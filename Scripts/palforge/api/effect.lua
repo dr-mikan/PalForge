@@ -29,30 +29,49 @@
 --   }
 --   Regen:apply(Player.character())
 
-local om = require("palforge.core.object_manager")
+local om     = require("palforge.core.object_manager")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of Effect.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as Effect.Spec:
+--
+--   Effect.Spec:help()          -- print every field, its type, default and meaning
+--   Effect.Spec.fields          -- the same, as a table, for tooling
+--   Effect.Spec.Events{ ... }   -- build (and validate) a nested value on its own
+--
+-- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
+-- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
 ---The lifecycle handlers an effect can respond to. All optional. Each receives the effect
----class as `self`, the `target` it is applied to, and a context `ctx`.
----@class Effect.Events
----@field onApply  fun(self: Effect.Handle, target: any, ctx: table)  # LIVE — applied
----@field onTick   fun(self: Effect.Handle, target: any, ctx: table)  # LIVE — every `interval` s
----@field onStack  fun(self: Effect.Handle, target: any, ctx: table)  # LIVE — re-applied
----@field onExpire fun(self: Effect.Handle, target: any, ctx: table)  # LIVE — duration up / removed
+---definition as `self`, the `target` it is applied to, and a context `ctx`.
+local Events = schema.define("Effect.Spec.Events", {
+    { "onApply",  type = "function", sig = "fun(self: Effect.Handle, target: any, ctx: table)",
+                  doc = "LIVE - applied to a target" },
+    { "onTick",   type = "function", sig = "fun(self: Effect.Handle, target: any, ctx: table)",
+                  doc = "LIVE - every `interval` seconds while active" },
+    { "onStack",  type = "function", sig = "fun(self: Effect.Handle, target: any, ctx: table)",
+                  doc = "LIVE - re-applied to a target that already has it" },
+    { "onExpire", type = "function", sig = "fun(self: Effect.Handle, target: any, ctx: table)",
+                  doc = "LIVE - duration elapsed, removed, or target gone" },
+})
 
----What you pass to Effect.define. `id` is required; everything else is optional.
----@class Effect.Spec
----@field id          string         # effect id: a name or "pack:name"
----@field displayName string?        # shown on the status bar (defaults to id)
----@field duration    number?        # total lifetime in seconds (nil = until :remove())
----@field interval    number?        # seconds between onTick calls (nil = no periodic tick)
----@field stackable   boolean?       # may several copies coexist on one target?
----@field maxStacks   integer?       # ceiling when stackable (default 1)
----@field icon        any?           # status-bar icon
----@field events      Effect.Events? # lifecycle handlers (grouped)
+---What you pass to Effect.define. `id` is the only required field.
+local Spec = schema.define("Effect.Spec", {
+    { "id",           type = "string", required = true, check = schema.nonEmpty,
+                      doc = "effect id: a name or \"pack:name\"" },
+    { "displayName",  type = "string",  doc = "shown on the status bar (defaults to id)" },
+    { "duration",     type = "number",  doc = "total lifetime in seconds (omit = until :remove())" },
+    { "interval",     type = "number",  doc = "seconds between onTick calls (omit = no periodic tick)" },
+    { "stackable",    type = "boolean", default = false, doc = "may several copies coexist on one target?" },
+    { "maxStacks",    type = "number",  default = 1, doc = "stack ceiling when stackable" },
+    { "icon",         doc = "status-bar icon" },
+    { "nativeStatus", type = "string",
+                      doc = "the game's own EPalStatusEffectType this mirrors, when it has one" },
+    { "events",       type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
+    { "data",         type = "table", doc = "free-form payload of your own, carried onto the definition" },
+})
 
 --=============================================================================
 -- the registered effect DEFINITION class. Defaults are inert; define{ events = {...} }
@@ -154,26 +173,31 @@ end
 ---@class palforge.effect
 local Effect = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+Effect.Spec        = Spec
+Effect.Spec.Events = Events
+
 local wrap  -- forward decl; the Effect.Handle wrapper is defined in the BOTTOM section
 
 ---Define an effect and register it.
+---`spec` is validated against Effect.Spec: `id` is required, unknown fields are an error.
 ---@param spec Effect.Spec
 ---@return Effect.Handle
 function Effect.define(spec)
-    assert(type(spec) == "table",
-        "Effect.define: pass a table, e.g. Effect.define{ id = 'X', events = {...} }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "Effect.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "Effect.define")
     local cls = setmetatable({
-        id          = spec.id,
-        displayName = spec.displayName or spec.id,
-        duration    = spec.duration,
-        interval    = spec.interval,
-        stackable   = spec.stackable,
-        maxStacks   = spec.maxStacks,
-        icon        = spec.icon,
+        id           = spec.id,
+        displayName  = spec.displayName or spec.id,
+        duration     = spec.duration,
+        interval     = spec.interval,
+        stackable    = spec.stackable,
+        maxStacks    = spec.maxStacks,
+        icon         = spec.icon,
+        nativeStatus = spec.nativeStatus,
+        data         = spec.data,
     }, Class)
     cls.__index = cls
-    if type(spec.events) == "table" then
+    if spec.events then
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onApply, ...
     end
     pcall(function() om.register("effect", spec.id, cls) end)

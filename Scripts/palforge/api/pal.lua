@@ -23,7 +23,9 @@
 -- cannot add a brand-new creature row (that is PalSchema's job).
 --
 -- LAYOUT
---   TYPES   — LuaLS (---@) annotations so editors give real intellisense.
+--   SPEC    — the shape of define(), declared as data (core/schema). It is enforced on
+--             every call AND readable at runtime as Pal.Spec, and it is what
+--             Scripts/palforge/types.lua is generated from for editor completion.
 --   TOP     — module functions:   Pal.define / Pal.get / Pal.get_all
 --   BOTTOM  — the pal OBJECT (Pal.Handle): actions (:spawn) + lifecycle events.
 --
@@ -38,41 +40,78 @@
 --       },
 --   }:spawn(Player.coordinate())
 
-local om    = require("palforge.core.object_manager")
-local spawn = require("palforge.core.spawn")
-local mesh  = require("palforge.core.mesh")
-local icons = require("palforge.core.icons")
+local om     = require("palforge.core.object_manager")
+local spawn  = require("palforge.core.spawn")
+local mesh   = require("palforge.core.mesh")
+local icons  = require("palforge.core.icons")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of Pal.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as Pal.Spec:
+--
+--   Pal.Spec:help()        -- print every field, its type, default and meaning
+--   Pal.Spec.fields        -- the same, as a table, for tooling
+--   Pal.Spec.Mesh{ ... }   -- build (and validate) a nested value on its own
+--
+-- Nested constructors are OPTIONAL sugar — `mesh = Pal.Spec.Mesh{ model = "..." }` and
+-- `mesh = { model = "..." }` are validated identically, so use whichever reads better.
+-- Anything not declared here is a hard error at define time, with a did-you-mean: a
+-- silently ignored typo is exactly what this layer exists to prevent.
 --=============================================================================
 
 ---A world coordinate. Accepts { x=, y=, z= } or the array form { x, y, z }.
----@class Coord
----@field x number
----@field y number
----@field z number
+local Coord = schema.define("Pal.Spec.Coord", {
+    { "x", type = "number", required = true, doc = "world X in centimetres" },
+    { "y", type = "number", required = true, doc = "world Y in centimetres" },
+    { "z", type = "number", required = true, doc = "world Z in centimetres" },
+})
+
+local Mesh = schema.define("Pal.Spec.Mesh", {
+    { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
+                   default = "skeletal", doc = "which core.mesh backend renders it" },
+    { "model",     type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" },
+    { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
+    { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
+    { "offset",    type = "table",  doc = "{ x, y, z } offset from the pawn's origin" },
+})
+
+local Material = schema.define("Pal.Spec.Material", {
+    { "color",    type = "table",  doc = "tint { r, g, b, a } in 0..1" },
+    { "texture",  type = "string", doc = "absolute path to a png applied to the mesh" },
+    { "params",   type = "table",  doc = "extra material parameters passed through" },
+    { "material", type = "string", doc = "base material asset path to instance from" },
+})
 
 ---The lifecycle handlers a pal can respond to. All optional. Each receives the pal
----as `self` and an event context `ctx` (ctx.actor = the pawn in the world).
----@class Pal.Events
----@field onSpawned  fun(self: Pal.Handle, ctx: table)  # LIVE (candidate hook) — finished spawning
----@field onDamaged  fun(self: Pal.Handle, ctx: table)  # LIVE — took damage
----@field onDeath    fun(self: Pal.Handle, ctx: table)  # LIVE — HP reached zero
----@field onCaptured fun(self: Pal.Handle, ctx: table)  # LIVE — caught in a sphere
----@field onTick     fun(self: Pal.Handle, ctx: table)  # declarable; no per-pal tick source yet
+---definition as `self` and an event context `ctx` (ctx.actor = the pawn in the world).
+local Events = schema.define("Pal.Spec.Events", {
+    { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
+                    doc = "LIVE (candidate hook) - finished spawning into the world" },
+    { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
+                    doc = "LIVE - took damage" },
+    { "onDeath",    type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
+                    doc = "LIVE - HP reached zero" },
+    { "onCaptured", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
+                    doc = "LIVE - caught in a sphere" },
+    { "onTick",     type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
+                    doc = "declarable; no per-pal tick source exists yet" },
+})
 
----What you pass to Pal.define. `id` is required; everything else is optional.
----@class Pal.Spec
----@field id          string       # pal id: a game CharacterID ("ChickenPal") or "pack:name"
----@field displayName string?      # shown in UI (defaults to id)
----@field skills      string[]?    # skill ids this pal owns (see Skill.define)
----@field events      Pal.Events?  # lifecycle handlers (grouped)
----@field mesh        table?       # mesh descriptor { kind=, model=, animClass=, scale=, ... }
----@field material    table?       # { color, texture, params, material } override
----@field color       table?       # base tint { r, g, b, a }
----@field texture     string?      # absolute png path applied to the mesh
----@field icon        any?         # fallback icon when the DataTable lookup misses
+---What you pass to Pal.define. `id` is the only required field.
+local Spec = schema.define("Pal.Spec", {
+    { "id",          type = "string", required = true, check = schema.nonEmpty,
+                     doc = "pal id: a game CharacterID (\"ChickenPal\") or \"pack:name\"" },
+    { "displayName", type = "string", doc = "shown in UI (defaults to id)" },
+    { "skills",      type = "table", arrayOf = "string", doc = "skill ids this pal owns (see Skill.define)" },
+    { "mesh",        type = "table", of = Mesh,     doc = "the mesh attached to a spawned pawn" },
+    { "material",    type = "table", of = Material, doc = "material override applied to that mesh" },
+    { "color",       type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
+    { "texture",     type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
+    { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
+    { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
+    { "data",        type = "table",  doc = "free-form payload of your own, carried onto the definition" },
+})
 
 --=============================================================================
 -- the registered pal DEFINITION class (what core/event dispatches to)
@@ -119,15 +158,21 @@ end
 ---@class palforge.pal
 local Pal = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+Pal.Spec          = Spec
+Pal.Spec.Coord    = Coord
+Pal.Spec.Mesh     = Mesh
+Pal.Spec.Material = Material
+Pal.Spec.Events   = Events
+
 local wrap  -- forward decl; the Pal.Handle wrapper is defined in the BOTTOM section
 
 ---Define a NEW pal and register it. Returns a handle you can chain :spawn on.
+---`spec` is validated against Pal.Spec: `id` is required, unknown fields are an error.
 ---@param spec Pal.Spec
 ---@return Pal.Handle
 function Pal.define(spec)
-    assert(type(spec) == "table",
-        "Pal.define: pass a table, e.g. Pal.define{ id = 'X', events = {...} }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "Pal.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "Pal.define")
     local cls = setmetatable({
         id           = spec.id,
         displayName  = spec.displayName or spec.id,
@@ -137,9 +182,10 @@ function Pal.define(spec)
         color        = spec.color,
         texture      = spec.texture,
         icon         = spec.icon,
+        data         = spec.data,
     }, Class)
     cls.__index = cls  -- so a spawned instance (if ever made) resolves the class methods
-    if type(spec.events) == "table" then
+    if spec.events then
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onSpawned, ...
     end
     pcall(function() om.register("pal", spec.id, cls) end)  -- so core/event + get() find it

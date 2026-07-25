@@ -28,38 +28,59 @@
 --   }
 --   Item.get("Wood"):give(10)
 
-local om    = require("palforge.core.object_manager")
-local icons = require("palforge.core.icons")
-local items = require("palforge.utils.items")
+local om     = require("palforge.core.object_manager")
+local icons  = require("palforge.core.icons")
+local items  = require("palforge.utils.items")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of Item.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as Item.Spec:
+--
+--   Item.Spec:help()          -- print every field, its type, default and meaning
+--   Item.Spec.fields          -- the same, as a table, for tooling
+--   Item.Spec.Recipe{ ... }   -- build (and validate) a nested value on its own
+--
+-- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
+-- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----A crafting recipe for the item that produces it.
----@class Item.Recipe
----@field materials table<string, integer>  # { <itemId> = <count> }
----@field count     integer?                # output count (default 1)
----@field work      number?                 # work amount
----@field station   string?                 # workbench / station id
+---A crafting recipe, declared on the item it produces.
+local Recipe = schema.define("Item.Spec.Recipe", {
+    { "materials", type = "table", mapOf = "number", required = true,
+                   doc = "{ <itemId> = <count> } consumed by one craft" },
+    { "count",     type = "number", default = 1, doc = "how many of this item one craft yields" },
+    { "work",      type = "number", doc = "work amount the station must put in" },
+    { "station",   type = "string", doc = "workbench / station id that can craft it" },
+})
 
 ---The lifecycle handlers an item can respond to. All optional. Each receives the item
----class as `self` and the event context `ctx`.
----@class Item.Events
----@field onObtain  fun(self: Item.Handle, ctx: table)  # LIVE — entered the inventory (ctx.count)
----@field onUse     fun(self: Item.Handle, ctx: table)  # LIVE — used / consumed (ctx.actor)
----@field onCraft   fun(self: Item.Handle, ctx: table)  # declarable; no native source yet
----@field onDiscard fun(self: Item.Handle, ctx: table)  # declarable; no native source yet
+---definition as `self` and the event context `ctx`.
+local Events = schema.define("Item.Spec.Events", {
+    { "onObtain",  type = "function", sig = "fun(self: Item.Handle, ctx: table)",
+                   doc = "LIVE - entered the inventory (ctx.count)" },
+    { "onUse",     type = "function", sig = "fun(self: Item.Handle, ctx: table)",
+                   doc = "LIVE - used / consumed (ctx.actor)" },
+    { "onCraft",   type = "function", sig = "fun(self: Item.Handle, ctx: table)",
+                   doc = "declarable; no native source exists yet" },
+    { "onDiscard", type = "function", sig = "fun(self: Item.Handle, ctx: table)",
+                   doc = "declarable; no native source exists yet" },
+})
 
----What you pass to Item.define. `id` is required; everything else is optional.
----@class Item.Spec
----@field id          string        # item id: a game ItemId ("Wood") or "pack:name"
----@field displayName string?       # shown in UI (defaults to id)
----@field category    string?       # material | consumable | equipment | ammo | ...
----@field maxStack    integer?      # inventory stack ceiling
----@field icon        any?          # fallback icon when the DataTable lookup misses
----@field recipe      Item.Recipe?  # the recipe that produces THIS item
----@field events      Item.Events?  # lifecycle handlers (grouped)
+---What you pass to Item.define. `id` is the only required field.
+local Spec = schema.define("Item.Spec", {
+    { "id",          type = "string", required = true, check = schema.nonEmpty,
+                     doc = "item id: a game ItemId (\"Wood\") or \"pack:name\"" },
+    { "displayName", type = "string", doc = "shown in UI (defaults to id)" },
+    { "category",    type = "string", default = "material",
+                     values = { "material", "consumable", "equipment", "ammo", "ingredient", "other" },
+                     doc = "what kind of inventory content this is" },
+    { "maxStack",    type = "number", default = 1, doc = "inventory stack ceiling" },
+    { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
+    { "recipe",      type = "table", of = Recipe, doc = "the recipe that produces THIS item" },
+    { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
+    { "data",        type = "table", doc = "free-form payload of your own, carried onto the definition" },
+})
 
 --=============================================================================
 -- the registered item DEFINITION class (what core/event dispatches to)
@@ -96,15 +117,19 @@ end
 ---@class palforge.item
 local Item = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+Item.Spec        = Spec
+Item.Spec.Recipe = Recipe
+Item.Spec.Events = Events
+
 local wrap  -- forward decl; the Item.Handle wrapper is defined in the BOTTOM section
 
 ---Define an item (give an item id behaviour + metadata) and register it.
+---`spec` is validated against Item.Spec: `id` is required, unknown fields are an error.
 ---@param spec Item.Spec
 ---@return Item.Handle
 function Item.define(spec)
-    assert(type(spec) == "table",
-        "Item.define: pass a table, e.g. Item.define{ id = 'X', events = {...} }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "Item.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "Item.define")
     local cls = setmetatable({
         id          = spec.id,
         displayName = spec.displayName or spec.id,
@@ -112,9 +137,10 @@ function Item.define(spec)
         maxStack    = spec.maxStack,
         icon        = spec.icon,
         recipe      = spec.recipe,
+        data        = spec.data,
     }, Class)
     cls.__index = cls
-    if type(spec.events) == "table" then
+    if spec.events then
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onUse, ...
     end
     pcall(function() om.register("item", spec.id, cls) end)  -- so core/event + get() find it

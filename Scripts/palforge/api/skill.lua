@@ -26,31 +26,49 @@
 --   }
 --   Fireball:activate(myPalActor)      -- runs onActivate unless still cooling down
 
-local om    = require("palforge.core.object_manager")
-local icons = require("palforge.core.icons")
+local om     = require("palforge.core.object_manager")
+local icons  = require("palforge.core.icons")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of Skill.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as Skill.Spec:
+--
+--   Skill.Spec:help()          -- print every field, its type, default and meaning
+--   Skill.Spec.fields          -- the same, as a table, for tooling
+--   Skill.Spec.Events{ ... }   -- build (and validate) a nested value on its own
+--
+-- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
+-- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
 ---The behaviour handlers a skill can respond to. All optional. Each receives the skill
----class as `self`; only MANUAL invocation fires them today (see the header).
----@class Skill.Events
----@field onActivate fun(self: Skill.Handle, owner: any, ctx: table)   # an active skill fired
----@field onHit      fun(self: Skill.Handle, target: any, ctx: table)  # one of its hits landed
----@field onEquip    fun(self: Skill.Handle, owner: any, ctx: table)   # a passive was attached
----@field onUnequip  fun(self: Skill.Handle, owner: any, ctx: table)   # a passive was removed
+---definition as `self`; only MANUAL invocation fires them today (see the header).
+local Events = schema.define("Skill.Spec.Events", {
+    { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
+                    doc = "an active skill fired (self, owner, ctx)" },
+    { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
+                    doc = "one of its hits landed (self, target, ctx)" },
+    { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
+                    doc = "a passive was attached (self, owner, ctx)" },
+    { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
+                    doc = "a passive was removed (self, owner, ctx)" },
+})
 
----What you pass to Skill.define. `id` is required; everything else is optional.
----@class Skill.Spec
----@field id          string        # skill id: a game row id or "pack:name"
----@field displayName string?       # shown in skill lists (defaults to id)
----@field kind        string?       # "active" (default) | "passive"
----@field element     string?       # attribute / element (fire, water, ...)
----@field cooldown    number?       # seconds between activations (enforced by :activate)
----@field power       number?       # base power / magnitude
----@field icon        any?          # fallback icon when the DataTable lookup misses
----@field events      Skill.Events? # behaviour handlers (grouped)
+---What you pass to Skill.define. `id` is the only required field.
+local Spec = schema.define("Skill.Spec", {
+    { "id",          type = "string", required = true, check = schema.nonEmpty,
+                     doc = "skill id: a game row id or \"pack:name\"" },
+    { "displayName", type = "string", doc = "shown in skill lists (defaults to id)" },
+    { "kind",        type = "string", values = { "active", "passive" }, default = "active",
+                     doc = "an active skill is fired; a passive one is equipped" },
+    { "element",     type = "string", doc = "attribute / element (fire, water, ...)" },
+    { "cooldown",    type = "number", doc = "seconds between activations (enforced by :activate)" },
+    { "power",       type = "number", doc = "base power / magnitude" },
+    { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
+    { "events",      type = "table", of = Events, doc = "behaviour handlers (grouped)" },
+    { "data",        type = "table", doc = "free-form payload of your own, carried onto the definition" },
+})
 
 --=============================================================================
 -- the registered skill DEFINITION class. Defaults are inert; define{ events = {...} }
@@ -108,15 +126,18 @@ end
 ---@class palforge.skill
 local Skill = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+Skill.Spec        = Spec
+Skill.Spec.Events = Events
+
 local wrap  -- forward decl; the Skill.Handle wrapper is defined in the BOTTOM section
 
 ---Define a skill and register it.
+---`spec` is validated against Skill.Spec: `id` is required, unknown fields are an error.
 ---@param spec Skill.Spec
 ---@return Skill.Handle
 function Skill.define(spec)
-    assert(type(spec) == "table",
-        "Skill.define: pass a table, e.g. Skill.define{ id = 'X', events = {...} }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "Skill.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "Skill.define")
     local cls = setmetatable({
         id          = spec.id,
         displayName = spec.displayName or spec.id,
@@ -125,9 +146,10 @@ function Skill.define(spec)
         cooldown    = spec.cooldown,
         power       = spec.power,
         icon        = spec.icon,
+        data        = spec.data,
     }, Class)
     cls.__index = cls
-    if type(spec.events) == "table" then
+    if spec.events then
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onActivate, ...
     end
     pcall(function() om.register("skill", spec.id, cls) end)

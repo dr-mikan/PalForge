@@ -33,50 +33,86 @@
 --       },
 --   }
 
-local om    = require("palforge.core.object_manager")
-local icons = require("palforge.core.icons")
-local mesh  = require("palforge.core.mesh")
-local items = require("palforge.utils.items")
+local om     = require("palforge.core.object_manager")
+local icons  = require("palforge.core.icons")
+local mesh   = require("palforge.core.mesh")
+local items  = require("palforge.utils.items")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of Building.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as Building.Spec:
+--
+--   Building.Spec:help()        -- print every field, its type, default and meaning
+--   Building.Spec.fields        -- the same, as a table, for tooling
+--   Building.Spec.Mesh{ ... }   -- build (and validate) a nested value on its own
+--
+-- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
+-- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----A mesh descriptor. `kind` picks the backend in core.mesh (procedural | static | skeletal).
----@class Building.Mesh
----@field kind   string?  # "static" | "procedural" | "skeletal" (default procedural)
----@field model  string   # asset path (static/skeletal) or OBJ path (procedural)
----@field scale  number?
----@field offset table?
----@field color  table?   # { r, g, b, a } 0..1
+---The mesh attached to a placed structure. `kind` picks the core.mesh backend.
+local Mesh = schema.define("Building.Spec.Mesh", {
+    { "kind",   type = "string", values = { "procedural", "static", "skeletal", "obj" },
+                default = "static", doc = "which core.mesh backend renders it" },
+    { "model",  type = "string", required = true,
+                doc = "UStaticMesh asset path, or an OBJ path for the procedural backend" },
+    { "scale",  type = "number", doc = "uniform scale applied to the attached mesh" },
+    { "offset", type = "table",  doc = "{ x, y, z } offset from the actor's origin" },
+    { "color",  type = "table",  doc = "tint { r, g, b, a } in 0..1" },
+})
+
+local Material = schema.define("Building.Spec.Material", {
+    { "color",    type = "table",  doc = "tint { r, g, b, a } in 0..1" },
+    { "texture",  type = "string", doc = "absolute path to a png applied to the mesh" },
+    { "params",   type = "table",  doc = "extra material parameters passed through" },
+    { "material", type = "string", doc = "base material asset path to instance from" },
+})
 
 ---The lifecycle handlers a building can respond to. All optional. Each receives the LIVE
 ---INSTANCE as `self` (self.actor / self.pos / self.state) and the event context `ctx`.
----@class Building.Events
----@field onPlace       fun(self: Building.Instance, ctx: table)  # LIVE — committed into the world
----@field onLoad        fun(self: Building.Instance, ctx: table)  # LIVE — tracked / restored from save
----@field onRightClick  fun(self: Building.Instance, ctx: table)  # LIVE — primary interaction
----@field onRemove      fun(self: Building.Instance, ctx: table)  # LIVE — the structure vanished
----@field onTick        fun(self: Building.Instance, ctx: table)  # LIVE — heartbeat (see tickInterval)
----@field onWorldReady  fun(self: Building.Instance, ctx: table)  # LIVE — world finished loading
----@field onWorldLeft   fun(self: Building.Instance, ctx: table)  # LIVE — world unloaded
----@field onBuild       fun(self: Building.Instance, ctx: table)  # declarable; no native source yet
----@field onLeftClick   fun(self: Building.Instance, ctx: table)  # declarable; no native source yet
----@field onBreak       fun(self: Building.Instance, ctx: table)  # declarable; no native source yet
+local Events = schema.define("Building.Spec.Events", {
+    { "onPlace",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - committed into the world" },
+    { "onLoad",       type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - tracked / restored from a save" },
+    { "onRightClick", type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - primary interaction" },
+    { "onRemove",     type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - the structure vanished" },
+    { "onTick",       type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - heartbeat (see tickInterval)" },
+    { "onWorldReady", type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - the world finished loading" },
+    { "onWorldLeft",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "LIVE - the world was unloaded" },
+    { "onBuild",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "declarable; no native source exists yet" },
+    { "onLeftClick",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "declarable; no native source exists yet" },
+    { "onBreak",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
+                      doc = "declarable; no native source exists yet" },
+})
 
----What you pass to Building.define. `id` is required; everything else is optional.
----@class Building.Spec
----@field id           string          # build id: a game BuildObjectId ("PalBoxV2") or "pack:name"
----@field displayName  string?         # shown in UI (defaults to id)
----@field gridCm       number?         # placement grid quantum in cm (default core.spatial.GRID_CM)
----@field buildIds     string[]?       # extra game build ids this definition claims (default { id })
----@field tickInterval integer?        # run onTick every N heartbeats (default 1)
----@field mesh         Building.Mesh?  # the mesh attached to the placed actor
----@field material     table?          # { color, texture, params, material } override
----@field color        table?          # base tint { r, g, b, a } (shorthand for material.color)
----@field icon         any?            # fallback icon when the DataTable lookup misses
----@field state        table|fun():table|nil  # default persisted state for a new instance
----@field events       Building.Events?       # lifecycle handlers (grouped)
+---What you pass to Building.define. `id` is the only required field.
+local Spec = schema.define("Building.Spec", {
+    { "id",           type = "string", required = true, check = schema.nonEmpty,
+                      doc = "build id: a game BuildObjectId (\"PalBoxV2\") or \"pack:name\"" },
+    { "displayName",  type = "string", doc = "shown in UI (defaults to id)" },
+    { "gridCm",       type = "number", doc = "placement grid quantum in cm (default core.spatial.GRID_CM)" },
+    { "buildIds",     type = "table", arrayOf = "string",
+                      doc = "extra game build ids this definition claims (default { id })" },
+    { "tickInterval", type = "number", default = 1, doc = "run onTick every N heartbeats" },
+    { "mesh",         type = "table", of = Mesh,     doc = "the mesh attached to the placed actor" },
+    { "material",     type = "table", of = Material, doc = "material override applied to that mesh" },
+    { "color",        type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
+    { "texture",      type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
+    { "icon",         doc = "fallback icon used when the DataTable lookup misses" },
+    { "state",        type = "table|function", sig = "table|fun(): table",
+                      doc = "default persisted state for a new instance (a table, or a factory returning one)" },
+    { "events",       type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
+    { "data",         type = "table", doc = "free-form payload of your own, carried onto the definition" },
+})
 
 ---A LIVE placed structure — what the lifecycle handlers get as `self`.
 ---@class Building.Instance
@@ -186,16 +222,21 @@ end
 ---@class palforge.building
 local Building = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+Building.Spec          = Spec
+Building.Spec.Mesh     = Mesh
+Building.Spec.Material = Material
+Building.Spec.Events   = Events
+
 local wrap  -- forward decl; the Building.Handle wrapper is defined in the BOTTOM section
 
 ---Define a building and register it. core/event picks the definition up on its next
 ---scan, so a building defined AFTER startup is still tracked.
+---`spec` is validated against Building.Spec: `id` is required, unknown fields are an error.
 ---@param spec Building.Spec
 ---@return Building.Handle
 function Building.define(spec)
-    assert(type(spec) == "table",
-        "Building.define: pass a table, e.g. Building.define{ id = 'X', events = {...} }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "Building.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "Building.define")
     local cls = setmetatable({
         id           = spec.id,
         displayName  = spec.displayName or spec.id,
@@ -208,9 +249,10 @@ function Building.define(spec)
         texture      = spec.texture,
         icon         = spec.icon,
         defaultState = spec.state,
+        data         = spec.data,
     }, Class)
     cls.__index = cls  -- so a placed instance (cls:new) resolves the class methods
-    if type(spec.events) == "table" then
+    if spec.events then
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onPlace, ...
     end
     pcall(function() om.register("building", spec.id, cls) end)  -- so core/event + get() find it

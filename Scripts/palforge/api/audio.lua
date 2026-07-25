@@ -25,22 +25,35 @@
 --   Theme:stop()
 --   Audio.get("AKE_BGM_Title"):play(someActor)
 
-local om    = require("palforge.core.object_manager")
-local sound = require("palforge.core.sound")
+local om     = require("palforge.core.object_manager")
+local sound  = require("palforge.core.sound")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of Audio.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as Audio.Spec:
+--
+--   Audio.Spec:help()   -- print every field, its type, default and meaning
+--   Audio.Spec.fields   -- the same, as a table, for tooling
+--
+-- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
 ---What you pass to Audio.define / Audio.bgm / Audio.se. `id` is required, plus ONE of
----soundId / soundPath / soundFile (or an own source() override).
----@class Audio.Spec
----@field id          string   # audio id: the AkAudioEvent name, or "pack:name"
----@field displayName string?  # human label (defaults to id)
----@field kind        string?  # "se" (default) | "bgm"
----@field soundId     string?  # native AkAudioEvent name (SoundID fallback route)
----@field soundPath   string?  # native AkAudioEvent asset path (the route that plays)
----@field soundFile   string?  # custom audio file path (seam — not playable yet)
+---soundId / soundPath / soundFile (or an own `source` override).
+local Spec = schema.define("Audio.Spec", {
+    { "id",          type = "string", required = true, check = schema.nonEmpty,
+                     doc = "audio id: the AkAudioEvent name, or \"pack:name\"" },
+    { "displayName", type = "string", doc = "human label (defaults to id)" },
+    { "kind",        type = "string", values = { "se", "bgm" }, default = "se",
+                     doc = "descriptive only - the native play route is the same for both" },
+    { "soundId",     type = "string", doc = "native AkAudioEvent name (the SoundID fallback route)" },
+    { "soundPath",   type = "string", doc = "native AkAudioEvent asset path (the route that actually plays)" },
+    { "soundFile",   type = "string", doc = "custom audio file path (seam - not playable yet)" },
+    { "source",      type = "function", sig = "fun(self: Audio.Handle): table|nil",
+                     doc = "override that returns the core.sound spec yourself" },
+    { "data",        type = "table",  doc = "free-form payload of your own, carried onto the definition" },
+})
 
 --=============================================================================
 -- the registered audio DEFINITION class
@@ -78,15 +91,17 @@ end
 ---@class palforge.audio
 local Audio = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+Audio.Spec = Spec
+
 local wrap  -- forward decl; the Audio.Handle wrapper is defined in the BOTTOM section
 
 ---Define a playable sound and register it.
+---`spec` is validated against Audio.Spec: `id` is required, unknown fields are an error.
 ---@param spec Audio.Spec
 ---@return Audio.Handle
 function Audio.define(spec)
-    assert(type(spec) == "table",
-        "Audio.define: pass a table, e.g. Audio.define{ id = 'X', soundPath = '/Game/...' }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "Audio.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "Audio.define")
     local cls = setmetatable({
         id          = spec.id,
         displayName = spec.displayName or spec.id,
@@ -94,30 +109,39 @@ function Audio.define(spec)
         soundId     = spec.soundId,
         soundPath   = spec.soundPath,
         soundFile   = spec.soundFile,
+        data        = spec.data,
     }, Class)
     cls.__index = cls
-    if type(spec.source) == "function" then cls.source = spec.source end
+    if spec.source then cls.source = spec.source end
     pcall(function() om.register("audio", spec.id, cls) end)
     return wrap(cls)
+end
+
+-- Sugar over define that pins `kind`. The caller's table is never mutated — a stray
+-- `kind` in it would be a contradiction, so it is rejected rather than overwritten.
+local function defineAs(kind, spec, who)
+    if spec ~= nil and type(spec) ~= "table" then
+        spec = Spec:validate(spec, who)   -- let the schema produce the type error
+    end
+    local copy = {}
+    for k, v in pairs(spec or {}) do copy[k] = v end
+    if copy.kind ~= nil and copy.kind ~= kind then
+        error(string.format("PalForge: %s: kind is fixed to %q here, but got %q - use Audio.define to set it",
+            who, kind, tostring(copy.kind)), 0)
+    end
+    copy.kind = kind
+    return Audio.define(copy)
 end
 
 ---Define background music (kind = "bgm"). Sugar over define.
 ---@param spec Audio.Spec
 ---@return Audio.Handle
-function Audio.bgm(spec)
-    spec = spec or {}
-    spec.kind = "bgm"
-    return Audio.define(spec)
-end
+function Audio.bgm(spec) return defineAs("bgm", spec, "Audio.bgm") end
 
 ---Define a one-shot sound effect (kind = "se"). Sugar over define.
 ---@param spec Audio.Spec
 ---@return Audio.Handle
-function Audio.se(spec)
-    spec = spec or {}
-    spec.kind = "se"
-    return Audio.define(spec)
-end
+function Audio.se(spec) return defineAs("se", spec, "Audio.se") end
 
 ---Get an EXISTING sound by id: a previously-defined one, else a thin native definition
 ---keyed on that id (so any AkAudioEvent name is playable if it resolves). Never nil.

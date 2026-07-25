@@ -12,6 +12,16 @@
 -- plus forwarders for its events. Each module's header states exactly which of its events
 -- are LIVE (a confirmed native hook emits them) and which are declarable-but-not-yet-fired.
 --
+-- KNOWING WHAT TO PASS. Every domain's spec is declared as data and is readable at
+-- runtime, so you never have to guess:
+--   Pal.Spec:help()          -- every field, its type, default and meaning
+--   Pal.Spec.fields          -- the same as a table, for tooling
+--   Pal.Spec.Mesh{ ... }     -- build (and validate) a nested value on its own
+-- `id` is required everywhere, and an undeclared field is a hard error at define time
+-- with a did-you-mean — a typo can never be silently ignored. In the editor, the same
+-- information comes from Scripts/palforge/types.lua, which is GENERATED from those specs
+-- (tools/gen-types.lua), so the completion can never drift from what define() accepts.
+--
 -- The ---@type annotations make LuaLS auto-complete the bare globals.
 -- (UE4SS gives each Lua mod its own state, so these globals are mod-local — no clash
 --  with the game or other mods.)

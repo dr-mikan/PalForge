@@ -29,17 +29,33 @@
 --   }
 --   Panel:new{ title = "Hello" }:mount(root)
 
-local om = require("palforge.core.object_manager")
+local om     = require("palforge.core.object_manager")
+local schema = require("palforge.core.schema")
 
 --=============================================================================
--- TYPES (LuaLS annotations — editor intellisense only; zero runtime cost)
+-- SPEC — the shape of UI.define, declared as data so it is REFERENCEABLE at
+-- runtime and enforced on every call. Reach it as UI.Spec:
+--
+--   UI.Spec:help()   -- print every field, its type, default and meaning
+--   UI.Spec.fields   -- the same, as a table, for tooling
+--
+-- Anything not declared here is a hard error at define time, with a did-you-mean.
+-- Per-element state does NOT go here — it belongs to an instance, so pass it to
+-- :new{ label = "OK", onClick = fn } and read it as `self` inside render/update.
+-- Use `data` for defaults every instance should share.
 --=============================================================================
 
 ---What you pass to UI.define. `id` is required; `render` is what makes it useful.
----@class UI.Spec
----@field id     string                        # element id, e.g. "pack:Panel"
----@field render fun(self: UI.Handle, root: any) # build the widget tree under `root`
----@field update fun(self: UI.Handle)            # refresh the already-built widgets
+local Spec = schema.define("UI.Spec", {
+    { "id",          type = "string", required = true, check = schema.nonEmpty,
+                     doc = "element id, e.g. \"pack:Panel\"" },
+    { "displayName", type = "string",   doc = "human label (defaults to id)" },
+    { "render",      type = "function", sig = "fun(self: UI.Handle, root: any)",
+                     doc = "build the widget tree under `root` (self, root); runs once per mount" },
+    { "update",      type = "function", sig = "fun(self: UI.Handle)",
+                     doc = "refresh the already-built widgets (self); runs on each :refresh()" },
+    { "data",        type = "table",    doc = "default fields shared by every instance of this element" },
+})
 
 --=============================================================================
 -- the registered UI element class. render/update are the seams a definition fills;
@@ -99,20 +115,26 @@ end
 ---@class palforge.ui
 local UI = {}
 
+-- The spec, exposed so it can be read, printed and used as a constructor.
+UI.Spec = Spec
+
 local wrap  -- forward decl; the UI.Handle wrapper is defined in the BOTTOM section
 
 ---Define a UI element and register it. Returns a Handle that is itself mountable (a
 ---default instance); use :new{...} for independent copies with their own state.
+---`spec` is validated against UI.Spec: `id` is required, unknown fields are an error.
 ---@param spec UI.Spec
 ---@return UI.Handle
 function UI.define(spec)
-    assert(type(spec) == "table",
-        "UI.define: pass a table, e.g. UI.define{ id = 'X', render = function(self, root) end }")
-    assert(type(spec.id) == "string" and #spec.id > 0, "UI.define: spec.id (string) is required")
+    spec = Spec:validate(spec, "UI.define")
     local cls = setmetatable({ id = spec.id, displayName = spec.displayName or spec.id }, Class)
     cls.__index = cls
-    for k, v in pairs(spec) do
-        if k ~= "id" and k ~= "displayName" then cls[k] = v end  -- render, update, data, ...
+    if spec.render then cls.render = spec.render end
+    if spec.update then cls.update = spec.update end
+    -- `data` becomes per-element defaults: an instance reads them through the class
+    -- metatable unless it sets its own field of the same name.
+    if spec.data then
+        for k, v in pairs(spec.data) do cls[k] = v end
     end
     pcall(function() om.register("ui", spec.id, cls) end)
     return wrap(cls)
