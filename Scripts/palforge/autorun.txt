@@ -37,6 +37,29 @@
 # It touches only a component of PalForge's own and destroys it again — your character's own
 # mesh, materials and save are never written to.
 15 pf_mesh
+
+# THE UI RUN — the one that needs you to CLICK. A declared panel mounts into the game's own UI
+# root 20 s after the world is ready, and then it wants ninety seconds of your attention:
+#
+#   1. WAIT until the panel appears, top-left. It has the game's window chrome, an item icon,
+#      a line that counts seconds, and a button that says "clicked 0x".
+#   2. WITHOUT pressing anything, move the mouse onto the button and click it TWICE.
+#      (The panel declares input = "clicks", so it asks the game for a cursor and Game+UI mode.
+#      If no cursor appears, that call did not land — go to step 3, which is the fallback.)
+#   3. PRESS ESC to open the game's own menu. The game shows its own cursor here whatever we did.
+#      Click OUR button again, then click one of the GAME's own menu buttons (any of them —
+#      that one is the control: it is how we find out whether the click hook fires at all).
+#   4. PRESS ESC again to close the menu, and carry on. At 95 s a verdict block prints itself.
+#
+# WHAT EACH OUTCOME MEANS is written out in the log by the run itself; the short version:
+#   the button's label counts up            everything works, end to end.
+#   `seen=0` on both routes                 no click hook fires on this build — the click PATH.
+#   `seen>0 dispatched=0`                   hooks fire for the game's buttons, never for ours —
+#                                           the mouse is not reaching our widget (the INPUT half).
+#   `dispatched>0` but the label is stuck   router delivered; the handler or the binding is wrong.
+#   `rootClass=WBP_PalCommonWindow_C`       the panel is wearing the game's own chrome.
+#   `rootClass=Border`                      it is not; a [ui] warning above names what was missing.
+# Nothing is written to your save and the panel comes off with a reload (F9) or on leaving.
 20 pf_uidecl
 
 # ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----

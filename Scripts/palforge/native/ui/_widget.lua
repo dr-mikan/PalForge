@@ -81,6 +81,16 @@ M.PATHS = {
     menuButtonInner = "HorizontalBox_0",
     gameUILayout    = "PalPrimaryGameLayoutBase",  -- the live in-game UI root, by native class
     gameUIRoot      = "CanvasPanel_Root",          -- its root UCanvasPanel: the injection host
+    -- ---- looking NATIVE: the game's own frame and label, by the child names they declare ----
+    -- WBP_PalCommonWindow_C is a pure content frame — ONE member, a UNamedSlot, and no functions
+    -- at all (dumps/cxx/WBP_PalCommonWindow.hpp:4-6). A UNamedSlot is a UContentWidget
+    -- (UMG.hpp:1042 -> :505), so it takes our tree through SetContent, exactly as UBorder does.
+    -- It is the window every Palworld dialog is built out of: seven distinct classes declare one
+    -- (dumps/reflection/03_widgets.txt:6, 165, 166, 172, 221, 280, 340), including the game's own
+    -- mod-disclaimer dialog.
+    windowSlot      = "NamedSlot_91",
+    -- WBP_CommonButton_C's own label child and clickable child (WBP_CommonButton.hpp:12-13).
+    commonButtonLabel = "Text_Main",
 }
 
 -- Slate alignment enums, named so callers don't memorize integers.
@@ -89,43 +99,237 @@ M.VALIGN = { FILL = 0, TOP = 1, CENTER = 2, BOTTOM = 3 }
 M.SIZE   = { AUTO = 0, FILL = 1 }
 
 -- ---- shared click router (ported from the old clicks module) ----
+--
+-- WHAT ACTUALLY FIRES ON A CLICK, settled from the dump rather than from hope.
+--
+-- The premise this router was rewritten under — "HandleButtonClicked is not a member of
+-- UCommonButtonBase" — is FALSE. It is declared, on the class, in this build:
+--
+--   dumps/cxx/CommonUI.hpp:258   class UCommonButtonBase : public UCommonUserWidget
+--   dumps/cxx/CommonUI.hpp:346       void HandleButtonClicked();
+--
+-- and it is the right SHAPE as well as the right name. The rule this tree keeps re-learning is
+-- that RegisterHook sees what ProcessEvent runs — a delegate TARGET, an RPC or a
+-- BlueprintCallable, never a broadcaster — and HandleButtonClicked is a delegate target: the
+-- inner UCommonButtonInternalBase (CommonUI.hpp:411, a UButton) broadcasts OnClicked and the
+-- bound target is this UFunction, invoked through ProcessEvent like every AddDynamic target.
+--
+-- THE BROADCASTER, so nobody hooks it by mistake. `OnButtonBaseClicked` (CommonUI.hpp:287) is a
+-- multicast delegate PROPERTY. Its targets are generated per blueprint, and the title button
+-- shows exactly that — three of them, one per binding:
+--   dumps/cxx/WBP_Title_MenuButton.hpp:23-25
+--     BndEvt__WBP_Title_MenuButton_WBP_PalInvisibleButton_K2Node_ComponentBoundEvent_0_
+--       CommonButtonBaseClicked__DelegateSignature(UCommonButtonBase* Button)
+-- A hook on the delegate's signature function catches none of those, because none of them IS
+-- that function; they merely share its parameter list.
+--
+-- SO WHY DID NOTHING HAPPEN. Because this code could not tell you. The old installClicks
+-- wrapped RegisterHook in a bare pcall, threw the error text away, discarded the (pre, post)
+-- ids it returns on success, and printed "hook installed" / "hook FAILED" with no reason
+-- attached. "There is no CommonUI line in the log" is not evidence either way: UE4SS logs its
+-- own `[RegisterHook] Registered native hook` at LogLevel::Verbose (LuaMod.cpp:4151) and a
+-- refusal is thrown into Lua, where that pcall ate it. A silent failure is the bug — so this
+-- router now records, per route, whether it armed, with which ids, and with what refusal.
+--
+-- TWO ROUTES, NOT ONE, because there are two independent places a Palworld button's click
+-- passes through and only a live run can say which one this build actually delivers:
+--
+--   [native] /Script/CommonUI.CommonButtonBase:HandleButtonClicked      CommonUI.hpp:346
+--            One hook for every CommonUI button in the game. FUNC_Native, so UE4SS takes the
+--            native branch (LuaMod.cpp:4141-4152) and hooks the UFunction's Func pointer.
+--   [bp]     <WBP_PalCommonButtonBase_C>:BP_OnClicked                   WBP_PalCommonButtonBase.hpp:20
+--            UCommonButtonBase::BP_OnClicked is a BlueprintImplementableEvent, and Palworld's
+--            button base OVERRIDES it — which means the derived class carries its OWN UFunction
+--            of that name and a hook on the CommonUI one would never see it (the same trap
+--            recorded against OnSetup/OnClosed in api/ui.lua). Every button this file can build
+--            is one of these: WBP_PalCommonButton_C (WBP_PalCommonButton.hpp:4) and
+--            WBP_PalInvisibleButton_C (WBP_PalInvisibleButton.hpp:4) both derive from
+--            WBP_PalCommonButtonBase_C (WBP_PalCommonButtonBase.hpp:4).
+--            Its path is NOT written down here. It is read off a LIVE button's own class at arm
+--            time — the same "ask the world what is loaded" move buttonClass() makes — so a
+--            blueprint that moves cannot turn this into a lookup by a name that does not exist.
+--
+-- Both fire for the same click on the same widget, so a dispatch is de-duplicated per widget on
+-- a short ELAPSED window (never a tick count). Which route delivered the first click of the
+-- session is logged, once, because that is the fact neither the dump nor this comment can settle.
 local handlers = {}   -- fullName -> fn
-local hooked   = false
+local lastFire = {}   -- fullName -> os.clock() of its last dispatch, for the cross-route dedupe
+
+-- Both hooks fire microseconds apart inside one ProcessEvent chain, and the fastest human
+-- double-click is an order of magnitude slower than this, so the window separates the two
+-- routes without ever merging two real clicks. os.clock is the same clock core/poll bounds
+-- its pollers on.
+M.CLICK_DEDUPE = 0.05
+
+-- The classes the blueprint route reads its path off. NOT M.BUTTON_CLASSES: that list now leads
+-- with WBP_CommonButton_C, which is a plain UUserWidget (WBP_CommonButton.hpp:4) and has no
+-- BP_OnClicked of its own. These two are the ones that ARE WBP_PalCommonButtonBase_C.
+M.BP_CLICK_CLASSES = { "WBP_PalInvisibleButton_C", "WBP_PalCommonButton_C" }
+
+-- One record per route: what it is, whether it armed, and what it has SEEN. `seen` counts
+-- every click on every button of that kind in the whole game, which is the diagnostic that
+-- separates "the hook never fires" from "the hook fires and our widget never gets the click".
+M.clickRoutes = {
+    { id = "native", state = "pending", seen = 0, dispatched = 0,
+      path = "/Script/CommonUI.CommonButtonBase:HandleButtonClicked",
+      what = "UCommonButtonBase::HandleButtonClicked (CommonUI.hpp:346)" },
+    { id = "bp",     state = "pending", seen = 0, dispatched = 0,
+      path = nil,   -- read off a live button at arm time; see blueprintClickPath below
+      what = "WBP_PalCommonButtonBase_C::BP_OnClicked (WBP_PalCommonButtonBase.hpp:20)" },
+}
 
 local function fullName(w)
     local ok, n = pcall(function() return w:GetFullName() end)
     return ok and n or nil
 end
 
--- Install the single dispatch hook (idempotent). Called lazily by registerClick.
--- The failure is logged ONCE, not once per button: with no UE4SS there is no RegisterHook
--- and every registerClick would otherwise print a line.
-local clickHookLogged = false
+-- One click, arriving through one route. `ctx` is UE4SS's RemoteUnrealParam for the hook's
+-- context object (LuaMod.cpp:144 constructs it as an ObjectProperty), so `:get()` is how
+-- the button itself is reached — and it is the ONE call here that is allowed to fail quietly,
+-- because it fails identically for every button in the game and would otherwise print per click.
+local function dispatch(route, ctx)
+    route.seen = route.seen + 1
+    local name
+    local ok = pcall(function() name = ctx:get():GetFullName() end)
+    if not ok or type(name) ~= "string" then
+        route.unnamed = (route.unnamed or 0) + 1
+        return
+    end
+    local fn = handlers[name]
+    if not fn then return end
+
+    local now, prev = os.clock(), lastFire[name]
+    if prev and (now - prev) < M.CLICK_DEDUPE then
+        route.deduped = (route.deduped or 0) + 1
+        return
+    end
+    lastFire[name] = now
+    route.dispatched = route.dispatched + 1
+    if not route.delivered then
+        route.delivered = true
+        log(string.format("clicks: FIRST delivery came through the %s route (%s)",
+            route.id, route.what))
+    end
+    local oke, e = pcall(fn)
+    if not oke then err("click handler: " .. tostring(e)) end
+end
+
+-- Arm one route. Everything RegisterHook can tell us is kept: the two callback ids it returns
+-- on success (LuaMod.cpp:4185-4186) and the message it throws on refusal — which names whether
+-- the UFunction was not found, or was found and is neither a native nor a script function
+-- (LuaMod.cpp:4134, :4176-4183). Each outcome is logged once per route, never once per button.
+local function arm(route)
+    if route.state == "armed" then return true end
+    if type(RegisterHook) ~= "function" then
+        route.state, route.why = "refused", "RegisterHook is not available in this session"
+    elseif type(route.path) ~= "string" or #route.path == 0 then
+        route.state, route.why = "pending", route.why or "no path resolved yet"
+    else
+        local ok, a, b = pcall(RegisterHook, route.path, function(ctx) dispatch(route, ctx) end)
+        if ok then
+            route.state, route.why, route.ids = "armed", nil, { a, b }
+        else
+            route.state, route.why = "refused", tostring(a)
+        end
+    end
+    -- Log a state CHANGE, not a state. A retry that fails the same way every time says nothing
+    -- new, and this is reached from registerClick — i.e. once per button built.
+    if route.state ~= route.logged then
+        route.logged = route.state
+        if route.state == "armed" then
+            log(string.format("clicks: %s route armed (%s) ids=%s,%s", route.id, route.path,
+                tostring(route.ids and route.ids[1]), tostring(route.ids and route.ids[2])))
+        else
+            log(string.format("clicks: %s route %s — %s", route.id, route.state,
+                tostring(route.why)))
+        end
+    end
+    return route.state == "armed"
+end
+
+-- The blueprint route's path, read off whatever button class this world has loaded. Not a
+-- constant, on purpose: `/Game/Pal/Blueprint/UI/System/Style/WBP_PalCommonButtonBase...` is a
+-- path nobody in this tree has verified, and a lookup by a name that does not exist is the
+-- exact failure mode that produced this rewrite. sig.find walks the live super chain, so a
+-- WBP_PalCommonButton_C instance answers with the UFunction its BASE declares; GetFullName then
+-- spells it in the "Function <outer>:<name>" form RegisterHook parses (LuaMod.cpp:85-96).
+---@return string? path, string? why
+local function blueprintClickPath()
+    local inst
+    for _, name in ipairs(M.BP_CLICK_CLASSES) do
+        local o = M.findFirst(name)
+        if alive(o) then inst = o; break end
+    end
+    if not inst then
+        return nil, "no live WBP_PalCommonButtonBase_C to read BP_OnClicked off (needs a world "
+            .. "with UI up)"
+    end
+    local fn = sig.find(inst, "BP_OnClicked")
+    if not fn then
+        return nil, "BP_OnClicked is not reachable from a live " .. M.widgetName(inst)
+    end
+    local full
+    pcall(function() full = fn:GetFullName() end)
+    if type(full) ~= "string" or #full == 0 then
+        return nil, "BP_OnClicked was found but has no readable full name"
+    end
+    -- THE CHECK THAT MAKES THIS ROUTE WORTH ARMING. UCommonButtonBase declares BP_OnClicked
+    -- itself, as a BlueprintImplementableEvent (CommonUI.hpp:375) — so a super-chain walk that
+    -- runs past the blueprint lands on the BASE's stub, whose full name lives under /Script/.
+    -- Hooking that one catches exactly the classes that do NOT override it, i.e. none of
+    -- Palworld's buttons, while reporting itself as armed. Refuse instead of arming a lie.
+    if full:find("/Script/", 1, true) then
+        return nil, "BP_OnClicked resolved to the CommonUI base (" .. full .. "), not to a "
+            .. "blueprint override — a hook there can never see the override"
+    end
+    return full
+end
+
+-- Install the dispatch hooks (idempotent). Called at load AND from registerClick.
+--
 -- ⚠️ ARM THIS EAGERLY, not on first registration. It used to be reached only from
 -- registerClick, so a button class with no bindable child meant registerClick was never called,
 -- which meant the hook was never registered, which meant NO button in the mod could ever be
 -- clicked — and the only symptom was silence. A hook that costs one lookup per click is not
 -- worth making conditional on anything.
+--
+-- The blueprint route CANNOT arm at load: its path is read off a live button and there is no
+-- world at load. That is why this stays callable — registerClick calls it again from inside a
+-- world, and the route arms then. Retrying is free; `arm` returns immediately once armed.
 function M.installClicks()
-    if hooked then return true end
-    local ok = pcall(function()
-        RegisterHook("/Script/CommonUI.CommonButtonBase:HandleButtonClicked", function(self)
-            local name
-            local ok2 = pcall(function() name = self:get():GetFullName() end)
-            if not ok2 or not name then return end
-            local fn = handlers[name]
-            if fn then
-                local oke, e = pcall(fn)
-                if not oke then err("click handler: " .. tostring(e)) end
-            end
-        end)
-    end)
-    hooked = ok
-    if ok or not clickHookLogged then
-        clickHookLogged = true
-        log(ok and "clicks: hook installed" or "clicks: hook FAILED")
+    local armed = 0
+    for _, route in ipairs(M.clickRoutes) do
+        if route.id == "bp" and route.state ~= "armed" and not route.path then
+            local path, why = blueprintClickPath()
+            route.path, route.why = path, why
+        end
+        if arm(route) then armed = armed + 1 end
     end
-    return ok
+    return armed > 0
+end
+
+---What the click router is doing, as printable lines. This is the whole point of the rewrite:
+---a run can now say "the native route is armed, it has seen 14 clicks, none of them ours" —
+---which names the step that refused instead of leaving silence to mean four different things.
+---@return string[]
+function M.clickReport()
+    local out, n = {}, 0
+    for _ in pairs(handlers) do n = n + 1 end
+    out[#out + 1] = string.format("clicks: %d handler(s) registered", n)
+    for _, r in ipairs(M.clickRoutes) do
+        out[#out + 1] = string.format(
+            "clicks: %-6s %-8s seen=%d dispatched=%d%s%s | %s%s",
+            r.id, r.state, r.seen, r.dispatched,
+            r.deduped and (" deduped=" .. r.deduped) or "",
+            r.unnamed and (" unnamed=" .. r.unnamed) or "",
+            r.what, r.why and ("  [" .. tostring(r.why) .. "]") or "")
+    end
+    if M.clickRoutes[1].seen == 0 and M.clickRoutes[2].seen == 0 then
+        out[#out + 1] = "clicks: NEITHER route has seen a single click — including the game's "
+            .. "own buttons. Either no hook is armed (read the states above) or no mouse click "
+            .. "is reaching any widget at all (see M.grabInput)."
+    end
+    return out
 end
 
 -- Register a CommonButtonBase widget (the WBP_PalInvisibleButton inside a menu
@@ -320,6 +524,43 @@ function M.text(tree, str, size, rgba)
     pcall(function() t:SetColorAndOpacity({ SpecifiedColor = color(rgba or { 0.95, 0.93, 0.86, 1 }), ColorUseRule = 0 }) end)
     pcall(function() local f = t.Font; f.Size = size or 16; t.Font = f end)
     return t
+end
+
+-- A UImage with a texture in it. The ONE brush call this makes is the one that needs no struct:
+--
+--   dumps/cxx/UMG.hpp:747   class UImage : public UWidget
+--                     :765     void SetBrushFromTexture(class UTexture2D* Texture, bool bMatchSize);
+--
+-- Every other way in takes an FSlateBrush, an FSlateColor, an FLinearColor or an FVector2D
+-- (:760, :761, :762, :771), and UWidgetBlueprintLibrary's MakeBrushFromTexture (:2016) RETURNS
+-- one — so SetBrushFromTexture is not merely the shortest route, it is the only one whose
+-- arguments this tree is allowed to marshal. It goes through core/signature for that reason:
+-- ObjectProperty + BoolProperty is exactly what the check can verify.
+--
+-- NO SIZE FIELD, and that is a finding rather than an omission. This build's UImage has no
+-- SetBrushSize (grep dumps/cxx: zero hits — that is UE5.1+), the size lives on FSlateBrush's
+-- ImageSize (SlateCore.hpp:337) which is a struct write, and SetDesiredSizeOverride takes an
+-- FVector2D. So an image is sized either by `bMatchSize` (it adopts the texture's own pixel
+-- size) or by putting it in a SizeBox, which is a node this tree already has.
+--
+-- `opacity` is SetOpacity(float) (:759) — a plain float, so it is called directly. `rgba` is a
+-- TINT through SetColorAndOpacity(FLinearColor) (:761), written the way M.text writes its own
+-- colour: every field of the struct named in full, inside a pcall, and skipped entirely when
+-- the caller did not ask for one.
+function M.image(tree, texture, opts)
+    opts = opts or {}
+    local img = M.construct("/Script/UMG.Image", tree)
+    if texture ~= nil then
+        local match = opts.matchSize
+        if match == nil then match = true end
+        sig.call(img, "SetBrushFromTexture", { "ObjectProperty", "BoolProperty" }, texture, match == true)
+        -- The property write as well as the setter, the way every override in this file is
+        -- written: UE4SS setters sometimes no-op where the property write lands.
+        pcall(function() img.Brush.ResourceObject = texture end)
+    end
+    if opts.opacity then pcall(function() img:SetOpacity(opts.opacity) end) end
+    if opts.rgba then pcall(function() img:SetColorAndOpacity(color(opts.rgba)) end) end
+    return img
 end
 
 -- ---- screen root: a widget of OUR OWN to build those primitives in ----
@@ -523,21 +764,103 @@ end
 --
 -- This is one route, not a fallback chain. The title screen has live buttons too, so the same
 -- question — "what button class is loaded right now" — is the right question everywhere.
-M.BUTTON_CLASSES = { "WBP_PalCommonButton_C", "WBP_PalInvisibleButton_C" }
+--
+-- ORDER CHANGED, 2026-07-27, and the reason is what the game does with its OWN mod menu.
+-- WBP_CommonButton_C leads because it is the button Palworld's built-in Mod Menu is built from
+-- (dumps/cxx/WBP_Option_ModMenu.hpp:15-17) and it is the only candidate that carries a LABEL and
+-- a click target it declares by name rather than by luck:
+--
+--   dumps/cxx/WBP_CommonButton.hpp:12   class UBP_PalTextBlock_C* Text_Main;
+--                               :13     class UWBP_PalInvisibleButton_C* WBP_PalInvisibleButton;
+--                               :30     void SetText(FText Text);
+--
+-- so the text goes in through the button's own one-argument setter instead of through a search
+-- for whatever TextBlock happens to be inside it, and the clickable child is found by the exact
+-- name the class declares. It is resident in a world — eleven rows in
+-- dumps/reflection/03_widgets.txt (:7, :338-339, :589) — which is the property the whole
+-- buttonClass idea rests on.
+--
+-- WBP_PalCommonButton_C and WBP_PalInvisibleButton_C stay behind it: both are
+-- UWBP_PalCommonButtonBase_C and therefore CommonButtonBase themselves (WBP_PalCommonButton.hpp:4,
+-- WBP_PalInvisibleButton.hpp:4, WBP_PalCommonButtonBase.hpp:4), which is the shape the click
+-- router's `inv = btn` fallback below was written for.
+M.BUTTON_CLASSES = { "WBP_CommonButton_C", "WBP_PalCommonButton_C", "WBP_PalInvisibleButton_C" }
 
-function M.buttonClass()
-    for _, name in ipairs(M.BUTTON_CLASSES) do
+---The CLASS behind the first of `names` this world has an instance of, plus the name that hit.
+---
+---The whole idea in one function: a live instance carries its own class, so asking the world is
+---both cheaper than a path and correct by construction — if the lookup answers, the class is
+---loaded, because something is standing there made of it. FindFirstOf also answers with
+---ARCHETYPES, the template widgets inside a loaded blueprint's WidgetTree, which is why this
+---works for classes that are resident but not currently on screen (that is how
+---dumps/reflection/03_widgets.txt lists WBP_PalCommonWindow_C seven times with no live window).
+---@return userdata? cls, string? name
+function M.liveClass(names)
+    for _, name in ipairs(names or {}) do
         local inst = M.findFirst(name)
         if alive(inst) then
             local cls; pcall(function() cls = inst:GetClass() end)
             if alive(cls) then return cls, name end
         end
     end
+    return nil, nil
+end
+
+---Construct a native/engine object from a CLASS OBJECT rather than a path — the counterpart to
+---M.construct for the classes that have no path anyone can cite. Raises like M.construct does.
+function M.constructFromClass(cls, outer)
+    if not alive(cls) then error("constructFromClass: no class", 0) end
+    local o = StaticConstructObject(cls, outer)
+    if not alive(o) then error("construct failed from a live class", 0) end
+    return o
+end
+
+function M.buttonClass()
+    do
+        local cls, name = M.liveClass(M.BUTTON_CLASSES)
+        if cls then return cls, name end
+    end
     -- The title-menu class by path, for the title screen, where the in-world ones may not be up
     -- yet. Same question, different moment; it is the only path form kept.
     local cls; pcall(function() cls = StaticFindObject(M.PATHS.menuButton) end)
     if alive(cls) then return cls, "WBP_Title_MenuButton_C" end
     return nil, nil
+end
+
+---The widget inside a button that carries its text, whatever class of button it is. Three names
+---for one question, in order of how exact each one is: WBP_CommonButton_C declares Text_Main
+---(WBP_CommonButton.hpp:12), WBP_Title_MenuButton_C declares Test_Content
+---(WBP_Title_MenuButton.hpp:14), and anything else is asked by SHAPE — the first TextBlock in
+---its tree — because a class nobody wrote this code against has neither name.
+---@return userdata? label
+function M.buttonLabel(btn)
+    local lbl = M.findByName(btn, M.PATHS.commonButtonLabel)
+        or M.findByName(btn, M.PATHS.menuButtonLabel)
+        or M.findByClass(btn, "TextBlock")
+    return alive(lbl) and lbl or nil
+end
+
+---Write `label` into `btn`, through the button's OWN setter when it declares one.
+---
+---WBP_CommonButton_C declares `void SetText(FText Text)` on itself
+---(dumps/cxx/WBP_CommonButton.hpp:30) and that is the call the game's own Mod Menu makes
+---(WBP_Option_ModMenu.hpp:15-17). Going through it lets the button do whatever it does around
+---the write — its Text_Main is a UBP_PalTextBlock_C, which carries Palworld's font scaling and
+---its localisation binding (Pal.hpp:30039-30050) — instead of us reaching past it into a child.
+---
+---core/signature gates it because FText is a TextProperty, i.e. one of the kinds signature
+---refuses on an unread declaration: if this build will not walk the parameter list we do not
+---guess, we write the child instead, which is exactly what shipped before.
+---@return boolean wrote
+function M.setButtonText(btn, label)
+    if not alive(btn) then return false end
+    local s = tostring(label or "")
+    if sig.check(btn, "SetText", { "TextProperty" }) == "declared" then
+        if pcall(function() btn:SetText(FText(s)) end) then return true end
+    end
+    local lbl = M.buttonLabel(btn)
+    if not lbl then return false end
+    return pcall(function() lbl:SetText(FText(s)) end) == true
 end
 
 -- needs no WidgetTree. The parameter is kept only so every builder here reads the same way.
@@ -548,22 +871,25 @@ function M.menuButton(tree, pc, label, onClick)
     end
     local btn, e = M.createFromClass(pc, cls)
     if not btn then return nil, (tostring(e) .. " [" .. tostring(clsName) .. "]") end
-    -- THE LABEL AND THE CLICK TARGET ARE FOUND BY SHAPE, NOT BY NAME, and that is a correction.
-    -- Both used to be looked up by the child names the TITLE menu button happens to use
-    -- (Test_Content, WBP_PalInvisibleButton). Now that the class comes from whatever the world
-    -- has loaded, those names are not there — WBP_PalCommonButton_C is built differently — and
-    -- the failure was silent in the worst way: no inner button found meant registerClick was
-    -- never called, which meant installClicks was never called, which meant the click hook was
-    -- never registered at all. The panel mounted, the button drew, and nothing could ever
-    -- happen. A named lookup is tried first because it is exact; the shape search is what makes
-    -- it work on a class nobody wrote this code against.
-    local lbl = M.findByName(btn, M.PATHS.menuButtonLabel) or M.findByClass(btn, "TextBlock")
-    if alive(lbl) then pcall(function() lbl:SetText(FText(label)) end) end
+    -- THE LABEL AND THE CLICK TARGET ARE FOUND BY SHAPE WHEN A NAME WILL NOT DO, and that was a
+    -- correction. Both used to be looked up by the child names the TITLE menu button happens to
+    -- use (Test_Content, WBP_PalInvisibleButton). Once the class came from whatever the world had
+    -- loaded, those names were not always there, and the failure was silent in the worst way: no
+    -- inner button found meant registerClick was never called, which meant installClicks was
+    -- never called, which meant the click hook was never registered at all. The panel mounted,
+    -- the button drew, and nothing could ever happen.
+    --
+    -- The names are back — but as DECLARED members of the class in the lead, not as a guess:
+    -- WBP_CommonButton_C declares Text_Main and WBP_PalInvisibleButton by those exact names
+    -- (dumps/cxx/WBP_CommonButton.hpp:12-13). The shape search stays behind them, for the class
+    -- nobody wrote this code against.
+    M.setButtonText(btn, label)
 
     -- The clickable thing is an inner CommonButtonBase when the class wraps one, and otherwise
     -- the button ITSELF — WBP_PalCommonButton_C derives from CommonButtonBase, so it is the
     -- widget the hook will report. One question, "which CommonButtonBase fires", asked of the
-    -- two places it can be.
+    -- three places it can be: the child the class declares, any CommonButtonBase in its tree,
+    -- and the button itself.
     local inv = M.findByName(btn, M.PATHS.menuButtonClick)
     if not alive(inv) then inv = M.findByClass(btn, "CommonButtonBase") end
     if not alive(inv) and M.isA(btn, "CommonButtonBase") then inv = btn end
@@ -622,6 +948,256 @@ function M.cloneGameWidget(tree, pc, classPath, opts)
         end
     end
     return w, clickName
+end
+
+--=============================================================================
+-- LOOKING NATIVE — the game's own frame and the game's own label
+--
+-- WHAT CAN LOOK NATIVE, and what cannot. Three of the five things a panel is made of can be the
+-- game's own widget, and two cannot:
+--
+--   button  YES — and already was. M.BUTTON_CLASSES now leads with the button Palworld's own
+--                 Mod Menu is built from (WBP_Option_ModMenu.hpp:15-17).
+--   frame   YES — M.gameFrame below. WBP_PalCommonWindow_C is a pure content frame: one member,
+--                 a UNamedSlot, no functions at all (WBP_PalCommonWindow.hpp:4-6). It is the
+--                 window seven different Palworld dialogs are built out of
+--                 (03_widgets.txt:6, 165, 166, 172, 221, 280, 340).
+--   label   YES — M.palText below. BP_PalTextBlock_C (BP_PalTextBlock.hpp:4) is the label 57
+--                 loaded classes use, and it is a UPalTextBlockBase (Pal.hpp:30039) — Palworld's
+--                 font scaling, UI-settings binding and localisation binding, which is most of
+--                 what makes text look native.
+--   layout  NO  — a VerticalBox is a VerticalBox. There is no Palworld "row" or "column" widget
+--                 to adopt; the game lays its own panels out with canvases and offsets, which
+--                 needs the struct calls this tree cannot make (UMG.hpp:350-374).
+--   colour / spacing / font  NO, not as a THEME. Every style hook in this build is a struct or a
+--                 style-CLASS argument with no path to a Palworld instance:
+--                 UCommonBorder::SetStyle takes a TSubclassOf<UCommonBorderStyle>
+--                 (CommonUI.hpp:232) and the dump names no Palworld subclass to pass;
+--                 UCommonTextBlock::SetStyle is the same (CommonUI.hpp:749); UBorder's
+--                 SetBrushColor / SetPadding take FLinearColor / FMargin (UMG.hpp:282, :275).
+--                 So a PalForge Border is a Border with a colour you chose, and it will not
+--                 match the game's chrome. Use a Frame if you want the game's chrome.
+--=============================================================================
+
+-- One member, and it is a UNamedSlot (WBP_PalCommonWindow.hpp:6). A UNamedSlot is a
+-- UContentWidget (UMG.hpp:1042 -> :505), so it takes our content through SetContent.
+M.PANEL_CLASSES = { "WBP_PalCommonWindow_C" }
+
+-- The game's own window chrome, with the slot our content goes into.
+--
+-- Returns (frame, contentHost, className) or nil + a reason. `contentHost` is the frame's
+-- NamedSlot, NOT the frame: a caller adds its tree to that and the chrome draws around it.
+--
+-- WHY IT IS SEPARATE FROM THE FRAME. Every other widget in this file is its own parent. This one
+-- is not, and pretending otherwise is how a panel ends up drawn behind the frame instead of
+-- inside it — so the two are returned as two things and the caller cannot conflate them.
+---@return userdata? frame, userdata? contentHost, string? whyOrName
+function M.gameFrame(pc)
+    local cls, name = M.liveClass(M.PANEL_CLASSES)
+    if not cls then
+        return nil, nil, "no Palworld window class is loaded (tried " ..
+            table.concat(M.PANEL_CLASSES, ", ") .. ")"
+    end
+    -- A UUserWidget, so it goes through WidgetBlueprintLibrary::Create like every other blueprint
+    -- widget here — StaticConstructObject would leave its WidgetTree null.
+    local frame, e = M.createFromClass(pc, cls, name)
+    if not frame then return nil, nil, tostring(e) end
+    local slot = M.findByName(frame, M.PATHS.windowSlot) or M.findByClass(frame, "NamedSlot")
+    if not alive(slot) then
+        pcall(function() frame:RemoveFromParent() end)
+        return nil, nil, name .. " has no " .. M.PATHS.windowSlot .. " to put content in"
+    end
+
+    -- ⚠️ IT IS AN ACTIVATABLE WIDGET, NOT A PLAIN ONE. WBP_PalCommonWindow_C is a UPalUserWidget
+    -- (WBP_PalCommonWindow.hpp:4 -> Pal.hpp:31888 -> :13367 -> UCommonActivatableWidget,
+    -- CommonUI.hpp:147), and a CommonUI activatable is DEACTIVATED when it is created: it carries
+    -- bSetVisibilityOnActivated / ActivatedVisibility (CommonUI.hpp:163-164) and normally gets its
+    -- visibility from being pushed onto a layer. Ours is not pushed onto anything — it is parented
+    -- straight into the canvas — so it has to be activated by hand or it can sit there collapsed,
+    -- which would read as "the Frame node does nothing" with nothing in the log.
+    -- ActivateWidget takes no arguments (CommonUI.hpp:177), so it goes through signature cleanly.
+    sig.call(frame, "ActivateWidget", {})
+    -- SelfHitTestInvisible (ESlateVisibility 4, UMG_enums.hpp:48-55): the chrome must not eat the
+    -- clicks meant for the button inside it, and Visible on a container is exactly how that
+    -- happens. Children stay hit-testable.
+    pcall(function() frame:SetVisibility(4) end)
+    return frame, slot, name
+end
+
+-- The game's own text block. A UWidget (UTextBlock -> UCommonTextBlock -> UPalTextBlockBase ->
+-- BP_PalTextBlock_C: UMG.hpp:1518, CommonUI.hpp:736, Pal.hpp:30039, BP_PalTextBlock.hpp:4), NOT
+-- a UUserWidget — so it is CONSTRUCTED into a widget tree like every primitive above and NOT
+-- created through WidgetBlueprintLibrary, which only takes UUserWidget subclasses.
+--
+-- BP_PalTextBlock_C is resident in any world — 57 loaded classes declare one as a child — and it
+-- also has a path, which is the rarest combination here, so both routes are used (live class
+-- first, path second) exactly as buttonClass does.
+--
+-- Returns nil + a reason rather than raising, because "the class is not resident" is a normal
+-- answer at the title screen and the caller falls back to a plain TextBlock.
+M.LABEL_CLASSES = { "BP_PalTextBlock_C" }
+
+---@return userdata? label, string? why
+function M.palText(tree, str, size)
+    local cls, name = M.liveClass(M.LABEL_CLASSES)
+    if not cls then
+        pcall(function() cls = StaticFindObject(M.PATHS.palTextBlock) end)
+        name = alive(cls) and "BP_PalTextBlock_C (by path)" or nil
+    end
+    if not alive(cls) then
+        return nil, "no BP_PalTextBlock_C is loaded and " .. M.PATHS.palTextBlock
+            .. " did not resolve"
+    end
+    local ok, t = pcall(M.constructFromClass, cls, tree)
+    if not ok or not alive(t) then return nil, "construct " .. tostring(name) .. ": " .. tostring(t) end
+
+    -- ⚠️ TURN THE REBUILD BINDING OFF BEFORE WRITING THE TEXT. UPalTextBlockBase carries
+    -- `IsAutoTextSetWhenWidgetRebuilt` (Pal.hpp:30044) and a BindTextDatatableHandle (:30041):
+    -- with the flag on, the widget re-reads its bound localisation row whenever Slate rebuilds
+    -- it, which silently throws away anything we wrote. Ours is bound to no row, so the re-read
+    -- would blank it.
+    pcall(function() t.IsAutoTextSetWhenWidgetRebuilt = false end)
+    pcall(function() t:SetText(FText(tostring(str))) end)
+    if size then
+        -- UpdateFontSize(int32) is Palworld's own, and it is a plain int (Pal.hpp:30050) — the
+        -- one font call in this whole tree that is not a struct. SetFont takes an FSlateFontInfo
+        -- (UMG.hpp:1548) and is unreachable.
+        sig.call(t, "UpdateFontSize", { "IntProperty" }, math.floor(size))
+    end
+    return t
+end
+
+--=============================================================================
+-- INPUT — letting the mouse reach a widget, and giving it back
+--
+-- THE PROBLEM, and it is not a UI problem. A widget that draws inside the game's own UI root
+-- still gets no click while the game holds mouse capture: in GameOnly input mode Slate is never
+-- offered the pointer at all, so hit-testing, visibility and z-order are all irrelevant. Pressing
+-- Esc is what usually fixes this by hand — the game's own menu switches the input mode and shows
+-- the cursor, and our panel (added last to CanvasPanel_Root, therefore drawn last) is on top and
+-- clickable. That is the DEFAULT route here and it costs the player nothing.
+--
+-- THE THREE CALLS, all struct-free, all on UWidgetBlueprintLibrary (UMG.hpp:1993):
+--   :2003  SetInputMode_UIOnlyEx(APlayerController*, UWidget* InWidgetToFocus,
+--                                EMouseLockMode, bool bFlushInput)
+--   :2005  SetInputMode_GameAndUIEx(APlayerController*, UWidget*, EMouseLockMode,
+--                                   bool bHideCursorDuringCapture, bool bFlushInput)
+--   :2004  SetInputMode_GameOnly(APlayerController*, bool bFlushInput)
+-- plus the cursor itself, which is a plain property: APlayerController::bShowMouseCursor
+-- (Engine.hpp:9035). EMouseLockMode is Engine_enums.hpp:2246-2252; DoNotLock = 0.
+--
+-- WHAT CAN AND CANNOT BE RESTORED, stated plainly because it decides the design. There is no
+-- GetInputMode: UE offers no way to read the mode back, so "restore what was there" is not
+-- available. `bShowMouseCursor` IS readable, so that half is restored exactly. For the mode:
+--   * "clicks" (GameAndUI) is NOT forced back to GameOnly on release. GameAndUI still lets the
+--     player move and look, so leaving it is not the failure that matters; forcing GameOnly
+--     would rip the mouse out of the game's OWN menu if one happens to be open. Palworld
+--     re-asserts its own mode every time a menu opens or closes, so this self-heals.
+--   * "exclusive" (UIOnly) IS forced back, with SetInputMode_GameOnly. UIOnly is precisely the
+--     state that leaves a player unable to move the camera, and a mod that leaves someone stuck
+--     there is worse than one whose button does nothing. It is still the dangerous mode: a
+--     hot-reload (F9) drops this Lua state without ever calling release, and nobody would be
+--     able to move. Do not use it for anything a player leaves running.
+--=============================================================================
+
+M.MOUSE_LOCK = { DO_NOT_LOCK = 0, ON_CAPTURE = 1, ALWAYS = 2, IN_FULLSCREEN = 3 }
+
+---The modes M.grabInput accepts, as a set, so api/ui can declare the same list without
+---duplicating it and without loading this module.
+M.INPUT_MODES = { none = true, cursor = true, clicks = true, exclusive = true }
+
+local function inputLibrary()
+    local lib
+    pcall(function() lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary") end)
+    return alive(lib) and lib or nil
+end
+
+---Give the mouse to a widget. Returns a grab token to hand back to M.releaseInput, or nil plus
+---a reason — and "none" is a reason, not a failure: it is the default and it means the player's
+---input was deliberately not touched.
+---
+---`focus` must be a LIVE widget. The two Ex calls take a UWidget* to focus and this passes ours
+---rather than nil, because nil into an ObjectProperty is the one marshalling shape nobody here
+---has measured, and a wrong argument TYPE faults inside UE4SS where pcall cannot see it. No
+---widget means no call: the mode degrades to "cursor" and says so.
+---@param mode string   # "none" | "cursor" | "clicks" | "exclusive"
+---@param focus userdata # the widget to focus (the element's own root)
+---@return table? grab, string? reason
+function M.grabInput(mode, focus)
+    if mode == nil or mode == "none" then
+        return nil, "input = \"none\": the player's mouse was not touched"
+    end
+    if not M.INPUT_MODES[mode] then return nil, "unknown input mode " .. tostring(mode) end
+
+    local pc = M.findFirst("PalPlayerController") or M.findFirst("PlayerController")
+    if not pc then return nil, "no PlayerController to set an input mode on" end
+
+    -- Read the cursor flag BEFORE anything is written: it is the only half that can be restored
+    -- exactly, so it is the only half worth recording.
+    local cursorWas
+    pcall(function() cursorWas = pc.bShowMouseCursor end)
+    local grab = { pc = pc, mode = mode, cursorWas = cursorWas, applied = {} }
+    if pcall(function() pc.bShowMouseCursor = true end) then
+        grab.applied[#grab.applied + 1] = "bShowMouseCursor = true"
+    end
+
+    if mode == "cursor" then return grab end
+
+    local lib = inputLibrary()
+    if not lib then
+        grab.mode = "cursor"
+        grab.note = "UWidgetBlueprintLibrary's CDO did not resolve, so only the cursor was shown"
+        return grab
+    end
+    if not alive(focus) then
+        grab.mode = "cursor"
+        grab.note = "no live widget to focus, so the input MODE was left alone and only the "
+            .. "cursor was shown"
+        return grab
+    end
+
+    local ok, level
+    if mode == "exclusive" then
+        ok, _, level = sig.call(lib, "SetInputMode_UIOnlyEx",
+            { "ObjectProperty", "ObjectProperty", "ByteProperty", "BoolProperty" },
+            pc, focus, M.MOUSE_LOCK.DO_NOT_LOCK, false)
+    else
+        ok, _, level = sig.call(lib, "SetInputMode_GameAndUIEx",
+            { "ObjectProperty", "ObjectProperty", "ByteProperty", "BoolProperty", "BoolProperty" },
+            pc, focus, M.MOUSE_LOCK.DO_NOT_LOCK, false, false)
+    end
+    if ok then
+        grab.applied[#grab.applied + 1] = (mode == "exclusive" and "SetInputMode_UIOnlyEx"
+            or "SetInputMode_GameAndUIEx") .. " [" .. tostring(level) .. "]"
+    else
+        -- The call was refused or raised; core/signature has already logged which and why. The
+        -- cursor is still shown, so say what the caller actually got rather than claiming a mode.
+        grab.mode = "cursor"
+        grab.note = "the input-mode call did not go through (core/signature logged the reason); "
+            .. "only the cursor was shown"
+    end
+    return grab
+end
+
+---Hand a grab back. Restores the cursor flag exactly, and the input MODE only for "exclusive" —
+---see the block comment above for why that asymmetry is deliberate rather than an oversight.
+---@return boolean released
+function M.releaseInput(grab)
+    if type(grab) ~= "table" or not alive(grab.pc) then return false end
+    local pc = grab.pc
+    if grab.mode == "exclusive" then
+        local lib = inputLibrary()
+        if lib then
+            sig.call(lib, "SetInputMode_GameOnly", { "ObjectProperty", "BoolProperty" }, pc, true)
+        else
+            err("releaseInput: UIOnly was set and UWidgetBlueprintLibrary is gone — the player "
+                .. "may be unable to move until a menu is opened and closed")
+        end
+    end
+    if grab.cursorWas ~= nil then
+        pcall(function() pc.bShowMouseCursor = grab.cursorWas end)
+    end
+    return true
 end
 
 -- ---- slot helpers (return the created slot for further tweaking) ----

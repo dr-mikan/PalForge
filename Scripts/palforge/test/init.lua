@@ -338,45 +338,69 @@ end,
 -- pf_uidecl — A DECLARED PANEL, INSIDE THE GAME'S OWN UI. The other action that puts something
 -- on screen, and the only one that puts it in a panel the GAME draws.
 --
--- WHAT IS UNPROVEN. `ui-host-paths` is closed on paper and only on paper: WBP_PalOverallUILayout
--- declares `UCanvasPanel* CanvasPanel_Root` (dumps/cxx/WBP_PalOverallUILayout.hpp:9), a
--- UCanvasPanel is a UPanelWidget so it answers AddChild (UMG.hpp:344, :1087), and an instance is
--- alive under BP_PalGameInstance (dumps/reflection/03_widgets.txt:54). Nobody has ever watched a
--- widget APPEAR in it. Everything api/ui's declarative layer does rests on that one unobserved
--- step, so this is the run that observes it — or names exactly which step refused.
+-- MOUNTING IS CLOSED. The panel was seen, on screen, in the game's own canvas:
+--   pf_uidecl: MOUNTED into PalPrimaryGameLayoutBase.CanvasPanel_Root | slot=CanvasPanelSlot
+-- What was NOT closed is everything after that: the button did nothing, and four separate
+-- things could each have been the reason. This run separates them, and every outcome below is
+-- attributable to exactly one of them rather than to "the UI does not work".
 --
--- It is written the way a PACK would write it: UI{ host = "game", root = <tree> } and
--- :autoMount. No core call, no widget toolkit, nothing this action knows that a reader of
--- api/ui.lua would not.
+-- WHAT THIS RUN IS ASKING, in the order the log answers it:
 --
--- WHAT TO LOOK FOR, in order of what each one proves:
---   * a dark box with three lines of text, top-left  -> the whole chain: host resolved, tree
---     built, AddChild accepted, the canvas slot's SetAutoSize gave it a size. Never seen.
---   * the second line's seconds COUNT UP              -> bindings re-evaluate on the poll, so a
---     declared panel is live rather than a snapshot.
---   * clicking the button changes ITS OWN label       -> click router -> instance state ->
---     binding -> SetText on the button's label child. The full loop, in one gesture.
---   * nothing on screen and `mounted -> true`         -> it was placed and drew nowhere: a
---     CanvasPanelSlot lays out by offsets and SetAutoSize is what gives it size
---     (_widget.lua:565). The slot class printed below is then the thing to read.
---   * `mounted -> false`                              -> the reason is printed with it, from
---     UI.Handle:lastError(), which names the node or the host that refused.
+--   1. IS A CLICK HOOK ARMED AT ALL. The router prints one line per route with the ids
+--      RegisterHook returned, or the refusal text it threw. The old code pcall'd that away and
+--      printed "hook installed" / "hook FAILED" with no reason, which is why nobody could tell.
+--   2. DOES ANY CLICK REACH ANY WIDGET. Each route counts every click it sees on every
+--      CommonUI button in the whole game — not just ours. So `seen=0` after you have clicked
+--      the game's own menu buttons means no hook is firing; `seen>0, dispatched=0` means the
+--      hooks work and OUR widget is not the one being clicked.
+--   3. CAN THE MOUSE REACH OURS. The panel declares `input = "clicks"`, so it asks the engine
+--      for Game+UI and a cursor. If that call lands you can click it during ordinary play; if
+--      it does not, the Esc route is the fallback and step 2 tells the two apart.
+--   4. DOES IT LOOK NATIVE. A UI.Frame (the game's own WBP_PalCommonWindow chrome), a
+--      `native = true` label (BP_PalTextBlock_C) and a UI.Sprite showing the vanilla Wood icon.
+--      Any of the three that could not use the game's widget logs a `[ui]` warning naming which
+--      class was missing and what was used instead — it never fails silently and never fails
+--      the mount.
+--
+-- WHAT TO LOOK FOR ON SCREEN, in order of what each one proves:
+--   * a panel with the game's own window chrome, top-left  -> Frame adopted WBP_PalCommonWindow.
+--     A plain dark rectangle instead -> the fallback Border; read the [ui] warning for why.
+--   * a small item icon next to the text                   -> Sprite: core/icons resolved a
+--     vanilla id to a real texture and SetBrushFromTexture landed. Never seen before this run.
+--   * the "alive N s" line COUNTS UP                       -> bindings re-evaluate on the poll.
+--   * clicking the button changes ITS OWN label            -> the whole loop: hook -> router ->
+--     instance state -> binding -> the button's own SetText.
+--   * a mouse cursor you can move onto the panel           -> input = "clicks" landed.
 -- It stays on screen: nothing takes it down but a reload (F9) or leaving the world.
 pf_uidecl = function()
     local UI   = require("palforge.api.ui")
+    local tree = require("palforge.native.ui").tree
     local poll = require("palforge.core.poll")
-    local VBox, Label, Button, Border = UI.VBox, UI.Label, UI.Button, UI.Border
+    local VBox, HBox, Label, Button = UI.VBox, UI.HBox, UI.Label, UI.Button
+    local Frame, Sprite, SizeBox = UI.Frame, UI.Sprite, UI.SizeBox
     local t0 = os.clock()
 
     local Panel = UI{
-        id   = "palforge_test:DeclPanel",
-        name = "Declared panel",
-        host = "game",                     -- CanvasPanel_Root inside WBP_PalOverallUILayout
-        root = Border{ color = { 0.05, 0.04, 0.03, 0.92 }, padding = 10, hAlign = "left",
-            VBox{
-                Label{ text = "PalForge — declared UI", size = 20 },
-                Label{ name = "clock",
-                       text = function() return string.format("alive %.0f s", os.clock() - t0) end },
+        id    = "palforge_test:DeclPanel",
+        name  = "Declared panel",
+        host  = "game",     -- CanvasPanel_Root inside WBP_PalOverallUILayout
+        -- ASK FOR THE MOUSE. The default is "none" and the default is right for a HUD readout;
+        -- this panel has a button, so it says so. On unmount the cursor flag goes back exactly
+        -- as it was and the input mode is left alone (Game+UI still lets the player move and
+        -- look) — see the INPUT block in native/ui/_widget.lua.
+        input = "clicks",
+        root  = Frame{ color = { 0.05, 0.04, 0.03, 0.92 },
+            VBox{ padding = 10,
+                Label{ text = "PalForge — declared UI", size = 20, native = true },
+                HBox{
+                    -- Wood is an item id every save has. A miss here is a NAMED miss: the
+                    -- sprite maker says whether core/icons had no row or the texture did not
+                    -- load, and the mount fails with that sentence rather than drawing blank.
+                    SizeBox{ width = 48, height = 48,
+                        Sprite{ name = "icon", icon = "Wood", matchSize = false } },
+                    Label{ name = "clock", vAlign = "center", padding = { left = 8 },
+                           text = function() return string.format("alive %.0f s", os.clock() - t0) end },
+                },
                 Button{ name = "hit",
                         text    = function(self) return "clicked " .. (self.clicks or 0) .. "x" end,
                         onClick = function(self) self.clicks = (self.clicks or 0) + 1 end },
@@ -391,23 +415,59 @@ pf_uidecl = function()
     panel:autoMount(nil, 1000)
     log.info("pf_uidecl: a declared panel is trying to mount into the game's own UI root")
 
+    local function reportClicks(when)
+        for _, line in ipairs(tree.clickReport()) do log.info("pf_uidecl " .. when .. ": " .. line) end
+    end
+
     poll.every("pf_uidecl look-back", function(elapsed)
         if elapsed < 12 then return false end
         if not panel:isMounted() then
             log.warn("pf_uidecl: NOT mounted after 12 s — " .. tostring(panel:lastError()))
+            reportClicks("at 12 s")
             return true
         end
         -- The evidence line: which slot class the canvas handed back, and the full name of the
         -- widget that is now in the game's tree. Both are read off the built tree rather than
         -- inferred, and a "CanvasPanelSlot" here is what closes ui-host-paths on OBSERVATION.
         local st = panel:state()
-        local slotCls, rootName, hostWhat = "?", "?", "?"
+        local slotCls, rootName, rootCls, hostWhat = "?", "?", "?", "?"
         pcall(function() slotCls = st._tree.slot:GetClass():GetFName():ToString() end)
         pcall(function() rootName = st._tree.root:GetFullName() end)
+        pcall(function() rootCls = st._tree.root:GetClass():GetFName():ToString() end)
         pcall(function() hostWhat = st._host.what end)
-        log.info(string.format("pf_uidecl: MOUNTED into %s | slot=%s | root=%s",
-            hostWhat, slotCls, rootName))
-        support.announce("pf_uidecl: a declared panel should be on screen — click its button")
+        log.info(string.format("pf_uidecl: MOUNTED into %s | slot=%s | root=%s | rootClass=%s",
+            hostWhat, slotCls, rootName, rootCls))
+        -- rootClass is the LOOK question in one word: WBP_PalCommonWindow_C means the panel is
+        -- wearing the game's own chrome; Border means the fallback ran and a [ui] warning above
+        -- says which class was missing.
+        log.info(string.format("pf_uidecl: input grab -> %s",
+            st._input and table.concat(st._input.applied or {}, " + ")
+                .. (st._input.note and ("  [" .. st._input.note .. "]") or "")
+                or "none taken (read the [ui] line above for why)"))
+        reportClicks("at 12 s")
+        support.announce("pf_uidecl: panel up — click its button; then press Esc and click again")
+        return true
+    end)
+
+    -- THE SECOND LOOK IS THE MEASUREMENT. Twelve seconds in, nobody has clicked anything yet and
+    -- every counter is zero, which proves nothing. This one runs a minute later, by which time
+    -- the player has been asked to click our button twice and the game's own menu once — and the
+    -- three counters then say which of the four candidate faults is the real one.
+    poll.every("pf_uidecl click verdict", function(elapsed)
+        if elapsed < 75 then return false end
+        reportClicks("at 75 s")
+        local st = panel:state()
+        log.info(string.format("pf_uidecl: our button was clicked %d time(s) as far as the "
+            .. "element is concerned", tonumber(st.clicks) or -1))
+        log.info("pf_uidecl: HOW TO READ THE THREE LINES ABOVE — "
+            .. "(a) a route that says `refused` never armed, and its bracketed text is "
+            .. "RegisterHook's own message; "
+            .. "(b) seen=0 on BOTH routes after you clicked the game's own menu means no click "
+            .. "hook fires at all on this build, and the click PATH is the fault; "
+            .. "(c) seen>0 with dispatched=0 means the hooks fire for the game's buttons and "
+            .. "never for ours — the mouse is not reaching our widget, which is the input half; "
+            .. "(d) dispatched>0 with clicks=0 means the router delivered and the handler or the "
+            .. "binding is the fault. Exactly one of these is true.")
         return true
     end)
 end,

@@ -273,10 +273,22 @@
 ---@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says
 ---@field size? number # font size (default 16)
 ---@field color? table # text colour { r, g, b, a } in 0..1
+---@field native? boolean # build the GAME's own label (BP_PalTextBlock_C) instead of a plain TextBlock; `color` is then ignored
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.Label.HAlign # horizontal alignment in the parent's slot
 ---@field vAlign? UI.Node.Label.VAlign # vertical alignment in the parent's slot
+---@field padding? number|table # slot padding: one number for all four sides, or { left =, top =, right =, bottom = }
+
+---@alias UI.Node.Frame.HAlign "fill"|"left"|"center"|"right"
+---@alias UI.Node.Frame.VAlign "fill"|"top"|"center"|"bottom"
+---@class UI.Node.Frame
+---@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
+---@field color? table # the FALLBACK Border's tint { r, g, b, a }, used only when the game's window class is not loaded
+---@field name? string # look the built widget up later with UI.Handle:find("<name>")
+---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
+---@field hAlign? UI.Node.Frame.HAlign # horizontal alignment in the parent's slot
+---@field vAlign? UI.Node.Frame.VAlign # vertical alignment in the parent's slot
 ---@field padding? number|table # slot padding: one number for all four sides, or { left =, top =, right =, bottom = }
 
 ---@alias UI.Node.Button.HAlign "fill"|"left"|"center"|"right"
@@ -288,6 +300,22 @@
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.Button.HAlign # horizontal alignment in the parent's slot
 ---@field vAlign? UI.Node.Button.VAlign # vertical alignment in the parent's slot
+---@field padding? number|table # slot padding: one number for all four sides, or { left =, top =, right =, bottom = }
+
+---@alias UI.Node.Sprite.From "item"|"pal"|"skill"|"building"
+---@alias UI.Node.Sprite.HAlign "fill"|"left"|"center"|"right"
+---@alias UI.Node.Sprite.VAlign "fill"|"top"|"center"|"bottom"
+---@class UI.Node.Sprite
+---@field path? string # a /Game/... texture object path, e.g. "/Game/Pal/Texture/UI/T_icon.T_icon"
+---@field icon? string # a vanilla content id whose icon the game already draws ("Wood", "Sheepball"); ignored when `path` is given
+---@field from? UI.Node.Sprite.From # which of the game's icon tables `icon` is looked up in (default item)
+---@field matchSize? boolean # take the texture's own pixel size (SetBrushFromTexture's bMatchSize). false: let the layout decide (default true)
+---@field color? table # tint { r, g, b, a } in 0..1, multiplied over the texture
+---@field opacity? number # 0..1
+---@field name? string # look the built widget up later with UI.Handle:find("<name>")
+---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
+---@field hAlign? UI.Node.Sprite.HAlign # horizontal alignment in the parent's slot
+---@field vAlign? UI.Node.Sprite.VAlign # vertical alignment in the parent's slot
 ---@field padding? number|table # slot padding: one number for all four sides, or { left =, top =, right =, bottom = }
 
 ---@alias UI.Node.GameWidget.HAlign "fill"|"left"|"center"|"right"
@@ -308,6 +336,7 @@
 ---@field widget string # the host widget's CLASS name. FindFirstOf matches subclasses, so name the native base ("PalPrimaryGameLayoutBase", not "WBP_PalOverallUILayout_C")
 ---@field panel? string # the panel inside it that takes our children: a declared member (read as a property), else a widget of that name in its tree. Omitted: the widget itself is the panel
 
+---@alias UI.Spec.Input "none"|"cursor"|"clicks"|"exclusive"
 ---@class UI.Spec
 ---@field id string # element id, e.g. "pack:Panel"
 ---@field name? string # human label (defaults to id)
@@ -317,6 +346,7 @@
 ---@field render? fun(self: UI.Handle, root: any): boolean? # build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted
 ---@field update? fun(self: UI.Handle) # refresh the already-built widgets (self); runs on each :refresh()
 ---@field destroy? fun(self: UI.Handle) # remove the widgets render() built (self); runs on :unmount()
+---@field input? UI.Spec.Input # how much of the player's mouse this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor. "clicks" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. "exclusive" is a modal and stops game input — see the warning on it (default none)
 ---@field data? table # default fields shared by every instance of this element
 
 --=============================================================================

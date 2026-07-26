@@ -551,6 +551,7 @@ A UI element is something drawn on screen out of Palworld's own native UMG kit.
 | `render` | `fun(self: UI.Handle, root: any): boolean?` | — | build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted |
 | `update` | `fun(self: UI.Handle)` | — | refresh the already-built widgets (self); runs on each :refresh() |
 | `destroy` | `fun(self: UI.Handle)` | — | remove the widgets render() built (self); runs on :unmount() |
+| `input` | `string` | = `none`, one of `none` `cursor` `clicks` `exclusive` | how much of the player's mouse this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor. "clicks" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. "exclusive" is a modal and stops game input — see the warning on it |
 | `data` | `table` | — | default fields shared by every instance of this element |
 
 ### UI.Node.VBox
@@ -608,11 +609,20 @@ Identical to [`UI.Node.VBox`](#uinodevbox) — same fields, same rules.
 | `text` | `string\|number\|fun(self: UI.Handle): any` | — | BINDABLE - what it says |
 | `size` | `number` | — | font size (default 16) |
 | `color` | `table` | — | text colour { r, g, b, a } in 0..1 |
+| `native` | `boolean` | — | build the GAME's own label (BP_PalTextBlock_C) instead of a plain TextBlock; `color` is then ignored |
 | `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
 | `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
 | `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
 | `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
 | `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.Frame
+
+Same fields as [`UI.Node.Border`](#uinodeborder), with 1 difference:
+
+| field | changed | here | in `UI.Node.Border` |
+|---|---|---|---|
+| `color` | doc | the FALLBACK Border's tint { r, g, b, a }, used only when the game's window class is not loaded | background tint { r, g, b, a } in 0..1 |
 
 ### UI.Node.Button
 
@@ -620,6 +630,22 @@ Identical to [`UI.Node.VBox`](#uinodevbox) — same fields, same rules.
 |---|---|---|---|
 | `text` | `string\|number\|fun(self: UI.Handle): any` | — | BINDABLE - what it says |
 | `onClick` | `fun(self: UI.Handle, ctx: table)` | — | clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget) |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.Sprite
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `path` | `string` | checked | a /Game/... texture object path, e.g. "/Game/Pal/Texture/UI/T_icon.T_icon" |
+| `icon` | `string` | checked | a vanilla content id whose icon the game already draws ("Wood", "Sheepball"); ignored when `path` is given |
+| `from` | `string` | = `item`, one of `item` `pal` `skill` `building` | which of the game's icon tables `icon` is looked up in |
+| `matchSize` | `boolean` | = `true` | take the texture's own pixel size (SetBrushFromTexture's bMatchSize). false: let the layout decide |
+| `color` | `table` | — | tint { r, g, b, a } in 0..1, multiplied over the texture |
+| `opacity` | `number` | — | 0..1 |
 | `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
 | `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
 | `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
@@ -666,7 +692,7 @@ Identical to [`UI.Node.VBox`](#uinodevbox) — same fields, same rules.
 | `:unmount()` | — | Take the element down: runs destroy() so it removes its own widgets, then forgets the rendered state so a later mount() renders afresh. Also cancels autoRefresh/autoMount. |
 
 `UI.Class` methods (what `self` resolves inside a handler that gets a
-definition or an instance): `:destroy()` `:destroyTree()` `:find(name)` `:isMounted()` `:mount(root)` `:refresh()` `:releaseHost()` `:render(root)` `:renderTree(root)` `:unmount()` `:update()` `:updateTree()`.
+definition or an instance): `:destroy()` `:destroyTree()` `:find(name)` `:grabInput()` `:isMounted()` `:mount(root)` `:refresh()` `:releaseHost()` `:releaseInput()` `:render(root)` `:renderTree(root)` `:unmount()` `:update()` `:updateTree()`.
 
 ### palforge.ui
 
@@ -678,8 +704,10 @@ definition or an instance): `:destroy()` `:destroyTree()` `:find(name)` `:isMoun
 | `ScrollBox` | `fun(spec:` | UI.Node.ScrollBox): UI.Node # a scrolling column |
 | `Border` | `fun(spec:` | UI.Node.Border): UI.Node # a tinted frame around ONE child |
 | `SizeBox` | `fun(spec:` | UI.Node.SizeBox): UI.Node # a fixed size around ONE child |
+| `Frame` | `fun(spec:` | UI.Node.Frame): UI.Node # the GAME's own window chrome around ONE child |
 | `Label` | `fun(spec:` | UI.Node.Label): UI.Node # text |
 | `Button` | `fun(spec:` | UI.Node.Button): UI.Node # the game's own menu button, clickable |
+| `Sprite` | `fun(spec:` | UI.Node.Sprite): UI.Node # a picture: an asset path, or a vanilla id's icon |
 | `GameWidget` | `fun(spec:` | UI.Node.GameWidget): UI.Node # any Blueprint widget the game ships |
 
 ## Player

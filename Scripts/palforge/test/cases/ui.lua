@@ -688,6 +688,107 @@ function(t)
     t:type(err, "string", "plus the error, so the refresh can carry on with the others")
 end)
 
+--=============================================================================
+-- the nodes added for "the button does nothing": Sprite, Frame, a native Label
+--=============================================================================
+
+s:test("a Sprite takes an asset path or a vanilla id, and fills the rest in", function(t)
+    local byPath = UI.Sprite{ path = "/Game/Pal/Texture/UI/T_x.T_x" }
+    t:eq(byPath.kind, "sprite", "it is a sprite")
+    t:eq(byPath.from, "item", "`from` defaults to the item icon table")
+    t:eq(byPath.matchSize, true, "and matchSize defaults to taking the texture's own size")
+
+    local byIcon = UI.Sprite{ icon = "Sheepball", from = "pal", matchSize = false }
+    t:eq(byIcon.icon, "Sheepball", "a content id is carried as declared")
+    t:eq(byIcon.from, "pal", "in the catalog that was named")
+    t:eq(byIcon.matchSize, false, "and matchSize can be turned off for a laid-out sprite")
+
+    t:errors(function() UI.Sprite{ from = "weapons" } end, "must be one of")
+    t:errors(function() UI.Sprite{ icon = "" } end, "must be a non-empty string")
+    t:errors(function() UI.Sprite{ UI.Label{} } end, "UI.Sprite holds no children")
+end)
+
+s:test("a Frame wraps ONE child and takes only a FALLBACK colour", function(t)
+    local f = UI.Frame{ UI.Label{ text = "inside" } }
+    t:eq(f.kind, "frame", "it is a frame")
+    t:eq(#f.children, 1, "with its one child")
+    t:errors(function() UI.Frame{ UI.Label{}, UI.Label{} } end, "UI.Frame holds ONE child, 2 given")
+    -- The distinction that matters: a Border's colour IS the border, a Frame's colour is only
+    -- what is used when the game's own window class turns out not to be loaded.
+    t:truthy(schema.get("UI.Node.Frame"):field("color").doc:find("FALLBACK", 1, true),
+        "the colour field says it is the fallback's, not the frame's")
+end)
+
+s:test("a Label can ask for the game's OWN label widget", function(t)
+    local n = UI.Label{ text = "hi", native = true }
+    t:eq(n.native, true, "`native` is carried on the node")
+    t:eq(UI.Label{ text = "hi" }.native, nil, "and is absent, not false, when not asked for")
+    t:errors(function() UI.Label{ native = "yes" } end, "expects boolean, got string")
+end)
+
+s:test("native/ui/tree can build both new kinds, and api/ui publishes both", function(t)
+    local makers = native.tree.kinds()
+    t:truthy(makers.sprite, "tree builds a sprite")
+    t:truthy(makers.frame, "tree builds a frame")
+    t:eq(UI.Sprite.kind, "sprite", "UI.Sprite says what it builds without being called")
+    t:eq(UI.Frame.kind, "frame", "so does UI.Frame")
+end)
+
+--=============================================================================
+-- `input` — how much of the player's mouse an element takes
+--
+-- Every case here is pure: the field is validated in api/ui and the engine calls live in
+-- _widget, so what an element DECLARES and what the lifecycle does with it are both provable
+-- with no game. Whether SetInputMode_GameAndUIEx lands is not — that is the in-game run.
+--=============================================================================
+
+s:test("`input` defaults to none: an element takes nothing unless it asked", function(t)
+    local El = UI{ id = support.id("ui_input_default") }
+    t:eq(El:state().inputMode, "none", "the default is the SAFE one — nobody's mouse is touched")
+    local Grab = UI{ id = support.id("ui_input_clicks"), input = "clicks" }
+    t:eq(Grab:state().inputMode, "clicks", "and an element that wants clicks says so")
+end)
+
+s:test("an input mode outside the list is refused at define time", function(t)
+    t:errors(function() UI{ id = support.id("ui_input_bad"), input = "mouse" } end, "must be one of")
+    t:errors(function() UI{ id = support.id("ui_input_bad2"), input = true } end,
+        "expects string, got boolean")
+end)
+
+s:test("mounting with input = none never reaches the engine, and unmount is still clean",
+function(t)
+    local El = UI{ id = support.id("ui_input_none"), render = function() end }
+    local el = El:new{}
+    t:eq(el:mount(fakeRoot()), true, "it mounts")
+    t:eq(el:state()._input, nil, "and holds no input grab at all")
+    t:eq(el:state():releaseInput(), false, "releasing nothing is a false, not an error")
+    el:unmount()
+    t:eq(el:isMounted(), false, "and it comes down as usual")
+end)
+
+s:test("an element that asks for the mouse and cannot get it says so and stays clean",
+function(t)
+    if widget.owner() then t:skip("an owner exists — this would really move the player's cursor") end
+    local El = UI{ id = support.id("ui_input_nogame"), input = "clicks",
+                   render = function() end }
+    local el = El:new{}
+    t:eq(el:mount(fakeRoot()), true, "the render succeeded, so the element is mounted")
+    t:eq(el:state()._input, nil, "but with no PlayerController there is no grab to hold")
+    -- The point: a mount that could not take the mouse is still a mount. Failing to grab is
+    -- never allowed to unmount a panel that drew.
+    t:eq(el:isMounted(), true, "and the element is NOT taken down over it")
+    el:unmount()
+end)
+
+s:test("a render that reports failure gives the mouse back on the way out", function(t)
+    local El = UI{ id = support.id("ui_input_failrender"), input = "clicks",
+                   render = function() return false end }
+    local el = El:new{}
+    t:eq(el:mount(fakeRoot()), false, "the render could not build")
+    t:eq(el:state()._input, nil, "so nothing is left holding the player's input")
+    t:eq(el:isMounted(), false, "and the element stays unmounted, so mount() retries")
+end)
+
 s:test("slot padding is expanded to the four sides UMG names", function(t)
     local m = native.tree.margin(6)
     t:eq(m.Left, 6, "one number pads every side")

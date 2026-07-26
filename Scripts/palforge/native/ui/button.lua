@@ -29,7 +29,10 @@ return UI{
         if not btn then return false end
         self.widget, self.invButton, self.clickName = btn, inv, clickName
         self._wiredClick = self.onClick   -- what the router currently holds (see update)
-        self.labelWidget = widget.findByName(btn, widget.PATHS.menuButtonLabel)
+        -- Kept for callers that want the widget itself; the WRITE goes through
+        -- widget.setButtonText, which knows that some button classes declare their own SetText
+        -- and that the child's NAME differs per class (Text_Main vs Test_Content).
+        self.labelWidget = widget.buttonLabel(btn)
         -- Attach into the host panel, whatever kind of panel it is: addChild tries the
         -- typed AddChildTo* first and falls back to UPanelWidget's generic AddChild.
         local slot = widget.addChild(root, btn)
@@ -63,12 +66,8 @@ return UI{
             end
             self._wiredClick = self.onClick
         end
-        if not alive(self.labelWidget) then
-            self.labelWidget = widget.findByName(self.widget, widget.PATHS.menuButtonLabel)
-            if not alive(self.labelWidget) then return false end
-        end
-        local lbl = self.labelWidget
-        return pcall(function() lbl:SetText(FText(tostring(self.label or ""))) end)
+        if not alive(self.labelWidget) then self.labelWidget = widget.buttonLabel(self.widget) end
+        return widget.setButtonText(self.widget, self.label or "")
     end,
 
     -- Take the button out of its host panel and drop its click handler, so a later

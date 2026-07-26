@@ -127,6 +127,12 @@ local function setVisible(w, v)
     return pcall(function() w:SetVisibility(mode) end) == true
 end
 
+-- A button's text is not its child's text: some button classes declare their own SetText and
+-- some do not, and only _widget knows which. One writer for the build and for the refresh.
+local function setButtonText(w, v)
+    return widget.setButtonText(w, (v == nil) and "" or tostring(v))
+end
+
 --=============================================================================
 -- slots — the parent's half of a child's layout
 --=============================================================================
@@ -160,7 +166,9 @@ end
 -- Which kinds hold their child through SetContent rather than AddChild. UBorder and USizeBox
 -- are UContentWidgets (UMG.hpp:247, :1291 -> :505), and SetContent is what the shipped
 -- screen frame and title-menu entry use (_widget.lua:384-386, title_menu.lua:113).
-local CONTENT = { border = true, sizebox = true }
+-- `frame` joins them because what it hands back as a parent is a UNamedSlot, which is a
+-- UContentWidget too (UMG.hpp:1042 -> :505).
+local CONTENT = { border = true, sizebox = true, frame = true }
 
 -- Put `child` into `parent` and return something to style: the slot when one came back,
 -- `true` when the child was placed but this build handed back no slot, nil when it was not
@@ -185,6 +193,16 @@ end
 --=============================================================================
 
 local MAKE = {}
+
+-- A note is something that WORKED but not the way the declaration asked for — a native frame
+-- that fell back to a Border, a native label on a build where the class is not resident. It is
+-- not a failure (the panel drew) and it must not be silence (the panel does not look like what
+-- was written), so it is collected on the built tree and api/ui logs it once per mount.
+local function note(built, msg)
+    if type(built) ~= "table" then return end
+    built.notes = built.notes or {}
+    built.notes[#built.notes + 1] = tostring(msg)
+end
 
 MAKE.vbox    = function(_, ctx) return widget.vbox(ctx.outer) end
 MAKE.hbox    = function(_, ctx) return widget.hbox(ctx.outer) end
@@ -212,16 +230,107 @@ end
 
 MAKE.label = function(node, ctx, built)
     local text = M.valueOf(node.text, ctx.self)
-    local w = widget.text(ctx.outer, (text == nil) and "" or tostring(text), node.size, node.color)
+    local s = (text == nil) and "" or tostring(text)
+    local w
+    -- `native = true` adopts the game's OWN label — BP_PalTextBlock_C, a UPalTextBlockBase, which
+    -- is where Palworld's font scaling, UI-settings binding and localisation live
+    -- (dumps/cxx/Pal.hpp:30039-30050). It is a fallback rather than a hard requirement because
+    -- the class is resident in a world and not necessarily at the title screen, and a panel that
+    -- refuses to draw is worse than one whose font is ours.
+    if node.native then
+        local t, why = widget.palText(ctx.outer, s, node.size)
+        if t then w = t else note(built, "label native: " .. tostring(why)
+            .. " — a plain UMG TextBlock was used instead") end
+    end
+    w = w or widget.text(ctx.outer, s, node.size, node.color)
     bind(built, node, "text", setText, w, text)
     return w
 end
 
--- A button is the GAME'S own WBP_Title_MenuButton, wired through the shared click router —
--- the identical route native/ui/button.lua takes, so a declared button and an imperative
--- one are the same widget with the same click path and there is only one thing to reason
--- about. The label alignment inside it is the one open cosmetic unknown
--- (TODO(ui-menubutton-inner-slot) at _widget.lua:426).
+-- A SPRITE: one UImage with a texture in it, resolved either from an asset PATH or from a
+-- vanilla content ID whose icon is looked up.
+--
+-- TWO WAYS IN, because there are two different things an author knows. `path` is for an asset
+-- you have — a texture you shipped, or one of the four /Game/... textures core/mesh/assets has
+-- verified. `icon` is for the far commoner case: the author knows a content id ("Wood",
+-- "Sheepball", "Workbench") and wants whatever picture the game already draws for it.
+-- core/icons answers that off the game's own DataTables and its coverage is measured — 674/674
+-- pal rows, 1183/1207 item rows, 567/571 building rows, 311/311 partner-skill rows
+-- (core/icons.lua:416-422) — so a missing icon is nearly always a MISSPELLED id, and the error
+-- below says so rather than leaving a blank square.
+--
+-- BOTH REQUIRES ARE LAZY AND WRAPPED. This module is the only one that meets UMG, and it is
+-- reached through a pcall'd require from api/ui; pulling core/icons and core/mesh/assets in at
+-- the top would make a headless load of api/ui depend on two more engine-facing modules for a
+-- node kind most trees do not use.
+---@return userdata? texture, string? why
+local function textureFor(node)
+    local path = node.path
+    if not path and node.icon then
+        local ok, icons = pcall(require, "palforge.core.icons")
+        if not ok then return nil, "core/icons is unavailable: " .. tostring(icons) end
+        local from = node.from or "item"
+        local spec = icons.TABLES[from]
+        if not spec then
+            return nil, string.format("%q is not an icon catalog (item / pal / skill / building)", from)
+        end
+        local ref = icons.resolve(spec, node.icon)
+        if ref == nil then
+            return nil, string.format("no %s icon for id %q — the row keys are the vanilla ids "
+                .. "spelled exactly as the DataTable spells them, and the match is "
+                .. "case-sensitive", from, tostring(node.icon))
+        end
+        -- resolve() answers with a string path on this build (the soft-object column read as
+        -- text), but it is documented as "a string path OR an engine object", so take either.
+        if type(ref) == "userdata" then return ref end
+        path = tostring(ref)
+    end
+    if type(path) ~= "string" or #path == 0 then
+        return nil, "a sprite needs `path` (a /Game/... texture) or `icon` (a vanilla content id)"
+    end
+
+    local ok, assets = pcall(require, "palforge.core.mesh.assets")
+    if not ok then return nil, "core/mesh/assets is unavailable: " .. tostring(assets) end
+    local tex, why = assets.load(path, { class = "Texture2D" })
+    if not tex then return nil, tostring(why) end
+    return tex
+end
+
+MAKE.sprite = function(node, ctx, built)
+    local tex, why = textureFor(node)
+    if not tex then error(tostring(why), 0) end
+    return widget.image(ctx.outer, tex, {
+        matchSize = node.matchSize, opacity = node.opacity, rgba = node.color,
+    })
+end
+
+-- A FRAME: the game's own window chrome (WBP_PalCommonWindow_C) with our one child inside its
+-- NamedSlot. Two widgets, so the maker hands back BOTH — the frame is what goes into the parent,
+-- and the NamedSlot is what the child goes into (buildNode uses the second return as the parent
+-- for the children, and CONTENT marks it as a SetContent host).
+--
+-- Falls back to a plain Border rather than failing the mount: the window class is resident in a
+-- world and not necessarily at the title screen, and a declared panel that vanishes because its
+-- chrome is missing is worse than one that draws in PalForge's own colours. The substitution is
+-- NOTED, never silent.
+MAKE.frame = function(node, ctx, built)
+    local okPc, pc = pcall(controller, ctx)
+    if okPc then
+        local frame, host, why = widget.gameFrame(pc)
+        if frame then return frame, host end
+        note(built, "frame: " .. tostring(why) .. " — a PalForge Border was used instead")
+    else
+        note(built, "frame: " .. tostring(pc) .. " — a PalForge Border was used instead")
+    end
+    return widget.border(ctx.outer, node.color)
+end
+
+-- A button is one of the GAME'S OWN, wired through the shared click router — the identical
+-- route native/ui/button.lua takes, so a declared button and an imperative one are the same
+-- widget with the same click path and there is only one thing to reason about. WHICH of the
+-- game's buttons is decided by _widget.buttonClass, which asks the world what it has loaded
+-- rather than naming a path; it now leads with WBP_CommonButton_C, the button Palworld's own
+-- Mod Menu is built from (dumps/cxx/WBP_Option_ModMenu.hpp:15-17).
 --
 -- The handler is called as onClick(self, ctx) — `self` is the ELEMENT INSTANCE, so a button
 -- can read and write the same state its siblings' bindings display, and ctx names the node
@@ -241,11 +350,13 @@ MAKE.button = function(node, ctx, built)
     clickCtx.widget = btn
     if key then built.clicks[#built.clicks + 1] = key end
 
-    -- A dynamic label writes to the button's label CHILD, not to the button: the text lives
-    -- on Test_Content inside it (_widget.PATHS.menuButtonLabel).
+    -- A dynamic label goes back through the SAME writer the build used, which is the whole point
+    -- of _widget.setButtonText: it prefers the button's own SetText (WBP_CommonButton.hpp:30)
+    -- and reaches for the label child only when the button declares no setter. The old code
+    -- bound straight to a child named Test_Content, which is the TITLE button's name and is not
+    -- in the button class a world actually has — so a dynamic label silently never updated.
     if type(node.text) == "function" then
-        local lbl = widget.findByName(btn, widget.PATHS.menuButtonLabel)
-        if alive(lbl) then bind(built, node, "text", setText, lbl, text) end
+        bind(built, node, "text", setButtonText, btn, text)
     end
     return btn
 end
@@ -294,9 +405,15 @@ local function buildNode(node, ctx, built)
     local maker = MAKE[node.kind]
     if not maker then return nil, "no builder for node kind " .. tostring(node.kind) end
 
-    local ok, w = pcall(maker, node, ctx, built)
+    -- A maker may hand back TWO widgets: the one that goes into the parent, and — when they are
+    -- not the same object — the one the CHILDREN go into. `frame` is the case that needs it: the
+    -- game's window chrome is one widget and the slot our content occupies is another
+    -- (WBP_PalCommonWindow.hpp:6), and conflating them is how a panel ends up drawn behind its
+    -- own frame instead of inside it.
+    local ok, w, contentHost = pcall(maker, node, ctx, built)
     if not ok then return nil, string.format("%s: %s", node.kind, tostring(w)) end
     if not alive(w) then return nil, node.kind .. ": built nothing" end
+    if not alive(contentHost) then contentHost = w end
     if node.name then built.byName[node.name] = w end
 
     if node.visible ~= nil then
@@ -310,7 +427,7 @@ local function buildNode(node, ctx, built)
         if not cw then
             return nil, string.format("%s -> child %d: %s", node.kind, i, tostring(why))
         end
-        local slot = attach(node, w, cw)
+        local slot = attach(node, contentHost, cw)
         if not slot then
             return nil, string.format("%s did not accept child %d (a %s)", node.kind, i, child.kind)
         end
@@ -340,7 +457,7 @@ function M.mount(node, ctx)
     if not ctx.host then return nil, "no host panel to mount into" end
     ctx.outer = ctx.outer or ctx.host
 
-    local built = { byName = {}, binds = {}, clicks = {} }
+    local built = { byName = {}, binds = {}, clicks = {}, notes = {} }
     local w, why = buildNode(node, ctx, built)
     if not w then
         M.destroy(built)     -- release whatever the partial build already registered
@@ -385,7 +502,7 @@ function M.destroy(built)
     end
     local w = built.root
     built.root, built.slot = nil, nil
-    built.byName, built.binds, built.clicks = {}, {}, {}
+    built.byName, built.binds, built.clicks, built.notes = {}, {}, {}, {}
     if not alive(w) then return false end
     return pcall(function() w:RemoveFromParent() end) == true
 end
@@ -429,6 +546,31 @@ function M.host(spec)
     end
     return nil, "unknown host: " .. tostring(spec)
 end
+
+--=============================================================================
+-- input — the other half of "the button does nothing"
+--
+-- api/ui owns WHEN this happens (after a successful render, undone on unmount) and declares WHAT
+-- the author asked for (UI.Spec `input`); _widget owns the engine calls and the restore policy.
+-- These two lines are the seam between them, and they exist so api/ui keeps its one defining
+-- property: it makes no engine call, which is what lets the whole lifecycle be proved headlessly.
+--=============================================================================
+
+---Give the mouse to `focus` in the manner `mode` asks for. nil + a reason when nothing was
+---touched — and "none", the default, is one of those reasons rather than a failure.
+---@return table? grab, string? reason
+function M.grabInput(mode, focus) return widget.grabInput(mode, focus) end
+
+---Hand a grab back. See _widget's INPUT block for exactly which half can be restored and which
+---cannot: the cursor flag is readable and is restored precisely, the input MODE is not readable
+---at all and is only forced back for the one mode that would otherwise strand the player.
+function M.releaseInput(grab) return widget.releaseInput(grab) end
+
+---What the shared click router is doing, as printable lines — armed routes, their ids, and how
+---many clicks each has SEEN across the whole game. Re-exported so a probe or an autorun action
+---can print it without reaching into an underscore module.
+---@return string[]
+function M.clickReport() return widget.clickReport() end
 
 ---Give back a host that was CREATED for an element — today only the "screen" one, which is
 ---a viewport layer nobody else owns. A host that was FOUND (the game's own panels) is not

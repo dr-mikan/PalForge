@@ -109,6 +109,30 @@
 -- surface changes. An element with neither mounts nowhere and SAYS SO: :lastError() carries the
 -- reason the last attempt gave up, because a retry loop that fails silently is indistinguishable
 -- from one that never ran — which is the failure this tree has paid for more than once.
+--
+-- WHETHER THE MOUSE CAN REACH IT: `input`. Drawing a widget and being able to CLICK it are two
+-- different problems, and the second one is not a UI problem at all. While the game holds mouse
+-- capture — ordinary gameplay, input mode GameOnly — Slate is never offered the pointer, so
+-- hit-testing, z-order and visibility are all irrelevant and every button in every mod is inert.
+-- Pressing Esc is what fixes it by hand: the game's own menu switches the input mode and shows
+-- the cursor, and a panel in CanvasPanel_Root is added last and therefore drawn on top.
+--
+--   input = "none"       THE DEFAULT. Take nothing. The panel is clickable while the game has
+--                        already given the mouse away (a menu is open), and it never interferes
+--                        with anyone's camera. A HUD readout wants exactly this.
+--   input = "cursor"     show the mouse cursor, leave the input MODE alone.
+--   input = "clicks"     also switch to Game+UI, so clicks reach widgets while the player can
+--                        still move and look. What a panel with buttons wants.
+--   input = "exclusive"  a MODAL: game input stops entirely. ⚠️ this is the state that leaves a
+--                        player unable to move the camera, and a hot-reload drops the Lua state
+--                        without ever unmounting. Do not leave one of these running.
+--
+-- THE DEFAULT IS THE SAFE ONE ON PURPOSE. A mod that leaves the player unable to move is worse
+-- than one whose button does nothing, so nothing happens unless the element asked. On unmount
+-- the cursor flag is restored exactly (it is readable) and the input mode is put back only for
+-- "exclusive" (it is NOT readable — UE has no GetInputMode — and forcing GameOnly would rip the
+-- mouse out of the game's own menu if one were open). native/ui/_widget.lua's INPUT block states
+-- that asymmetry in full.
 
 local om     = require("palforge.core.object_manager")
 local schema = require("palforge.core.schema")
@@ -127,8 +151,8 @@ local function fail(msg) error("PalForge: " .. msg, 0) end
 -- provable with no game running, and what lets native/ui/tree.lua own every widget call.
 --
 --   UI.VBox / UI.HBox / UI.Overlay / UI.ScrollBox    hold any number of children
---   UI.Border / UI.SizeBox                           hold exactly one
---   UI.Label / UI.Button / UI.GameWidget             hold none
+--   UI.Border / UI.SizeBox / UI.Frame                hold exactly one
+--   UI.Label / UI.Button / UI.Sprite / UI.GameWidget hold none
 --
 -- CHILDREN ARE POSITIONAL, which is the entire point: the array part of the table is the
 -- children, the named part is the fields, and that is what makes the source read like the
@@ -152,7 +176,7 @@ local function isNode(v)
 end
 
 local BUILDERS = "UI.VBox / UI.HBox / UI.Overlay / UI.ScrollBox / UI.Border / UI.SizeBox / "
-    .. "UI.Label / UI.Button / UI.GameWidget"
+    .. "UI.Frame / UI.Label / UI.Button / UI.Sprite / UI.GameWidget"
 
 local function nodeCheck(v)
     if isNode(v) then return true end
@@ -226,13 +250,64 @@ kind("SizeBox",   "sizebox",  "one",  { CHILDREN,
     { "height", type = "number", doc = "fixed height in slate units" } })
 kind("Label",     "label",    "none", { TEXT,
     { "size",  type = "number", doc = "font size (default 16)" },
-    { "color", type = "table",  doc = "text colour { r, g, b, a } in 0..1" } })
+    { "color", type = "table",  doc = "text colour { r, g, b, a } in 0..1" },
+    -- `native` swaps the plain UMG TextBlock for the game's OWN label, BP_PalTextBlock_C — a
+    -- UPalTextBlockBase, which is where Palworld's font scaling, UI-settings binding and
+    -- localisation live (dumps/cxx/Pal.hpp:30039-30050) and therefore most of what makes text
+    -- LOOK like the game's. It is opt-in rather than the default because it is a different
+    -- widget with different behaviour (it ignores `color`, and its size goes through
+    -- UpdateFontSize) and because the class is resident in a world but not guaranteed at the
+    -- title screen — a native label that cannot be built falls back to the plain one and the
+    -- substitution is logged, never silent.
+    { "native", type = "boolean",
+      doc = "build the GAME's own label (BP_PalTextBlock_C) instead of a plain TextBlock; `color` is then ignored" } })
+-- A FRAME is the game's own window chrome around ONE child: WBP_PalCommonWindow_C, which is a
+-- pure content frame — one member, a UNamedSlot, and no functions at all
+-- (dumps/cxx/WBP_PalCommonWindow.hpp:4-6) — and the window seven different Palworld dialogs are
+-- built out of (dumps/reflection/03_widgets.txt:6, 165, 166, 172, 221, 280, 340). This is the
+-- node to reach for when a panel should not look like a mod. Where UI.Border is a rectangle in
+-- a colour you chose, a Frame is the game's chrome and takes no colour of its own — `color` is
+-- only the fallback Border's, for the case where the class is not loaded.
+kind("Frame",     "frame",    "one",  { CHILDREN,
+    { "color", type = "table",
+      doc = "the FALLBACK Border's tint { r, g, b, a }, used only when the game's window class is not loaded" } })
 -- A Button is the GAME's own WBP_Title_MenuButton wired through the shared click router —
 -- the same widget and the same route as the imperative native/ui/button.lua, so there is one
 -- button in this tree rather than two that drift apart. `self` inside onClick is the element
 -- INSTANCE, which is the mountable object itself: a close button is `self:unmount()`, and a
 -- button that changes what a sibling label says is one assignment to `self`.
 kind("Button",    "button",   "none", { TEXT, ON_CLICK })
+-- A SPRITE is one picture: a UImage with a texture in it (dumps/cxx/UMG.hpp:747, the brush set
+-- through SetBrushFromTexture at :765 — the one call in that class that takes no struct).
+--
+-- TWO WAYS TO SAY WHICH PICTURE, because there are two different things an author knows:
+--
+--   Sprite{ path = "/Game/.../T_Foo.T_Foo" }   an asset you have
+--   Sprite{ icon = "Wood" }                    a vanilla content id, whose icon is looked up
+--   Sprite{ icon = "Sheepball", from = "pal" } the same, in another of the game's icon tables
+--
+-- `icon` is the one worth having. core/icons reads the game's own icon DataTables and its
+-- coverage is measured rather than hoped for — 674/674 pal rows, 1183/1207 item rows, 567/571
+-- building, 311/311 partner-skill (core/icons.lua:416-422) — so `icon = "Wood"` really is the
+-- picture the inventory draws, and a miss is almost always a misspelt id. Ids are case-sensitive
+-- and spelled exactly as the DataTable spells them.
+--
+-- NO WIDTH OR HEIGHT, and that is a finding rather than an omission: this build's UImage has no
+-- SetBrushSize at all, the brush's ImageSize is a struct write, and SetDesiredSizeOverride takes
+-- an FVector2D — none of which this tree may call. So a sprite is sized either by `matchSize`
+-- (it takes the texture's own pixel size) or by the node that already does sizing:
+--   SizeBox{ width = 48, height = 48, Sprite{ icon = "Wood", matchSize = false } }
+kind("Sprite",    "sprite",   "none", {
+    { "path", type = "string", check = schema.nonEmpty,
+      doc = "a /Game/... texture object path, e.g. \"/Game/Pal/Texture/UI/T_icon.T_icon\"" },
+    { "icon", type = "string", check = schema.nonEmpty,
+      doc = "a vanilla content id whose icon the game already draws (\"Wood\", \"Sheepball\"); ignored when `path` is given" },
+    { "from", type = "string", values = { "item", "pal", "skill", "building" }, default = "item",
+      doc = "which of the game's icon tables `icon` is looked up in" },
+    { "matchSize", type = "boolean", default = true,
+      doc = "take the texture's own pixel size (SetBrushFromTexture's bMatchSize). false: let the layout decide" },
+    { "color",   type = "table",  doc = "tint { r, g, b, a } in 0..1, multiplied over the texture" },
+    { "opacity", type = "number", doc = "0..1" } })
 -- The escape hatch for "use the game's own component": any Blueprint widget by class path.
 -- The three child names have to be given because they differ per widget and nothing can guess
 -- them — WBP_Title_MenuButton's are Test_Content and WBP_PalInvisibleButton
@@ -394,6 +469,9 @@ local Spec = schema.define("UI.Spec", {
                      doc = "refresh the already-built widgets (self); runs on each :refresh()" },
     { "destroy",     type = "function", sig = "fun(self: UI.Handle)",
                      doc = "remove the widgets render() built (self); runs on :unmount()" },
+    { "input",       type = "string", default = "none",
+                     values = { "none", "cursor", "clicks", "exclusive" },
+                     doc = "how much of the player's mouse this element takes while it is mounted. \"none\" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). \"cursor\" shows the cursor. \"clicks\" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. \"exclusive\" is a modal and stops game input — see the warning on it" },
     { "data",        type = "table",    doc = "default fields shared by every instance of this element" },
 })
 
@@ -443,6 +521,14 @@ function Class:renderTree(root)
     if not ok then return refuse(self, err) end
     if not built then return refuse(self, reason) end
     self._tree = built
+    -- Things that WORKED but not the way the declaration asked: a Frame that fell back to a
+    -- Border because the game's window class is not resident, a native Label on a build that has
+    -- no BP_PalTextBlock_C. The panel drew, so it is not a failure and must not be refuse()d —
+    -- and it is not silence either, because "the frame does not look native" with nothing in the
+    -- log is indistinguishable from "the frame node does nothing".
+    for _, n in ipairs(built.notes or {}) do
+        log.warn(string.format("%s: %s", tostring(self.id or "ui element"), n))
+    end
     return true
 end
 
@@ -507,12 +593,58 @@ function Class:mount(root)
     self._root = root
     if self:render(root) == false then
         self._root = nil
+        self:releaseInput()
         self:releaseHost()
         return false
     end
     self._mounted = true
     self._mountError, self._loggedError = nil, nil
+    self:grabInput()
     return true
+end
+
+-- Take as much of the player's mouse as `input` asked for, and no more. Runs AFTER a successful
+-- render, never before: a mount that could not build must not leave a cursor on somebody's
+-- screen, and the widget it hands the engine to focus is the one render just built.
+--
+-- The engine call is native/ui/tree's, not this file's — api/ui.lua makes no engine call, which
+-- is the property that lets the whole lifecycle be proved with no game running.
+function Class:grabInput()
+    local mode = self.inputMode
+    if mode == nil or mode == "none" then return false end
+    local tree = uiTree()
+    if not tree then return false end
+    -- The widget to focus, in order of how much it is OURS: the tree's own root, else the host
+    -- panel an imperative render was given. Both are live widgets in a real session; in a
+    -- headless one they are plain tables and grabInput refuses on the missing controller first.
+    local focus = (self._tree and self._tree.root) or self._root
+    local grab, why = nil, nil
+    pcall(function() grab, why = tree.grabInput(mode, focus) end)
+    self._input = grab
+    if not grab then
+        log.warn(string.format("%s: input = %q did not take: %s",
+            tostring(self.id or "ui element"), tostring(mode), tostring(why)))
+        return false
+    end
+    -- What was ACTUALLY done, which is not always what was asked: grabInput degrades to
+    -- cursor-only when it cannot make the mode call, and says so on the token.
+    log.info(string.format("%s: input = %q -> %s%s", tostring(self.id or "ui element"),
+        tostring(mode), table.concat(grab.applied or {}, " + "),
+        grab.note and ("  [" .. grab.note .. "]") or ""))
+    return true
+end
+
+-- Give the mouse back. Called by unmount, and by a mount that could not render — an element that
+-- failed to build must never be the reason somebody's cursor is stuck on screen.
+function Class:releaseInput()
+    local grab = self._input
+    self._input = nil
+    if not grab then return false end
+    local tree = uiTree()
+    if not tree then return false end
+    local released = false
+    pcall(function() released = tree.releaseInput(grab) end)
+    return released
 end
 
 -- Give back a host this element CREATED (today: the "screen" viewport layer). A host that was
@@ -545,6 +677,11 @@ function Class:unmount()
     if self._mounted then pcall(function() self:destroy() end) end
     self._mounted = false
     self._root = nil
+    -- The mouse goes back BEFORE the host does, and before anything else can fail: an element
+    -- that took the player's input must give it back even if every other step of the teardown
+    -- refuses. This is the line that keeps "a mod that leaves the player unable to move the
+    -- camera" from ever being this file's fault.
+    self:releaseInput()
     self:releaseHost()
     if self._refreshSub then
         pcall(function() self._refreshSub:unsubscribe() end)
@@ -571,8 +708,10 @@ end
 ---@field ScrollBox fun(spec: UI.Node.ScrollBox): UI.Node   # a scrolling column
 ---@field Border    fun(spec: UI.Node.Border): UI.Node      # a tinted frame around ONE child
 ---@field SizeBox   fun(spec: UI.Node.SizeBox): UI.Node     # a fixed size around ONE child
+---@field Frame     fun(spec: UI.Node.Frame): UI.Node       # the GAME's own window chrome around ONE child
 ---@field Label     fun(spec: UI.Node.Label): UI.Node       # text
 ---@field Button    fun(spec: UI.Node.Button): UI.Node      # the game's own menu button, clickable
+---@field Sprite    fun(spec: UI.Node.Sprite): UI.Node      # a picture: an asset path, or a vanilla id's icon
 ---@field GameWidget fun(spec: UI.Node.GameWidget): UI.Node # any Blueprint widget the game ships
 local UI = {}
 
@@ -600,7 +739,8 @@ local function define(spec)
     if spec.data then
         for k, v in pairs(spec.data) do cls[k] = v end
     end
-    cls.hostSpec = spec.host   -- read by mount() when it is given no root
+    cls.hostSpec  = spec.host   -- read by mount() when it is given no root
+    cls.inputMode = spec.input  -- read by mount() once the render has succeeded
 
     -- A DECLARED tree fills the three seams itself. render is replaced outright (declaring
     -- both is refused above the assignment, not silently resolved); update and destroy are
