@@ -101,6 +101,11 @@ end
 -- The failure is logged ONCE, not once per button: with no UE4SS there is no RegisterHook
 -- and every registerClick would otherwise print a line.
 local clickHookLogged = false
+-- ⚠️ ARM THIS EAGERLY, not on first registration. It used to be reached only from
+-- registerClick, so a button class with no bindable child meant registerClick was never called,
+-- which meant the hook was never registered, which meant NO button in the mod could ever be
+-- clicked — and the only symptom was silence. A hook that costs one lookup per click is not
+-- worth making conditional on anything.
 function M.installClicks()
     if hooked then return true end
     local ok = pcall(function()
@@ -184,6 +189,49 @@ end
 
 ---Build a widget from a class OBJECT rather than a path. Split out because the useful button
 ---class has no path worth citing — it is whichever one this world has loaded — and a live
+---Is `w` an instance of a class whose name CONTAINS `needle`? Walks the super chain, because a
+---Blueprint button is several links below CommonButtonBase and its own class name says nothing.
+function M.isA(w, needle)
+    if not alive(w) then return false end
+    local k; pcall(function() k = w:GetClass() end)
+    local depth = 0
+    while alive(k) and depth < 12 do
+        local n; pcall(function() n = k:GetFName():ToString() end)
+        if type(n) == "string" and n:find(needle, 1, true) then return true end
+        local parent; pcall(function() parent = k:GetSuperStruct() end)
+        k, depth = parent, depth + 1
+    end
+    return false
+end
+
+---The first descendant whose class chain contains `needle`. The counterpart to findByName for
+---the case where the child's NAME is whatever its author chose but its KIND is known.
+function M.findByClass(w, needle, depth)
+    if not alive(w) or (depth or 0) > 14 then return nil end
+    if (depth or 0) > 0 and M.isA(w, needle) then return w end
+    local found
+    pcall(function()
+        local tree = w.WidgetTree
+        if alive(tree) then
+            local root = tree.RootWidget
+            if alive(root) then found = M.findByClass(root, needle, (depth or 0) + 2) end
+        end
+    end)
+    if found then return found end
+    local n = 0
+    pcall(function() n = w:GetChildrenCount() end)
+    for i = 0, (n or 0) - 1 do
+        local child
+        pcall(function() child = w:GetChildAt(i) end)
+        if child then
+            local r = M.findByClass(child, needle, (depth or 0) + 1)
+            if r then return r end
+        end
+    end
+    return nil
+end
+
+
 ---instance hands over its class directly. `label` is only for the error message.
 function M.createFromClass(pc, cls, label)
     local lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
@@ -500,13 +548,33 @@ function M.menuButton(tree, pc, label, onClick)
     end
     local btn, e = M.createFromClass(pc, cls)
     if not btn then return nil, (tostring(e) .. " [" .. tostring(clsName) .. "]") end
-    local lbl = M.findByName(btn, M.PATHS.menuButtonLabel)
+    -- THE LABEL AND THE CLICK TARGET ARE FOUND BY SHAPE, NOT BY NAME, and that is a correction.
+    -- Both used to be looked up by the child names the TITLE menu button happens to use
+    -- (Test_Content, WBP_PalInvisibleButton). Now that the class comes from whatever the world
+    -- has loaded, those names are not there — WBP_PalCommonButton_C is built differently — and
+    -- the failure was silent in the worst way: no inner button found meant registerClick was
+    -- never called, which meant installClicks was never called, which meant the click hook was
+    -- never registered at all. The panel mounted, the button drew, and nothing could ever
+    -- happen. A named lookup is tried first because it is exact; the shape search is what makes
+    -- it work on a class nobody wrote this code against.
+    local lbl = M.findByName(btn, M.PATHS.menuButtonLabel) or M.findByClass(btn, "TextBlock")
     if alive(lbl) then pcall(function() lbl:SetText(FText(label)) end) end
+
+    -- The clickable thing is an inner CommonButtonBase when the class wraps one, and otherwise
+    -- the button ITSELF — WBP_PalCommonButton_C derives from CommonButtonBase, so it is the
+    -- widget the hook will report. One question, "which CommonButtonBase fires", asked of the
+    -- two places it can be.
     local inv = M.findByName(btn, M.PATHS.menuButtonClick)
+    if not alive(inv) then inv = M.findByClass(btn, "CommonButtonBase") end
+    if not alive(inv) and M.isA(btn, "CommonButtonBase") then inv = btn end
+
     local clickName
-    if inv and onClick then
+    if alive(inv) and onClick then
         local key = M.registerClick(inv, onClick)
         if key then clickName = key end
+    end
+    if onClick and not clickName then
+        err("menuButton: no CommonButtonBase to bind the click to on " .. tostring(clsName))
     end
     return btn, inv, clickName
 end
@@ -617,5 +685,8 @@ end
 
 function M.addH(hbox, child) return tryAdd(hbox, "AddChildToHorizontalBox", child) end
 function M.addScroll(scroll, child) return tryAdd(scroll, "AddChild", child) end
+
+-- Armed at load. See the note on installClicks for what conditional arming cost.
+M.installClicks()
 
 return M
