@@ -162,6 +162,14 @@ function M.reload()
     end
 
     log.info(string.format("reloaded %d module(s) - engine hooks kept from the first load", #names))
+    -- Say what that costs, because it is not obvious and it has already wasted a session. A
+    -- RegisterHook cannot be unregistered, so a hook armed on the first load keeps running its
+    -- ORIGINAL callback — the closure it was created with, capturing the module it came from.
+    -- Editing the body of a native source and pressing this key changes nothing about what that
+    -- hook does. Handlers, definitions, dispatch and every ordinary module reload fine; a change
+    -- INSIDE an event source needs the game restarted.
+    log.warn("reload does NOT re-arm native hooks: a change inside an event source (core/event's "
+        .. "own hook callbacks) needs a game RESTART to take effect. Everything else is live now.")
     return true, #names
 end
 

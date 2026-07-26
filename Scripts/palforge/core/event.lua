@@ -118,7 +118,42 @@ end
 function M.channel(name) return subject(name) end       -- Subject (subscribe + push)
 function M.observable(name) return subject(name) end    -- read-side alias for operator chains
 function M.on(name, onNext, onError, onCompleted) return subject(name):subscribe(onNext, onError, onCompleted) end
+-- PROOF OF LIFE, one line per channel per session, at the moment it first carries something.
+--
+-- A source that fires and a source that does not look identical from the log, because a channel
+-- with no matching definition dispatches to nobody and says nothing. That cost a full play
+-- session: every hook registered, the player crafted, dropped and fought, and the log showed no
+-- skill.activate and no item.craft — which could equally have meant "the hook never fired" or
+-- "it fired and no pack had declared that skill". Those need opposite next steps.
+--
+-- The tick channel is excluded: it fires twice a second forever and its liveness is never in
+-- doubt.
 function M.emit(name, payload) return subject(name):onNext(payload) end
+
+-- What a SOURCE uses. Identical to M.emit except it announces the first time a channel carries
+-- something, which is the one thing the log could not say.
+--
+-- A source that fires and a source that does not look identical from outside, because a channel
+-- with no matching definition dispatches to nobody and prints nothing. That cost a whole play
+-- session: every hook registered, the player crafted, dropped and fought, and the log showed no
+-- skill.activate and no item.craft — which could equally have meant "the hook never fired" or
+-- "it fired and no pack had declared that skill". Those need opposite next steps.
+--
+-- Deliberately NOT inside M.emit. The test suite emits every channel by hand to prove dispatch
+-- works, so putting this there marked all twenty as live the moment F1 ran and answered the
+-- question with the suite's own noise. Only a native source announces.
+--
+-- The tick channel is excluded: it fires twice a second forever and its liveness is never in
+-- doubt.
+local firstEmit = {}
+local function srcEmit(name, payload)
+    if not firstEmit[name] and name ~= "tick" then
+        firstEmit[name] = true
+        log.info(string.format("channel %s carried its first event this session — the native "
+            .. "source is LIVE, whether or not any definition handled it", name))
+    end
+    return subject(name):onNext(payload)
+end
 
 for _, n in ipairs(M.CHANNELS) do subject(n) end        -- pre-create so subscribe-before-emit works
 
@@ -143,7 +178,7 @@ local function installTickSource()
         LoopAsync(M.TICK_MS, function()
             ExecuteInGameThread(function()
                 n = n + 1
-                pcall(function() M.emit("tick", { count = n, now = os.clock() }) end)
+                pcall(function() srcEmit("tick", { count = n, now = os.clock() }) end)
                 -- Everything in this tree that needs to watch the world repeatedly rides HERE,
                 -- rather than asking UE4SS for a timer of its own. This loop is armed once per
                 -- session and never stops, so it creates no registry references to tear down —
@@ -507,12 +542,12 @@ local function scanOnce()
             -- matched to a RequestBuild intent -> building.place; every newly tracked
             -- instance -> building.load (reconstructed = it came from a saved record).
             if not rec and pend then
-                M.emit("building.place", {
+                srcEmit("building.place", {
                     key = key, actor = actor, pos = pos, buildId = buildId,
                     player = pend.player, firstSeen = true,
                 })
             end
-            M.emit("building.load", {
+            srcEmit("building.load", {
                 key = key, actor = actor, pos = pos, buildId = buildId,
                 reconstructed = (rec ~= nil),
             })
@@ -526,7 +561,7 @@ local function scanOnce()
             inst.missingStreak = (inst.missingStreak or 0) + 1
             if inst.missingStreak >= MISS_THRESHOLD then
                 -- emit BEFORE dropping so DISPATCH's resolve() still finds the instance.
-                M.emit("building.remove", { key = key, buildId = inst.buildId, actor = inst.actor, reason = "missing" })
+                srcEmit("building.remove", { key = key, buildId = inst.buildId, actor = inst.actor, reason = "missing" })
                 removeInstance(key, "missing")
                 changes = changes + 1
             end
@@ -603,7 +638,7 @@ local function installWorldSource()
                     readyCount = 0
                     if wasReady then
                         log.info("world left - building dispatch paused")
-                        pcall(function() M.emit("world.left") end)
+                        pcall(function() srcEmit("world.left") end)
                         pcall(dropAllInstances)
                     end
                 end
@@ -746,7 +781,7 @@ local function installBuildingSource()
             -- identify the building id from its class name: BP_BuildObject_<Id>_C
             local cls = building:GetClass():GetFullName()
             local id = cls:match("BP_BuildObject_([%w_]+)_C") or cls
-            M.emit("building.interact", { actor = building, player = otherActor, buildId = id })
+            srcEmit("building.interact", { actor = building, player = otherActor, buildId = id })
         end)
         if not ok then log.err("building source: interact handler: " .. tostring(e)) end
     end)
@@ -764,7 +799,7 @@ local function installBuildingSource()
         scanOnce()
         if pendingWorldReady then
             pendingWorldReady = false
-            pcall(function() M.emit("world.ready") end)
+            pcall(function() srcEmit("world.ready") end)
         end
     end)
 
@@ -805,7 +840,7 @@ local function installBuildingSource()
                 local id
                 pcall(function() id = m.BuildObjectId:ToString() end)
                 if id == nil or id == "" or id == "None" then return end
-                M.emit("building.build", { buildId = id, model = m })
+                srcEmit("building.build", { buildId = id, model = m })
             end)
             if not ok then log.err("building source: build-complete handler: " .. tostring(e)) end
         end)
@@ -969,18 +1004,18 @@ local function installPalSource()
             if get(started) ~= true then return end
             local comp = get(self)
             local actor; pcall(function() actor = comp:GetOwner() end)
-            M.emit("pal.captured", { actor = actor, comp = comp })
+            srcEmit("pal.captured", { actor = actor, comp = comp })
         end)
     end)
     -- damage: OnDamageReaction (self = the character taking damage).
     tryHook("/Script/Pal.PalCharacter:OnDamageReaction", function(self)
         if not worldReady then return end
-        pcall(function() M.emit("pal.damaged", { actor = get(self) }) end)
+        pcall(function() srcEmit("pal.damaged", { actor = get(self) }) end)
     end)
     -- death: OnDeadCharacter (self = the dead character).
     tryHook("/Script/Pal.PalCharacter:OnDeadCharacter", function(self)
         if not worldReady then return end
-        pcall(function() M.emit("pal.death", { actor = get(self) }) end)
+        pcall(function() srcEmit("pal.death", { actor = get(self) }) end)
     end)
     -- spawned (UNCONFIRMED candidate): fires when a pal finishes parameter init.
     -- ARMED AFTER world.ready, NEVER AT start() — unlike the three confirmed hooks above.
@@ -1018,7 +1053,7 @@ local function installPalSource()
     tryHookAfterWorldReady("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter",
         function(self)
             if not worldReady then return end
-            pcall(function() M.emit("pal.spawned", { actor = get(self) }) end)
+            pcall(function() srcEmit("pal.spawned", { actor = get(self) }) end)
         end)
 
     installPalTickSource()   -- the onTick sweep (no native hook exists; see above)
@@ -1099,7 +1134,7 @@ local function installItemSource()
             end
             if not id then return end
             local character; pcall(function() character = FindFirstOf("PalPlayerCharacter") end)
-            M.emit("item.use", {
+            srcEmit("item.use", {
                 itemId   = id,
                 actor    = character,   -- the local player pawn (see the caveat above)
                 player   = character,   -- same value under the name the old runtime used
@@ -1133,7 +1168,7 @@ local function installItemSource()
         lastObtain[id] = now
         emitting = true
         local ok, e = pcall(function()
-            M.emit("item.obtain", { itemId = id, count = count, via = via })
+            srcEmit("item.obtain", { itemId = id, count = count, via = via })
         end)
         emitting = false
         if not ok then log.err("item.obtain (" .. tostring(via) .. "): " .. tostring(e)) end
@@ -1217,7 +1252,7 @@ local function installItemSource()
                 if not (m and m.IsValid and m:IsValid()) then return end
                 local id = fstr(m, field)
                 if not id then return end
-                M.emit("item.craft", {
+                srcEmit("item.craft", {
                     itemId   = id,
                     recipeId = id,       -- same value under the name the convert route calls it
                     count    = nil,      -- not on the model; see the note above
@@ -1380,7 +1415,7 @@ local function installItemSource()
             end
             return
         end
-        M.emit("item.discard", { itemId = id, count = tonumber(num), reason = reason })
+        srcEmit("item.discard", { itemId = id, count = tonumber(num), reason = reason })
     end
 
     -- drop: an ARRAY of slots, so one emit per entry. The Num on the entry is what is leaving
@@ -1489,7 +1524,7 @@ local function installSkillSource()
         pcall(function()
             local id = wazaName(getv(wazaID))
             if not id then return end
-            M.emit("skill.activate", {
+            srcEmit("skill.activate", {
                 skillId = id,
                 wazaId  = tonumber(getv(wazaID)),
                 owner   = getv(actionActor),
@@ -1508,7 +1543,7 @@ local function installSkillSource()
             pcall(function()
                 local id = wazaName(getv(wazaType))
                 if not id then return end
-                M.emit("skill.hit", {
+                srcEmit("skill.hit", {
                     skillId  = id,
                     wazaId   = tonumber(getv(wazaType)),
                     target   = getv(defender),     -- onHit's second argument
@@ -1539,7 +1574,7 @@ local function installSkillSource()
                 local id = pstr(addSkill)
                 if not id then return end
                 local actor, params = ownerOf(self)
-                M.emit("skill.equip", {
+                srcEmit("skill.equip", {
                     skillId   = id,
                     owner     = actor,
                     actor     = actor,
@@ -1556,7 +1591,7 @@ local function installSkillSource()
                 local id = pstr(skillId)
                 if not id then return end
                 local actor, params = ownerOf(self)
-                M.emit("skill.unequip", { skillId = id, owner = actor, actor = actor, params = params })
+                srcEmit("skill.unequip", { skillId = id, owner = actor, actor = actor, params = params })
             end)
         end)
 end
