@@ -114,18 +114,22 @@ function M.nearestPal(coord)
     return best
 end
 
--- A live PalCharacter that is NOT the player: the nearest actual pal, or nil when there is
--- none nearby. Some capabilities only make sense on a pal — equipped moves are the clear case,
--- since a player has none and the first live run showed the player pawn carrying zero — so a
--- test that needs one must be able to say so and skip instead of drawing a conclusion from the
--- wrong kind of character.
+-- The nearest live PAL, or nil when there is none nearby. Returns the actor and its class name,
+-- because which class it is turns out to matter.
+--
+-- ⚠️ NOT FindAllOf("PalCharacter"). That was the first attempt and it is too wide: the hierarchy
+-- is APalMonsterCharacter : APalNPC : APalCharacter (dumps/cxx/Pal.hpp:10167, 10195, 8956), so
+-- "PalCharacter" also matches villagers, merchants and every other NPC — none of which has an
+-- equipped move. A run against one of those reports zero moves and looks exactly like a broken
+-- read; that is what "0 active, 0 passive, 0 equipable, 0 mastered" almost certainly was.
+-- PalMonsterCharacter is the pal itself and is what a move question has to be asked of.
 function M.nearbyPal()
     local pawn = M.player()
     if not pawn then return nil end
     local here = M.location(pawn)
     if not here then return nil end
 
-    local ok, all = pcall(FindAllOf, "PalCharacter")
+    local ok, all = pcall(FindAllOf, "PalMonsterCharacter")
     if not (ok and type(all) == "table") then return nil end
 
     local best, bestDist
@@ -139,7 +143,9 @@ function M.nearbyPal()
             end
         end
     end
-    return best
+    if not best then return nil end
+    local cls; pcall(function() cls = best:GetClass():GetFName():ToString() end)
+    return best, cls or "?"
 end
 
 --=============================================================================

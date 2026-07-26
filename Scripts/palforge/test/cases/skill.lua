@@ -418,10 +418,11 @@ s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)",
     -- And a real pal, when one is nearby, because that is the character equipped moves belong
     -- to. A player carrying zero is normal; a PAL carrying zero would say the read is not
     -- reaching what it should.
-    local pal = support.nearbyPal()
+    local pal, palClass = support.nearbyPal()
     if pal then
         local theirs = character.skillsOn(pal)
         if theirs then
+            support.log("skills: the nearest pal is a " .. tostring(palClass))
             -- All four lists, because the useful question is which of them are empty. A wild pal
             -- with nothing EQUIPPED but a non-empty mastered/equipable list is a correct read of
             -- a pal that simply has no loadout; all four empty means the read is not reaching
@@ -465,11 +466,12 @@ s:test("an active skill can be taught to a live PAL and taken back off -- TODO(p
     -- 0 active and 0 passive" — a player has no equipped moves at all, because moves belong to
     -- pals and a player fights with weapons. So the write may well have been correct and simply
     -- meaningless on that target, and testing it there could never tell the two apart.
-    local pal = support.nearbyPal()
+    local pal, palClass = support.nearbyPal()
     if not pal then
         t:skip("no pal near the player — whistle one out and run this again; the player pawn is "
             .. "the wrong target for equipped moves and would not answer the question")
     end
+    support.log("skills: teaching against a " .. tostring(palClass))
     if character.skillsOn(pal) == nil then t:skip("character parameters unreadable on that pal") end
 
     -- Human_Punch is chosen deliberately: it is the plainest move in the game, so a run that
