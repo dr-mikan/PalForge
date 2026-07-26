@@ -349,7 +349,7 @@ function M.rowAccessors(dt, rowName)
 end
 
 --=============================================================================
--- watching (the F7 shape)
+-- watching (the F8 shape)
 --=============================================================================
 
 ---Arm a native hook and log every call, with its parameters described. Returns true when

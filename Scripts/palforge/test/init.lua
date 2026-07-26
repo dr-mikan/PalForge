@@ -15,7 +15,7 @@
 --
 --   F5  reflection dump          needs a loaded save
 --   F6  the pal's mesh           needs a pal standing near you
---   F7  watch native hooks       needs you to craft / drop / spawn while it runs
+--   F8  watch native hooks       needs you to craft / drop / spawn while it runs
 --   F8  the title menu button    needs the title screen
 --
 -- Results land in UE4SS.log under [PalForge.test] and [PalForge.unittests]:
@@ -96,14 +96,21 @@ M.CASES = {
 -- fail, it writes what the engine actually looks like to UE4SS.log so an open item in
 -- plan/TODO.md can be closed. Each one brackets its output with `#### BEGIN <id>` and
 -- `#### END <id>`, where <id> is the item's id in that file.
+-- ⚠️ F7 IS PALWORLD'S OWN VOLUME KEY. The game claims it before UE4SS sees it, so a probe bound
+-- there can never be pressed — `watch` sat on F8 and was simply unreachable. Nothing in the log
+-- says so either: the bind succeeds, the key just never arrives.
+--
+-- So `watch` moved to F8 and `title` to F2. If another key turns out to be taken, change it
+-- HERE and nowhere else — this table is the only place a probe key is written, and the kernel
+-- prints the whole list at startup so the current bindings are always in the log.
 M.PROBES = {
     { name = "reflect", key = "F5", needs = "a loaded save",
       desc = "reflection dump: classes, functions, parameters, DataTable rows" },
     { name = "pal",     key = "F6", needs = "a pal standing near you",
       desc = "the pal's mesh component, its animation class and its materials" },
-    { name = "watch",   key = "F7", needs = "a loaded save, then craft / drop / spawn",
+    { name = "watch",   key = "F8", needs = "a loaded save, then craft / drop / spawn",
       desc = "arms native hooks and logs what fires while you act" },
-    { name = "title",   key = "F8", needs = "the title screen",
+    { name = "title",   key = "F2", needs = "the title screen",
       desc = "the game's own title menu button, so ours can match it" },
 }
 
@@ -248,5 +255,11 @@ for _, p in ipairs(M.PROBES) do
     M.bind(p.key, function() M.probe(p.name) end,
         { desc = string.format("probe %s (%s) - needs %s", p.name, p.desc, p.needs) })
 end
+
+-- Print the bindings once, at load. A key the GAME has already claimed still binds successfully
+-- here and simply never fires — that is how `watch` sat unreachable on Palworld's volume key —
+-- so the log has to carry which key is on what, or a probe that cannot be pressed looks exactly
+-- like a probe that found nothing.
+for _, line in ipairs(M.bindings()) do log.info("key " .. line) end
 
 return M

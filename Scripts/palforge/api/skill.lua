@@ -16,7 +16,7 @@
 -- dumps/cxx/Pal.hpp (the installed binary's own header dump) with their real signatures, and
 -- two of the four classes are reflected in the live build as well, but nobody has yet used a
 -- move with them armed. So:
---   * a declared `events` table is no longer inert — but until an F7 run logs a firing,
+--   * a declared `events` table is no longer inert — but until an F8 run logs a firing,
 --     assume it can still be silent, and keep the manual entry points as the reliable path;
 --   * MANUAL invocation is unchanged and unconditional: :activate(owner) / :hit(target) /
 --     :equip(owner) / :unequip(owner) run the handler now, with the cooldown enforced here
@@ -67,7 +67,7 @@ local Events = schema.define("Skill.Spec.Events", {
     -- waza id. ctx = { skillId, wazaId, owner, actor, target }.
     -- TODO(skill-activate-source): unverified IN GAME — reflected and declared, never armed,
     -- so it is unknown whether the C++ combat path goes through this helper or builds its
-    -- action directly. Press F7, have a pal use a move, and look for `HOOK skill.activate`.
+    -- action directly. Press F8, have a pal use a move, and look for `HOOK skill.activate`.
     -- If it is 0, the next candidate is a UPalActionWazaBase subclass's OnBeginAction:
     -- Pal.hpp:13270 puts `EPalWazaID WazaID` on that class itself, so `self` would carry it.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",

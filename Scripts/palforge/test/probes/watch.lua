@@ -1,4 +1,4 @@
--- palforge/test/probes/watch.lua — arms the live hooks and watches while YOU play (the F7 probe).
+-- palforge/test/probes/watch.lua — arms the live hooks and watches while YOU play (the F8 probe).
 --
 -- Closes seven plan/TODO.md items that no amount of reflection can settle, because each one asks
 -- "does the game CALL this when a human does that": item-craft-source, item-discard-source,

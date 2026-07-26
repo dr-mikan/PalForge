@@ -1011,7 +1011,7 @@ local function installPalSource()
     -- sit behind it silently, which is a complete explanation for the one recorded arming
     -- counting 0. Every hook in this file that is proven to fire is an RPC, a BlueprintCallable
     -- static or a dynamic-delegate target; this one is none of the three. One post-load arming
-    -- that logs a single firing closes it (F7, then release a pal and WAIT >10 s for the
+    -- that logs a single firing closes it (F8, then release a pal and WAIT >10 s for the
     -- spawn); if it stays at 0, the replacement is a delegate TARGET rather than the
     -- broadcaster — APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter*)
     -- (Pal.hpp:10637) is one such bound handler and is the next path to arm.
@@ -1207,7 +1207,7 @@ local function installItemSource()
     -- opposite of the OnDamage trap that killed building.leftclick, where the candidate DID
     -- fire — 196 times, on a 12 s decay timer — and would have run every pack's handler.
     -- TODO(item-craft-source): unverified IN GAME. Nobody has yet crafted one item with these
-    -- two hooks armed. What is left is exactly that one observation — press F7, craft at a
+    -- two hooks armed. What is left is exactly that one observation — press F8, craft at a
     -- bench, and look for `HOOK craft` — plus the count, which no model field carries.
     local function craftSource(path, field, via)
         tryHook(path, function(self, work)
@@ -1271,7 +1271,7 @@ local function installItemSource()
     -- assumes FindFirstOf("PalPlayerInventoryData") is the local player's, that
     -- .InventoryMultiHelper.Containers is readable as an array, that a UPalItemContainer's
     -- .ID.ID FGuid compares field-wise against the param's, and that :Get(SlotIndex) is
-    -- 0-based like ItemSlotArray. Press F7, drop a stack and trash a stack, and read the
+    -- 0-based like ItemSlotArray. Press F8, drop a stack and trash a stack, and read the
     -- `discard` lines. Consuming an item is NOT this channel — that is item.use, which works.
 
     ---FGuid equality, field-wise. Neither UE4SS nor this tree has a comparison operator for a
@@ -1396,7 +1396,7 @@ end
 -- unknown whether the GAME calls them or whether they are Blueprint-facing helpers the C++
 -- combat path bypasses. Wiring them cannot misfire — PlayActionByWazaID with a waza id is a
 -- move being played by definition — so silence is the only failure mode.
--- TODO(skill-activate-source): unverified IN GAME. Arm F7, have a pal use a move, and look
+-- TODO(skill-activate-source): unverified IN GAME. Arm F8, have a pal use a move, and look
 -- for a `skill.activate` dispatch; 0 firings means the C++ combat path builds its action
 -- without this helper and the next candidate is a UPalActionWazaBase subclass's OnBeginAction
 -- (Pal.hpp:13270 declares `EPalWazaID WazaID` right on that class, so `self` would carry it).

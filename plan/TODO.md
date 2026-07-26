@@ -59,11 +59,16 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 | F1 | The API test suite — and, in a loaded world, the measurement that closes four items below | Anything. World-gated checks skip |
 | F5 | Reflection dump: classes, functions, parameters, DataTable rows | A loaded save |
 | F6 | Everything that needs a live pal: mesh, animation, materials | A pal near you |
-| F7 | Arms hooks and watches for 60 s while you act | A save, then craft / drop / spawn |
-| F8 | Title-screen widgets | The title screen |
+| F8 | Arms hooks and watches for 60 s while you act | A save, then craft / drop / spawn |
+| F2 | Title-screen widgets | The title screen |
 | F9 | Reload every palforge module without restarting the game | Anything |
 
-Only F7 changes anything, and it says so before it arms a hook.
+Only F8 changes anything, and it says so before it arms a hook.
+
+**F7 is Palworld's own volume key** and the game claims it before UE4SS sees it, so a probe
+bound there can never be pressed — which is where `watch` sat, unreachable and silent about
+it. The bindings are printed at startup now, so a key the game has taken is visible in the
+log rather than looking like a probe that found nothing.
 
 ## Closed (26)
 
@@ -184,7 +189,7 @@ now accepts it.
 
 #### `pal-spawned-hook` — Pal.Spec.Events.onSpawned
 
-- **Probe:** F7
+- **Probe:** F8
 - **Marked at:** Scripts/palforge/api/pal.lua:159
 
 **What a pack author sees**
@@ -219,7 +224,7 @@ and the BP class names printed.
 
 #### `item-craft-source` — Item.Spec.Events.onCraft (channel item.craft)
 
-- **Probe:** F7
+- **Probe:** F8
 - **Marked at:** Scripts/palforge/api/item.lua:112
 
 **What a pack author sees**
@@ -320,7 +325,7 @@ Product_Count, WorkAmount, Material1_Id, Material1_Count.
 
 #### `item-discard-source` — Item.Spec.Events.onDiscard (channel item.discard)
 
-- **Probe:** F7
+- **Probe:** F8
 - **Marked at:** Scripts/palforge/api/item.lua:121
 
 **What a pack author sees**
@@ -426,7 +431,7 @@ value string.
 
 #### `skill-hit-source` — Skill.Spec.Events.onHit
 
-- **Probe:** F7
+- **Probe:** F8
 - **Marked at:** Scripts/palforge/api/skill.lua:85
 
 **What a pack author sees**
@@ -633,7 +638,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 
 #### `pal-spawned-fresh` — Pal{ events = { onSpawned } } / event.on("pal.spawned")
 
-- **Probe:** F7
+- **Probe:** F8
 - **Marked at:** Scripts/palforge/core/event.lua:1008
 
 **What a pack author sees**

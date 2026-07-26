@@ -179,7 +179,7 @@ local Events = schema.define("Pal.Spec.Events", {
     -- arming counting 0. Every hook in this tree that is PROVEN to fire is an RPC, a
     -- BlueprintCallable static, or a dynamic-delegate target; this is none of the three.
     -- Handlers stay idempotent until one post-load arming logs one line.
-    -- HOW TO GET THAT LINE (unchanged, and the timing is the whole lesson): press F7, then
+    -- HOW TO GET THAT LINE (unchanged, and the timing is the whole lesson): press F8, then
     -- release a pal from the box or call Pal.get("ChickenPal"):spawn(coord) — and WATCH FOR AT
     -- LEAST TEN SECONDS, because the pal arrives ~6 s after the call. A hook log that is empty
     -- at 1.2 s says nothing about the hook. If it stays at 0, the replacement is a delegate

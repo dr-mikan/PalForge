@@ -1,6 +1,6 @@
 -- palforge/test/probes/title.lua — what the title screen's own widgets are actually made of.
 --
--- Closes plan/TODO.md `ui-menubutton-inner-slot` (Probe: F8, marked in
+-- Closes plan/TODO.md `ui-menubutton-inner-slot` (Probe: F2, marked in
 -- native/ui/_widget.lua at leftAlignButtonContent). dumps/cxx has since narrowed the item, and
 -- this probe now answers what is LEFT of it rather than what it originally asked:
 --
@@ -19,7 +19,7 @@
 -- string ("VerticalBox_0", "SizeBox_4", "WBP_Title_MenuButton_ExitGame"): if any of them
 -- changed, TitleMenu silently injects nothing today. THE GAME MUST BE SITTING ON THE TITLE
 -- SCREEN — main menu, no save loaded, which is exactly where support.player() is legitimately
--- nil. Bind it with: test.bind("F8", function() require("palforge.test.probes.title").run() end).
+-- nil. Bind it with: test.bind("F2", function() require("palforge.test.probes.title").run() end).
 --
 -- Read-only: nothing is added to the viewport, no native widget is reparented, no property
 -- is written. The single object this probe brings into being is one orphan WBP_Title_MenuButton

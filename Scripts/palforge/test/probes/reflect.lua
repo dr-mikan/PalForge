@@ -31,7 +31,7 @@
 -- with an argument type it has not read (see the rule at the top of test/probe.lua): a wrong
 -- TYPE faults inside UE4SS's marshalling, pcall does not see it, and a probe that closes the
 -- game loses the whole run's findings — which has happened once already. Every section that has such a half ends with a NOTE naming it and saying which
--- key (F6 / F7) or console line performs it, so the reader knows what is still owed.
+-- key (F6 / F8) or console line performs it, so the reader knows what is still owed.
 --
 -- LOG VOLUME. A class whose whole function list is the answer is dumped whole (PalBuildObject,
 -- PalSoundUtility, GameplayStatics, PalPlayerInventoryData, UDataTable, ...). Everything else
@@ -1227,7 +1227,7 @@ local function building_leftclick()
     probe.note("MISS: a complete function list with no click or strike path is the answer too — "
         .. "events.onLeftClick then has no native source and should be documented as manual-only "
         .. "(Handle:onLeftClick) rather than left looking live.")
-    probe.note("STILL OWED (hooks are F7, and this probe arms none): RegisterHook each candidate above, "
+    probe.note("STILL OWED (hooks are F8, and this probe arms none): RegisterHook each candidate above, "
         .. "melee a placed Workbench, and paste which fired.")
     probe.finish()
 end
@@ -1256,7 +1256,7 @@ local function building_break()
     probe.note("MISS: four classes with no destroy counterpart confirms dump_targets.md's position that "
         .. "destruction is only observable through the scan miss sweep, and onRemove's reason can never "
         .. "be better than 'missing'.")
-    probe.note("STILL OWED (F7, and note the recorded native access violation for this hook class during "
+    probe.note("STILL OWED (F8, and note the recorded native access violation for this hook class during "
         .. "the world-load storm): in a THROWAWAY world, RegisterHook the best candidate, dismantle one "
         .. "Workbench, paste the log.")
     probe.finish()
@@ -1280,7 +1280,7 @@ local function building_break_source()
         .. "channel plus an honest reason='dismantled' on onRemove.")
     probe.note("MISS: no HP property and a parameterless OnDamage means damage cannot be told from "
         .. "destruction from our side, and onBreak stays blocked on building-break's search instead.")
-    probe.note("STILL OWED (F7): hook OnDamage, then (a) hit a wooden wall once, (b) destroy it, "
+    probe.note("STILL OWED (F8): hook OnDamage, then (a) hit a wooden wall once, (b) destroy it, "
         .. "(c) dismantle another from the build menu — with a marker line before each.")
     probe.finish()
 end
@@ -1318,7 +1318,7 @@ local function skill_activate_source()
         .. "in core/event M.CHANNELS plus a dispatch, and every pack's onActivate stops being manual-only.")
     probe.note("MISS: eight classes, the BP chain and no id-carrying candidate means onActivate has no "
         .. "game-driven source on this build and native/skills.lua's Fireball stays a manual call.")
-    probe.note("STILL OWED (F7): arm the top candidates, then have a Pal use a move and the player use a "
+    probe.note("STILL OWED (F8): arm the top candidates, then have a Pal use a move and the player use a "
         .. "partner skill; paste which fired, how many times, and every parameter value.")
     probe.finish()
 end
@@ -1359,7 +1359,7 @@ local function skill_passive_source()
         .. "only running the pack's handler, and a skill.equip / skill.unequip source becomes possible.")
     probe.note("MISS: no Passive function anywhere — and especially no PalPassiveSkillComponent class at "
         .. "all — means kind=\"passive\" is PalForge-side bookkeeping only, permanently.")
-    probe.note("STILL OWED (F7): arm every Add*/Remove* found, then capture a Pal, use the passive-skill "
+    probe.note("STILL OWED (F8): arm every Add*/Remove* found, then capture a Pal, use the passive-skill "
         .. "bench, and pull a Pal in and out of the party.")
     probe.finish()
 end
@@ -1400,7 +1400,7 @@ local function effect_native_status()
         .. "empty Poison / Burn / Freeze bodies can be filled the same day.")
     probe.note("MISS: eight 'absent' lines and no enum means the game's own ailments are unreachable from "
         .. "Lua, and nativeStatus must be removed rather than left validated-and-ignored.")
-    probe.note("STILL OWED (F7): arm the shortlisted add/remove functions and deliberately catch each "
+    probe.note("STILL OWED (F8): arm the shortlisted add/remove functions and deliberately catch each "
         .. "ailment (stand in fire, take poison, freeze, get wet, get electrified) — the parameter value "
         .. "printed per ailment is the mapping.")
     probe.finish()
@@ -1530,7 +1530,7 @@ local function ui_update_event()
 
     probe.note("HIT: any of the seven printing a 'declared'/'present' level is hookable BY NAME. "
         .. "That is not yet permission to hook it — see the STILL OWED line.")
-    probe.note("STILL OWED, and it is the whole of what is left (F7, and it MUST be a throwaway "
+    probe.note("STILL OWED, and it is the whole of what is left (F8, and it MUST be a throwaway "
         .. "session): RegisterHook each path above one at a time, log a single line per firing, "
         .. "then (a) open and close the inventory, (b) open the build menu, (c) return to the "
         .. "title screen, and (d) LOAD A SAVE and watch the world-load storm. Paste which paths "

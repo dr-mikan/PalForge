@@ -171,7 +171,7 @@ end)
 
 s:test("emitting a skill channel reaches the DEFINED skill with the right subject", function(t)
     -- This is the half of the 導線 a test can own. The other half — whether the game calls
-    -- PlayActionByWazaID / MakeDamageInfoByWazaType / Add|RemovePassiveSkill — is what F7's
+    -- PlayActionByWazaID / MakeDamageInfoByWazaType / Add|RemovePassiveSkill — is what F8's
     -- watch probe is for, and no assertion here can stand in for it.
     local id = support.id("skill")
     local seen = {}
