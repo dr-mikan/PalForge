@@ -1,28 +1,27 @@
 -- PalForge core.mesh.procedural: the `kind = "procedural"` (a.k.a. obj) mesh
 -- backend — a Wavefront OBJ -> ProceduralMeshComponent attach with an optional
--- material layer (flat color tint / imported PNG texture). Extends the base
--- renderer. Moved VERBATIM from the old core.mesh (self-contained; no PalForge
--- module deps beyond the base renderer + the shared logger).
+-- material layer (flat color tint / imported PNG texture). Extends the base renderer.
 --
--- Verified chain: AActor:AddComponentByClass -> UProceduralMeshComponent:CreateMeshSection
--- -> SetWorldScale3D. Trap: an empty {} FTransform zero-initializes the relative scale,
--- so the explicit SetWorldScale3D call is mandatory.
+-- Verified chain (V5 runtime-mesh POC, in-game 2026-07-16, shipped since in PalLogistics):
+-- AActor:AddComponentByClass -> UProceduralMeshComponent:CreateMeshSection ->
+-- SetWorldScale3D. Trap: an empty {} FTransform zero-initializes the relative scale, so
+-- the explicit SetWorldScale3D call is mandatory.
 --
 -- detach removes again what attach added: K2_DestroyComponent on the component we
 -- created (the BlueprintCallable counterpart of the proven AddComponentByClass — not
 -- itself confirmed in-game, so detach reports only whether that call executed).
 --
--- Material layer native APIs:
---   UPrimitiveComponent:CreateAndSetMaterialInstanceDynamic(int32 elem) -> MID
---   UMaterialInstanceDynamic:SetVectorParameterValue(FName, FLinearColor)  -- color
---   UMaterialInstanceDynamic:SetTextureParameterValue(FName, UTexture*)    -- texture
---   UMaterialInstanceDynamic:SetScalarParameterValue(FName, float)
---   UKismetRenderingLibrary:ImportFileAsTexture2D(WorldCtx, FString) -> UTexture2D
+-- MATERIAL: the MID handling lives in base/renderer (it is UPrimitiveComponent API, the
+-- same on every mesh component). This backend only supplies the two things that ARE
+-- specific to it: `preferBase = true`, because a freshly created mesh section carries no
+-- material at all — CreateAndSetMaterialInstanceDynamic(0) returns nil there, so the MID
+-- has to be parented to a real base material to exist — and `always = true`, so a marker
+-- declared without a colour can still be tinted later through setColor.
 -- Because no custom base material ships, element-0 ends up on whichever engine material
--- happens to be loaded (BASE_MATERIAL_CANDIDATES below), so a color/texture may not
--- visibly apply until a base material carrying those params is supplied. The MID itself
--- is created on EVERY attach, declared colour or not, so a later setColor always has
--- something to write to. The layer is FULLY fail-soft; the mesh always attaches.
+-- happens to be loaded (Renderer.BASE_MATERIAL_CANDIDATES), so a color/texture may not
+-- visibly apply until a base material carrying those params is supplied. The one in-game
+-- record of this path says exactly that (PalLogistics extensions/pallogistics/init.lua:42
+-- — "no-MID -> white"). The layer is FULLY fail-soft; the mesh always attaches.
 
 local Renderer = require("palforge.core.mesh.base.renderer")
 local log      = require("palforge.utils.log").scope("mesh")
@@ -38,10 +37,6 @@ local function readFile(path)
 end
 
 local objCache = {} -- path -> parsed mesh
-
--- Candidate parameter names to probe on the (unknown) base material.
-local COLOR_PARAMS   = { "Color", "BaseColor", "Tint", "BaseColorTint", "Albedo", "EmissiveColor" }
-local TEXTURE_PARAMS = { "BaseColor", "Texture", "Albedo", "Diffuse", "BaseTexture", "MainTexture" }
 
 -- Parse a (triangulated-or-not) OBJ file: v / vt / f records.
 -- Faces with >3 vertices are fan-triangulated. Both windings are emitted so the
@@ -98,196 +93,29 @@ function Procedural.parseObj(path)
     return mesh
 end
 
--- clamp a number to [0,1]
-local function unit(n) n = tonumber(n) or 0; if n < 0 then return 0 elseif n > 1 then return 1 else return n end end
-
--- def.color = {r,g,b,a} 0..1  ->  FLinearColor-shaped table
-local function linearColor(c)
-    if type(c) ~= "table" then return nil end
-    return { R = unit(c[1] or c.r), G = unit(c[2] or c.g), B = unit(c[3] or c.b), A = c[4] or c.a or 1.0 }
-end
-
--- def.color -> FColor-shaped table (byte 0..255) for vertex colors
-local function byteColor(c)
-    local lc = linearColor(c); if not lc then return nil end
-    return { R = math.floor(lc.R * 255 + 0.5), G = math.floor(lc.G * 255 + 0.5),
-             B = math.floor(lc.B * 255 + 0.5), A = math.floor((lc.A or 1) * 255 + 0.5) }
-end
-
-local kismetRendering = nil
-local function importTexture(worldCtx, absPath)
-    if kismetRendering == nil then
-        kismetRendering = StaticFindObject("/Script/Engine.Default__KismetRenderingLibrary") or false
-    end
-    if not kismetRendering then return nil, "no KismetRenderingLibrary" end
-    local ok, tex = pcall(function() return kismetRendering:ImportFileAsTexture2D(worldCtx, absPath) end)
-    if ok and tex and tex:IsValid() then return tex end
-    return nil, "ImportFileAsTexture2D failed: " .. tostring(tex)
-end
-
--- Candidate base materials to PARENT the MID to. A freshly created
--- ProceduralMeshComponent section has no material on element 0, so
--- CreateAndSetMaterialInstanceDynamic(0) returns nil. Building the MID *From* a real
--- base material fixes that AND gives it a parent whose Color param / vertex colors the
--- engine will actually render. StaticFindObject only returns ALREADY-LOADED objects,
--- so we try several and take the first present.
-local BASE_MATERIAL_CANDIDATES = {
-    "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",       -- has a "Color" vector param
-    "/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial",
-    "/Engine/EngineDebugMaterials/VertexColorViewMode_ColorOnly.VertexColorViewMode_ColorOnly",
-    "/Engine/EngineMaterials/DefaultMaterial.DefaultMaterial",
-    "/Engine/EngineMaterials/WorldGridMaterial.WorldGridMaterial",
-}
--- Only SUCCESSES are cached; a miss (candidate not loaded yet) retries on the next
--- attach — otherwise early markers placed before the material streams in would be
--- stuck white forever. StaticFindObject is cheap.
-local baseMatCache -- {mat,path} of a found base material, or nil
-local function resolveBaseMaterial(explicitPath)
-    if explicitPath then
-        local ok, m = pcall(StaticFindObject, explicitPath)
-        if ok and m and m.IsValid and m:IsValid() then return m, explicitPath end
-    end
-    if baseMatCache then
-        local ok = pcall(function() return baseMatCache.mat:IsValid() end)
-        if ok and baseMatCache.mat:IsValid() then return baseMatCache.mat, baseMatCache.path end
-        baseMatCache = nil
-    end
-    for _, p in ipairs(BASE_MATERIAL_CANDIDATES) do
-        local ok, m = pcall(StaticFindObject, p)
-        if ok and m and m.IsValid and m:IsValid() then baseMatCache = { mat = m, path = p }; return m, p end
-    end
-    return nil  -- not loaded yet; retry next attach
-end
-
--- Discovery helper: log which candidate base materials are currently loaded.
+-- Discovery helper: log which candidate base materials are currently loaded. Kept on this
+-- backend because core.mesh exposes it from here (M.probeMaterials).
 function Procedural.probeMaterials(extra)
-    local seen = {}
-    local function try(p)
-        if seen[p] then return end
-        seen[p] = true
-        local ok, m = pcall(StaticFindObject, p)
-        local found = ok and m and m.IsValid and m:IsValid()
-        log.info("MATPROBE " .. (found and "FOUND " or "----- ") .. p)
-    end
-    for _, p in ipairs(BASE_MATERIAL_CANDIDATES) do try(p) end
-    for _, p in ipairs(extra or {}) do try(p) end
+    return Renderer.probeMaterials(extra, log.info)
 end
-
-local function shortName(path)
-    if not path then return "?" end
-    return (path:gsub("^.*/", ""):gsub("%..*$", ""))
-end
-
--- Keep the created MID per actor so a marker's colour can be RE-SET at runtime.
-local midByActor = setmetatable({}, { __mode = "k" })
 
 -- Keep the component we created per actor, so detach removes exactly what attach added
--- (and nothing that was already on the actor). __mode="k" weak table.
+-- (and nothing that was already on the actor), and so the base setColor knows which
+-- component to reach for. __mode="k" weak table.
 local compByActor = setmetatable({}, { __mode = "k" })
 
--- Re-tint an already-attached marker. color = {r,g,b,a} 0..1. Also writes emissive
--- param names so, on a material that supports it, "connected" visibly glows. Safe
--- no-op if the actor has no MID yet (marker not attached / no base material).
-function Procedural:setColor(actor, color)
-    local mid = midByActor[actor]
-    if not mid then return false end
-    local lc = linearColor(color)
-    if not lc then return false end
-    for _, name in ipairs(COLOR_PARAMS) do
-        pcall(function() mid:SetVectorParameterValue(FName(name), lc) end)
-    end
-    for _, name in ipairs({ "EmissiveColor", "Emissive", "EmissiveColour" }) do
-        pcall(function() mid:SetVectorParameterValue(FName(name), lc) end)
-    end
-    return true
-end
-
--- Apply the material layer to a MID on element 0. Fully fail-soft: returns a short
--- status string describing the outcome (for logging). `def` may carry
--- color / texture (abs path) / params / material (base material object path). Never throws.
--- The MID is created even when `def` declares NO material fields at all: setColor writes
--- through midByActor, so a mesh attached without a colour could otherwise never be tinted
--- afterwards. Such an attach still reports "none" so it stays silent in the log.
-local function applyMaterial(comp, worldCtx, def)
-    local declared = (def.color or def.texture or def.params or def.material) and true or false
-    local status = {}
-    local mid
-    -- prefer a MID parented to a real base material (renders color / vertex color)
-    local base, basePath = resolveBaseMaterial(def.material)
-    if base then
-        local ok, m = pcall(function() return comp:CreateAndSetMaterialInstanceDynamicFromMaterial(0, base) end)
-        if ok and m and m:IsValid() then mid = m; status[#status + 1] = "base:" .. shortName(basePath) end
-    end
-    if not mid then
-        local ok, m = pcall(function() return comp:CreateAndSetMaterialInstanceDynamic(0) end)
-        if ok and m and m:IsValid() then mid = m end
-    end
-    if not mid then
-        status[#status + 1] = "no-MID(no base material loaded)"
-        return declared and table.concat(status, ",") or "none"
-    end
-    -- worldCtx is the owning actor (attach passes it) — remember the MID so its
-    -- colour can be updated later. __mode="k" weak table.
-    if worldCtx then pcall(function() midByActor[worldCtx] = mid end) end
-    if not declared then return "none" end
-
-    -- texture (imported PNG) — try known texture param names
-    if def.texture then
-        local tex, terr = importTexture(worldCtx, def.texture)
-        if tex then
-            status[#status + 1] = "tex-imported"
-            for _, name in ipairs(TEXTURE_PARAMS) do
-                pcall(function() mid:SetTextureParameterValue(FName(name), tex) end)
-            end
-        else
-            status[#status + 1] = "tex-fail(" .. tostring(terr) .. ")"
-        end
-    end
-
-    -- color (flat tint) — probe candidate vector param names
-    if def.color then
-        local lc = linearColor(def.color)
-        if lc then
-            for _, name in ipairs(COLOR_PARAMS) do
-                pcall(function() mid:SetVectorParameterValue(FName(name), lc) end)
-            end
-            status[#status + 1] = "color-set"
-        end
-    end
-
-    -- explicit params passthrough: { vector={name={r,g,b,a}}, scalar={name=v}, texture={name=path} }
-    if type(def.params) == "table" then
-        if type(def.params.vector) == "table" then
-            for name, val in pairs(def.params.vector) do
-                local lc = linearColor(val)
-                if lc then pcall(function() mid:SetVectorParameterValue(FName(name), lc) end) end
-            end
-        end
-        if type(def.params.scalar) == "table" then
-            for name, val in pairs(def.params.scalar) do
-                pcall(function() mid:SetScalarParameterValue(FName(name), tonumber(val) or 0) end)
-            end
-        end
-        if type(def.params.texture) == "table" then
-            for name, p in pairs(def.params.texture) do
-                local tex = importTexture(worldCtx, p)
-                if tex then pcall(function() mid:SetTextureParameterValue(FName(name), tex) end) end
-            end
-        end
-        status[#status + 1] = "params"
-    end
-
-    return #status > 0 and table.concat(status, ",") or "mid-only"
-end
+-- The component this backend dressed `actor` with (base/renderer contract).
+function Procedural:componentFor(actor) return actor and compByActor[actor] or nil end
 
 -- Attach a runtime mesh to an actor. def = { model, scale, offset, color, texture, params, material }.
 -- Returns true on success. The mesh always attaches; the material layer is best-effort.
 function Procedural:attach(actor, def)
+    if not (actor and type(def) == "table") then return false end
     local mesh, e = Procedural.parseObj(def.model)
     if not mesh then log.err("mesh: " .. tostring(e)); return false end
 
     local vertexColors = def.color and (function()
-        local bc = byteColor(def.color)
+        local bc = Renderer.byteColor(def.color)
         if not bc then return {} end
         local arr = {}
         for i = 1, #mesh.verts do arr[i] = bc end
@@ -311,8 +139,10 @@ function Procedural:attach(actor, def)
         comp:SetWorldScale3D({ X = s, Y = s, Z = s }) -- mandatory (zero-scale trap)
         local o = def.offset or {}
         comp:K2_SetRelativeLocation({ X = o.x or 0, Y = o.y or 0, Z = o.z or 0 }, false, {}, false)
-        -- material layer (fail-soft, logged)
-        local st = applyMaterial(comp, actor, def)
+        -- material layer (fail-soft, logged). always=true so a marker declared with no
+        -- colour can still be re-tinted later; preferBase=true because a fresh section has
+        -- no material of its own to instance from.
+        local st = self:dressMaterial(comp, actor, def, { always = true, preferBase = true })
         if st ~= "none" then
             log.info(string.format("material [%s] uv=%s vcol=%s on %s",
                 st, tostring(mesh.hasUV), tostring(#vertexColors > 0), tostring(def.model)))
@@ -352,16 +182,17 @@ function Procedural:detach(actor)
         -- removed BY this call, so say so
         compByActor[actor] = nil
         dressed[actor]     = nil
-        midByActor[actor]  = nil
+        self:forgetMaterial(actor)
         return false
     end
     if not pcall(function() comp:K2_DestroyComponent(comp) end) then
         log.warn("detach failed (K2_DestroyComponent unavailable)")
         return false
     end
+    -- the whole component goes, so there is no material to put back — just drop the record
+    self:forgetMaterial(actor)
     compByActor[actor] = nil
     dressed[actor]     = nil
-    midByActor[actor]  = nil
     return true
 end
 

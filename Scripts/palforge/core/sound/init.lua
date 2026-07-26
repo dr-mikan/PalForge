@@ -11,6 +11,11 @@
 --                           valid on its own; id is the fallback SoundID)
 --   M.play(spec, actor) -- resolve + play on actor -> true only if a native call was issued
 --   M.stop(actor)       -- stop all sounds on actor (native engine stop)
+--
+-- CONTENT KNOWLEDGE STAYS OUT OF HERE. Turning an AkAudioEvent NAME into its asset path is a
+-- catalog lookup, and the catalog lives in native/audio.lua; api/audio.lua does it while
+-- lowering, so a spec arriving here already carries whatever path is knowable. This module
+-- only ever talks to the engine.
 local NativeSource = require("palforge.core.sound.native")
 local FileSource   = require("palforge.core.sound.file")
 

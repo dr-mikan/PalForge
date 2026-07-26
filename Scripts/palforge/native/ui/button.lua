@@ -1,11 +1,13 @@
 -- PalForge native.ui: Button — a single clickable, native-styled button built from
 -- Palworld's own native UMG kit. Defined through api/ui, so it fills render() (build the
--- button and place it), update() (write the current self.label into it) and destroy()
--- (take it back out); the lifecycle — WHEN those run — is owned by api/ui.
+-- button and place it), update() (write the current self.label / self.onClick into it) and
+-- destroy() (take it back out); the lifecycle — WHEN those run — is owned by api/ui.
 --
---   local widget = require("palforge.native.ui._widget")
+--   local widget = require("palforge.native.ui").widget
 --   local screen = widget.screen()          -- a panel of our own to host it
---   Button:new{ label = "OK", onClick = function() end }:mount(screen.root)
+--   local btn = Button:new{ label = "OK", onClick = function() end }
+--   btn:mount(screen.root)
+--   btn:state().label = "Done"; btn:refresh()   -- update() writes the new label + handler
 
 local UI     = require("palforge.api.ui")
 local widget = require("palforge.native.ui._widget")
@@ -23,16 +25,14 @@ return UI{
     render = function(self, root)
         local pc = widget.findFirst("PalPlayerController")
         if not pc then return false end
-        local btn, _, clickName = widget.menuButton(root, pc, self.label or "", self.onClick)
+        local btn, inv, clickName = widget.menuButton(root, pc, self.label or "", self.onClick)
         if not btn then return false end
-        self.widget, self.clickName = btn, clickName
+        self.widget, self.invButton, self.clickName = btn, inv, clickName
+        self._wiredClick = self.onClick   -- what the router currently holds (see update)
         self.labelWidget = widget.findByName(btn, widget.PATHS.menuButtonLabel)
-        -- Attach into the host panel if it accepts children (context-dependent).
-        local slot
-        pcall(function()
-            if root and root.AddChildToVerticalBox then slot = root:AddChildToVerticalBox(btn)
-            elseif root and root.AddChild then slot = root:AddChild(btn) end
-        end)
+        -- Attach into the host panel, whatever kind of panel it is: addChild tries the
+        -- typed AddChildTo* first and falls back to UPanelWidget's generic AddChild.
+        local slot = widget.addChild(root, btn)
         if not slot then
             -- Placed nowhere: drop it rather than leak an invisible button and a live
             -- click handler, and report the failure so the mount does not latch.
@@ -42,10 +42,27 @@ return UI{
         return true
     end,
 
-    -- Write the current self.label into the live button. False if the button is gone
-    -- (the host panel dropped it) or its label widget could not be reached.
+    -- Write the current self.label AND the current self.onClick into the live button.
+    -- False if the button is gone (the host panel dropped it) or its label widget could
+    -- not be reached.
+    --
+    -- The click is re-wired because self.onClick is a field the caller may change after
+    -- mounting, and render() is the only other place that reads it: without this a
+    -- refreshed button keeps calling the handler it was built with. registerClick keys on
+    -- the invisible button's own name, so re-registering REPLACES the router entry rather
+    -- than adding one; clearing onClick drops it instead.
     update = function(self)
         if not alive(self.widget) then return false end
+        if self.onClick ~= self._wiredClick then
+            if self.onClick and alive(self.invButton) then
+                local key = widget.registerClick(self.invButton, self.onClick)
+                if key then self.clickName = key end
+            elseif self.clickName then
+                widget.releaseClicks({ self.clickName })
+                self.clickName = nil
+            end
+            self._wiredClick = self.onClick
+        end
         if not alive(self.labelWidget) then
             self.labelWidget = widget.findByName(self.widget, widget.PATHS.menuButtonLabel)
             if not alive(self.labelWidget) then return false end
@@ -60,7 +77,8 @@ return UI{
     destroy = function(self)
         local btn = self.widget
         if self.clickName then widget.releaseClicks({ self.clickName }) end
-        self.widget, self.labelWidget, self.clickName = nil, nil, nil
+        self.widget, self.labelWidget, self.invButton = nil, nil, nil
+        self.clickName, self._wiredClick = nil, nil
         if not alive(btn) then return false end
         return pcall(function() btn:RemoveFromParent() end)
     end,

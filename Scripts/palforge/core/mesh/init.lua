@@ -17,7 +17,16 @@
 -- could never be re-tinted.
 --
 -- Backends are the class tables from mesh.* used as singletons (their methods carry
--- no per-instance state). New mesh kinds register in the `renderers` table below.
+-- no per-instance state). New mesh kinds register in the `renderers` table below. All
+-- THREE now implement the full contract: the material layer that used to sit inside the
+-- procedural backend alone lives in mesh.base.renderer, so a spec's color / texture /
+-- material / params reach every kind and every kind can be re-tinted and undone.
+--
+-- The three DEFAULTS for `kind` are deliberately different and all three are real:
+-- Mesh.Spec fills "skeletal" (a named mesh is a creature body), Building.Spec.Mesh fills
+-- "static" (a structure is a prop), and DEFAULT_KIND below is "procedural" — it only ever
+-- applies to a direct core.mesh call whose spec carries no kind at all, which is how the
+-- OBJ path was reached before the api existed.
 local M = {}
 
 -- Global kill-switch for runtime meshes. Flip off if marker attachment ever
@@ -69,18 +78,21 @@ end
 
 -- Re-tint an already-attached mesh. `color` = {r,g,b,a} 0..1. Dispatches to the backend
 -- that actually dressed `actor`; `kind` is an optional hint used only when the actor was
--- never attached through here (falling back, as before, to the default backend).
--- Safe no-op if the actor has no live material.
+-- never attached through here (falling back, as before, to the default backend). A mesh
+-- attached with NO colour declared can still be tinted: the backend names the component it
+-- dressed and the base makes the dynamic material on the spot. Returns false — never a
+-- pretended tint — when there is no such component or nothing accepted the write.
 function M.setColor(actor, color, kind)
     local r = (actor and dressedBy[actor]) or renderers[kind] or renderers[DEFAULT_KIND]
     return r:setColor(actor, color)
 end
 
--- Remove again what an attach put on `actor`, so it can be dressed afresh. Only a
--- backend that added a component of its own can do this (procedural / static); a
--- skeletal swap has nothing of ours to remove. Returns false when we never dressed this
--- actor, and when the removal did not execute — the record is kept in that case, since
--- the component is still there.
+-- Undo an attach, so `actor` can be dressed afresh. What that means depends on the
+-- backend: procedural and static destroy the component they added, while skeletal — which
+-- dresses the pawn's OWN body component — puts back the asset, scale, offset and
+-- materials it captured before the swap. Returns false when we never dressed this actor,
+-- and when the undo did not execute — the record is kept in that case, since the change
+-- is still on the actor.
 function M.detach(actor)
     if not actor then return false end
     local r = dressedBy[actor]

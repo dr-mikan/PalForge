@@ -26,6 +26,13 @@
 -- changes, or opt into polling with :autoRefresh(ms) (built on core/event's heartbeat).
 -- No async policy is imposed by default.
 --
+-- MOUNTING WHEN THE HOST UI IS NOT UP YET: an element whose host is absent returns false
+-- from render and stays unmounted — and :autoRefresh does NOT get it in, because
+-- refresh() is a no-op while unmounted. That is what :autoMount(root, ms) is for: the
+-- same heartbeat poll, but it retries mount() while the element is down and refreshes it
+-- once it is up. It is the whole retry loop a title-screen element needs, since the title
+-- screen does not exist yet when a pack's files load.
+--
 --   local Panel = UI{
 --       id = "example:Panel",
 --       render  = function(self, root) --[[ build widgets under root ]] end,
@@ -174,7 +181,16 @@ setmetatable(UI, { __call = function(_, spec) return define(spec) end })
 ---@return UI.Handle
 function UI.get(id)
     assert(type(id) == "string" and #id > 0, "UI.get: id (string) is required")
-    local cls = om.get("ui", id) or setmetatable({ id = id }, Class)
+    local cls = om.get("ui", id)
+    if not cls then
+        -- Never defined: hand back an INERT element rather than nil. It needs an __index
+        -- of its OWN, exactly as define() gives one: an instance's metatable is the class,
+        -- and Lua reads __index off a metatable RAW, so without this line every lifecycle
+        -- call (mount/refresh/unmount/isMounted) resolves to nil on the instance and
+        -- raises instead of quietly doing nothing.
+        cls = setmetatable({ id = id }, Class)
+        cls.__index = cls
+    end
     return wrap(cls)
 end
 
@@ -197,6 +213,22 @@ end
 ---@field id string   # the element's id
 local Handle = {}
 Handle.__index = Handle
+
+-- The one heartbeat subscription behind autoRefresh/autoMount. Kept on the INSTANCE (not on
+-- the handle) so :unmount() can cancel it and a second call cannot install a duplicate. A
+-- raising render is swallowed here on purpose: event.every already pcalls its body, and a
+-- retry loop that dies on the first bad frame is worse than one that keeps trying.
+local function poll(st, ms, remount, root)
+    if st._refreshSub then return true end
+    local ok = pcall(function()
+        local event = require("palforge.core.event")
+        st._refreshSub = event.every(ms, function()
+            if st._mounted then st:refresh()
+            elseif remount then pcall(function() st:mount(root) end) end
+        end)
+    end)
+    return ok and st._refreshSub ~= nil
+end
 
 -- An instance is a table with the definition class as its metatable, so render/update and
 -- the lifecycle resolve on it while its own fields stay per-instance. The handle carries
@@ -225,25 +257,34 @@ function Handle:mount(root) return self._st:mount(root) end
 function Handle:refresh() return self._st:refresh() end
 
 ---Take the element down: runs destroy() so it removes its own widgets, then forgets the
----rendered state so a later mount() renders afresh. Also cancels autoRefresh.
+---rendered state so a later mount() renders afresh. Also cancels autoRefresh/autoMount.
 function Handle:unmount() return self._st:unmount() end
 
 ---@return boolean
 function Handle:isMounted() return self._st:isMounted() end
 
 ---Poll refresh() every `ms` milliseconds off core/event's heartbeat (opt-in; there is no
----confirmed native UI-update event to hook). Cancelled by :unmount(). Returns true if the
----subscription was installed.
+---confirmed native UI-update event to hook). No-op while the element is unmounted — use
+---:autoMount when the host UI may not be up yet. Cancelled by :unmount(). Returns true if
+---the subscription was installed.
 ---@param ms integer?  # default 500
 ---@return boolean ok
 function Handle:autoRefresh(ms)
-    local st = self._st
-    if st._refreshSub then return true end
-    local ok = pcall(function()
-        local event = require("palforge.core.event")
-        st._refreshSub = event.every(tonumber(ms) or 500, function() st:refresh() end)
-    end)
-    return ok and st._refreshSub ~= nil
+    -- TODO(ui-update-event): unknown whether Palworld raises a catchable UFunction when a
+    -- UI is (re)built — until one is dumped, polling is the only driver PalForge has.
+    return poll(self._st, tonumber(ms) or 500, false, nil)
+end
+
+---Poll every `ms` milliseconds off the same heartbeat, but drive the WHOLE lifecycle: while
+---the element is down this retries mount(root) — so an element whose host UI does not exist
+---yet (the title screen at load) gets in the moment it appears — and once it is up this
+---refreshes it. Cancelled by :unmount(), which is therefore also how you stop it retrying.
+---Idempotent, and shares the one subscription slot with :autoRefresh.
+---@param root any?      # the root handed to each mount attempt (nil for elements that find their own)
+---@param ms integer?    # default 2000 — a retry loop wants a slower beat than a refresh
+---@return boolean ok
+function Handle:autoMount(root, ms)
+    return poll(self._st, tonumber(ms) or 2000, true, root)
 end
 
 -- ---- queries ----

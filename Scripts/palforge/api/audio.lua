@@ -12,17 +12,27 @@
 --
 -- The native route is a real engine call, not yet a recorded in-game success: a catalog entry
 -- is a Wwise AkAudioEvent NAME with an asset PATH, played via
--- LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor. Prefer passing BOTH soundId and
--- soundPath (native/audio.lua's catalog does); the path is what actually plays, the id is the
--- SoundID-table fallback. Either one alone is a complete definition.
+-- LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor. The path is what actually
+-- plays; PlaySoundByActor({Key=FName(id)}) is a DIFFERENT namespace (SoundID rows) and is
+-- silent for AkAudioEvent names.
+--
+-- SO A NAME ALONE IS ENOUGH: when a definition carries a soundId and no soundPath, lowering
+-- looks the name up in native/audio.lua's generated AkAudioEvent catalog and attaches the
+-- real asset path. `Audio.get("AKE_General_Explosion"):play()` and the one-line form
+-- `Audio.bgm{ id = "AKE_BGM_Title" }` therefore take the route that plays, instead of
+-- resolving onto the silent fallback and still reporting true. A name the catalog does not
+-- know keeps the old behaviour (the SoundID fallback), and passing soundPath yourself always
+-- wins — nothing is ever overwritten.
 --
 -- :play returns true only when a native play call was ISSUED for the sound — a definition
 -- that names nothing, or a world that has no player pawn, returns false rather than a
 -- reassuring true. It is still not a promise of audibility (the engine returns nothing).
 --
--- Custom audio FILES are not playable yet — Palworld exposes no USoundWave loader we have
--- confirmed, so a `soundFile` definition resolves and no-ops instead of pretending. Volume
--- is likewise unwired, though not for want of a route: see Handle:setVolume.
+-- TWO THINGS HERE STILL DO NOTHING, and say so rather than pretending. Custom audio FILES
+-- are not playable: Palworld is all Wwise and no runtime file loader is confirmed, so a
+-- `soundFile` definition resolves and then no-ops (core/sound/file.lua). Volume is not wired
+-- either — no volume call is confirmed to exist on any class here (see Handle:setVolume).
+-- Both return false, and both carry a TODO marker naming the one fact a probe has to settle.
 --
 --   local Theme = Audio.bgm{ id = "AKE_BGM_Title",
 --                            soundId = "AKE_BGM_Title", soundPath = "/Game/.../AKE_BGM_Title" }
@@ -54,11 +64,11 @@ local Spec = schema.define("Audio.Spec", {
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "kind",        type = "string", values = { "se", "bgm" }, default = "se",
                      doc = "descriptive only - the native play route is the same for both" },
-    { "soundId",     type = "string", doc = "native AkAudioEvent name (the SoundID fallback route)" },
-    { "soundPath",   type = "string", doc = "native AkAudioEvent asset path (the route that actually plays)" },
+    { "soundId",     type = "string", doc = "native AkAudioEvent name - its asset path is filled in from the native catalog when you do not pass one" },
+    { "soundPath",   type = "string", doc = "native AkAudioEvent asset path (the route that actually plays); overrides the catalog lookup" },
     { "soundFile",   type = "string", doc = "custom audio file path (seam - not playable yet)" },
-    { "source",      type = "function", sig = "fun(self: Audio.Handle): table|nil",
-                     doc = "override that returns the core.sound spec yourself" },
+    { "source",      type = "function", sig = "fun(self: Audio.Definition): table|nil",
+                     doc = "override that returns the core.sound spec yourself; `self` is the DEFINITION, not the handle" },
     { "data",        type = "table",  doc = "free-form payload of your own, carried onto the definition" },
 })
 
@@ -70,15 +80,44 @@ local Class = {}
 Class.__index = Class
 Class.kind = "se"
 
+-- The generated AkAudioEvent catalog (event name -> asset path) that native/audio.lua carries,
+-- reached LAZILY and through pcall. It has to be lazy: native/audio.lua requires THIS module to
+-- build its definitions, so a top-level require here would be a cycle. The kernel loads
+-- palforge.native.audio at startup (core/registry), so by the time anything plays this is a
+-- table lookup; a session without the catalog simply has no path to add.
+local catalog         -- name -> asset path, once native.audio has been seen
+local catalogLoading  -- re-entrancy guard: never require the catalog from inside its own load
+local function catalogPath(name)
+    if type(name) ~= "string" or #name == 0 then return nil end
+    if not catalog and not catalogLoading then
+        catalogLoading = true
+        local mod = package.loaded["palforge.native.audio"]
+        if mod == nil then
+            local ok, m = pcall(require, "palforge.native.audio")
+            mod = ok and m or nil
+        end
+        if type(mod) == "table" and type(mod.CATALOG) == "table" then catalog = mod.CATALOG end
+        catalogLoading = false
+    end
+    return catalog and catalog[name] or nil
+end
+
 -- Lower this declaration into a source spec for core.sound. Prefers a custom file over a
 -- native id; returns nil when the definition names no sound. Override for full control.
+--
+-- A name WITHOUT a path is looked up in the AkAudioEvent catalog and given its real asset
+-- path: the path is the branch that produces sound, so a name-only definition that skipped
+-- this fell through to PlaySoundByActor and played nothing while still reporting true. A
+-- declared soundPath is never overwritten, and an unknown name still lowers to the id alone.
 function Class:source()
     if type(self.soundFile) == "string" and #self.soundFile > 0 then
         return { kind = "file", path = self.soundFile }
     end
-    if (type(self.soundId) == "string" and #self.soundId > 0)
-        or (type(self.soundPath) == "string" and #self.soundPath > 0) then
-        return { kind = "native", id = self.soundId, path = self.soundPath }
+    local id   = (type(self.soundId)   == "string" and #self.soundId   > 0) and self.soundId   or nil
+    local path = (type(self.soundPath) == "string" and #self.soundPath > 0) and self.soundPath or nil
+    if id and not path then path = catalogPath(id) end
+    if id or path then
+        return { kind = "native", id = id, path = path }
     end
     return nil
 end
@@ -160,8 +199,9 @@ function Audio.bgm(spec) return defineAs("bgm", spec, "Audio.bgm") end
 ---@return Audio.Handle
 function Audio.se(spec) return defineAs("se", spec, "Audio.se") end
 
----Get an EXISTING sound by id: a previously-defined one, else a thin native definition
----keyed on that id (so any AkAudioEvent name is playable if it resolves). Never nil.
+---Get an EXISTING sound by id: a previously-defined one, else a thin native definition keyed
+---on that id. Lowering resolves the name against the AkAudioEvent catalog, so any catalogued
+---event name plays without ever having been defined. Never nil, and never registers.
 ---@param id string
 ---@return Audio.Handle
 function Audio.get(id)
@@ -216,19 +256,18 @@ function Handle:stop(actor)
 end
 
 ---Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell
----it did nothing. A route does exist: the shipping binary reflects
----UPalSoundUtility::SetRTPCValueByActor and UAkGameplayStatics::SetRTPCValue (plus
----UAkComponent::SetOutputBusVolume on the actor's emitter). None of them is per-SOUND, so
----wiring one most likely changes this signature to setVolume(volume, actor) or moves it to a
----bus-level call — which is why it is not wired on a guess.
+---it did nothing. Nothing in this tree records a volume call on any Palworld or Wwise class:
+---the candidates a probe should look for are UPalSoundUtility::SetRTPCValueByActor,
+---UAkGameplayStatics::SetRTPCValue and UAkComponent::SetOutputBusVolume, but none of them is
+---confirmed to exist here, none is per-SOUND, and no volume RTPC name is known. Wiring one
+---most likely changes this signature to setVolume(volume, actor) or moves it to a bus-level
+---call, which is exactly why it is not written on a guess.
 ---@param volume number
 ---@return boolean ok
 function Handle:setVolume(volume)
-    -- TODO: route through UPalSoundUtility::SetRTPCValueByActor / UAkGameplayStatics::SetRTPCValue
-    -- (or UAkComponent::SetOutputBusVolume on the actor's emitter). The names are in the
-    -- shipping binary's reflection table; the parameter lists are NOT dumped yet, and the only
-    -- RTPCs Palworld declares are Field_Time / Sliding_Speed — no volume RTPC name is known —
-    -- so this needs a reflection probe before any of it can be written.
+    -- TODO(audio-volume-rtpc): no volume call is known to exist — which class carries one
+    -- (UPalSoundUtility / UAkGameplayStatics / UAkComponent), its parameter list, and the name
+    -- of a volume RTPC are all unknown; a reflection walk of those CDOs would settle it.
     return false
 end
 

@@ -38,7 +38,19 @@ function M.findFirst(class)
     return (ok and o) or nil
 end
 
--- Known Palworld UI asset/class paths (from the title menu).
+-- Known Palworld UI asset/class paths. TITLE MENU ONLY — every entry below was read off
+-- WBP_Title_MenuButton and the title screen (verified 2026-07-17, poc/V7-title-injection).
+-- Nothing here names the live HUD, the inventory or the build menu, so cloneGameWidget()
+-- and Button:mount(<a panel of the game's own>) have no in-game host to target: a PalForge
+-- panel today is either a title entry or a viewport layer of our own (M.screen).
+--
+-- The HUD's own CLASS is known — deprecated/catalog/ui_widget_classes.txt lists
+-- UPalUIHUDLayoutBase (and UPalUIWorldHUDWidgetCanvas / UPalUIInventoryEquipment); note it
+-- does NOT list the "PalHUD"/"PalHUDWidget" that dump/docs/04_native_ui.md guesses at. What
+-- is missing is one level down, and no dump in either tree has it:
+-- TODO(ui-host-paths): unknown — the widget NAME of a child inside the live
+-- PalUIHUDLayoutBase tree that is a UPanelWidget (i.e. answers AddChild), which is the one
+-- fact needed to parent a PalForge widget into the game's HUD instead of our own layer.
 M.PATHS = {
     menuButton      = "/Game/Pal/Blueprint/UI/UserInterface/Title/WBP_Title_MenuButton.WBP_Title_MenuButton_C",
     palTextBlock    = "/Game/Pal/Blueprint/UI/PalTextBlock/BP_PalTextBlock.BP_PalTextBlock_C",
@@ -63,6 +75,9 @@ local function fullName(w)
 end
 
 -- Install the single dispatch hook (idempotent). Called lazily by registerClick.
+-- The failure is logged ONCE, not once per button: with no UE4SS there is no RegisterHook
+-- and every registerClick would otherwise print a line.
+local clickHookLogged = false
 function M.installClicks()
     if hooked then return true end
     local ok = pcall(function()
@@ -78,7 +93,10 @@ function M.installClicks()
         end)
     end)
     hooked = ok
-    log(ok and "clicks: hook installed" or "clicks: hook FAILED")
+    if ok or not clickHookLogged then
+        clickHookLogged = true
+        log(ok and "clicks: hook installed" or "clicks: hook FAILED")
+    end
     return ok
 end
 
@@ -329,8 +347,14 @@ end
 
 -- ---- Palworld game widgets ----
 
--- Force a freshly created WBP_Title_MenuButton's inner content to the left so
--- labels align regardless of the button's outer width.
+-- Force a freshly created WBP_Title_MenuButton's inner content to the left so labels align
+-- regardless of the button's outer width. Cosmetic and best-effort: SetAnchors/SetAlignment
+-- exist on a CanvasPanelSlot, and nobody has recorded what HorizontalBox_0's Slot actually
+-- is inside that button — on any other slot class both calls raise inside the pcall and the
+-- label simply stays centred. Left as-is rather than guessed at: the label is still legible
+-- either way, and clickableRow does not depend on it (it overlays its own left-aligned text).
+-- TODO(ui-menubutton-inner-slot): unknown — the CLASS of `HorizontalBox_0`.Slot inside a
+-- created WBP_Title_MenuButton, which decides whether these two calls do anything at all.
 local function leftAlignButtonContent(btn)
     local inner = M.findByName(btn, M.PATHS.menuButtonInner)
     if not (inner and inner:IsValid()) then return end
@@ -344,6 +368,8 @@ end
 -- Clone the game's title menu button as a clickable row. Returns (button, invBtn,
 -- clickName). `onClick` is routed through the shared click router; clickName is that
 -- registration's key — keep it and pass it to releaseClicks when you drop the button.
+-- `tree` is UNUSED: WidgetBlueprintLibrary:Create outers the widget itself, so a BP widget
+-- needs no WidgetTree. The parameter is kept only so every builder here reads the same way.
 function M.menuButton(tree, pc, label, onClick)
     local btn, e = M.create(pc, M.PATHS.menuButton)
     if not btn then return nil, e end
@@ -381,7 +407,10 @@ function M.clickableRow(tree, pc, label, onClick, opts)
 end
 
 -- Generic: clone any Palworld BP widget, optionally set a label child's text and
--- wire a click. `opts = { label=, labelChild=, clickChild=, onClick= }`.
+-- wire a click. `opts = { label=, labelChild=, clickChild=, onClick= }`. Like menuButton,
+-- `tree` is unused (Create outers the widget itself). Returns (widget, clickName) — the
+-- router key, so the caller can releaseClicks it when the widget goes away; without it a
+-- cloned widget's handler would sit in the router forever with no way to name it again.
 function M.cloneGameWidget(tree, pc, classPath, opts)
     opts = opts or {}
     local w, e = M.create(pc, classPath)
@@ -390,11 +419,15 @@ function M.cloneGameWidget(tree, pc, classPath, opts)
         local lbl = M.findByName(w, opts.labelChild)
         if lbl and lbl:IsValid() then pcall(function() lbl:SetText(FText(opts.label)) end) end
     end
+    local clickName
     if opts.onClick and opts.clickChild then
         local c = M.findByName(w, opts.clickChild)
-        if c then M.registerClick(c, opts.onClick) end
+        if c then
+            local key = M.registerClick(c, opts.onClick)
+            if key then clickName = key end
+        end
     end
-    return w
+    return w, clickName
 end
 
 -- ---- slot helpers (return the created slot for further tweaking) ----
@@ -403,15 +436,40 @@ local function setVAlign(slot, halign)
     pcall(function() slot.HorizontalAlignment = halign end)
 end
 
+-- Call one AddChildTo* on `panel`; nil unless a slot really came back. Fail-soft on
+-- purpose: `panel` may be nil, a plain table, or a widget of the wrong kind, and none of
+-- those is worth raising over — the caller reads the nil and reports that nothing was placed.
+local function tryAdd(panel, method, child)
+    if not (panel and child) then return nil end
+    local ok, slot = pcall(function() return panel[method](panel, child) end)
+    if ok and slot then return slot end
+    return nil
+end
+
+-- Put `child` into whatever kind of panel `panel` is, and return its slot (nil if it would
+-- not take it). AddChild FIRST, deliberately: it is UPanelWidget's generic entry, every
+-- panel overrides it to build its own slot type (a VerticalBox answers with a
+-- VerticalBoxSlot), and it is the call the verified two-pane Mod Manager used through
+-- addScroll. The typed names are only a fallback, and they go last because UE4SS does not
+-- always answer an unknown method with nil — V7a recorded it handing back a TrivialObject —
+-- so asking a ScrollBox for AddChildToVerticalBox is a question worth not asking first.
+function M.addChild(panel, child)
+    return tryAdd(panel, "AddChild", child)
+        or tryAdd(panel, "AddChildToVerticalBox", child)
+        or tryAdd(panel, "AddChildToHorizontalBox", child)
+        or tryAdd(panel, "AddChildToOverlay", child)
+end
+
 function M.addV(vbox, child, padTop)
-    local slot = vbox:AddChildToVerticalBox(child)
+    local slot = tryAdd(vbox, "AddChildToVerticalBox", child)
+    if not slot then return nil end
     pcall(function() slot:SetPadding({ Left = 0, Top = padTop or 2, Right = 0, Bottom = padTop or 2 }) end)
     pcall(function() slot.Padding = { Left = 0, Top = padTop or 2, Right = 0, Bottom = padTop or 2 } end)
     setVAlign(slot, M.HALIGN.LEFT)
     return slot
 end
 
-function M.addH(hbox, child) return hbox:AddChildToHorizontalBox(child) end
-function M.addScroll(scroll, child) return scroll:AddChild(child) end
+function M.addH(hbox, child) return tryAdd(hbox, "AddChildToHorizontalBox", child) end
+function M.addScroll(scroll, child) return tryAdd(scroll, "AddChild", child) end
 
 return M

@@ -16,8 +16,8 @@
 -- The runtime no longer calls hooks directly — the scan/hooks EMIT channels and
 -- DISPATCH resolves the live instance and calls the hook (place fires exactly once).
 -- The PAL source arms four native hooks plus a slow onTick sweep, and the ITEM source
--- three; what is still `-- TODO(dump):` is narrower than it once was — item.craft and
--- item.discard, for which no native call has been found. Their DISPATCH is wired and
+-- three; what is still marked `-- TODO(<id>):` is narrower than it once was — item.craft
+-- and item.discard, for which no native call has been found. Their DISPATCH is wired and
 -- starts firing the moment a source emits.
 --
 -- ARMED LATE, ON PURPOSE. Two of those hooks — building.build's
@@ -66,6 +66,13 @@ M.CHANNELS = {
 
 M.TICK_MS = 500   -- central heartbeat interval (the tick SOURCE uses it)
 local SCAN_MS = M.TICK_MS  -- building reconstruction scan cadence (quantized to the heartbeat)
+
+-- Batched persistence cadence. persist() (a newly discovered structure) and inst:setDirty()
+-- only MARK the world dirty; the only thing that ever wrote was inst:save() and the
+-- world-left teardown, so everything placed in a session used to survive a clean exit and
+-- nothing else. 10 s = the deprecated runtime's own batched flush (deprecated/ticker.lua:19
+-- FLUSH_EVERY = 20 ticks, :37 "and only when dirty"), which is exactly what flushWorld does.
+local FLUSH_MS = 10000
 
 -- Pal onTick sweep cadence. Deliberately NOT the heartbeat: the sweep is a
 -- FindAllOf("PalCharacter"), which walks every UObject and is the known periodic-hitch
@@ -134,8 +141,6 @@ local Registry = {
     instances    = {},   -- key -> instance
     tickList     = {},   -- array of instances whose class overrides onTick
     pending      = {},   -- placement intents { buildId, pos, player }
-    placeObservers = {}, -- every-placement diagnostics fan-out (no public entry point; see NOTE)
-    wantFastScan = false,
 }
 -- weak actor -> instance map (actors are engine objects; don't keep them alive)
 local instancesByActor = setmetatable({}, { __mode = "k" })
@@ -210,13 +215,14 @@ local function buildDef(cls)
         buildIds     = resolved,
         gridCm       = cls.gridCm or spatial.GRID_CM,
         tickInterval = tickInterval,
-        hooks = {
-            place      = overrides(cls, "onPlace"),
-            load       = overrides(cls, "onLoad"),
-            tick       = overrides(cls, "onTick"),
-            remove     = overrides(cls, "onRemove"),
-            rightClick = overrides(cls, "onRightClick"),
-        },
+        -- ONLY the tick flag, and deliberately. The port also computed place / load / remove /
+        -- rightClick flags — faithful to a runtime that called def.onX DIRECTLY and had to ask
+        -- whether one existed (deprecated/entity.lua's `if def.onX`) — but dispatch here goes
+        -- through a channel and calls inst[hook], whose base default is an inert no-op, so
+        -- those four were computed and then read by nothing. onTick is the one that still
+        -- decides something: membership of tickList, i.e. whether the instance is visited at
+        -- all, twice a second.
+        hooks = { tick = overrides(cls, "onTick") },
     }
 end
 
@@ -304,11 +310,19 @@ local function removeInstance(key, reason)
 end
 
 -- ---- placement intent (from the RequestBuild source hook) ----
+-- The reference runtime kept two more pieces of state in this function, and NEITHER
+-- survives the port, because in this file nothing could ever read or write them:
+--   * `placeObservers`, an every-placement fan-out — the only adder was module-local there
+--     too (tmp/building_runtime_ref.lua:318,707), so no pack could ever register one and the
+--     loop ran over an empty list forever;
+--   * `wantFastScan`, "a building we manage was just placed -> scan promptly" — its only
+--     consumer was the deprecated adaptive scheduler (deprecated/ticker.lua:110-113), and
+--     this scan runs on EVERY heartbeat (SCAN_MS == TICK_MS), so there is no slower cadence
+--     to snap out of.
+-- Dead state that reads as a feature is worse than no state.
 local function onPlaceRequest(resolvedBuildId, pos, player)
-    for _, fn in ipairs(Registry.placeObservers) do pcall(fn, resolvedBuildId, pos, player) end
     refreshDefs()  -- a building defined post-start must be known before we match its id
     if not Registry.byBuildId[resolvedBuildId] then return end
-    Registry.wantFastScan = true  -- a building we manage was just placed -> scan promptly
     table.insert(Registry.pending, { buildId = resolvedBuildId, pos = pos, player = player })
     while #Registry.pending > 16 do table.remove(Registry.pending, 1) end
 end
@@ -380,7 +394,17 @@ local function scanOnce()
                 bound.missingStreak = 0
                 matched[bound.key] = true
                 local p = actorPos(actor)
-                if p then bound.pos = p end
+                if p then
+                    bound.pos = p
+                    -- RE-BUCKET. core.spatial's hash grid keys on the position it was
+                    -- indexed at, and this line is the only place an instance ever moves —
+                    -- so without the update a structure that drifts far enough keeps its old
+                    -- bucket and spatial.neighbors(pos, r) stops finding it. core/spatial.lua
+                    -- names this exact call as its one missing hook ("KNOWN GAP ... it
+                    -- belongs to the building runtime"). Cheap: it compares the bucket key
+                    -- and only touches the index when that key actually changed.
+                    spatial.indexUpdate(bound)
+                end
                 -- deferred mesh: the actor survived >=1 scan, so it's initialized now.
                 if bound._meshPending then
                     bound._meshPending = false
@@ -476,7 +500,6 @@ local function scanOnce()
             end
         end
     end
-    Registry.wantFastScan = false  -- consumed by this pass
     return changes
 end
 
@@ -666,6 +689,13 @@ local function installBuildingSource()
         end
     end)
 
+    -- Batched persistence flush (see FLUSH_MS). Without it the ONLY writes are inst:save()
+    -- and the world-left teardown, so a structure discovered by the scan — and any state a
+    -- handler mutated in place after inst:setDirty() — reached disk only on a clean exit and
+    -- was lost to an alt-F4 or a crash. flushWorld is a no-op while nothing is dirty, so this
+    -- costs one boolean test every 10 s.
+    M.every(FLUSH_MS, flushWorld)
+
     -- build COMPLETE -> building.build (api/building's declarable `onBuild`).
     --     /Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal(UPalMapObjectModel*)
     -- Recorded ✅ in-game (deprecated/poc/V3-place-interact-hooks/README.md + its probe
@@ -700,6 +730,19 @@ local function installBuildingSource()
             end)
             if not ok then log.err("building source: build-complete handler: " .. tostring(e)) end
         end)
+
+    -- api/building also DECLARES onBreak and onLeftClick, and there is no channel for either
+    -- here, so neither can ever fire. That file says no candidate was ever found; the parent
+    -- tree contradicts it once, for the break side only: dump/docs/further_plan.md:157-166
+    -- ("Opportunity: direct building lifecycle hooks (found in the probe)") records
+    -- /Script/Pal.PalBuildObject:OnDamage as ARMED AND SEEN by the event probe
+    -- (dump/auto_mod/Scripts/main.lua:37, label BUILD.damage), annotated "(break/damage)".
+    -- What that note does NOT say is whether it also fires on DESTRUCTION, or how a handler
+    -- would tell a chipped wall from a demolished one — and a channel that reports every
+    -- scratch as a break is worse than the silence. Destruction is meanwhile covered, one
+    -- MISS_THRESHOLD late, by the scan's miss sweep -> building.remove -> onRemove.
+    -- TODO(building-break-source): unknown whether PalBuildObject:OnDamage fires on destroy and
+    -- what its params carry; onLeftClick has no candidate hook at all.
 end
 
 -- =====================================================================================
@@ -854,6 +897,8 @@ local function installPalSource()
     -- confirmed hooks down with it, so late arming protects them, not just this one.
     -- Still unproven that it signals a FRESH spawn: that needs a post-load spawn probe, so
     -- keep handlers idempotent and treat the channel as a candidate.
+    -- TODO(pal-spawned-fresh): unknown whether BroadcastOnCompleteInitializeParameter fires for a
+    -- pal spawned AFTER world load — every probe pal so far pre-existed the hook (0 firings).
     tryHookAfterWorldReady("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter",
         function(self)
             if not worldReady then return end
@@ -1020,8 +1065,19 @@ local function installItemSource()
         end)
     end)
 
-    -- TODO(dump): item.craft (crafting used a work-process, not the get-log) / item.discard —
-    -- hook these after a craft-complete / discard probe round.
+    -- item.craft and item.discard stay SOURCELESS, on purpose rather than by omission.
+    -- The one signal that is right there — the get-log — cannot stand in for either: a
+    -- crafted item surfaces through that same get-log ("Crafting output surfaces through the
+    -- same get-log, so item.craft may be redundant with item.obtain",
+    -- dump/docs/further_plan.md:38-39), so emitting item.craft from it would report every
+    -- pickup as a craft. Neither channel has a candidate native function recorded anywhere:
+    -- dump/dump_targets.md:149-150 lists both as `dump to discover`, and the probe harness
+    -- (dump/auto_mod/Scripts/main.lua:33-48) never armed one. Their DISPATCH is wired and
+    -- begins working the moment an emit lands here.
+    -- TODO(item-craft-source): no craft-complete UFunction is known — which class/function the
+    -- game calls when a bench finishes an item, and which param carries the id + count.
+    -- TODO(item-discard-source): no drop/discard UFunction is known, and it is unobserved
+    -- whether AddItem_ServerInternal ever arrives with a NEGATIVE Count for a discard.
 end
 
 -- =====================================================================================
@@ -1214,7 +1270,7 @@ function M.start()
     -- dispatch (channel -> object hook)
     installDispatch()
     log.info("event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned "
-        .. "arm at world.ready; craft+discard TODO(dump)) + dispatch")
+        .. "arm at world.ready; craft+discard have no native source) + dispatch")
 end
 
 return M

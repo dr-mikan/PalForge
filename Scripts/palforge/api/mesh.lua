@@ -23,6 +23,15 @@
 -- `kind` (procedural / static / skeletal / obj) and guards against re-stacking.
 -- core.mesh remembers which backend dressed each actor, so :setColor and :detach reach
 -- that same backend rather than guessing from a colour table that carries no kind.
+--
+-- WHAT EACH KIND DOES WITH THE PAINT FIELDS. All four kinds honour every field of the
+-- spec: `model` + `scale` + `offset` place the model, and `texture` / `color` / `material`
+-- / `params` become a dynamic material instance on the component the backend dressed —
+-- one per material slot. The one thing that is kind-specific is what a MID can be made
+-- FROM: a procedural OBJ section owns no material, so it has to be parented to a base
+-- material that happens to be loaded (supply one with `material` if the default guesses
+-- miss), while a static or skeletal asset arrives with authored materials and is instanced
+-- directly. `animClass` is skeletal-only, as marked.
 
 local om     = require("palforge.core.object_manager")
 local mesh   = require("palforge.core.mesh")
@@ -46,14 +55,16 @@ local Spec = schema.define("Mesh.Spec", {
                    doc = "mesh id, e.g. \"pack:name\" (required when defined directly; omit when inline)" },
     { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
                    default = "skeletal", doc = "which core.mesh backend renders it" },
-    { "model",     type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" },
+    { "model",     type = "string", required = true,
+                   doc = "USkeletalMesh / UStaticMesh object path; for procedural / obj, an absolute .obj file path" },
     { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
     { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
-    { "offset",    type = "table",  doc = "{ x, y, z } offset from the pawn's origin" },
+    { "offset",    type = "table",  doc = "{ x, y, z } offset from the mesh's normal position, in cm" },
     { "texture",   type = "string", doc = "absolute path to a png applied to the mesh" },
     { "color",     type = "table",  doc = "tint { r, g, b, a } in 0..1" },
     { "material",  type = "string", doc = "base material asset path to instance from" },
-    { "params",    type = "table",  doc = "extra material parameters passed through" },
+    { "params",    type = "table",
+                   doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"<abs png>\" } }" },
 }, { handle = "Mesh.Handle" })   -- a Mesh.Handle satisfies this shape too (see __spec below)
 
 --=============================================================================
@@ -154,7 +165,9 @@ end
 
 ---Re-tint an already-attached mesh on `actor`. The re-tint goes to whichever backend
 ---actually dressed the actor; this mesh's own `kind` is passed only as the hint for the
----case where the attach did not go through PalForge.
+---case where the attach did not go through PalForge. Works whether or not the mesh
+---declared a `color`: the dynamic material is made on the spot if it does not exist yet.
+---False — never a pretended tint — when nothing of ours is on the actor to write to.
 ---@param actor any
 ---@param color table  # { r, g, b, a } in 0..1
 ---@return boolean ok
@@ -163,9 +176,10 @@ function Handle:setColor(actor, color)
     return mesh.setColor(actor, color, self._cls.kind)
 end
 
----Remove this mesh from `actor` again, undoing attachTo so the actor can be dressed
----afresh. Only a backend that added a component of its own can do this (procedural /
----static); a skeletal swap has nothing of PalForge's to remove and reports false.
+---Undo attachTo, so the actor can be dressed afresh. procedural and static destroy the
+---component they added; skeletal, which swaps the pawn's OWN body, puts back the asset,
+---scale, offset and materials it captured before the swap. False when nothing of
+---PalForge's is on the actor, and when the undo did not execute.
 ---@param actor any
 ---@return boolean ok
 function Handle:detach(actor)

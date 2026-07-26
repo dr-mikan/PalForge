@@ -8,6 +8,16 @@
 --   PRESS F1 IN GAME  ->  run every suite, print a summary to UE4SS.log, and put the
 --                         pass/fail line on screen.
 --
+-- F5..F8 are DISCOVERY PROBES rather than tests. They write what the engine actually looks
+-- like — class listings, real function signatures, DataTable columns — so the open items in
+-- plan/TODO.md can be closed. Each brackets its output with `#### BEGIN <id>` / `#### END
+-- <id>`; copy a block out of the log and that item's missing fact is known.
+--
+--   F5  reflection dump          needs a loaded save
+--   F6  the pal's mesh           needs a pal standing near you
+--   F7  watch native hooks       needs you to craft / drop / spawn while it runs
+--   F8  the title menu button    needs the title screen
+--
 -- Results land in UE4SS.log under [PalForge.test] and [PalForge.unittests]:
 --
 --   [PalForge.test][info] running 13 suite(s): schema, registry, definitions, pal, ...
@@ -70,6 +80,21 @@ M.CASES = {
     "ui",
     "player",
     "events",
+}
+
+-- Discovery probes, and the key each is bound to. A probe is not a test: it does not pass or
+-- fail, it writes what the engine actually looks like to UE4SS.log so an open item in
+-- plan/TODO.md can be closed. Each one brackets its output with `#### BEGIN <id>` and
+-- `#### END <id>`, where <id> is the item's id in that file.
+M.PROBES = {
+    { name = "reflect", key = "F5", needs = "a loaded save",
+      desc = "reflection dump: classes, functions, parameters, DataTable rows" },
+    { name = "pal",     key = "F6", needs = "a pal standing near you",
+      desc = "the pal's mesh component, its animation class and its materials" },
+    { name = "watch",   key = "F7", needs = "a loaded save, then craft / drop / spawn",
+      desc = "arms native hooks and logs what fires while you act" },
+    { name = "title",   key = "F8", needs = "the title screen",
+      desc = "the game's own title menu button, so ours can match it" },
 }
 
 M.loaded = {}   -- case name -> suite (or false when the file failed to load)
@@ -168,6 +193,30 @@ function M.bind(key, what, opts)
     return reg.register(key, fn, merged)
 end
 
+---Run one discovery probe by name ("reflect", "pal", "watch", "title"). Returns how many of
+---its sections ran; 0 means the probe said what it needed and stopped.
+---@param name string
+---@return integer sections
+function M.probe(name)
+    local ok, mod = pcall(require, "palforge.test.probes." .. tostring(name))
+    if not ok then
+        log.err("probe '" .. tostring(name) .. "' failed to load: " .. tostring(mod))
+        return 0
+    end
+    if type(mod.run) ~= "function" then
+        log.err("probe '" .. tostring(name) .. "' has no run()")
+        return 0
+    end
+    log.info("probe " .. name .. " starting - copy everything between the BEGIN and END markers")
+    support.announce("probe " .. name .. ": writing to UE4SS.log")
+    local ran, err = pcall(mod.run)
+    if not ran then
+        log.err("probe '" .. name .. "' raised: " .. tostring(err))
+        return 0
+    end
+    return tonumber(err) or 0
+end
+
 ---What is bound where, as printable lines. Handy from a console command.
 ---@return string[]
 function M.bindings()
@@ -179,9 +228,14 @@ function M.bindings()
     return out
 end
 
--- Wire it up on require: load the cases, then put the whole run on F1. Re-bind it from
--- your own code if F1 is taken — M.bind replaces a binding in place.
+-- Wire it up on require: load the cases, put the whole run on F1, and give each discovery
+-- probe its own key. Re-bind any of them from your own code — M.bind replaces a binding in
+-- place, so `test.bind("F5", "pal")` would take F5 back for a suite.
 M.load()
 M.bind("F1")
+for _, p in ipairs(M.PROBES) do
+    M.bind(p.key, function() M.probe(p.name) end,
+        { desc = string.format("probe %s (%s) - needs %s", p.name, p.desc, p.needs) })
+end
 
 return M

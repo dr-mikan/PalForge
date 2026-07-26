@@ -35,6 +35,19 @@
 --     covered by the scan's miss sweep -> onRemove), so nothing emits them. They stay
 --     declarable so a pack's code is future-proof; they never fire.
 --
+-- THE VISUAL LAYER, HONESTLY. A structure's `mesh` really is attached: core/mesh's static
+-- backend adds a UStaticMeshComponent and confirms the asset landed on it before claiming
+-- success. `color` / `texture` / `material` / `params` reach it too — the MID work is
+-- core/mesh/base/renderer's, shared by every backend — and :update() re-tints through the
+-- same MIDs. The one thing nobody has measured is which PARAMETER NAMES a Palworld
+-- material actually carries: the layer writes a candidate list and the names the material
+-- does not have are silent no-ops, so a tint can execute and still not be visible. That
+-- open question is marked TODO(mesh-material-params) in core/mesh/base/renderer.lua.
+--
+-- A live structure can also look around itself: `self:neighbors(radiusCm)` inside any
+-- instance hook returns every other tracked structure within that radius (core.spatial's
+-- hash grid, re-bucketed first so a structure that moved is still found).
+--
 -- The lifecycle receives the live INSTANCE as `self` (not the class): self.actor is the
 -- placed actor, self.pos its world position, self.state your persisted table, and
 -- self:save() writes it. onBuild is the ONE exception, and it has to be: it fires at
@@ -65,11 +78,14 @@
 --       },
 --   }
 
-local om     = require("palforge.core.object_manager")
-local icons  = require("palforge.core.icons")
-local mesh   = require("palforge.core.mesh")
-local items  = require("palforge.utils.items")
-local schema = require("palforge.core.schema")
+local om      = require("palforge.core.object_manager")
+local icons   = require("palforge.core.icons")
+local mesh    = require("palforge.core.mesh")
+local items   = require("palforge.utils.items")
+local schema  = require("palforge.core.schema")
+local spatial = require("palforge.core.spatial")
+-- core.event is NOT required here: it requires THIS module at load (for the base hook
+-- table), so every use of it below is a lazy, pcall'd require inside the function.
 
 require("palforge.api.mesh")   -- declares "Mesh.Spec", the shape this file derives from
 
@@ -194,7 +210,11 @@ end
 function Class:onBuild(ctx) end
 function Class:onPlace(ctx) end
 function Class:onRightClick(ctx) end
+-- TODO(building-leftclick): no UFunction on PalBuildObject is known to fire when a player
+-- hits/attacks a structure, so nothing emits this. Needs the PalBuildObject function list.
 function Class:onLeftClick(ctx) end
+-- TODO(building-break): no dismantle/destroy UFunction has ever been found in either tree,
+-- so nothing emits this; the scan's miss sweep covers disappearance as onRemove instead.
 function Class:onBreak(ctx) end
 function Class:onLoad(ctx) end
 function Class:onTick(ctx) end
@@ -209,14 +229,18 @@ function Class:onWorldLeft(ctx) end
 -- The mesh descriptor to show in-world. Override for a state-driven mesh.
 function Class:mesh() return self.meshSpec end
 
--- The material descriptor applied to the mesh. Override, or supply data fields on the
--- definition (color / texture / materialParams / baseMaterial). Consumed by core.mesh:
+-- The material descriptor applied to the mesh: the declared `material = { ... }` block
+-- when there is one, else the `color` / `texture` shorthands lifted into that same shape.
+-- Consumed by core.mesh:
 --   { color = {r,g,b,a}, texture = <abs png path>, params = {...}, material = <base mat path> }
+-- Only spec fields are read. Building.Spec is STRICT, so a definition can carry nothing
+-- else — the fuller shape (extra params, a base material path) is declared as
+-- `material = { params = ..., material = ... }` and returned by the first branch as-is.
+-- Override the method for a state-driven material.
 function Class:material()
     if self.materialSpec then return self.materialSpec end
-    if self.color or self.texture or self.materialParams or self.baseMaterial then
-        return { color = self.color, texture = self.texture,
-                 params = self.materialParams, material = self.baseMaterial }
+    if self.color or self.texture then
+        return { color = self.color, texture = self.texture }
     end
     return nil
 end
@@ -228,6 +252,13 @@ function Class:currentColor() return self.color end
 -- re-stacking). Needs a valid self.actor and a self:mesh() carrying a `model` path.
 -- Fail-soft. NOTE: core/event calls this from the scan, deliberately one scan AFTER the
 -- actor first appears — attaching to an actor still mid-init crashes the game.
+--
+-- WHAT `true` MEANS: the MESH attached. The colour / texture / params / material half of
+-- `def` is lowered with it and core/mesh's shared material layer writes it onto the
+-- component's dynamic material instances, but a write to a parameter the material does not
+-- carry is a silent no-op, so a declared tint is attempted rather than guaranteed
+-- (TODO(mesh-material-params) in core/mesh/base/renderer.lua). Attachment failure IS
+-- reported: false, and no half-dressed component left behind.
 function Class:render()
     if not (self.actor and self.actor.IsValid and self.actor:IsValid()) then return false end
     local m = self:mesh()
@@ -249,11 +280,46 @@ end
 
 -- Push state-driven visual changes: re-tint the live material from self:currentColor().
 -- Call from onTick when the structure's look depends on its state.
+--
+-- Returns true when the write EXECUTED on a real dynamic material instance — core.mesh
+-- routes it to whichever backend dressed the actor, and that backend makes the MID on the
+-- spot if the mesh was attached without a colour. false means there was nothing to write
+-- to (no mesh of ours on the actor, or no colour). Which parameter name a Palworld
+-- material answers to is still unmeasured, so an executed write is not yet proof of a
+-- visible change: see TODO(mesh-material-params) in core/mesh/base/renderer.lua.
 function Class:update()
     if not (self.actor and self.actor.IsValid and self.actor:IsValid()) then return false end
     local color = self:currentColor()
     if not color then return false end
     return mesh.setColor(self.actor, color)
+end
+
+-- ---- spatial queries (LIVE INSTANCE only) ----
+
+-- Every OTHER live structure within `radiusCm` of this one — any building definition, not
+-- just this one's — as instances. Empty on a definition (no self.pos) and on a bad radius.
+--
+--   events = { onTick = function(self)
+--       for _, n in ipairs(self:neighbors(350)) do ... end   -- everything within 3.5 m
+--   end }
+--
+-- This is the api-level consumer of core.spatial's hash-grid index. The building runtime
+-- keeps that index in step on place / load / remove (core/event.lua:277, 293, 516) but
+-- refreshes a tracked instance's position IN PLACE on every scan without re-bucketing it
+-- (core/event.lua:383), so a structure that ever moves would keep a stale bucket and could
+-- be missed at a bucket boundary. Re-bucketing the live registry first is core.spatial's
+-- own documented caller-side remedy: O(tracked structures), pure Lua, no engine call, and
+-- it touches a bucket only for the entries whose cell really changed.
+---@param radiusCm number  # search radius in centimetres
+---@return Building.Instance[]
+function Class:neighbors(radiusCm)
+    if type(radiusCm) ~= "number" or radiusCm <= 0 then return {} end
+    if type(self.pos) ~= "table" then return {} end   -- a definition, not a placed structure
+    pcall(function()
+        spatial.reindexAll(require("palforge.core.event").instances())
+    end)
+    local ok, list = pcall(function() return spatial.neighbors(self.pos, radiusCm, self) end)
+    return (ok and type(list) == "table") and list or {}
 end
 
 -- The build-menu icon: look the id up in the build-object icon DataTable, falling back

@@ -11,13 +11,19 @@
 -- HONEST STATE OF THE 導線: there is NO native skill source. The in-game event probe found
 -- no hook that says "this Pal used skill X", and Lua cannot inject a row into the skill
 -- DataTables (that is PalSchema's job). So:
---   * NOTHING fires these handlers automatically — no channel emits skill.* at all.
+--   * NOTHING fires these handlers automatically — core/event.lua declares no skill
+--     channel (M.CHANNELS is world / building / pal / item / tick) and nothing in the tree
+--     emits one, so a declared `events` table is inert until you call into it yourself.
 --   * What DOES work is MANUAL invocation: :activate(owner) / :hit(target) /
 --     :equip(owner) / :unequip(owner) run the handler now, with the cooldown enforced
 --     here in Lua. That is enough to drive a skill from your own code — e.g. from a Pal's
 --     onTick, a building's onRightClick, or a keybind.
--- When a native source is found it emits skill.* channels and these same handlers fire
--- without any change to a pack's code.
+--   * Nothing here reaches the engine EXCEPT :iconOf, and that one lookup has never been
+--     observed to return a value (see TODO(skill-icon-key) below).
+-- Wiring a native source later means adding the channel AND the dispatch that resolves it
+-- to a definition, in core/event.lua — the handlers below are then reached unchanged, but
+-- that dispatch does not exist yet either. The three unknowns are marked in place, one per
+-- hook, with the probe that would settle each.
 --
 --   local Fireball = Skill{
 --       id = "example:Fireball", kind = "active", element = "fire",
@@ -45,10 +51,20 @@ local schema = require("palforge.core.schema")
 ---handle as its first argument; only MANUAL invocation fires them today (see the header).
 ---A handler this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Skill.Spec.Events", {
+    -- TODO(skill-activate-source): no native call is known to announce "this character used
+    -- skill X" — PalPlayerController:PlaySkill was armed in two in-game probes and fired 0
+    -- times, so the executing class/function is still unidentified.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "an active skill fired (self, owner, ctx)" },
+    -- TODO(skill-hit-source): the only confirmed damage hook (PalCharacter:OnDamageReaction,
+    -- wired as pal.damaged) fires on the VICTIM and carries no skill identity, so nothing can
+    -- say WHICH skill landed; the candidate that would,
+    -- PalPlayerController:SkillDamageReactionComponent_ProcessDamage_ToServer, fired 0 times.
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
                     doc = "one of its hits landed (self, target, ctx)" },
+    -- TODO(skill-passive-source): passive attach/detach has never been probed at all — no
+    -- candidate native function has even been named for it, so onEquip/onUnequip have no
+    -- source and no shortlist to arm. Covers onUnequip too: they are the same component.
     { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "a passive was attached (self, owner, ctx)" },
     { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
@@ -89,8 +105,20 @@ function Class:onHit(target, ctx) end
 function Class:onEquip(owner, ctx) end
 function Class:onUnequip(owner, ctx) end
 
--- The skill-list icon: look the id up in the partner-skill icon DataTable, falling back
--- to the declared self.icon on any miss.
+-- The skill-list icon: look the id up in the partner-skill icon DataTable, falling back to
+-- the declared self.icon on any miss — which is the OVERWHELMINGLY likely outcome, for two
+-- separate reasons, so treat `icon` as the real source and this lookup as a bonus:
+--   * KEY. The one skill icon table in the 390-table catalog dump,
+--     DT_partnerSkillIconDataTable, is keyed by PAL id — its 311 rows are Alpaca / Anubis /
+--     Bastet / ... — not by skill id. Intersected against native/skills.lua's CATALOG, 303
+--     of 2585 ids match, every one of them a DT_PartnerSkillParameter row that happens to be
+--     pal-named; all 1905 DT_PassiveSkill_Main_Common ids miss by construction, and so does
+--     the curated "FlameThrower". No icon table in that catalog is keyed by skill id.
+--   * READ. No artifact in either tree has ever read a DataTable row VALUE from Lua on this
+--     build (the catalog dumper read row NAMES only), so even a matching key is unproven.
+-- TODO(skill-icon-key): unknown whether ANY loaded UDataTable exposes a row read to UE4SS
+-- Lua here, and if so which column of DT_partnerSkillIconDataTable holds the texture — until
+-- that is answered this call cannot be told from "no such row".
 function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.skill, self.id) end)
     if ok and tex ~= nil then return tex end

@@ -6,19 +6,27 @@
 -- WHAT IS PROVEN HERE AND WHAT IS NOT — read this before trusting a return value:
 --   * The TABLE NAMES are real. Every one below, `_Common` siblings included, exists in the
 --     390-table catalog dump (PalSmith/deprecated/catalog/datatables/).
---   * FINDING a table BY NAME is proven: FindAllOf("DataTable") + o:GetFName():ToString() is
---     the one route in this tree that ever handed back live UDataTable objects — it is how
---     that catalog was dumped (tests/catalog.lua:141-163). That runs first, and it is the
---     step this module actually fixed.
+--   * FINDING a table BY NAME is proven, by two routes, and both are used — TARGETED FIRST:
+--     UE4SS's FindObject("DataTable", "<name>") is what utils/items/init.lua's
+--     technologyRows() uses to read the live technology tables, and it asks for the ONE
+--     object we want, touching nothing else; the
+--     FindAllOf("DataTable") + o:GetFName():ToString() sweep that dumped the 390-table
+--     catalog (tests/catalog.lua:141-163) is the fallback for when that global is absent or
+--     misses. The order is not cosmetic: tests/catalog.lua:6-10 records the sweep as
+--     crash-prone (it touches EVERY loaded table, and a stale pointer there raises an access
+--     violation Lua's pcall cannot catch), which is why utils/items refuses it "inside an
+--     ordinary helper" — and iconOf() is exactly that.
 --   * The /Game PACKAGE PATHS are NOT proven. They appear nowhere else in either tree, and
 --     no dump ever recorded an icon table's path — the dumper only ever recorded object
 --     NAMES. They survive as a last-resort fallback only, now written in the "Package.Object"
 --     form LoadAsset actually wants (the convention that works in core/sound/native.lua).
---   * READING A ROW is proven NOWHERE. No artifact in either tree has ever read a DataTable
---     row VALUE from Lua; the catalog dumper read row NAMES only. GetDataTableRowFromName /
---     FindRow are the right UE5 members to try, but neither has been observed to fire on this
---     build, and the icon column is a probe list (see ICON_COLUMNS) rather than a fact.
---   So: this module now finds the table for real, and the last two steps stay best-effort.
+--     Every table this module finds is logged WITH ITS FULL NAME, so one line of UE4SS.log
+--     from a loaded world settles the real paths without a probe.
+--   * READING A ROW is proven NOWHERE, and the two members tried are unlikely to be the
+--     answer — see findRow. No artifact in either tree has ever read a DataTable row VALUE
+--     from Lua; the catalog dumper read row NAMES only. The icon column is likewise a probe
+--     list (see ICON_COLUMNS) rather than a fact.
+--   So: this module finds the table for real, and the last two steps stay best-effort.
 --
 -- Strictly fail-soft. Every engine call is inside a pcall, any miss at any step returns nil,
 -- and each domain's iconOf() then falls back to the declared `icon`. Nothing throws when the
@@ -71,6 +79,12 @@ local PACKAGE_DIRS = {
 -- `Texture` are defensive leftovers; "Icon" does not appear in that name table at all, and each
 -- extra probe costs one nil index, so they stay last. All of this is name-table inference: no
 -- row has ever actually been read here, so the ORDER is a bet, not a measurement.
+-- Settling it does NOT need a readable row, only the row STRUCT: a UDataTable carries its
+-- RowStruct as a property and dump/dump.lua:55-59 already walks it
+-- (`dt.RowStruct` -> `rs:ForEachProperty(...)`) to print a table's columns — that output is
+-- what this list should be replaced by.
+-- TODO(icons-row-column): unknown which property of each icon table's row struct holds the
+-- texture ref, and of what type — these five names are inferred, never observed.
 local ICON_COLUMNS = { "SoftIcon", "IconName", "IconTexture", "Icon", "Texture" }
 
 -- Seconds between full discovery sweeps, and between retries for one table name. A /Game
@@ -112,6 +126,33 @@ local function objName(o)
     return nil
 end
 
+-- Full object name, for the log only. This is the one line that turns PACKAGE_DIRS from a
+-- guess into a fact: it prints the real package path of a table we actually found.
+local function objPath(o)
+    local ok, s = pcall(function() return o:GetFullName() end)
+    if ok and type(s) == "string" and #s > 0 then return s end
+    return "?"
+end
+
+-- Cache a discovered table and say so once, with its full name (see objPath).
+local function noteTable(name, dt, how)
+    tableCache[name] = dt
+    log.info(string.format("icon DataTable %s (%s) = %s", name, how, objPath(dt)))
+    return dt
+end
+
+-- TARGETED lookup — UE4SS's FindObject("DataTable", "<name>") overload (class short name +
+-- object short name). Same call utils/items/init.lua's technologyRows() makes for the
+-- technology tables, and preferred over the sweep for the reason recorded there: the sweep
+-- walks every loaded UDataTable and tests/catalog.lua:6-10 documents that as crash-prone.
+-- One targeted lookup costs nothing, and when it hits, the sweep below never runs at all.
+local function findObjectByName(name)
+    if type(FindObject) ~= "function" then return nil end
+    local ok, o = pcall(FindObject, "DataTable", name)
+    if ok and isValid(o) then return o end
+    return nil
+end
+
 -- Every table name any domain might ask for, read fresh so extending M.TABLES keeps working.
 local function wantedNames(extra)
     local want = {}
@@ -145,8 +186,7 @@ local function sweep(target)
         if isValid(dt) then
             local name = objName(dt)
             if name and want[name] and tableCache[name] == nil then
-                tableCache[name] = dt
-                log.info("discovered icon DataTable " .. name)
+                noteTable(name, dt, "sweep")
             end
         end
     end
@@ -170,9 +210,9 @@ local function loadTable(name)
     return nil
 end
 
--- The live UDataTable named `name`, or nil. Cache first (free), then discovery, then the path
--- fallback. A cached object that has gone invalid (world teardown) is dropped and looked up
--- again rather than handed back.
+-- The live UDataTable named `name`, or nil. Cache first (free), then the targeted lookup,
+-- then the sweep, then the path fallback — cheapest and safest first. A cached object that
+-- has gone invalid (world teardown) is dropped and looked up again rather than handed back.
 local function findTable(name)
     if type(name) ~= "string" or #name == 0 then return nil end
     local cached = tableCache[name]
@@ -185,16 +225,16 @@ local function findTable(name)
     if last and (t - last) < RETRY_COOLDOWN then return nil end
     lastTry[name] = t
 
+    local tbl = findObjectByName(name)
+    if tbl then return noteTable(name, tbl, "FindObject") end
+
     sweep(name)
-    local tbl = tableCache[name]
+    tbl = tableCache[name]
     if tbl then return tbl end
 
     tbl = loadTable(name)
-    if tbl then
-        tableCache[name] = tbl
-        log.info("loaded icon DataTable " .. name .. " by path")
-    end
-    return tbl
+    if tbl then return noteTable(name, tbl, "path") end
+    return nil
 end
 
 -- The id as an FName when the engine is there, as the raw string when it is not. Passing
@@ -214,6 +254,20 @@ end
 -- of these has been observed to work on this build — reading a row value from Lua is a
 -- capability nobody in this tree has demonstrated — so a nil here means "the unproven route
 -- did not fire", not "there is no such row".
+--
+-- Be pessimistic about both, and about anything shaped like them. In UE, GetDataTableRowFromName
+-- is not a member of UDataTable at all: it is a static on UDataTableFunctionLibrary declared
+-- CustomThunk with a wildcard output struct, and the wildcard's real type comes from Blueprint
+-- bytecode — a reflected call can only offer the declared FTableRowBase, which the thunk
+-- rejects as incompatible with the table's row type. FindRow is a C++ template and is not
+-- reflected at all. The library's SIBLING function is the shape that does work here
+-- (dtfl:GetDataTableRowNames(dt) — dump/dump.lua:64, tests/catalog.lua:105-119, and
+-- utils/items/init.lua's rowNamesInto), and it returns row NAMES, not values. So the missing
+-- capability is probably not a call spelling but a whole accessor; whatever probe closes this
+-- has to go LOOKING for one rather than assume one, which is why no third guess is bolted on
+-- here.
+-- TODO(icons-row-read): unknown whether ANY reflected row-VALUE accessor exists on this build
+-- (on UDataTable, on UDataTableFunctionLibrary, or as a Pal-specific icon getter).
 local function findRow(tbl, id)
     local key = nameArg(id)
     -- 1) GetDataTableRowFromName(RowName), FName first then the raw string.

@@ -20,14 +20,14 @@
 ---@class Mesh.Spec
 ---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
 ---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # USkeletalMesh / UStaticMesh asset path
+---@field model string # USkeletalMesh / UStaticMesh object path; for procedural / obj, an absolute .obj file path
 ---@field animClass? string # ABP_*_C animation blueprint path (skeletal only)
 ---@field scale? number # uniform scale applied to the attached mesh
----@field offset? table # { x, y, z } offset from the pawn's origin
+---@field offset? table # { x, y, z } offset from the mesh's normal position, in cm
 ---@field texture? string # absolute path to a png applied to the mesh
 ---@field color? table # tint { r, g, b, a } in 0..1
 ---@field material? string # base material asset path to instance from
----@field params? table # extra material parameters passed through
+---@field params? table # extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = "<abs png>" } }
 
 --=============================================================================
 -- Pal
@@ -70,20 +70,20 @@
 ---@field station? string # workbench / station id that can craft it
 
 ---@class Item.Spec.Events
----@field onObtain? fun(self: Item.Handle, ctx: table) # LIVE - entered the inventory (ctx.count)
----@field onUse? fun(self: Item.Handle, ctx: table) # LIVE - used / consumed (ctx.actor)
----@field onCraft? fun(self: Item.Handle, ctx: table) # declarable; no native source exists yet
----@field onDiscard? fun(self: Item.Handle, ctx: table) # declarable; no native source exists yet
+---@field onObtain? fun(self: Item.Handle, ctx: table) # LIVE - entered the inventory (ctx.count, ctx.via)
+---@field onUse? fun(self: Item.Handle, ctx: table) # LIVE - used / consumed (ctx.actor = the local player pawn)
+---@field onCraft? fun(self: Item.Handle, ctx: table) # declarable; NO native source exists — fires only on a manual emit
+---@field onDiscard? fun(self: Item.Handle, ctx: table) # declarable; NO native source exists — fires only on a manual emit
 
 ---@alias Item.Spec.Category "material"|"consumable"|"equipment"|"ammo"|"ingredient"|"other"
 ---@class Item.Spec
 ---@field id string # item id: a game ItemId ("Wood") or "pack:name"
----@field name? string # shown in UI (defaults to id)
+---@field name? string # display name for YOUR ui/tooling; not the in-game name (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
----@field category? Item.Spec.Category # what kind of inventory content this is (default material)
----@field maxStack? number # inventory stack ceiling (default 1)
+---@field category? Item.Spec.Category # what kind of inventory content this is (PalForge's own classification) (default material)
+---@field maxStack? number # stack ceiling you declare; the GAME's ceiling is a DataTable column (default 1)
 ---@field icon? any # fallback icon used when the DataTable lookup misses
----@field recipe? Item.Spec.Recipe # the recipe that produces THIS item
+---@field recipe? Item.Spec.Recipe # the recipe that produces THIS item (metadata; see Item.Spec.Recipe)
 ---@field events? Item.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 
@@ -102,7 +102,7 @@
 ---@field texture? string # absolute path to a png applied to the mesh
 ---@field color? table # tint { r, g, b, a } in 0..1
 ---@field material? string # base material asset path to instance from
----@field params? table # extra material parameters passed through
+---@field params? table # extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = "<abs png>" } }
 
 ---@class Building.Spec.Material
 ---@field color? table # tint { r, g, b, a } in 0..1
@@ -194,10 +194,10 @@
 ---@field name? string # human label (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field kind? Audio.Spec.Kind # descriptive only - the native play route is the same for both (default se)
----@field soundId? string # native AkAudioEvent name (the SoundID fallback route)
----@field soundPath? string # native AkAudioEvent asset path (the route that actually plays)
+---@field soundId? string # native AkAudioEvent name - its asset path is filled in from the native catalog when you do not pass one
+---@field soundPath? string # native AkAudioEvent asset path (the route that actually plays); overrides the catalog lookup
 ---@field soundFile? string # custom audio file path (seam - not playable yet)
----@field source? fun(self: Audio.Handle): table|nil # override that returns the core.sound spec yourself
+---@field source? fun(self: Audio.Definition): table|nil # override that returns the core.sound spec yourself; `self` is the DEFINITION, not the handle
 ---@field data? table # free-form payload of your own, carried onto the definition
 
 --=============================================================================

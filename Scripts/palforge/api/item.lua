@@ -10,20 +10,34 @@
 -- cls:onXxx(ctx) with the class as self.
 --
 --   WIRED (live, confirmed native hooks — see core/event installItemSource):
---     onObtain  <- PalPlayerState:AddItemGetLog_ToClient   (ctx.itemId, ctx.count)
---     onUse     <- PalItemUseProcessor:UseItemToCharacter_ServerInternal (ctx.itemId, ctx.actor)
+--     onObtain  <- PalPlayerState:AddItemGetLog_ToClient, plus the inventory add path
+--                  (ctx.itemId, ctx.count, ctx.via = "getlog" | "additem")
+--     onUse     <- PalItemUseProcessor:UseItemToCharacter_ServerInternal
+--                  (ctx.itemId; ctx.actor = the LOCAL player pawn — the character who used
+--                   the item, which is the one used ON only for self-use; ctx.itemData and
+--                   ctx.targetId carry the raw params)
 --   NOT WIRED YET (channel + dispatch exist, no native source found):
 --     onCraft / onDiscard — nothing emits item.craft / item.discard, so these never fire.
 --     They stay declarable so a pack's code is future-proof.
 --
 -- ACTIONS: :give moves the count through the game's own server path (AddItem_ServerInternal,
--- via utils.items) and is the best-proven call in the tree. :take is NOT its equal — no
--- removal call has ever been confirmed on this build, so it pushes a negative delta through
--- that same add call and then re-reads the inventory count, returning whether anything
--- actually left (see utils.items.take). :iconOf reads the live icon DataTable.
--- Publishing a BRAND-NEW item row into the game's data tables is NOT possible from Lua
--- alone (that is PalSchema's job) — defining gives an existing id behaviour, it does not
--- create inventory content.
+-- via utils.items) and is the best-proven call in the tree; it now reads the inventory count
+-- back, so a bogus id or a full inventory answers false instead of pretending. :take is NOT
+-- its equal — no removal call has ever been confirmed on this build, so it pushes a negative
+-- delta through that same add call and then re-reads the count, returning whether anything
+-- actually left (see utils.items.take).
+--
+-- WHAT IS DECLARATIVE, NOT LIVE — read this before believing a field did something:
+--   * name / description / category / maxStack / recipe are metadata PalForge stores and
+--     hands back through the queries below. They are NOT written to the game: an item's real
+--     stack size, its real recipe and its very existence live in DT_ItemDataTable /
+--     DT_ItemRecipeDataTable rows, which Lua cannot author — that is PalSchema's job (see
+--     PalSmith/packs/ExamplePack/items/example_items.jsonc, where MaxStackCount and the
+--     Recipe block are declared as JSON). Defining gives an EXISTING item id behaviour; it
+--     does not create inventory content and it does not re-balance it.
+--   * :iconOf goes to the live icon DataTable through core.icons, but no artifact in this
+--     tree has ever read a DataTable row VALUE, so in practice it returns the icon you
+--     declared. See the marker on Class:iconOf.
 --
 --   Item{
 --       id = "Berries", name = "Red Berries", category = "consumable",
@@ -31,7 +45,8 @@
 --           onUse = function(item, ctx) log.info(tostring(ctx.actor)) end,
 --       },
 --   }
---   Item.get("Wood"):give(10)
+--   Item.get("Wood"):give(10)      -- false if nothing landed
+--   Item.get("Wood"):count()       -- what the inventory holds now (nil = could not read)
 
 local om     = require("palforge.core.object_manager")
 local icons  = require("palforge.core.icons")
@@ -49,7 +64,12 @@ local schema = require("palforge.core.schema")
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----A crafting recipe, declared on the item it produces.
+---A crafting recipe, declared on the item it produces. AUTHOR METADATA: PalForge stores it
+---and hands it back from :recipeOf, and nothing else in the framework reads it. A recipe the
+---game will actually run is a DT_ItemRecipeDataTable row (columns Product_Count / WorkAmount
+---/ MaterialN_Id / MaterialN_Count — the shape these fields mirror), and Lua cannot author a
+---DataTable row; declare it as PalSchema JSON and use this to describe the same thing to your
+---own code and tooling.
 local Recipe = schema.define("Item.Spec.Recipe", {
     { "materials", type = "table", mapOf = "number", required = true,
                    doc = "{ <itemId> = <count> } consumed by one craft" },
@@ -63,27 +83,35 @@ local Recipe = schema.define("Item.Spec.Recipe", {
 ---name is a hard error, not a silent no-op.
 local Events = schema.define("Item.Spec.Events", {
     { "onObtain",  type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "LIVE - entered the inventory (ctx.count)" },
+                   doc = "LIVE - entered the inventory (ctx.count, ctx.via)" },
     { "onUse",     type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "LIVE - used / consumed (ctx.actor)" },
+                   doc = "LIVE - used / consumed (ctx.actor = the local player pawn)" },
+    -- TODO(item-craft-source): unknown which UFunction reports a craft COMPLETING and which
+    -- of its params carries the produced item id + count. Until one is observed this only
+    -- fires from a manual event.emit("item.craft", ...).
     { "onCraft",   type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "declarable; no native source exists yet" },
+                   doc = "declarable; NO native source exists — fires only on a manual emit" },
+    -- TODO(item-discard-source): unknown which UFunction reports a drop / discard / consume,
+    -- and whether it is just AddItem_ServerInternal with a negative Count.
     { "onDiscard", type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "declarable; no native source exists yet" },
+                   doc = "declarable; NO native source exists — fires only on a manual emit" },
 })
 
 ---What you pass to Item{ ... }. `id` is the only required field.
 local Spec = schema.define("Item.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "item id: a game ItemId (\"Wood\") or \"pack:name\"" },
-    { "name",        type = "string", doc = "shown in UI (defaults to id)" },
+    { "name",        type = "string",
+                     doc = "display name for YOUR ui/tooling; not the in-game name (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "category",    type = "string", default = "material",
                      values = { "material", "consumable", "equipment", "ammo", "ingredient", "other" },
-                     doc = "what kind of inventory content this is" },
-    { "maxStack",    type = "number", default = 1, doc = "inventory stack ceiling" },
+                     doc = "what kind of inventory content this is (PalForge's own classification)" },
+    { "maxStack",    type = "number", default = 1,
+                     doc = "stack ceiling you declare; the GAME's ceiling is a DataTable column" },
     { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
-    { "recipe",      type = "table", of = Recipe, doc = "the recipe that produces THIS item" },
+    { "recipe",      type = "table", of = Recipe,
+                     doc = "the recipe that produces THIS item (metadata; see Item.Spec.Recipe)" },
     { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
     { "data",        type = "table", doc = "free-form payload of your own, carried onto the definition" },
 })
@@ -105,11 +133,21 @@ function Class:onUse(ctx) end
 function Class:onCraft(ctx) end
 function Class:onDiscard(ctx) end
 
--- This item's recipe, or nil if it is not craftable. Override to build one dynamically.
+-- This item's DECLARED recipe, or nil when none was declared. Override to build one
+-- dynamically. It never reads the game: a vanilla id answers nil even though
+-- DT_ItemRecipeDataTable_Common has a row for it, because reading a row VALUE is the same
+-- unsolved capability :iconOf is waiting on (see the marker there).
 function Class:recipeOf() return self.recipe end
 
--- The live inventory icon: look the id up in the item icon DataTable, falling back to
--- the declared self.icon on any miss.
+-- The inventory icon. core.icons finds the live DT_ItemIconDataTable for real (the
+-- FindAllOf sweep that dumped the 390-table catalog), but the last step — reading the row —
+-- has never been observed to work from Lua on this build, so this falls back to the declared
+-- self.icon and that is what you get in practice.
+-- TODO(item-datatable-row-read): unknown which row-VALUE accessor a UDataTable exposes to
+-- UE4SS Lua here (GetDataTableRowFromName / FindRow / something else) and what it hands back.
+-- Settling it turns both :iconOf and :recipeOf into live reads; nothing else is missing —
+-- the tables are found, the row keys are the item ids, and the columns are known
+-- (IconName/SoftIcon for icons, Product_Count/WorkAmount/MaterialN_Id for recipes).
 function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, self.id) end)
     if ok and tex ~= nil then return tex end
@@ -190,9 +228,12 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 -- ---- actions ----
 
----Add `count` of this item to the local player's inventory (default 1).
+---Add `count` of this item to the local player's inventory (default 1). Goes through the
+---game's own AddItem_ServerInternal and then reads the inventory count back, so `ok` is
+---false when nothing landed — an id the item table does not know, or no room. (A build that
+---will not hand back a count answers true and logs that the add is unverified.)
 ---@param count integer?
----@return boolean ok
+---@return boolean ok  # true when the count was seen to rise, or could not be read at all
 function Handle:give(count) return items.give(self.id, count or 1) end
 
 ---TRY to remove `count` of this item from the local player's inventory (default 1).
@@ -203,6 +244,12 @@ function Handle:give(count) return items.give(self.id, count or 1) end
 ---@param count integer?
 ---@return boolean ok  # true only when the inventory count actually dropped
 function Handle:take(count) return items.take(self.id, count or 1) end
+
+---How many of this item the local player is holding right now, or nil when the count cannot
+---be read (no world, or CountItemNum unbound — nil is UNKNOWN, never zero). This is the same
+---measurement :give and :take report their outcome from.
+---@return integer?
+function Handle:count() return items.count(self.id) end
 
 -- ---- lifecycle events (fired by core.event on the definition; forward for manual use) ----
 

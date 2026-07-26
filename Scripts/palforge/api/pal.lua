@@ -56,9 +56,10 @@
 -- ACTIONS are real: :spawn goes through UPalCheatManager (server-verified; core/spawn
 -- constructs one itself on a dedicated server, where nothing else does). A coordinate
 -- spawn is a spawn-then-relocate, so it reports that the spawn was ACCEPTED, not that
--- the pal reached the coordinate — see :spawn below. Note that defining gives an
--- EXISTING CharacterID behaviour — Lua cannot add a brand-new creature row (that is
--- PalSchema's job).
+-- the pal reached the coordinate — see :spawn below. The id reaches core/spawn exactly as
+-- it was declared and is resolved there ("pack:Boss" -> the row spelling "pack_Boss"), so a
+-- namespaced pal spawns like a literal one. Note that defining gives an EXISTING CharacterID
+-- behaviour — Lua cannot add a brand-new creature row (that is PalSchema's job).
 --
 -- LAYOUT
 --   SPEC    — the shape of Pal{ ... }, declared as data (core/schema). It is PRIVATE to
@@ -92,6 +93,7 @@ local spawn   = require("palforge.core.spawn")
 local mesh    = require("palforge.core.mesh")
 local icons   = require("palforge.core.icons")
 local schema  = require("palforge.core.schema")
+local log     = require("palforge.utils.log").scope("pal")
 
 -- The mesh a spawned pawn wears is api/mesh's shape, not a copy of it, so `mesh = { ... }`
 -- written inline and `mesh = Mesh{ ... }` passed as a defined object are the same shape
@@ -123,6 +125,9 @@ local Material = schema.define("Pal.Spec.Material", {
 ---handle as its first argument and an event context `ctx` (ctx.actor = the pawn in the
 ---world). An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Pal.Spec.Events", {
+    -- TODO(pal-spawned-hook): nobody has ever seen this channel's hook fire — the one probe
+    -- that armed BroadcastOnCompleteInitializeParameter recorded 0 calls, and it has not been
+    -- re-armed post-load since. Handlers stay idempotent until a run proves it.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -171,6 +176,10 @@ function Class:onCaptured(ctx) end
 -- implements it, so a pal that declares no onTick costs nothing per sweep.
 function Class:onTick(ctx) end
 
+-- The declared skill ids, verbatim. DECLARATIVE ONLY: nothing here teaches the pawn
+-- anything — a pack reads the list back and drives each skill itself through api/skill.
+-- TODO(pal-skills-equip): no add-skill/waza call is named anywhere in either tree, so a
+-- declared `skills` list cannot be pushed onto a spawned pal.
 function Class:skillsOf() return self.skills or {} end
 function Class:mesh() return self.meshSpec end
 
@@ -189,6 +198,8 @@ end
 
 -- The paldeck / capture-UI icon: look the id up in the pal character icon DataTable,
 -- falling back to the declared self.icon on any miss.
+-- TODO(pal-icon-row): the DataTable ROW READ core/icons performs has never been observed to
+-- return anything on this build, so in practice this is the fallback and nothing else.
 function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.pal, self.id) end)
     if ok and tex ~= nil then return tex end
@@ -232,7 +243,18 @@ local function define(spec)
     for name, handler in pairs(spec.events or {}) do           -- onSpawned, ...
         cls[name] = function(_, ...) return handler(handle, ...) end
     end
-    pcall(function() om.register("pal", spec.id, cls) end)  -- so core/event + get() find it
+    -- Registration is what makes the definition reachable: core/event resolves a spawned
+    -- pawn to THIS class through it, and Pal.get hands it back. om.register never throws
+    -- (it answers nil + reason) and neither argument can be wrong here — "pal" is a declared
+    -- type and the spec guarantees a non-empty id — so a refusal means the registry itself
+    -- moved under us. Say so: an unregistered definition is a pal whose every event is
+    -- silently dead, and that must not be invisible.
+    local called, okReg, regErr = pcall(om.register, "pal", spec.id, cls)
+    if not called then okReg, regErr = nil, okReg end   -- it raised: the message is arg 2
+    if not okReg then
+        log.err(string.format("Pal '%s' could NOT be registered (%s) — it will receive no "
+            .. "lifecycle events and Pal.get will not find it", tostring(spec.id), tostring(regErr)))
+    end
     return handle
 end
 
@@ -303,9 +325,12 @@ end
 ---re-stacking). Pals get no tracked instance, so the caller supplies the actor — typically
 ---`ctx.actor` inside onSpawned, or inside onTick if the sweep is how you find your pawns.
 ---Fail-soft false when there is no mesh or no valid actor.
----NOTE: the material fields (color / texture / params / material) are applied by the
----procedural / obj backends only; on the default skeletal backend they are carried but
----inert, so a true return there means the MESH was swapped, not that it was painted.
+---NOTE: the material fields (color / texture / params / material) are lowered into the
+---mesh spec and every backend now runs them through core.mesh's dynamic-material layer,
+---the default skeletal one included. That layer writes a list of CANDIDATE parameter
+---names, because no dump records what a Palworld material actually calls its tint — so a
+---true return means the mesh was swapped and the material write ran, not that the pawn
+---visibly changed colour (the mesh-material-params marker in core/mesh/base/renderer.lua).
 ---@param actor any   # the pawn to decorate (e.g. ctx.actor)
 ---@return boolean ok
 function Handle:renderOn(actor)
@@ -317,6 +342,9 @@ function Handle:renderOn(actor)
         model = m.model, animClass = m.animClass, scale = m.scale, offset = m.offset,
         color = m.color, texture = m.texture, params = m.params, material = m.material,
     }
+    -- The pal-level material block / shorthands override whatever the mesh declared, so a
+    -- shared Mesh{ ... } can be re-tinted per pal. core.mesh's renderer base applies these
+    -- on every backend (skeletal included).
     local mat = self._cls:material()
     if type(mat) == "table" then
         def.color    = mat.color    or def.color

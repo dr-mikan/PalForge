@@ -15,10 +15,11 @@
 --
 -- What is NOT wired: the game's own ailments (EPalStatusEffectType — Poison / Burn /
 -- Freeze) are a native enum, and no native call to apply one was confirmed, so a PalForge
--- effect does not toggle the game's status icon. The gameplay lives in YOUR handlers —
+-- effect does not toggle the game's status icon. `nativeStatus` is therefore an ANNOTATION
+-- today: it is validated, stored on the definition and readable off it, and nothing acts on
+-- it — see TODO(effect-native-status) in Handle:apply. The gameplay lives in YOUR handlers —
 -- onTick is where you deal the damage / heal / buff through whatever call you have (e.g.
--- utils.items, an actor method). Native ailment application stays a `-- TODO:` in
--- native/effects.lua.
+-- utils.items, an actor method).
 --
 --   local Regen = Effect{
 --       id = "example:Regen", name = "Regeneration",
@@ -130,10 +131,43 @@ local function expire(byId, id, app, reason)
     end)
 end
 
+-- Every live application, flattened, BEFORE any handler runs. Handlers are pack code and
+-- are free to :apply() / :remove() from inside themselves — an onExpire that chains the
+-- next effect on, an onTick that removes its own application. Both mutate `apps` or one of
+-- its buckets, and INSERTING a key into a table that `pairs` is walking is undefined in
+-- Lua (the "invalid key to 'next'" error). So a pass never walks the live tables: it walks
+-- this snapshot and re-checks liveness per entry.
+local function snapshot()
+    local list = {}
+    for _, byId in pairs(apps) do
+        for id, app in pairs(byId) do
+            list[#list + 1] = { byId = byId, id = id, app = app }
+        end
+    end
+    return list
+end
+
+-- Drop the buckets a pass emptied. An emptied bucket would otherwise sit in `apps` until
+-- its target is collected — and for ever, for GLOBAL and plain-table keys. Only the empty
+-- ones go, so a handler that re-applied during teardown does not lose what it just added.
+-- (Clearing an EXISTING key while `pairs` walks the same table is well-defined; adding one
+-- is what snapshot() exists to avoid.)
+local function prune()
+    for key, byId in pairs(apps) do
+        if next(byId) == nil then apps[key] = nil end
+    end
+end
+
+-- Is this snapshot entry still the live application under its id? False once a handler
+-- earlier in the same pass removed it (byId[id] == nil) or re-applied it as a fresh app
+-- table. Every dispatch point re-asks, so no application is ever expired twice.
+local function stillLive(e) return e.byId[e.id] == e.app end
+
 -- One heartbeat: advance every live application (periodic tick, then expiry).
 local function step()
-    for key, byId in pairs(apps) do
-        for id, app in pairs(byId) do
+    for _, e in ipairs(snapshot()) do
+        local byId, id, app = e.byId, e.id, e.app
+        if stillLive(e) then
             if not targetAlive(app.target) then
                 expire(byId, id, app, "target_gone")
             else
@@ -141,7 +175,9 @@ local function step()
                 local interval = tonumber(app.cls.interval)
                 if interval and interval > 0 then
                     app.acc = app.acc + DT
-                    while app.acc >= interval do
+                    -- stillLive again per iteration: an onTick that removes its own
+                    -- application must not be called a second time on the same beat.
+                    while app.acc >= interval and stillLive(e) do
                         app.acc = app.acc - interval
                         pcall(function()
                             app.cls:onTick(app.target, { effect = id, elapsed = app.elapsed,
@@ -149,16 +185,16 @@ local function step()
                         end)
                     end
                 end
-                if app.remaining then
+                -- and again before the deadline: onTick may already have ended it, and
+                -- expiring it a second time would fire onExpire twice with two reasons.
+                if stillLive(e) and app.remaining then
                     app.remaining = app.remaining - DT
                     if app.remaining <= 0 then expire(byId, id, app, "duration") end
                 end
             end
         end
-        -- an emptied bucket would otherwise sit in `apps` until its target is collected
-        -- (and for ever, for GLOBAL and plain-table keys), so drop it here.
-        if next(byId) == nil then apps[key] = nil end
     end
+    prune()
 end
 
 -- Release EVERY live application. The world is going away, so nothing that was applied
@@ -167,12 +203,11 @@ end
 -- its OWN value, "world_left", so a handler can tell a world unload apart from a duration
 -- expiry, a :remove() or a despawned target.
 local function dropAll()
-    for key, byId in pairs(apps) do
-        for id, app in pairs(byId) do expire(byId, id, app, "world_left") end
-        -- same prune as step(); only when it really emptied, so an onExpire handler that
-        -- re-applies something during the teardown does not lose it.
-        if next(byId) == nil then apps[key] = nil end
+    for _, e in ipairs(snapshot()) do
+        -- an onExpire earlier in the teardown may already have removed this one
+        if stillLive(e) then expire(e.byId, e.id, e.app, "world_left") end
     end
+    prune()
 end
 
 -- Subscribe to the heartbeat AND to the world-unload signal on FIRST use, so requiring
@@ -312,6 +347,9 @@ function Handle:apply(target, ctx)
         remaining = tonumber(cls.duration) or nil,
     }
     byId[cls.id] = app
+    -- TODO(effect-native-status): cls.nativeStatus is stored and read by nothing — the native
+    -- add/remove-status call (and the EPalStatusEffectType value it takes) is undumped, so a
+    -- declared nativeStatus toggles no game ailment. The remove side belongs in expire().
     pcall(function()
         cls:onApply(target, setmetatable({ effect = cls.id, stacks = 1 }, { __index = ctx }))
     end)
@@ -322,10 +360,13 @@ end
 ---@param target any?
 ---@return boolean removed
 function Handle:remove(target)
-    local byId = apps[target or GLOBAL]
+    local key  = target or GLOBAL
+    local byId = apps[key]
     local app = byId and byId[self.id]
     if not app then return false end
     expire(byId, self.id, app, "removed")
+    -- only when it really emptied: onExpire may have re-applied something into the bucket.
+    if next(byId) == nil then apps[key] = nil end
     return true
 end
 

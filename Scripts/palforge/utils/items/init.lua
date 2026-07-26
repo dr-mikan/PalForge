@@ -5,9 +5,10 @@
 -- unlocking tech — no dependency on any specific item/building class.
 --
 --   local items = require("palforge.utils.items")
---   items.give("Wood", 10)         -- add 10 Wood to the local player
+--   items.give("Wood", 10)         -- add 10 Wood to the local player (measured)
 --   items.give("example:Potion")   -- namespaced ids resolve to their DataTable fname
---   items.take("Wood", 3)          -- TRY to remove 3 Wood (unconfirmed call; verified)
+--   items.take("Wood", 3)          -- TRY to remove 3 Wood (unconfirmed call; measured)
+--   items.count("Wood")            -- what the inventory holds right now, or nil
 --   items.unlockAllTech()          -- PalCheatManager: recipe + category + lv-cap
 --   items.unlockTech("example:Bench") -- unlock one technology row (ids resolve too;
 --                                     -- true only if that row really exists in game)
@@ -15,10 +16,10 @@
 -- Fail-soft everywhere: every engine call is pcall-wrapped and reported via
 -- utils.log; helpers return true on success, false on failure (never throw). What
 -- "success" means differs per helper and each one says so on its own doc comment:
--- take MEASURES the inventory count and reports what actually moved, unlockTech CHECKS
--- that the name really is a row of the live technology table before claiming anything,
--- while give and unlockAllTech can only report that the native call executed without
--- raising — no add-item or cheat call on this build reports back what it did.
+-- give and take both MEASURE the inventory count around the write and report what
+-- actually moved, unlockTech CHECKS that the name really is a row of the live technology
+-- table before claiming anything, while unlockAllTech can only report that the native
+-- cheats executed without raising — no cheat on this build reports back what it did.
 local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
 
@@ -40,11 +41,27 @@ local function playerInventory()
 end
 
 -- How many of `id` the local inventory holds right now; nil when the count could not be
--- read. CountItemNum is the accessor deprecated.container.probeWrite used to confirm its
--- AddItem writes landed, so it is the one proven way to check an inventory write.
+-- read. CountItemNum is the accessor deprecated.container.probeWrite reached for when it
+-- wanted to confirm its AddItem writes landed — but it wrapped the call in its own pcall
+-- and no run of it was ever recorded, so "readable" is the assumption this whole module's
+-- honesty rests on and NOT an observation. Every caller here treats nil as UNKNOWN, never
+-- as zero, so a build where this is unbound degrades to "unverified", not to a lie.
+-- TODO(item-inventory-count-readback): unknown whether UPalPlayerInventoryData:CountItemNum
+-- is reflected on this build and what it returns (int vs struct) — one probe call settles it.
 local function countOf(inv, id)
     local ok, n = pcall(function() return inv:CountItemNum(FName(id)) end)
     if ok then return tonumber(n) end
+    return nil
+end
+
+-- Both write helpers do the same three steps around one AddItem_ServerInternal call:
+-- resolve the inventory, read the count, write, read again. This is that preamble —
+-- the live inventory, or nil plus the reason the caller should log.
+local function inventoryFor(what, itemId, count)
+    local inv
+    local ok, e = pcall(function() inv = playerInventory() end)
+    if ok then return inv end
+    log.err(string.format("%s %s x%d failed: %s", what, tostring(itemId), count, tostring(e)))
     return nil
 end
 
@@ -65,20 +82,69 @@ local function cheatManager()
     return cm
 end
 
+-- The live count of `itemId` in the local player's inventory, or nil when it cannot be
+-- read (no world, no player, or CountItemNum unbound — see countOf). nil is UNKNOWN, not
+-- zero. Namespaced ids resolve like they do everywhere else.
+function M.count(itemId)
+    local resolved = object_manager.resolve(itemId) or itemId
+    local n
+    local ok = pcall(function() n = countOf(playerInventory(), resolved) end)
+    if not ok then return nil end
+    return n
+end
+
 -- Add `count` of `itemId` to the local player's inventory. Namespaced ids
 -- ("pack:Name") resolve to their DataTable fname ("pack_Name"); literal ids pass
--- through. Uses the game's own server path AddItem_ServerInternal (the same call
--- deprecated.container.probeWrite verified as safe). Returns true on success.
+-- through. Uses the game's own server path AddItem_ServerInternal — the best-verified
+-- call in the reference library and the one deprecated.container.probeWrite was written
+-- to confirm.
+--
+-- The CALL being proven is not the same as the ADD landing: an id the item table does not
+-- know and an inventory with no room both execute happily and move nothing. So the outcome
+-- is MEASURED, exactly like take does it — CountItemNum before and after — and true means
+-- the count was seen to RISE. The one exception is an unreadable count (countOf nil): the
+-- write itself is the proven call, so a build that will not hand back a count gets a true
+-- and a log line saying the add is unverified, rather than a false for a call that most
+-- likely worked. Both outcomes are logged distinctly.
 function M.give(itemId, count)
-    count = count or 1
+    count = math.floor(tonumber(count) or 1)
     local resolved = object_manager.resolve(itemId) or itemId
+    if count <= 0 then
+        log.err(string.format("give %s x%d: count must be a positive number", tostring(resolved), count))
+        return false
+    end
+
+    local inv = inventoryFor("give", resolved, count)
+    if not inv then return false end
+
+    local before = countOf(inv, resolved)
     local ok, e = pcall(function()
-        local inv = playerInventory()
         inv:AddItem_ServerInternal(FName(resolved), count, false, 0.0)
     end)
-    if ok then log.info(string.format("give %s x%d", tostring(resolved), count))
-    else log.err(string.format("give %s x%d failed: %s", tostring(resolved), count, tostring(e))) end
-    return ok
+    if not ok then
+        log.err(string.format("give %s x%d failed: %s", tostring(resolved), count, tostring(e)))
+        return false
+    end
+    local after = countOf(inv, resolved)
+
+    if before == nil or after == nil then
+        log.info(string.format("give %s x%d (issued; CountItemNum unreadable, so the add is unverified)",
+            tostring(resolved), count))
+        return true
+    end
+    local moved = after - before
+    if moved <= 0 then
+        log.err(string.format("give %s x%d: count unchanged at %d — nothing entered the inventory " ..
+            "(no such item id, or no room)", tostring(resolved), count, before))
+        return false
+    end
+    if moved < count then
+        log.warn(string.format("give %s x%d: only %d landed (%d -> %d)",
+            tostring(resolved), count, moved, before, after))
+    else
+        log.info(string.format("give %s x%d (%d -> %d)", tostring(resolved), count, before, after))
+    end
+    return true
 end
 
 -- TRY to remove `count` of `itemId` from the local player's inventory. `count` is treated
@@ -86,27 +152,52 @@ end
 --
 -- ⚠️ REMOVAL IS UNCONFIRMED. No removal call has ever been found on this build — not in
 -- the POCs, the deprecated Lua, the C++ module, the probe harness or the knowledge notes;
--- AddItem_ServerInternal is documented for ADDS only. This pushes a NEGATIVE delta through
--- that same add call on the untested hypothesis that the game accepts it. Because that is
--- a hypothesis, the outcome is MEASURED instead of assumed: CountItemNum is read before and
--- after and the return value is whether the count really fell. So false here means "nothing
--- was observed to leave the inventory" — either the negative delta does nothing on this
--- build, or the count could not be read at all (both are logged, distinctly). A caller is
--- never told a removal happened that was not seen.
+-- AddItem_ServerInternal is documented for ADDS only, and the one direct-slot alternative
+-- in the tree (deprecated.container._extractImpl, which writes UPalItemSlot.StackCount by
+-- hand) is gated off as save-corrupting and only ever reached a CHEST's container, never
+-- the player's inventory. This pushes a NEGATIVE delta through that same add call on the
+-- untested hypothesis that the game accepts it. Because that is a hypothesis, the outcome
+-- is MEASURED instead of assumed: CountItemNum is read before and after and the return
+-- value is whether the count really fell. So false here means "nothing was observed to
+-- leave the inventory" — the negative delta did nothing, there was nothing to take, or the
+-- count could not be read at all (all logged, distinctly). A caller is never told a removal
+-- happened that was not seen.
+--
+-- Two guards keep the unproven write as small as it can be: when the count IS readable the
+-- delta is clamped to what the inventory actually holds (never ask for an underflow), and
+-- when it holds none the write is skipped entirely (nothing to remove, so an untested
+-- negative delta buys nothing).
+-- TODO(item-remove-call): unknown whether ANY dedicated remove/consume UFunction exists on
+-- UPalPlayerInventoryData, and whether AddItem_ServerInternal honours a negative Count.
 function M.take(itemId, count)
-    count = math.abs(tonumber(count) or 1)
+    count = math.floor(math.abs(tonumber(count) or 1))
     local resolved = object_manager.resolve(itemId) or itemId
-    local before, after
+    if count <= 0 then
+        log.err(string.format("take %s x%d: count must be a positive number", tostring(resolved), count))
+        return false
+    end
+
+    local inv = inventoryFor("take", resolved, count)
+    if not inv then return false end
+
+    local before = countOf(inv, resolved)
+    if before ~= nil and before <= 0 then
+        log.warn(string.format("take %s x%d: the inventory holds none — nothing to remove",
+            tostring(resolved), count))
+        return false
+    end
+    -- ask for no more than is there; an unreadable count leaves the caller's amount alone.
+    local asked = (before ~= nil) and math.min(count, before) or count
+
     local ok, e = pcall(function()
-        local inv = playerInventory()
-        before = countOf(inv, resolved)
-        inv:AddItem_ServerInternal(FName(resolved), -count, false, 0.0)
-        after  = countOf(inv, resolved)
+        inv:AddItem_ServerInternal(FName(resolved), -asked, false, 0.0)
     end)
     if not ok then
         log.err(string.format("take %s x%d failed: %s", tostring(resolved), count, tostring(e)))
         return false
     end
+    local after = countOf(inv, resolved)
+
     if before == nil or after == nil then
         log.warn(string.format("take %s x%d: CountItemNum unreadable, removal unconfirmed",
             tostring(resolved), count))

@@ -52,10 +52,10 @@ M.dist2 = dist2
 -- stays alive in here until indexReset.
 --
 -- DRIVING IT — the whole contract, in call order:
---   on place / load   spatial.indexAdd(inst)       -- building runtime: core/event.lua:253
---   on remove         spatial.indexRemove(inst)    -- building runtime: core/event.lua:269
---   on world left     spatial.indexReset()         -- building runtime: core/event.lua:492
---   after a move      spatial.indexUpdate(inst)    -- NOBODY calls this; see the gap below
+--   on place / load   spatial.indexAdd(inst)       -- building runtime: core/event.lua:277
+--   on remove         spatial.indexRemove(inst)    -- building runtime: core/event.lua:293
+--   on world left     spatial.indexReset()         -- building runtime: core/event.lua:516
+--   after a move      spatial.indexUpdate(inst)    -- see reindexAll + the gap below
 --   to query          spatial.neighbors(pos, radiusCm, exclude) -> { inst, ... }
 --
 -- Placed buildings are therefore already in the index; querying is the caller's half
@@ -66,18 +66,22 @@ M.dist2 = dist2
 --       local near = spatial.neighbors(inst.pos, 350, inst)   -- everything within 3.5 m
 --   end
 --
--- Nothing in PalForge queries it today. The consumer it was built for is the sibling
--- mod's logistics graph (PalLogistics/network.lua: exactly the call above at
--- CONNECT_RADIUS 350, then union-find over the resulting adjacency) — a reference, not
--- a live caller: that file still requires the removed `palsmith.*` modules and would
--- need its requires swapped to palforge.core.* before it loads again.
+-- THE IN-TREE CONSUMER is api/building's `Building.Instance:neighbors(radiusCm)` — the
+-- same two calls, wrapped so a pack writes `self:neighbors(350)` inside any instance hook.
+-- It runs reindexAll over core.event.instances() first, which is what closes the gap
+-- below for every api-level caller. The ORIGINAL consumer, and the reason the grid is
+-- shaped this way, is the sibling mod's logistics graph (PalLogistics/network.lua:108,140
+-- — exactly the loop above at CONNECT_RADIUS 350, then union-find over the resulting
+-- adjacency); that file is a reference, not a live caller, since it still requires the
+-- removed `palsmith.*` modules and would need its requires swapped to palforge.core.*.
 --
 -- KNOWN GAP, deliberately NOT fixed here: the building scan refreshes an instance's
--- position in place (core/event.lua:359 `bound.pos = p`) without re-bucketing it, so an
--- instance that MOVES far enough keeps its old bucket and a query can miss it. The fix is
--- one line — spatial.indexUpdate(bound) next to that refresh — but it belongs to the
--- building runtime, and core.spatial deliberately knows nothing about it. Until that hook
--- exists, a caller whose instances can move calls reindexAll() before a batch of queries.
+-- position in place (core/event.lua:383 `bound.pos = p`) without re-bucketing it, so an
+-- instance that MOVES far enough keeps its old bucket and a raw neighbors() can miss it.
+-- The fix is one line — spatial.indexUpdate(bound) next to that refresh — but it belongs
+-- to the building runtime, and core.spatial deliberately knows nothing about it. Until
+-- that hook exists, a caller whose instances can move calls reindexAll() before a batch of
+-- queries, which is precisely what Building.Instance:neighbors does on its own behalf.
 M.BUCKET_CM = 200
 M.index = {}  -- bucketKey -> { [instance]=true }
 
@@ -170,9 +174,18 @@ function M.indexReset()
 end
 
 -- ---- world/save id for the persistence namespace ----
--- Memoized. Probes a few likely sources; falls back to a single "world" bucket
--- (fine for the single-player slice). The seams (FindFirstOf) are read lazily so
--- headless tests that don't define them get the fallback.
+-- Memoized. Probes a few likely sources; falls back to a single "world" bucket. The seams
+-- (FindFirstOf) are read lazily so headless tests that don't define them get the fallback.
+--
+-- WHAT IS PROVEN AND WHAT IS NOT. The CLASS is real — PalGameInstance is one of the
+-- reflection targets in PalSmith/dump/dump.lua:83 and one of the FindFirstOf names
+-- dump_targets.md:372 lists as used. The three PROPERTY names below are not: nothing in
+-- either tree names a world/save identifier, and the one artifact a real session ever
+-- produced is `state/entities_world.json` (PalSmith commit dc206a6) — i.e. the fallback is
+-- what has actually run so far, and every save file shares one bucket. That is safe (keys
+-- are position-based and a record only binds when an actor of the right build id is
+-- standing there) but it is not isolation, so treat the fallback as the documented normal
+-- case, not as an error path.
 local cachedSaveId = nil
 
 local function tryProbe()
@@ -180,6 +193,9 @@ local function tryProbe()
     local ok, id = pcall(function()
         local gi = FindFirstOf("PalGameInstance")
         if gi and gi:IsValid() then
+            -- TODO(spatial-saveid): these three property names are guesses — no dump or POC
+            -- names a world/save identifier on PalGameInstance. A reflection walk of the
+            -- class's properties would settle which (if any) exists.
             for _, field in ipairs({ "WorldGuid", "WorldSaveName", "SaveName" }) do
                 local okf, v = pcall(function() return gi[field] end)
                 if okf and v then

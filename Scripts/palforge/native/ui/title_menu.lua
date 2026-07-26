@@ -1,16 +1,21 @@
 -- PalForge native.ui: TitleMenu — injects entries into the game's title screen, built
 -- from Palworld's own native UMG kit. Defined through api/ui, so it fills render() (the
--- "what" to inject), update() (re-assert the injection) and destroy() (take it back
--- out). The lifecycle — WHEN those run — is owned by api/ui; this file writes NO watch
--- loop, it only makes each seam safe to run at any moment.
+-- "what" to inject), update() (re-assert the injection, and write back any entry whose
+-- label or onClick changed) and destroy() (take it back out). The lifecycle — WHEN those
+-- run — is owned by api/ui; this file writes NO watch loop, it only makes each seam safe
+-- to run at any moment.
 --
 -- Title layout: PalUITitleBase.WidgetTree.RootWidget -> ... -> VerticalBox_0
 -- (the button column); each entry is a SizeBox -> WBP_Title_MenuButton.
 --
 --   local TitleMenu = require("palforge.native.ui.title_menu")
 --   local menu = TitleMenu:new{ entries = { { label = "Mods", onClick = openMods } } }
---   menu:mount()            -- false while the title screen is absent; just call it again
---   menu:autoRefresh(2000)  -- re-injects the entries if the title screen rebuilds itself
+--   menu:autoMount(nil, 2000)   -- gets in when the title screen appears, and stays in
+--
+-- autoMount, not mount+autoRefresh: at the moment a pack's files load there is no title
+-- screen yet, so mount() returns false — and autoRefresh alone would never retry it,
+-- because refresh() is a no-op on an element that is not mounted. autoMount is the one
+-- call that both waits for the title screen and re-injects after it rebuilds itself.
 
 local UI     = require("palforge.api.ui")
 local widget = require("palforge.native.ui._widget")
@@ -58,7 +63,39 @@ end
 local function forgetEntry(e, vbox)
     if vbox and alive(e.sizeBox) then pcall(function() vbox:RemoveChild(e.sizeBox) end) end
     if e.clickName then widget.releaseClicks({ e.clickName }) end
-    e.invButton, e.sizeBox, e.clickName = nil, nil, nil
+    e.button, e.invButton, e.sizeBox, e.clickName = nil, nil, nil, nil
+    e.labelWidget, e.shownLabel, e.wiredClick = nil, nil, nil
+end
+
+-- Write an entry's CURRENT label / onClick into the button that is already on screen.
+-- `e.label` and `e.onClick` are fields the caller owns and may change at any time, and
+-- injectEntry is the only other place that reads them — without this a refresh would leave
+-- a live entry showing the text it was built with and calling the handler it was built
+-- with. Both writes are skipped when nothing changed, so a heartbeat refresh over unchanged
+-- entries costs two comparisons. Router keys are per BUTTON, so re-registering replaces the
+-- entry's handler rather than adding a second one.
+local function syncEntry(e)
+    if e.label ~= e.shownLabel then
+        if not alive(e.labelWidget) then
+            e.labelWidget = alive(e.button)
+                and widget.findByName(e.button, widget.PATHS.menuButtonLabel) or nil
+        end
+        if alive(e.labelWidget) then
+            local lbl = e.labelWidget
+            if pcall(function() lbl:SetText(FText(tostring(e.label or ""))) end) then
+                e.shownLabel = e.label
+            end
+        end
+    end
+    if e.onClick ~= e.wiredClick then
+        if e.onClick and alive(e.invButton) then
+            local key = widget.registerClick(e.invButton, e.onClick)
+            if key then e.clickName = key end
+        elseif e.clickName then
+            widget.releaseClicks({ e.clickName }); e.clickName = nil
+        end
+        e.wiredClick = e.onClick
+    end
 end
 
 -- Inject one entry as a native menu button wrapped in a SizeBox sized like the native
@@ -68,7 +105,10 @@ end
 local function injectEntry(root, vbox, pc, e)
     local btn, inv, clickName = widget.menuButton(vbox, pc, e.label or "", e.onClick)
     if not btn then return false end
-    e.invButton, e.clickName = inv, clickName
+    e.button, e.invButton, e.clickName = btn, inv, clickName
+    -- What is on screen right now, so update() can tell whether label/onClick changed.
+    e.labelWidget = widget.findByName(btn, widget.PATHS.menuButtonLabel)
+    e.shownLabel, e.wiredClick = e.label, e.onClick
     local sizeBox = widget.sizeBox(vbox, nativeEntrySize(root))
     pcall(function() sizeBox:SetContent(btn) end)
     e.sizeBox = sizeBox
@@ -136,17 +176,20 @@ return UI{
         return (injectMissing(self, root) or 0) > 0
     end,
 
-    -- Re-assert the injection. The title screen rebuilds its widget tree (returning to
-    -- the title, for instance) and silently takes our buttons with it; every entry whose
-    -- button is gone is injected again. This is the re-check deprecated/titlemenu.lua
-    -- ran from its own LoopAsync — here the loop belongs to api/ui (:autoRefresh(2000)).
+    -- Re-assert the injection AND write back what changed. The title screen rebuilds its
+    -- widget tree (returning to the title, for instance) and silently takes our buttons
+    -- with it; every entry whose button is gone is injected again. This is the re-check
+    -- deprecated/titlemenu.lua ran from its own LoopAsync — here the loop belongs to
+    -- api/ui (:autoRefresh(2000), or :autoMount(nil, 2000) which also gets it in the
+    -- first time). Entries that ARE still alive get their current label/onClick written
+    -- into the live button, so editing self.entries and refreshing is a real edit.
     -- True when every entry is present afterwards.
     update = function(self)
         local entries = self.entries or {}
         if #entries == 0 then return false end
         local dead = 0
         for _, e in ipairs(entries) do
-            if not alive(e.invButton) then dead = dead + 1 end
+            if alive(e.invButton) then syncEntry(e) else dead = dead + 1 end
         end
         if dead == 0 then return true end
         return (injectMissing(self, self.host) or 0) >= dead
