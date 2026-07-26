@@ -229,7 +229,9 @@ kind("Label",     "label",    "none", { TEXT,
     { "color", type = "table",  doc = "text colour { r, g, b, a } in 0..1" } })
 -- A Button is the GAME's own WBP_Title_MenuButton wired through the shared click router —
 -- the same widget and the same route as the imperative native/ui/button.lua, so there is one
--- button in this tree rather than two that drift apart.
+-- button in this tree rather than two that drift apart. `self` inside onClick is the element
+-- INSTANCE, which is the mountable object itself: a close button is `self:unmount()`, and a
+-- button that changes what a sibling label says is one assignment to `self`.
 kind("Button",    "button",   "none", { TEXT, ON_CLICK })
 -- The escape hatch for "use the game's own component": any Blueprint widget by class path.
 -- The three child names have to be given because they differ per widget and nothing can guess

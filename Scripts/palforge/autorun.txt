@@ -37,6 +37,7 @@
 # It touches only a component of PalForge's own and destroys it again — your character's own
 # mesh, materials and save are never written to.
 15 pf_mesh
+20 pf_uidecl
 
 # ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----
 #
