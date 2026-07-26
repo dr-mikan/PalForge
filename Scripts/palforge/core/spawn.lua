@@ -298,8 +298,25 @@ local WATCH_TRIES = 20
 -- else's machine, and a nominal schedule cannot tell anyone that. os.clock is the clock this
 -- tree already uses for elapsed everywhere else (api/skill's cooldowns, test/probes/watch's
 -- timeline); it is approximate, which at this resolution does not matter.
+-- How many arrival/placement watches may run at once. Each holds one UE4SS registry reference
+-- for its lifetime, and the tick hook is what services them all — so this is a ceiling on how
+-- much of that machinery one careless loop can occupy. Four covers the suite's three spawns
+-- plus one, and a pack that asks for more gets told rather than silently queued.
+local MAX_WATCHES = 4
+
+-- True when there is room for another watch. A refusal is logged and the spawn still happens:
+-- the pal arrives either way, only the log line about it is lost, and losing a log line is a
+-- far better outcome than filling the tick with watches.
+local function watchSlotFree(what)
+    if reload.asyncPending() < MAX_WATCHES then return true end
+    log.warn(string.format("%s: %d watches already running, so this one is not started. The spawn "
+        .. "still happens — only the arrival line is lost", what, reload.asyncPending()))
+    return false
+end
+
 local function watchForArrival(before, what)
     if not (before and canDefer()) then return false end
+    if not watchSlotFree(what) then return false end
     -- Registered with the reloader for the length of the chain: an F9 that lands while this is
     -- outstanding can leave UE4SS holding a dead callback reference, and its answer to that is
     -- to remove the engine tick hook — which silently kills every keybind in the mod. See the
@@ -503,6 +520,11 @@ end
 -- its LAST try under the old six-try budget, at 5.9 s against a nominal 2.4 s. The budget is
 -- now WATCH_TRIES; the reasoning is written there and it is the reasoning that matters more
 -- than the number.
+--
+-- RETURNS whether the chain is FINISHED — true when a pal was found and handled, or when the
+-- tries ran out; false while it should keep looking. The single LoopAsync driving it passes that
+-- straight through as its own stop flag. It used to return whether the move succeeded, which
+-- nothing read, and to schedule its own next try.
 local function placeNewPal(job)
     local best, bd
     for _, a in ipairs(palActors()) do
@@ -542,14 +564,11 @@ local function placeNewPal(job)
                 .. "report success; it stays where it spawned, not (%.0f,%.0f,%.0f)", x, y, z))
         end
         reload.asyncDone()   -- found and handled: this chain is over
-        return moved
+        return true          -- done: stop the loop
     end
     job.tries = job.tries + 1
-    if job.tries < WATCH_TRIES and canDefer() then
-        LoopAsync(WATCH_MS, function()
-            ExecuteInGameThread(function() pcall(placeNewPal, job) end)
-            return true   -- one shot; this try schedules the next one itself
-        end)
+    if job.tries < WATCH_TRIES then
+        return false         -- not yet: the ONE loop keeps going
     else
         reload.asyncDone()   -- given up: this chain is over too
         log.warn(string.format("spawn.palAt: no new pal actor appeared to place — %d looks over "
@@ -558,7 +577,7 @@ local function placeNewPal(job)
             .. "chain received its pal ~5.9 s after the call on 2026-07-26",
             job.tries, os.clock() - job.t0, x, y, z))
     end
-    return false
+    return true              -- out of tries: stop the loop
 end
 
 -- Spawn a pal of game CharacterID `charId` at `level` at EXACT world coordinates (x,y,z).
@@ -606,13 +625,29 @@ function M.palAt(charId, level, x, y, z)
     end
     -- The relocation chain is the only pass that can see the pal, since the pal is seconds
     -- away, and its last line is the record of whether anything ever arrived.
-    if canDefer() then
+    if canDefer() and watchSlotFree("spawn.palAt") then
         reload.asyncBegin("spawn placement chain")
         local job = { before = before, px = px, py = py, pz = pz, x = x, y = y, z = z,
                       tries = 0, t0 = os.clock() }
+        -- ONE LoopAsync for the whole chain. It used to schedule a FRESH one per try and return
+        -- true immediately — twenty registry refs created and released per spawn, three spawns
+        -- per suite run, and UE4SS answered that churn with
+        --   [UE4SS.EngineTick.LuaModImpl] Hook threw exception:
+        --     "[Lua::Registry::get_function_ref] Ref was not function", removing hook!
+        -- which removes the ENGINE TICK HOOK and silently kills every keybind in the mod. It
+        -- fired 1.4 s after a suite finished, long after the reload it was first blamed on. One
+        -- ref, held for the length of the chain, is both cheaper and the fix.
+        --
+        -- `done` is read on the loop thread while placeNewPal sets it on the game thread one
+        -- tick later; the cost of that race is one extra enumeration, which is the same trade
+        -- watchForArrival makes and for the same reason.
+        local done = false
         LoopAsync(WATCH_MS, function()
-            ExecuteInGameThread(function() pcall(placeNewPal, job) end)
-            return true   -- one shot; placeNewPal schedules its own next try
+            ExecuteInGameThread(function()
+                local ok, finished = pcall(placeNewPal, job)
+                if (not ok) or finished then done = true end
+            end)
+            return done
         end)
         log.info(string.format("spawn.palAt %s (lv %d): the call was issued [evidence %s]; "
             .. "relocation to (%.0f,%.0f,%.0f) is scheduled and reports when the pal arrives "
