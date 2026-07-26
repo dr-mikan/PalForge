@@ -57,6 +57,7 @@
 -- native cheats executed without raising — no cheat on this build reports back what it did.
 local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
+local reload         = require("palforge.core.reload")
 local sig            = require("palforge.core.signature")
 
 local M = {}
@@ -180,6 +181,46 @@ local function cheatManager()
     return cm
 end
 
+-- Read the count again a second later, and log what it says. This does NOT change what give()
+-- returns; it exists to answer one question the synchronous check cannot.
+--
+-- THE PRECEDENT IS THIS SESSION'S OWN. Pal spawning was declared broken on a build where it
+-- worked perfectly: the call is asynchronous, the pal arrives about four seconds later, and
+-- every check was taken immediately and reported the miss as a property of the game. The header
+-- of this file has flagged the same possibility for give all along — AddItem_ServerInternal
+-- declares a LogDelay, so the inventory-data path has a delay concept in it — and it has never
+-- been tested. An add that lands after the second reading looks exactly like an add that never
+-- happened.
+--
+-- One LoopAsync, fired once, and registered with the reloader for its short life. NOT a retry
+-- chain: rescheduling a fresh LoopAsync per try is what removed UE4SS's engine tick hook earlier
+-- today and cost the session its keybinds.
+local function recheckLater(resolved, before, asked)
+    if type(LoopAsync) ~= "function" or type(ExecuteInGameThread) ~= "function" then return end
+    reload.asyncBegin("items.give delayed re-read")
+    local fired = false
+    LoopAsync(1200, function()
+        ExecuteInGameThread(function()
+            pcall(function()
+                local later = liveCount(resolved)
+                if later and before and later > before then
+                    log.info(string.format("items: %s DID land, late — %d -> %d, 1.2 s after the "
+                        .. "call. The add is asynchronous and give()'s immediate check is too "
+                        .. "early; that is a fixable verdict, not a broken cheat",
+                        resolved, before, later))
+                else
+                    log.info(string.format("items: %s still %s 1.2 s later (asked for %d) — not a "
+                        .. "timing problem, so GetItem is reaching nothing on this build",
+                        resolved, tostring(later), asked))
+                end
+            end)
+        end)
+        fired = true
+        reload.asyncDone()
+        return true   -- one shot
+    end)
+end
+
 -- Which cheat manager we are holding, and what it is outered to. Logged once per session on the
 -- give path, because "the call ran and nothing happened" cannot distinguish a wrong object from
 -- a full inventory, and the two need opposite fixes.
@@ -194,9 +235,13 @@ local function describeCheatManager(cm)
     local outer, ctrlCM
     pcall(function() outer = cm:GetOuter() end)
     pcall(function() ctrlCM = FindFirstOf("PalPlayerController").CheatManager end)
+    -- Compare by FULL NAME, not by rawequal: UE4SS hands out a fresh userdata wrapper per
+    -- lookup, so two references to the same UObject are not the same Lua value. The first run
+    -- of this line printed "is the controller's own: false" for a cheat manager whose own path
+    -- was nested under that very controller, which is a diagnostic lying about its subject.
     log.info(string.format("items: cheat manager %s | outer %s | is the controller's own: %s",
         nameOf(cm), outer and nameOf(outer) or "?",
-        tostring(ctrlCM ~= nil and rawequal(ctrlCM, cm))))
+        tostring(ctrlCM ~= nil and nameOf(ctrlCM) == nameOf(cm))))
 end
 
 -- The live count of `itemId` in the local player's inventory, or nil when it cannot be read
@@ -280,6 +325,7 @@ function M.give(itemId, count)
         --     GetMaxItemWeight, and a player at the cap is exactly the case where a cheat runs,
         --     raises nothing and moves nothing.
         describeCheatManager(cm)
+        recheckLater(resolved, before, count)
         local now, max
         pcall(function()
             local inv = playerInventory()
