@@ -71,7 +71,14 @@ ran and found nothing. Open the UE4SS console window and type one:
 
 ```text
 pf_tests   pf_watch   pf_reflect   pf_pal   pf_title
+pf_spawn   pf_teach
 ```
+
+The last two exist because two channels are only observable while something specific is
+happening, and "go and play until it does" is a poor instruction when the something is
+"catch a pal strong enough to fight". `pf_spawn` puts one in front of you; `pf_teach` gives the
+nearest pal a passive skill through the same call the `skill.equip` source hooks. PalForge can
+make the situation, so it should.
 
 **F7 is Palworld's own volume key** and the game claims it before UE4SS sees it, so a probe
 bound there can never be pressed — which is where `watch` sat, unreachable and silent about

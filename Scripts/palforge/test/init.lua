@@ -269,10 +269,17 @@ local function installCommands()
         log.warn("console commands unavailable this session; the keys above are the only way in")
         return
     end
+    -- The body is queued onto the game thread, because everything it touches is a live UObject.
+    -- It is also wrapped: a console command that raises takes UE4SS's handler down with it, and
+    -- a typo in a dev command is not worth a broken console.
     local function register(name, run)
         pcall(function()
             RegisterConsoleCommandHandler(name, function()
-                if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(run) else run() end
+                local body = function()
+                    local ok, err = pcall(run)
+                    if not ok then log.err(name .. " failed: " .. tostring(err)) end
+                end
+                if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(body) else body() end
                 return true
             end)
         end)
@@ -281,7 +288,44 @@ local function installCommands()
     for _, p in ipairs(M.PROBES) do
         register("pf_" .. p.name, function() M.probe(p.name) end)
     end
-    local names = { "pf_tests" }
+
+    -- ---- commands that CREATE the situation a source needs ----
+    --
+    -- Two channels are only observable while something specific is happening, and both used to
+    -- mean "go and play until it does". skill.hit needs a melee blow that actually connects, and
+    -- skill.equip needs a passive to change on a real pal — which in an ordinary save means
+    -- catching a pal strong enough to fight, i.e. grinding a game you may not want to grind.
+    --
+    -- PalForge can make both. Spawning works and is measured; the passive write goes through the
+    -- same AddPassiveSkill this tree already hooks. So these produce the situation instead of
+    -- waiting for it.
+    register("pf_spawn", function()
+        local Pal = require("palforge.api.pal")
+        local coord = support.inFront(400.0, 50.0)
+        local ok = coord and Pal.get(support.GAME.pal):spawn(coord)
+        log.info(string.format("pf_spawn: %s issued for %s — it arrives in about 4-8 seconds, "
+            .. "then hit it with a melee weapon and watch for skill.hit",
+            tostring(ok), support.GAME.pal))
+    end)
+
+    register("pf_teach", function()
+        local character = require("palforge.core.character")
+        local pal, cls = support.nearbyPal()
+        if not pal then
+            log.warn("pf_teach: no pal near you — run pf_spawn first, wait for it, then try again")
+            return
+        end
+        -- A PASSIVE, deliberately. Passives go in as FNames through AddPassiveSkill, which is
+        -- the call this tree hooks for skill.equip; the ACTIVE-move write is a different call
+        -- (AddEquipWaza) and is still opt-in behind _G.PALFORGE_TEST_WRITE_WAZA because it once
+        -- correlated with the game closing.
+        local SKILL = "Legend"
+        log.info(string.format("pf_teach: giving %s to the nearest pal (a %s)", SKILL, tostring(cls)))
+        local ok = character.addSkill(pal, SKILL)
+        log.info(string.format("pf_teach: %s — watch for skill.equip carrying its first event",
+            ok and "the read-back shows it on the pal" or "the read-back did not show it"))
+    end)
+    local names = { "pf_tests", "pf_spawn", "pf_teach" }
     for _, p in ipairs(M.PROBES) do names[#names + 1] = "pf_" .. p.name end
     log.info("console commands: " .. table.concat(names, "  "))
 end
