@@ -22,12 +22,13 @@
 --     a last-resort fallback (discovery is cheaper), written in the "Package.Object" form
 --     LoadAsset wants — the convention that works in core/sound/native.lua.
 --   * The ICON COLUMN of each table is now MEASURED, not inferred — see ICON_COLUMNS_BY_TABLE.
---   * READING THE VALUE goes through UE4SS's OWN binding on UDataTable, not through a
---     reflected UFunction. UDataTable declares zero functions on this build, so every accessor
---     this module used to try was called on an object that genuinely does not have it; UE4SS
---     binds FindRow / GetRowNames / GetRowMap / GetAllRows / ForEachRow itself, and FindRow
---     takes a plain Lua string. See the block above findRow. It has NOT been observed
---     answering yet, so a nil still means "the read did not fire", never "there is no row".
+--   * READING THE VALUE reads the whole COLUMN as strings and zips it against the row names,
+--     rather than reading a row and indexing it. The row route works — UE4SS binds FindRow onto
+--     UDataTable itself and it returns the row with the measured column on it — but the value
+--     in that column is a TSoftObjectPtr userdata that answers none of the nineteen member
+--     names a soft pointer could plausibly expose, so it cannot be unwrapped from Lua at all.
+--     The reasoning, and the list, is above iconMap. NOT observed answering yet: a nil still
+--     means "the read did not fire", never "there is no such row".
 --
 -- Strictly fail-soft. Every engine call is inside a pcall, any miss at any step returns nil,
 -- and each domain's iconOf() then falls back to the declared `icon`. Nothing throws when the
@@ -312,132 +313,133 @@ local function rowKey(id)
     return (type(id) == "string" and #id > 0) and id or nil
 end
 
--- Turn whatever the column holds into an asset PATH string.
+-- THE COLUMN, AS STRINGS. The struct route is abandoned and this is why, so nobody retries it.
 --
--- The column is a TSoftObjectPtr<UTexture2D> (dumps/cxx/Pal.hpp, all three row structs), and a
--- soft pointer is a STRUCT, not a string: FSoftObjectPath ObjectID { FName AssetPathName;
--- FString SubPathString; }. The first live run proved the row read itself works — FindRow
--- returned a row and the column was there — and then handed back userdata that this function
--- passed straight through, which is why the suite reported "an icon resolves to an asset path"
--- as a failure rather than a miss. So: dig.
+-- FindRow works: it returns the row and the measured column is on it. What comes back from that
+-- column is a TSoftObjectPtrUserdata, and on this UE4SS build that userdata answers NOTHING.
+-- A probe asked it for all nineteen names a soft pointer plausibly exposes —
+--     Get, LoadSynchronous, ToString, ToSoftObjectPath, GetPathName, GetAssetName,
+--     GetLongPackageName, GetAssetPathName, GetAssetPathString, IsValid, IsNull, IsPending,
+--     ObjectID, AssetPath, AssetPathName, SubPathString, PackageName, AssetName, WeakPtr
+-- — and not one of them is readable. There is no documented Lua surface for it either (the
+-- UE4SS install ships class docs for UDataTable, Property, UFunction and friends, and none for
+-- TSoftObjectPtr). So the value cannot be unwrapped from Lua, and no amount of further guessing
+-- at member names changes that.
 --
--- The shapes are tried outermost-first, because a build that flattens the pointer for Lua
--- answers on the first one and never pays for the rest. Anything still unreadable at the end is
--- LOGGED with its shape — a nil that says nothing is what made this take three runs.
-local function pathOf(v)
-    if type(v) == "string" then
-        return (#v > 0 and v ~= "None") and v or nil
-    end
-    if type(v) ~= "userdata" and type(v) ~= "table" then return nil end
+-- What CAN be read is the same column rendered as text, by the one accessor that returns plain
+-- strings instead of a struct (dumps/cxx/Engine.hpp, UDataTableFunctionLibrary):
+--
+--     TArray<FString> GetDataTableColumnAsString(const UDataTable* DataTable, FName PropertyName);
+--
+-- One row per entry, in RowMap order — and dt:GetRowNames(), UE4SS's own binding, walks the
+-- same RowMap in the same order. Zipping the two gives id -> icon path for a whole table in two
+-- calls, with no struct ever crossing into Lua. Both arguments are an object pointer and an
+-- FName, which this tree marshals successfully every day.
+--
+-- The earlier attempt at this route failed for a reason that is now fixed: it took the row names
+-- from the FUNCTION LIBRARY's GetDataTableRowNames, which answered nothing here. The names come
+-- from the table itself now.
+local signature = require("palforge.core.signature")
 
-    -- 1) the whole thing stringifies (a flattened soft pointer, or an FName/FString)
-    local ok, str = pcall(function() return v.ToString and v:ToString() end)
-    if ok and type(str) == "string" and #str > 0 and str ~= "None" then return str end
-
-    -- 1b) RESOLVE IT. A soft pointer's whole job is to name an asset that may not be loaded, and
-    -- UE4SS's own userdata for one is undocumented — the run printed "TSoftObjectPtrUserdata"
-    -- with a protected metatable, so its members cannot be enumerated, only tried. If it can
-    -- hand over the object it points at, that object's full name IS the path, and this stops
-    -- being a struct-digging problem.
-    for _, get in ipairs({
-        function() return v:Get() end,
-        function() return v:LoadSynchronous() end,
-    }) do
-        local okr, obj = pcall(get)
-        if okr and obj ~= nil then
-            local okn, full = pcall(function() return obj:GetFullName() end)
-            if okn and type(full) == "string" and #full > 0 then
-                -- GetFullName is "Texture2D /Game/.../T_itemicon_Wood.T_itemicon_Wood"; the
-                -- caller wants the path, so drop the leading class name when there is one.
-                return (full:match("%s(%S+)$") or full)
-            end
-        end
+-- The DataTableFunctionLibrary CDO, resolved once. false records a failed resolve so the lookup
+-- is not repeated for every icon.
+local dtLib = nil
+local function library()
+    if dtLib == nil then
+        local ok, lib = pcall(StaticFindObject, "/Script/Engine.Default__DataTableFunctionLibrary")
+        dtLib = (ok and lib) or false
     end
-
-    -- 2) TSoftObjectPtr -> FSoftObjectPath -> the name inside it. UE4 and UE5 spell that last
-    --    step DIFFERENTLY and Palworld is UE5, which is why the first attempt at this missed:
-    --      UE4   FSoftObjectPath { FName AssetPathName; FString SubPathString; }
-    --      UE5   FSoftObjectPath { FTopLevelAssetPath AssetPath; FString SubPathString; }
-    --            FTopLevelAssetPath { FName PackageName; FName AssetName; }
-    --    PackageName is the "/Game/Pal/Texture/Icon/T_itemicon_Wood" half, which is what a
-    --    caller wants; AssetName is the object name after the dot. Both spellings are tried,
-    --    nested and flattened, because UE4SS exposes struct members differently per pusher.
-    for _, get in ipairs({
-        function() return v.ObjectID.AssetPath.PackageName end,
-        function() return v.AssetPath.PackageName end,
-        function() return v.ObjectID.AssetPathName end,
-        function() return v.AssetPathName end,
-        function() return v.ObjectID.AssetPath end,
-        function() return v.ObjectID end,
-    }) do
-        local okg, inner = pcall(get)
-        if okg and inner ~= nil then
-            if type(inner) == "string" and #inner > 0 and inner ~= "None" then return inner end
-            local oks, s2 = pcall(function() return inner.ToString and inner:ToString() end)
-            if oks and type(s2) == "string" and #s2 > 0 and s2 ~= "None" then return s2 end
-        end
-    end
-    return nil
+    return dtLib or nil
 end
 
--- Read the texture ref off a row, using that table's measured column (ICON_COLUMNS_BY_TABLE).
--- An empty path or "None" means the column is present but unset, so we move on rather than hand
--- back a lie. A column whose value cannot be turned into a path at all is reported once with its
--- shape, because that is the only thing that tells the next reader what to add to pathOf.
-local reportedShape = {}
-local function readIcon(row, tableName)
+-- Flatten a UE4SS TArray (or a plain Lua array) into a list of strings. UE4SS hands arrays back
+-- in three shapes depending on build and element type, so all three are tried; FName elements
+-- are ToString'd. This is the same coping utils/items already does for row names.
+local function toList(arr)
+    if arr == nil then return {} end
+    local out = {}
+    local function push(v)
+        if type(v) == "string" then
+            out[#out + 1] = v
+        elseif type(v) == "userdata" then
+            local ok, str = pcall(function() return v.ToString and v:ToString() end)
+            out[#out + 1] = (ok and type(str) == "string") and str or ""
+        else
+            out[#out + 1] = ""   -- keep the INDEX aligned: the two arrays are zipped by position
+        end
+    end
+    if type(arr) == "table" and #arr > 0 then
+        for i = 1, #arr do push(arr[i]) end
+        return out
+    end
+    if pcall(function() arr:ForEach(function(_, v) push(v) end) end) and #out > 0 then return out end
+    local n; pcall(function() n = #arr end)
+    if type(n) == "number" and n > 0 then
+        for i = 1, n do local v; pcall(function() v = arr[i] end); push(v) end
+        if #out > 0 then return out end
+        for i = 1, n do local v; pcall(function() v = arr:Get(i - 1) end); push(v) end
+    end
+    return out
+end
+
+-- The row names of `tbl`, in RowMap order, through UE4SS's own UDataTable binding.
+local function rowNames(tbl)
+    local ok, names = pcall(function() return tbl:GetRowNames() end)
+    if not ok then return {} end
+    return toList(names)
+end
+
+-- id -> icon path for one table, built once per table object and kept for the session. Icon
+-- tables are fixed assets once loaded (PalSchema injects its rows before play), so a successful
+-- build is reusable. A FAILED build is not cached, so a call made before the table finished
+-- loading is simply retried on the next one.
+local iconMaps = setmetatable({}, { __mode = "k" })
+
+-- TODO(icons-row-read): unknown whether GetDataTableColumnAsString is reflected on this build.
+-- That is the whole of what is left. The table is found, the row keys read, the column measured,
+-- and the accessor's two arguments are the shapes this tree marshals every day — but no run has
+-- called it. core.signature refuses it unless the live class declares it, so one F1 in a loaded
+-- world answers it in one line: a row count closes the item, and "refused ... is not declared on
+-- this build" means the library is unreflected here and icons have no route at all, which is
+-- equally an answer.
+local function iconMap(tbl, tableName)
+    local cached = iconMaps[tbl]
+    if cached then return cached end
+
+    local names = rowNames(tbl)
+    if #names == 0 then
+        log.warn(string.format("icons: %s answered no row names, so no icon can be looked up", tableName))
+        return nil
+    end
+
     for _, col in ipairs(columnsFor(tableName)) do
-        local ok, v = pcall(function() return row[col] end)
-        if ok and v ~= nil then
-            local path = pathOf(v)
-            if path then return path end
-            if not reportedShape[tableName] then
-                reportedShape[tableName] = true
-                local desc; pcall(function() desc = tostring(v) end)
-                -- List what the value actually responds to. Three runs have now ended with a
-                -- nil that named no reason, so this prints the metatable's own keys: whatever
-                -- UE4SS binds onto this userdata is the next thing pathOf should try, and
-                -- guessing shapes one release at a time is what made this slow.
-                -- The metatable is protected (the run printed "<no readable metatable>"), so it
-                -- cannot be enumerated — but __index still answers. Ask for every name a soft
-                -- pointer plausibly exposes and report which ones exist, with their Lua type.
-                -- One run of this names the accessor and ends the guessing.
-                local keys = {}
-                for _, name in ipairs({
-                    "Get", "LoadSynchronous", "ToString", "ToSoftObjectPath", "GetPathName",
-                    "GetAssetName", "GetLongPackageName", "GetAssetPathName", "GetAssetPathString",
-                    "IsValid", "IsNull", "IsPending",
-                    "ObjectID", "AssetPath", "AssetPathName", "SubPathString",
-                    "PackageName", "AssetName", "WeakPtr",
-                }) do
-                    local okm, member = pcall(function() return v[name] end)
-                    if okm and member ~= nil then
-                        keys[#keys + 1] = name .. ":" .. type(member)
+        local key; pcall(function() key = FName(col) end)
+        if key then
+            local ok, values, level = signature.call(library(), "GetDataTableColumnAsString",
+                { "ObjectProperty", "NameProperty" }, tbl, key)
+            if ok then
+                local vals = toList(values)
+                -- Only zippable if the two really are the same walk of the same RowMap. A length
+                -- mismatch means they are not, and pairing them anyway would hand out
+                -- confidently WRONG icons — the one outcome worse than nil.
+                if #vals == #names then
+                    local map, carried = {}, 0
+                    for i, id in ipairs(names) do
+                        local v = vals[i]
+                        if type(v) == "string" and #v > 0 and v ~= "None" then
+                            map[id] = v; carried = carried + 1
+                        end
                     end
+                    log.info(string.format("icons: %s column %s read — %d of %d rows carry an icon [%s]",
+                        tableName, col, carried, #names, tostring(level)))
+                    iconMaps[tbl] = map
+                    return map
                 end
-                log.warn(string.format("icons: %s.%s is a %s that pathOf could not read (%s) — "
-                    .. "the row IS readable, only this last unwrap is missing. It responds to: %s",
-                    tableName, col, type(v), tostring(desc),
-                    #keys > 0 and table.concat(keys, ", ") or "<no readable metatable>"))
+                log.warn(string.format("icons: %s column %s returned %d values for %d rows — not "
+                    .. "the same row walk, so it is not paired", tableName, col, #vals, #names))
             end
         end
     end
-    return nil
-end
-
--- TODO(icons-row-read): unknown whether UE4SS's UDataTable:FindRow binding answers on this
--- build. The route is no longer in doubt — it is documented in the UE4SS install shipped with
--- the game (Docs/lua-api/classes/udatatable.md), it takes a plain string, and the row struct it
--- returns is declared in dumps/cxx/Pal.hpp with the exact column this module already measured.
--- What no run has done is call it: the first live run never reached a row read at all, because
--- the code was then going through UDataTableFunctionLibrary and its row-name accessor answered
--- nothing. One F1 in a loaded world settles it — a resolved icon path for Wood closes the item,
--- and "FindRow is not bound on this build" is equally an answer.
-local function findRow(tbl, id)
-    local key = rowKey(id)
-    if not key then return nil end
-    local ok, row = pcall(function() return tbl:FindRow(key) end)
-    if ok and row ~= nil then return row end
     return nil
 end
 
@@ -465,9 +467,9 @@ function M.resolve(spec, id)
     for _, name in ipairs(namesOf(spec)) do
         local tbl = findTable(name)
         if tbl then
-            local row = findRow(tbl, id)
-            if row ~= nil then
-                local tex = readIcon(row, name)
+            local map = iconMap(tbl, name)
+            if map then
+                local tex = map[id]
                 if tex ~= nil then return tex end
             end
         end

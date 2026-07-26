@@ -1041,12 +1041,34 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `icons-row-read` — core.icons.resolve -> Item/Pal/Building/Skill Handle:iconOf()
 
 - **Probe:** F1
-- **Marked at:** Scripts/palforge/core/icons.lua:428
+- **Marked at:** Scripts/palforge/core/icons.lua:398
 
 **What a pack author sees**
 
 `:iconOf()` falls back to the icon you declared yourself and never finds the vanilla one, so a
 pack cannot reuse the game's own artwork for an item, pal, building or partner skill.
+
+**What the runs settled, so nobody retries it**
+
+Reading a ROW works. UE4SS binds `FindRow` / `GetRowNames` / `GetRowMap` / `GetAllRows` /
+`ForEachRow` onto `UDataTable` itself — they are not UFunctions, which is why every reflection
+sweep in this tree missed them and why `dumps/cxx/Engine.hpp` shows the class with zero
+functions. `FindRow("Wood")` returned the row and the measured column was on it.
+
+The VALUE in that column cannot be unwrapped from Lua. It is a `TSoftObjectPtrUserdata`, and a
+probe asked it for all nineteen names a soft pointer could plausibly expose — `Get`,
+`LoadSynchronous`, `ToString`, `ToSoftObjectPath`, `GetPathName`, `GetAssetName`,
+`GetLongPackageName`, `GetAssetPathName`, `GetAssetPathString`, `IsValid`, `IsNull`,
+`IsPending`, `ObjectID`, `AssetPath`, `AssetPathName`, `SubPathString`, `PackageName`,
+`AssetName`, `WeakPtr` — and not one is readable. The UE4SS install ships class docs for
+UDataTable, Property and UFunction and none for TSoftObjectPtr. Guessing more member names is
+not a plan.
+
+So the value is read as TEXT instead, by the one accessor that returns plain strings rather than
+a struct: `GetDataTableColumnAsString(UDataTable*, FName)` on `UDataTableFunctionLibrary`, one
+entry per row in RowMap order, zipped against `dt:GetRowNames()` which walks the same map in the
+same order. No struct crosses into Lua. (An earlier attempt at this route took the names from
+the function library's own `GetDataTableRowNames`, which answered nothing here — that is fixed.)
 
 **What is still unknown**
 
