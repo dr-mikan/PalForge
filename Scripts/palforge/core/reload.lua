@@ -67,11 +67,78 @@ end
 
 ---Drop every palforge.* module and load the framework again.
 ---
+--=============================================================================
+-- pending async work
+--
+-- WHY RELOADING MID-FLIGHT IS NOT SAFE. UE4SS holds a Lua registry reference to every
+-- LoopAsync callback, and the engine-tick hook is what runs them. Clearing package.loaded out
+-- from under a callback that is still scheduled can leave that reference pointing at something
+-- that is no longer a function, and UE4SS's response is not to skip it:
+--
+--   [UE4SS.EngineTick.LuaModImpl] Hook threw exception:
+--     "[Lua::Registry::get_function_ref] Ref was not function", removing hook!
+--
+-- It removes the TICK HOOK. Every keybind handler in this tree runs its body inside
+-- ExecuteInGameThread, and that queue is drained by the tick — so the keys stop responding
+-- while the game carries on perfectly well, which is a confusing thing to debug and costs a
+-- restart. That happened once, from an F9 pressed a few seconds after an F1 that had left three
+-- spawn watches running for up to twenty seconds each.
+--
+-- So: anything that schedules a repeating callback registers itself here, and reload REFUSES
+-- while any are outstanding rather than risking the hook. The counter lives on _G so it
+-- survives the reload it is guarding.
+local function pending()
+    local n = _G.__PalForgeAsync
+    if type(n) ~= "number" then n = 0; _G.__PalForgeAsync = 0 end
+    return n
+end
+
+---Call before scheduling a repeating async callback, and pair it with M.asyncDone.
+function M.asyncBegin(what)
+    _G.__PalForgeAsync = pending() + 1
+    _G.__PalForgeAsyncWhat = what or _G.__PalForgeAsyncWhat
+end
+
+---Call when that callback's chain has finished, on every exit path including the give-up one.
+function M.asyncDone()
+    local n = pending() - 1
+    _G.__PalForgeAsync = (n > 0) and n or 0
+end
+
+---How many repeating callbacks are outstanding right now.
+---@return integer
+function M.asyncPending() return pending() end
+
+---Force the counter back to zero. The guard is a courtesy, not a lock: a chain that dies
+---between begin and done would otherwise refuse every reload for the rest of the session, which
+---is a far worse failure than the one being prevented. Bound to F9 with a modifier by the
+---kernel, and printed in the refusal message so it is discoverable at the moment it is wanted.
+function M.asyncReset()
+    local n = pending()
+    _G.__PalForgeAsync, _G.__PalForgeAsyncWhat = 0, nil
+    log.warn(string.format("async counter reset from %d to 0 — reload is unblocked", n))
+    return n
+end
+
 ---Returns ok, plus how many modules were dropped. A failure leaves the OLD modules unloaded
 ---and the new ones partially loaded, so it says loudly what broke — fix the file and press
 ---the key again, which is the whole point of having it on a key.
 ---@return boolean ok, integer dropped
 function M.reload()
+    -- Refuse rather than break the tick hook. See the block above asyncBegin: a reload that
+    -- lands while a LoopAsync chain is outstanding can cost the session its keybinds entirely.
+    local waiting = M.asyncPending()
+    if waiting > 0 then
+        log.warn(string.format("reload REFUSED: %d async watch(es) still running%s. They are "
+            .. "short — wait a few seconds and press the key again. Reloading now can leave "
+            .. "UE4SS holding a dead callback reference, and its answer to that is to remove the "
+            .. "engine tick hook, which is what runs every keybind in this mod.",
+            waiting, _G.__PalForgeAsyncWhat and (" (" .. _G.__PalForgeAsyncWhat .. ")") or ""))
+        log.warn("if it never clears, the counter is stuck: "
+            .. "require('palforge.core.reload').asyncReset() unblocks it")
+        return false, 0
+    end
+
     local names = loadedModules()
     log.info(string.format("reloading %d module(s)", #names))
 

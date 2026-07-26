@@ -100,6 +100,7 @@
 -- mean, for the different reason written at its own doc (nothing here can enumerate a party/box).
 local log            = require("palforge.utils.log").scope("spawn")
 local object_manager = require("palforge.core.object_manager")
+local reload         = require("palforge.core.reload")
 local sig            = require("palforge.core.signature")
 
 local M = {}
@@ -299,6 +300,11 @@ local WATCH_TRIES = 20
 -- timeline); it is approximate, which at this resolution does not matter.
 local function watchForArrival(before, what)
     if not (before and canDefer()) then return false end
+    -- Registered with the reloader for the length of the chain: an F9 that lands while this is
+    -- outstanding can leave UE4SS holding a dead callback reference, and its answer to that is
+    -- to remove the engine tick hook — which silently kills every keybind in the mod. See the
+    -- pending-async block in core/reload.lua.
+    reload.asyncBegin("spawn arrival watch")
     local t0, tries, done = os.clock(), 0, false
     LoopAsync(WATCH_MS, function()
         -- ExecuteInGameThread QUEUES its body, so `done` can be read one tick before the body
@@ -309,10 +315,12 @@ local function watchForArrival(before, what)
                 local n = newPalCount(before)
                 if n > 0 then
                     done = true
+                    reload.asyncDone()
                     log.info(string.format("%s: %d new PalCharacter in the world %.1f s after the "
                         .. "call (look %d of %d)", what, n, os.clock() - t0, tries, WATCH_TRIES))
                 elseif tries >= WATCH_TRIES then
                     done = true
+                    reload.asyncDone()
                     log.warn(string.format("%s: the call ran but NO new PalCharacter appeared in "
                         .. "%.1f s (%d looks). This window is not the reason — the coordinate route "
                         .. "received its pal ~5.9 s after the same call on 2026-07-26 — so this is "
@@ -533,6 +541,7 @@ local function placeNewPal(job)
             log.warn(string.format("spawn.palAt: found the new pal but K2_TeleportTo did not "
                 .. "report success; it stays where it spawned, not (%.0f,%.0f,%.0f)", x, y, z))
         end
+        reload.asyncDone()   -- found and handled: this chain is over
         return moved
     end
     job.tries = job.tries + 1
@@ -542,6 +551,7 @@ local function placeNewPal(job)
             return true   -- one shot; this try schedules the next one itself
         end)
     else
+        reload.asyncDone()   -- given up: this chain is over too
         log.warn(string.format("spawn.palAt: no new pal actor appeared to place — %d looks over "
             .. "%.1f s and nothing in the world was absent from the pre-spawn snapshot, so there "
             .. "is nothing to move to (%.0f,%.0f,%.0f). The window is not the reason: this same "
@@ -597,6 +607,7 @@ function M.palAt(charId, level, x, y, z)
     -- The relocation chain is the only pass that can see the pal, since the pal is seconds
     -- away, and its last line is the record of whether anything ever arrived.
     if canDefer() then
+        reload.asyncBegin("spawn placement chain")
         local job = { before = before, px = px, py = py, pz = pz, x = x, y = y, z = z,
                       tries = 0, t0 = os.clock() }
         LoopAsync(WATCH_MS, function()
