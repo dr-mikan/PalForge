@@ -312,24 +312,62 @@ local function rowKey(id)
     return (type(id) == "string" and #id > 0) and id or nil
 end
 
+-- Turn whatever the column holds into an asset PATH string.
+--
+-- The column is a TSoftObjectPtr<UTexture2D> (dumps/cxx/Pal.hpp, all three row structs), and a
+-- soft pointer is a STRUCT, not a string: FSoftObjectPath ObjectID { FName AssetPathName;
+-- FString SubPathString; }. The first live run proved the row read itself works — FindRow
+-- returned a row and the column was there — and then handed back userdata that this function
+-- passed straight through, which is why the suite reported "an icon resolves to an asset path"
+-- as a failure rather than a miss. So: dig.
+--
+-- The shapes are tried outermost-first, because a build that flattens the pointer for Lua
+-- answers on the first one and never pays for the rest. Anything still unreadable at the end is
+-- LOGGED with its shape — a nil that says nothing is what made this take three runs.
+local function pathOf(v)
+    if type(v) == "string" then
+        return (#v > 0 and v ~= "None") and v or nil
+    end
+    if type(v) ~= "userdata" and type(v) ~= "table" then return nil end
+
+    -- 1) the whole thing stringifies (a flattened soft pointer, or an FName/FString)
+    local ok, str = pcall(function() return v.ToString and v:ToString() end)
+    if ok and type(str) == "string" and #str > 0 and str ~= "None" then return str end
+
+    -- 2) TSoftObjectPtr -> FSoftObjectPath -> FName. Both the nested spelling and the flattened
+    --    one, since UE4SS exposes struct members differently depending on the pusher.
+    for _, get in ipairs({
+        function() return v.ObjectID.AssetPathName end,
+        function() return v.AssetPathName end,
+        function() return v.ObjectID end,
+    }) do
+        local okg, inner = pcall(get)
+        if okg and inner ~= nil then
+            if type(inner) == "string" and #inner > 0 and inner ~= "None" then return inner end
+            local oks, s2 = pcall(function() return inner.ToString and inner:ToString() end)
+            if oks and type(s2) == "string" and #s2 > 0 and s2 ~= "None" then return s2 end
+        end
+    end
+    return nil
+end
+
 -- Read the texture ref off a row, using that table's measured column (ICON_COLUMNS_BY_TABLE).
--- A soft object pointer that exposes ToString is normalised to its path string; an empty string
--- or "None" means the column is present but unset, so we move on rather than hand back a lie.
--- An object handle with no ToString comes back as-is (callers only need a truthy handle).
--- Anything that is neither string nor userdata — a stray number or bool — is not an icon.
+-- An empty path or "None" means the column is present but unset, so we move on rather than hand
+-- back a lie. A column whose value cannot be turned into a path at all is reported once with its
+-- shape, because that is the only thing that tells the next reader what to add to pathOf.
+local reportedShape = {}
 local function readIcon(row, tableName)
     for _, col in ipairs(columnsFor(tableName)) do
         local ok, v = pcall(function() return row[col] end)
         if ok and v ~= nil then
-            if type(v) == "userdata" then
-                local oks, str = pcall(function() return v.ToString and v:ToString() end)
-                if oks and type(str) == "string" then
-                    if #str > 0 and str ~= "None" then return str end
-                else
-                    return v
-                end
-            elseif type(v) == "string" and #v > 0 and v ~= "None" then
-                return v
+            local path = pathOf(v)
+            if path then return path end
+            if not reportedShape[tableName] then
+                reportedShape[tableName] = true
+                local desc; pcall(function() desc = tostring(v) end)
+                log.warn(string.format("icons: %s.%s is a %s that pathOf could not read (%s) — "
+                    .. "the row IS readable, only this last unwrap is missing",
+                    tableName, col, type(v), tostring(desc)))
             end
         end
     end

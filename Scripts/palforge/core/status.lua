@@ -124,14 +124,18 @@ end
 ---@return boolean
 function M.known(name) return idOf(name) ~= nil end
 
--- TODO(effect-native-status): unknown whether AddStatus/RemoveStatus FIRE. Everything else is
--- settled — the component is a live property of PalCharacter (dumps/reflection/
--- 02_reflection.txt:1007), the class and its four-function ailment API are declared
--- (dumps/cxx/Pal.hpp:29774), and the vocabulary that had no source anywhere is the 38-value
--- EPalStatusID (dumps/cxx/Pal_enums.hpp:4246). What no run has done is call one. Press F1 in a
--- loaded world: core.signature logs "declared"/"present" and the ailment name, or refuses and
--- says which lookup failed. Watch for the parameter spelling — an EnumProperty build declares
--- it differently from a ByteProperty one, and that mismatch is a refusal, not a crash.
+-- OBSERVED WORKING, 2026-07-26, on the live player pawn:
+--     status.add AttackUp (EPalStatusID 26) [declared]
+--     status.remove AttackUp (EPalStatusID 26) [declared]
+-- with GetExecutionStatus reading the ailment back as present between the two and absent after.
+-- Nothing here is inferred any more: the component resolves off PalCharacter, the declaration
+-- matches the live class, the call fires, and the game agrees it happened.
+--
+-- The one thing that had to change to get there was the expected property spelling. These
+-- parameters are declared EnumProperty, not ByteProperty — an `enum class` rather than a legacy
+-- `enum` — and core/signature refused all three calls over the difference until it learned the
+-- two marshal identically. Read that as the pattern it is: every EPal* argument in this tree is
+-- an enum class.
 --
 -- Shared by add and remove: resolve the component and the id, then make one guarded call.
 -- EPalStatusID marshals as a plain integer, which is a scalar — no struct crosses this boundary.

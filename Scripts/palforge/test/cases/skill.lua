@@ -412,22 +412,47 @@ s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)",
     end
     t:type(skills.active, "table", "the active-skill list comes back as a list")
     t:type(skills.passive, "table", "and so does the passive one")
-    support.log(string.format("skills: the pawn carries %d active and %d passive",
+    support.log(string.format("skills: the player pawn carries %d active and %d passive",
         #skills.active, #skills.passive))
+
+    -- And a real pal, when one is nearby, because that is the character equipped moves belong
+    -- to. A player carrying zero is normal; a PAL carrying zero would say the read is not
+    -- reaching what it should.
+    local pal = support.nearbyPal()
+    if pal then
+        local theirs = character.skillsOn(pal)
+        if theirs then
+            support.log(string.format("skills: the nearest pal carries %d active and %d passive",
+                #theirs.active, #theirs.passive))
+        end
+    end
 end)
 
-s:test("an active skill can be taught and taken back off -- TODO(pal-skills-equip)", function(t)
-    local pawn = support.needWorld(t)
-    if character.skillsOn(pawn) == nil then t:skip("character parameters unreadable on this pawn") end
+s:test("an active skill can be taught to a live PAL and taken back off -- TODO(pal-skills-equip)", function(t)
+    support.needWorld(t)
 
-    -- Human_Punch is chosen deliberately: it is the plainest move in the game and the pawn
-    -- conceptually has it already, so a run that somehow leaves it behind changes nothing a
-    -- player would notice. Nothing in this suite may teach a real save a legendary move.
+    -- ON A PAL, NOT ON THE PLAYER, and that distinction is a finding rather than a preference.
+    -- The first live run taught Human_Punch to the player pawn: the call fired with evidence
+    -- "declared" and the read-back did not show it. The same run also printed "the pawn carries
+    -- 0 active and 0 passive" — a player has no equipped moves at all, because moves belong to
+    -- pals and a player fights with weapons. So the write may well have been correct and simply
+    -- meaningless on that target, and testing it there could never tell the two apart.
+    local pal = support.nearbyPal()
+    if not pal then
+        t:skip("no pal near the player — whistle one out and run this again; the player pawn is "
+            .. "the wrong target for equipped moves and would not answer the question")
+    end
+    if character.skillsOn(pal) == nil then t:skip("character parameters unreadable on that pal") end
+
+    -- Human_Punch is chosen deliberately: it is the plainest move in the game, so a run that
+    -- somehow leaves it behind changes nothing anyone would notice. Nothing in this suite may
+    -- teach a real save a legendary move.
     local SKILL = "Human_Punch"
     local sk = Skill.get(SKILL)
+    local pawn = pal
     local had = false
-    for _, n in ipairs(character.skillsOn(pawn).active) do if n == SKILL then had = true end end
-    if had then t:skip("the pawn already has " .. SKILL .. "; a clean before/after is not possible") end
+    for _, n in ipairs(character.skillsOn(pal).active) do if n == SKILL then had = true end end
+    if had then t:skip("that pal already has " .. SKILL .. "; a clean before/after is not possible") end
 
     -- Under pcall so the skill is always taken back off, including when an assertion raises.
     local ok, err = pcall(function()

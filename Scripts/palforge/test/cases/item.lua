@@ -374,9 +374,9 @@ s:test("a vanilla item's icon comes back from the game's own table -- TODO(icons
 
     local tex = wood:iconOf()
     if tex == nil then
-        t:skip("the icon column could not be read — the [signature] log line for "
-            .. "GetDataTableColumnAsString says whether the accessor is declared on this build, "
-            .. "and that line IS the finding")
+        t:skip("no icon came back — look for the [PalForge.icons] warn line naming the column's "
+            .. "shape; the row read itself is proven, so a nil here means the last unwrap from "
+            .. "soft-object-pointer to path is what is missing")
     end
     t:type(tex, "string", "an icon resolves to an asset path")
     t:truthy(#tex > 0, "and the path is not empty")

@@ -114,6 +114,34 @@ function M.nearestPal(coord)
     return best
 end
 
+-- A live PalCharacter that is NOT the player: the nearest actual pal, or nil when there is
+-- none nearby. Some capabilities only make sense on a pal — equipped moves are the clear case,
+-- since a player has none and the first live run showed the player pawn carrying zero — so a
+-- test that needs one must be able to say so and skip instead of drawing a conclusion from the
+-- wrong kind of character.
+function M.nearbyPal()
+    local pawn = M.player()
+    if not pawn then return nil end
+    local here = M.location(pawn)
+    if not here then return nil end
+
+    local ok, all = pcall(FindAllOf, "PalCharacter")
+    if not (ok and type(all) == "table") then return nil end
+
+    local best, bestDist
+    for _, actor in ipairs(all) do
+        if actor ~= pawn then
+            local pos = M.location(actor)
+            if pos then
+                local dx, dy, dz = pos.x - here.x, pos.y - here.y, pos.z - here.z
+                local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if not bestDist or d < bestDist then best, bestDist = actor, d end
+            end
+        end
+    end
+    return best
+end
+
 --=============================================================================
 -- test data
 --=============================================================================

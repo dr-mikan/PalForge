@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (14)
+## Closed (15)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -87,8 +87,9 @@ without the game running.
 - **`mesh-skeletal-setter`** — Mesh.Handle:attachTo on kind="skeletal" and Pal.Handle:renderOn. The class ladder is confirmed end to end — `APalCharacter : ACharacter`, whose `Mesh` is a reflected `USkeletalMeshComponent*` (`Engine.hpp:8156`), and `UPalSkeletalMeshComponent` derives from it. Two guesses collapsed: `actor:GetMesh()` is not declared anywhere in the dump, and the two mesh setters are inherited by the SAME component, so the second was never a fallback. One route remains, `SetSkinnedAssetAndUpdate(asset, true)`, chosen because it re-initialises the pose, with the getter that pairs with it for the read-back.
 - **`mesh-skeletal-animclass`** — Mesh.Spec.animClass. All three assumptions confirmed: `SetAnimClass(UClass*)`, `SetAnimationMode(TEnumAsByte<EAnimationMode::Type>)`, and `EAnimationMode::AnimationBlueprint = 0`. The calls were already right, and the log line claiming "SetAnimClass is not on this component" was simply wrong. The real weak link turned out to be elsewhere and is recorded in its place: `SetAnimClass` wants an AnimBlueprintGeneratedClass, and the one live asset sweep on disk found zero loaded while the classes plainly exist — so what is unproven is the LoadAsset resolve, not the call.
 - **`mesh-texture-import`** — Mesh.Spec.texture. `Engine.hpp:14694` declares `UTexture2D* ImportFileAsTexture2D(UObject* WorldContextObject, FString Filename)` on UKismetRenderingLibrary. Both halves of the unknown are answered: the world context is a plain `UObject*`, so the actor already being passed qualifies, and the path is an FString — an ordinary Lua string, and NOT the FName shape that kills the process.
+- **`effect-native-status`** — Effect.Spec.nativeStatus. **Observed working in a loaded save**, 2026-07-26: `status.add AttackUp (EPalStatusID 26) [declared]`, the game reading the ailment back as present, then `status.remove` and the game reading it back as gone. The route is `PalCharacter.StatusComponent` -> `UPalStatusComponent::AddStatus(EPalStatusID)`, and the vocabulary that previously had no source anywhere on disk is `EPalStatusID`'s 38 names. One thing had to change to get there and it generalises: those parameters are declared **EnumProperty**, not ByteProperty — an `enum class`, not a legacy `enum` — and `core/signature.lua` refused three correct calls over the spelling until it learned the two marshal identically. Every `EPal*` argument in this tree is an enum class.
 
-## Open (24)
+## Open (23)
 
 ### Pal
 
@@ -520,44 +521,6 @@ longer the only option and is not worth its risk while those six parameters are 
 
 The inventory class chain and the container's function list, unfiltered, so a name nobody has
 proposed can be spotted. It writes to no inventory.
-
-#### `effect-native-status` — Effect.Spec.nativeStatus
-
-- **Probe:** F1
-- **Marked at:** Scripts/palforge/core/status.lua:127
-
-**What a pack author sees**
-
-`Effect{ nativeStatus = "Poison" }` may not light up the game's real status icon. Everything else
-about the effect — timing, stacking, your handlers — works regardless, by design: a native
-ailment that will not fire is logged and never fails the apply.
-
-**What is still unknown**
-
-Only whether `AddStatus` / `RemoveStatus` actually fire. Every other part of this item is now
-settled, and it went from "no route has been found on any reflected class" to one call:
-
-- **Where it lives.** `PalCharacter` carries a `StatusComponent` property — visible in the live
-  property list at `dumps/reflection/02_reflection.txt:1007`, so the component is reachable off
-  any player pawn or pal.
-- **What it exposes.** `dumps/cxx/Pal.hpp:29774`, `class UPalStatusComponent`:
-  `AddStatus(EPalStatusID)`, `RemoveStatus(EPalStatusID)`, `GetExecutionStatus(EPalStatusID)`,
-  `AddStatusParameter(EPalStatusID, FStatusDynamicParameter)`. One integer argument, no struct,
-  no FName — the enum form the earlier analysis predicted.
-- **The vocabulary**, which previously had no source on disk anywhere: `EPalStatusID`,
-  `dumps/cxx/Pal_enums.hpp:4246`, 38 named ailments. Poison, Stun, Sleep, Burn, Freeze,
-  Electrical, Darkness, Wetness, AttackUp, DefenseUp and the rest. `core/status.lua` carries
-  them verbatim, and an unknown name is now rejected while the definition is being written.
-
-`AddStatusParameter`'s struct variant is deliberately not used: `core/signature.lua` does not
-pass a struct on an unread declaration.
-
-**What the probe prints**
-
-F1 in a loaded world, no dedicated block needed. `core.signature` logs `declared` or `present`
-plus the ailment name on a call that fires, or refuses and names the lookup that failed. Watch
-the parameter spelling: an `EnumProperty` build declares it differently from a `ByteProperty`
-one, which shows up as a refusal rather than a crash.
 
 #### `skill-activate-source` — Skill.Spec.Events.onActivate
 
@@ -1121,7 +1084,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `icons-row-read` — core.icons.resolve -> Item/Pal/Building/Skill Handle:iconOf()
 
 - **Probe:** F1
-- **Marked at:** Scripts/palforge/core/icons.lua:396
+- **Marked at:** Scripts/palforge/core/icons.lua:377
 
 **What a pack author sees**
 

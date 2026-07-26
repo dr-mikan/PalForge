@@ -593,7 +593,7 @@ s:test("applies to the live player pawn and takes it off again", function(t)
     t:falsy(h:isActive(pawn))
 end)
 
-s:test("a nativeStatus effect toggles the game's own ailment on the live pawn -- TODO(effect-native-status)", function(t)
+s:test("a nativeStatus effect toggles the game's own ailment on the live pawn", function(t)
     local pawn = support.needWorld(t)
 
     -- AttackUp is chosen deliberately: it is a BUFF, so a run that somehow leaves it behind
