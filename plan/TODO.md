@@ -282,46 +282,34 @@ Product_Count, WorkAmount, Material1_Id, Material1_Count.
 
 #### `skill-hit-source` — Skill.Spec.Events.onHit
 
-- **Probe:** F8
+- **Probe:** ordinary play
 - **Marked at:** Scripts/palforge/api/skill.lua:105
 
 **What a pack author sees**
 
-events.onHit never runs on its own; it only fires when the pack calls Handle:hit(target).
-Nothing reports "skill X landed on Y".
+`onHit` never fires. Everything else about a skill works — `onActivate` fires, and the handler
+gets the move's identity.
 
-**What is still unknown**
+**Both hooks are measured silent, and they rule out different things**
 
-```text
-TODO(skill-hit-source): NARROWED on both sides. VICTIM side: dumps/reflection/
-06_events.txt records PalCharacter:OnDamageReaction firing 9 times on real pals and on
-the player, and shows its shape — exactly ONE parameter, a UScriptStruct (a2..a4 are
-empty). So the question shrinks from "which hook and how many params" to "what are the
-FIELDS of that one struct". The probe never expanded it, so they are still unprinted.
-ATTACKER side: /Script/Pal.PalUtility carries MakeDamageInfoByWazaType alongside
-MakeDamageInfo, ProcessDamageAndPlayEffectsByDamageInfo and ProcessDamageAndPlayEffects
-— a damage-info struct BUILT from a waza type is strong reason to expect the waza
-identity to be a field of the very struct OnDamageReaction receives, and those
-Process* calls are attacker-side hook candidates that would carry it.
-THE ONE THING LEFT: the field list of that struct (walk its UClass with ForEachProperty
-inside the hook) and whether any field holds a waza / skill row FName.
-Still ruled out: PalPlayerController:SkillDamageReactionComponent_ProcessDamage_ToServer
-(armed, 0 firings).
-```
+- `MakeDamageInfoByWazaType` — silent while a pal fought and killed another pal.
+- `PalAnimNotifyState_AttackCollision:OnHit` — silent in that same session, and silent again in a
+  session where the player killed a pal by hand. `pal.damaged` and `pal.death` both carried, so a
+  blow certainly connected and certainly did damage.
 
-**What the probe prints**
+A hit does not reach either, from either side.
 
-Arm `RegisterHook("/Script/Pal.PalCharacter:OnDamageReaction", function(self, a1, a2, a3, a4)
-... end)`. Inside, for each param p: `local v = p:get()`; print `type(v)`; when v is userdata
-print `v:GetClass():GetFName():ToString()` and then enumerate the whole struct with `local c =
-v:GetClass(); while c do c:ForEachProperty(function(pr) print(" FIELD",
-pr:GetFName():ToString(), pr:GetClass():GetFName():ToString()) end); c = c:GetSuperStruct()
-end`, followed by the VALUE of each field printed as `tostring(v[fieldName])` and, when that is
-userdata with ToString, `v[fieldName]:ToString()`. Cap at ~10 firings. Then in game hit a Pal
-with a NAMED move (e.g. a fire attack) and, separately, with a plain melee hit, so the log can
-be diffed. PASTE BACK: the full field list of every param struct plus their values for both
-cases — we need to see whether any field holds a skill/waza row FName and, if so, its exact
-name.
+**What that leaves is not another hook**
+
+`skill.activate` works and carries the waza id. `pal.damaged` works. And nothing in the damage
+path carries a waza at all — `FPalDamageInfo` has 40 fields, `FPalDamageRactionInfo` 6,
+`FPalDamageResult` 12, and not one is an `EPalWazaID`. So the id can only reach a hit by being
+remembered from the activation that preceded it and attributed to the damage that follows.
+
+That is **inference, not a source**, and wiring it as one would be wrong: a move that misses, a
+second pal attacking in the same window, or damage from anything else would all be attributed to
+whatever activated last. If it is ever built it belongs behind a name that says so — a correlated
+guess a pack opts into — and never on `onHit`, which promises the game told us.
 
 #### `audio-custom-file-loader` — Audio.Spec.soundFile (Audio{ soundFile = ... }:play, via core.sound.file FileSource:play)
 

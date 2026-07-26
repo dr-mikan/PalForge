@@ -102,11 +102,26 @@ local Events = schema.define("Skill.Spec.Events", {
     -- and neither has an EPalWazaID. So no amount of struct walking on the damage hook could
     -- ever have named the skill, and the attacker side is the only side that can. Do not
     -- re-probe those structs.
-    -- TODO(skill-hit-source): NARROWED. Source 1 is ruled out by measurement; source 2 covers
-    -- melee only. The PROJECTILE half is what is left, and no class in dumps/cxx carries both a
-    -- bullet and an EPalWazaID — so a ranged move's hit can only be identified by carrying the
-    -- id forward from the ACTION that spawned the bullet, which needs onActivate working first.
-    -- KEEP onHit IDEMPOTENT either way: a multi-collision move can land more than once.
+    -- TODO(skill-hit-source): BOTH hooks are now MEASURED SILENT, and the two measurements are
+    -- worth keeping apart because they rule out different things.
+    --   * MakeDamageInfoByWazaType: silent while a pal fought and killed another pal.
+    --   * PalAnimNotifyState_AttackCollision:OnHit: silent in the same session, and silent
+    --     again on 2026-07-26 in a session where the player killed a pal by hand — pal.damaged
+    --     and pal.death both carried, so a blow certainly connected and certainly did damage.
+    -- So a hit does not reach either, from either side.
+    --
+    -- WHAT THAT LEAVES, and it is not another hook. skill.activate DOES work and it carries the
+    -- waza id (source "PalActionBase:OnBeginAction", measured). pal.damaged works. Nothing in
+    -- the damage path carries a waza at all — FPalDamageInfo has 40 fields, FPalDamageRactionInfo
+    -- 6, FPalDamageResult 12, and not one is an EPalWazaID — so the id can only reach a hit by
+    -- being remembered from the activation that preceded it and attributed to the damage that
+    -- follows.
+    --
+    -- That is INFERENCE, not a source, and it must not be wired as if it were one: a pal whose
+    -- move misses, a second pal attacking in the same window, or damage from anything else would
+    -- all be attributed to whatever activated last. If it is ever built it belongs behind a name
+    -- that says so — a correlated guess a pack opts into — and never on onHit, which promises the
+    -- game told us.
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
                     doc = "one of its hits landed (self, target, ctx) - two sources armed, melee only, may repeat" },
     -- TWO SOURCES for the pair, and again the first is measured rather than assumed.
