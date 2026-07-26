@@ -374,7 +374,8 @@ end
 -- Use `data` for defaults every instance should share.
 --=============================================================================
 
----What you pass to UI{ ... }. `id` is required; `render` is what makes it useful.
+---What you pass to UI{ ... }. `id` is required; `root` (a declared tree) or `render` (build it
+---yourself) is what makes it useful — one or the other, never both.
 local Spec = schema.define("UI.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "element id, e.g. \"pack:Panel\"" },

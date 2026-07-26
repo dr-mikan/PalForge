@@ -17,6 +17,7 @@
 
 # NOW: the last UI slot question. Read-only, one shot, no in-game action needed. The 10 s delay
 # lets the game's own UI widgets come up, because the probe cross-checks against them.
+5 pf_native
 10 pf_uislot
 
 # THE MESH CHAIN, END TO END — nothing to do but LOOK. 15 s after the world is ready it

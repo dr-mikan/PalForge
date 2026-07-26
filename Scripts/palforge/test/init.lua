@@ -85,6 +85,7 @@ M.CASES = {
     "schema",
     "registry",
     "definitions",
+    "native",
     "pal",
     "item",
     "building",
@@ -285,6 +286,130 @@ pf_teach = function()
     local ok = character.addSkill(pal, SKILL)
     log.info(string.format("pf_teach: %s — watch for skill.equip carrying its first event",
         ok and "the read-back shows it on the pal" or "the read-back did not show it"))
+end,
+
+-- The ONE claim about the native catalogs that a headless run cannot settle.
+--
+-- test/cases/native proves the naming rule, the laziness and the identity of the handles, and
+-- all of that is pure Lua. What it cannot prove is that a handle reached BY NAME — with nothing
+-- declared on it, no icon, no mesh — still answers with the game's own icon, which is the whole
+-- reason a native handle is worth having over a bare id string. :iconOf() goes through
+-- core/icons to a live DataTable, so it needs a loaded world and it needs the game.
+--
+-- It also looks at the two things a lazy handle must NOT claim, so a false is reported as the
+-- correct answer rather than read as a failure: no declared mesh (the game draws its own) and no
+-- declared stack size (that is a DataTable column this build cannot read).
+pf_native = function()
+    local native = require("palforge.native")
+    local probes = {
+        { "buildings", "PalBoxV2"    }, { "buildings", "Workbench" },
+        { "items",     "Arrow_Fire"  }, { "items",     "Stone"     },
+        { "pals",      "BlueSkyDragon" }, { "pals",    "Sheepball" },
+        { "skills",    "BOSS_FireKirin" },
+    }
+    log.info("pf_native: reading a NAMED handle out of each catalog — nothing was declared on any "
+        .. "of these, so every answer below comes from the game")
+    for _, p in ipairs(probes) do
+        local mod, name = native[p[1]], p[2]
+        local h = mod and mod[name]
+        if not h then
+            log.warn(string.format("pf_native: native.%s.%s did not resolve at all", p[1], name))
+        else
+            local okIcon, icon = pcall(function() return h:iconOf() end)
+            log.info(string.format("pf_native: native.%s.%s -> id=%s icon=%s",
+                p[1], name, tostring(h.id),
+                (okIcon and icon ~= nil) and tostring(icon) or "nil (no row, or the read did not fire)"))
+        end
+    end
+
+    -- and the honest negatives, named so a reader does not mistake them for breakage
+    local box = native.buildings.PalBoxV2
+    log.info(string.format("pf_native: PalBoxV2 has %d live instance(s); :render() attached %d of "
+        .. "them (0 is CORRECT for a curated mesh the game already draws over)",
+        #box:instances(), box:render()))
+    local gate = native.buildings.Stone_Gate
+    log.info(string.format("pf_native: Stone_Gate declares no mesh (%s), so :render() is %d — the "
+        .. "game is drawing its own", tostring(gate:mesh()), gate:render()))
+    log.info(string.format("pf_native: items.Stone:count()=%s (LIVE), :maxStack()=%d (PalForge's "
+        .. "default, NOT the game's column — see native/items.lua)",
+        tostring(native.items.Stone:count()), native.items.Stone:maxStack()))
+end,
+
+-- pf_uidecl — A DECLARED PANEL, INSIDE THE GAME'S OWN UI. The other action that puts something
+-- on screen, and the only one that puts it in a panel the GAME draws.
+--
+-- WHAT IS UNPROVEN. `ui-host-paths` is closed on paper and only on paper: WBP_PalOverallUILayout
+-- declares `UCanvasPanel* CanvasPanel_Root` (dumps/cxx/WBP_PalOverallUILayout.hpp:9), a
+-- UCanvasPanel is a UPanelWidget so it answers AddChild (UMG.hpp:344, :1087), and an instance is
+-- alive under BP_PalGameInstance (dumps/reflection/03_widgets.txt:54). Nobody has ever watched a
+-- widget APPEAR in it. Everything api/ui's declarative layer does rests on that one unobserved
+-- step, so this is the run that observes it — or names exactly which step refused.
+--
+-- It is written the way a PACK would write it: UI{ host = "game", root = <tree> } and
+-- :autoMount. No core call, no widget toolkit, nothing this action knows that a reader of
+-- api/ui.lua would not.
+--
+-- WHAT TO LOOK FOR, in order of what each one proves:
+--   * a dark box with three lines of text, top-left  -> the whole chain: host resolved, tree
+--     built, AddChild accepted, the canvas slot's SetAutoSize gave it a size. Never seen.
+--   * the second line's seconds COUNT UP              -> bindings re-evaluate on the poll, so a
+--     declared panel is live rather than a snapshot.
+--   * clicking the button changes ITS OWN label       -> click router -> instance state ->
+--     binding -> SetText on the button's label child. The full loop, in one gesture.
+--   * nothing on screen and `mounted -> true`         -> it was placed and drew nowhere: a
+--     CanvasPanelSlot lays out by offsets and SetAutoSize is what gives it size
+--     (_widget.lua:565). The slot class printed below is then the thing to read.
+--   * `mounted -> false`                              -> the reason is printed with it, from
+--     UI.Handle:lastError(), which names the node or the host that refused.
+-- It stays on screen: nothing takes it down but a reload (F9) or leaving the world.
+pf_uidecl = function()
+    local UI   = require("palforge.api.ui")
+    local poll = require("palforge.core.poll")
+    local VBox, Label, Button, Border = UI.VBox, UI.Label, UI.Button, UI.Border
+    local t0 = os.clock()
+
+    local Panel = UI{
+        id   = "palforge_test:DeclPanel",
+        name = "Declared panel",
+        host = "game",                     -- CanvasPanel_Root inside WBP_PalOverallUILayout
+        root = Border{ color = { 0.05, 0.04, 0.03, 0.92 }, padding = 10, hAlign = "left",
+            VBox{
+                Label{ text = "PalForge — declared UI", size = 20 },
+                Label{ name = "clock",
+                       text = function() return string.format("alive %.0f s", os.clock() - t0) end },
+                Button{ name = "hit",
+                        text    = function(self) return "clicked " .. (self.clicks or 0) .. "x" end,
+                        onClick = function(self) self.clicks = (self.clicks or 0) + 1 end },
+            },
+        },
+    }
+
+    -- autoMount, not mount: at the moment this runs the in-game layout may not be up yet, and
+    -- the same subscription that keeps retrying is the one that refreshes the bindings once it
+    -- is in. One heartbeat subscription, no timer of its own (api/ui.lua's poll).
+    local panel = Panel:new{ clicks = 0 }
+    panel:autoMount(nil, 1000)
+    log.info("pf_uidecl: a declared panel is trying to mount into the game's own UI root")
+
+    poll.every("pf_uidecl look-back", function(elapsed)
+        if elapsed < 12 then return false end
+        if not panel:isMounted() then
+            log.warn("pf_uidecl: NOT mounted after 12 s — " .. tostring(panel:lastError()))
+            return true
+        end
+        -- The evidence line: which slot class the canvas handed back, and the full name of the
+        -- widget that is now in the game's tree. Both are read off the built tree rather than
+        -- inferred, and a "CanvasPanelSlot" here is what closes ui-host-paths on OBSERVATION.
+        local st = panel:state()
+        local slotCls, rootName, hostWhat = "?", "?", "?"
+        pcall(function() slotCls = st._tree.slot:GetClass():GetFName():ToString() end)
+        pcall(function() rootName = st._tree.root:GetFullName() end)
+        pcall(function() hostWhat = st._host.what end)
+        log.info(string.format("pf_uidecl: MOUNTED into %s | slot=%s | root=%s",
+            hostWhat, slotCls, rootName))
+        support.announce("pf_uidecl: a declared panel should be on screen — click its button")
+        return true
+    end)
 end,
 }
 for _, p in ipairs(M.PROBES) do
