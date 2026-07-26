@@ -428,8 +428,31 @@ s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)",
     end
 end)
 
+-- OFF BY DEFAULT, AND THE REASON IS A CRASH. The first run of this test with a real pal out
+-- wrote Human_Punch onto that pal — AddEquipWaza fired with evidence "declared", the read-back
+-- did not show it, RemoveEquipWaza fired — and Palworld closed about 1.4 seconds later, part
+-- way through the mesh suite. The run before it, with no pal nearby, completed.
+--
+-- That is a CORRELATION, not a proof: the suite does several other things in that window, and
+-- the log ends without a Lua error, which is what a native fault looks like from here. But the
+-- direction of the risk is one-sided. This test writes to a character in the player's real save
+-- through a call whose effect has never been observed, and F1 is a key the user presses
+-- constantly. A test that MIGHT take the game down is not worth running unattended for a
+-- question that can wait.
+--
+-- To run it deliberately, set the flag from the UE4SS console and press F1:
+--     _G.PALFORGE_TEST_WRITE_WAZA = true
+-- Do that on a throwaway save, with a pal you do not mind losing.
+--
+-- The read half above still runs every time and is where the useful signal now is: if a real
+-- pal reports zero equipped moves, the read is not reaching what it should, and that is a
+-- better lead than any write result.
 s:test("an active skill can be taught to a live PAL and taken back off -- TODO(pal-skills-equip)", function(t)
     support.needWorld(t)
+    if not _G.PALFORGE_TEST_WRITE_WAZA then
+        t:skip("writing a move to a live pal is opt-in: it correlates with a crash and has never "
+            .. "been seen to land. Set _G.PALFORGE_TEST_WRITE_WAZA = true on a throwaway save to run it")
+    end
 
     -- ON A PAL, NOT ON THE PLAYER, and that distinction is a finding rather than a preference.
     -- The first live run taught Human_Punch to the player pawn: the call fired with evidence

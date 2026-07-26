@@ -334,11 +334,20 @@ local function pathOf(v)
     local ok, str = pcall(function() return v.ToString and v:ToString() end)
     if ok and type(str) == "string" and #str > 0 and str ~= "None" then return str end
 
-    -- 2) TSoftObjectPtr -> FSoftObjectPath -> FName. Both the nested spelling and the flattened
-    --    one, since UE4SS exposes struct members differently depending on the pusher.
+    -- 2) TSoftObjectPtr -> FSoftObjectPath -> the name inside it. UE4 and UE5 spell that last
+    --    step DIFFERENTLY and Palworld is UE5, which is why the first attempt at this missed:
+    --      UE4   FSoftObjectPath { FName AssetPathName; FString SubPathString; }
+    --      UE5   FSoftObjectPath { FTopLevelAssetPath AssetPath; FString SubPathString; }
+    --            FTopLevelAssetPath { FName PackageName; FName AssetName; }
+    --    PackageName is the "/Game/Pal/Texture/Icon/T_itemicon_Wood" half, which is what a
+    --    caller wants; AssetName is the object name after the dot. Both spellings are tried,
+    --    nested and flattened, because UE4SS exposes struct members differently per pusher.
     for _, get in ipairs({
+        function() return v.ObjectID.AssetPath.PackageName end,
+        function() return v.AssetPath.PackageName end,
         function() return v.ObjectID.AssetPathName end,
         function() return v.AssetPathName end,
+        function() return v.ObjectID.AssetPath end,
         function() return v.ObjectID end,
     }) do
         local okg, inner = pcall(get)
@@ -365,9 +374,23 @@ local function readIcon(row, tableName)
             if not reportedShape[tableName] then
                 reportedShape[tableName] = true
                 local desc; pcall(function() desc = tostring(v) end)
+                -- List what the value actually responds to. Three runs have now ended with a
+                -- nil that named no reason, so this prints the metatable's own keys: whatever
+                -- UE4SS binds onto this userdata is the next thing pathOf should try, and
+                -- guessing shapes one release at a time is what made this slow.
+                local keys = {}
+                pcall(function()
+                    local mt = getmetatable(v)
+                    local idx = mt and (type(mt.__index) == "table" and mt.__index or mt)
+                    if type(idx) == "table" then
+                        for k in pairs(idx) do keys[#keys + 1] = tostring(k) end
+                        table.sort(keys)
+                    end
+                end)
                 log.warn(string.format("icons: %s.%s is a %s that pathOf could not read (%s) — "
-                    .. "the row IS readable, only this last unwrap is missing",
-                    tableName, col, type(v), tostring(desc)))
+                    .. "the row IS readable, only this last unwrap is missing. It responds to: %s",
+                    tableName, col, type(v), tostring(desc),
+                    #keys > 0 and table.concat(keys, ", ") or "<no readable metatable>"))
             end
         end
     end

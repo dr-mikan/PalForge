@@ -132,6 +132,24 @@ raises. "ChickenPal" is a confirmed row of that table (674 rows on disk).
 works, the pal really does carry it — every write here is verified by reading the character back,
 so a true is never "the call ran".
 
+**⚠️ Writing a move to a live pal correlates with a crash**
+
+The first run that did it — `AddEquipWaza` firing with evidence `declared`, the read-back not
+showing the move, `RemoveEquipWaza` firing — was followed about 1.4 seconds later by Palworld
+closing, part way through the mesh suite. The run before it, with no pal nearby, completed.
+
+That is a correlation and not a proof: several other things happen in that window, and the log
+ends with no Lua error, which is what a native fault looks like from here. But the risk is
+one-sided — this writes into a character in a real save through a call whose effect has never
+been observed — so the write is now **opt-in** and F1 no longer performs it. To run it
+deliberately, on a throwaway save:
+
+```lua
+_G.PALFORGE_TEST_WRITE_WAZA = true   -- then press F1
+```
+
+The read half still runs every time, and it is where the better signal is (see below).
+
 **What is still unknown**
 
 Only whether the writes land. Everything else is settled by `dumps/cxx/Pal.hpp`, and this went
@@ -157,13 +175,24 @@ active skills, which is what `Pal{ skills = { ... } }` can contain and what
 distinction a caller cannot paper over, so `:teach` routes on which one the id is rather than on
 the skill's declared `kind`.
 
+**The lead worth chasing first: the READ says zero**
+
+`skills: the nearest pal carries 0 active and 0 passive`. A real Palworld pal has equipped
+moves, so a pal reporting none means the read is not reaching what it should — and if the read
+is landing on the wrong object, so is the write, which would explain the whole item without
+server authority coming into it at all. The route resolves and answers, so this is not "no
+parameter object"; it is the wrong one, or the right one before its moves are populated.
+
+Read next, in this order: whether `GetIndividualCharacterParameterByActor` returns the same
+object as the pal's own `GetCharacterParameterComponent():GetIndividualParameter()`, and what
+`GetEquipableWaza()` and `GetMasteredWaza()` say on the same object. If those are non-empty
+while `GetEquipWaza()` is empty, the read is fine and the pal genuinely has nothing equipped.
+
 **What the probe prints**
 
-F1 in a loaded world, no dedicated block. Watch two things: the evidence level (an
-`EnumProperty` build spells `EPalWazaID` differently from a `ByteProperty` one, which shows up
-as a refusal, not a crash), and a `declared` call that still does not land — that would point at
-server authority and make `APalPlayerController::AddEquipWaza_ToServer` the next thing to read.
-It takes an `FPalInstanceID` struct, so `core/signature.lua` will not fire it unattended.
+F1 in a loaded world with a pal nearby prints both read-backs, the player's and the pal's. The
+enum spelling question is settled — these parameters are `EnumProperty`, and `core/signature.lua`
+now accepts it.
 
 #### `pal-spawnmonster-signature` — Pal.Handle:spawn / core.spawn.pal / core.spawn.palAt
 

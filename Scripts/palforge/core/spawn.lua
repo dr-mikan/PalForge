@@ -2,36 +2,53 @@
 -- calls live here (the api/impl split: api/*:spawn() declares the capability, this holds
 -- the engine call), so base classes stay declaration-only.
 --
--- ⚠️ NO PAL SPAWN ROUTE HAS BEEN OBSERVED TO WORK ON THIS BUILD — measured, not suspected. In
--- a loaded save with a live world on 2026-07-26, with a cheat manager that already existed
--- (CheatManagerEnabler logged "CheatManager already exist") and on the game thread (every
--- keybind and hook enters through ExecuteInGameThread), cm:SpawnMonster(FName("ChickenPal"),
--- level) completed WITHOUT RAISING and no new PalCharacter existed 1.2 s later; the palAt
--- placement pass ran twice and found no new pal actor to place. So the call reaches the
--- engine and does nothing. Every route here still reports what it OBSERVED, and a route that
--- observed nothing returns false.
+-- ✅ THE WILD SPAWN ROUTE WORKS ON THIS BUILD, AND THE COORDINATE HALF PLACES EXACTLY —
+-- observed 2026-07-26 16:38, one F1 press in a loaded save, wall-clock timestamps:
+--     16:38:47.057  spawn.palAt: SpawnMonster(ChickenPal, lv 1) ran [evidence declared]
+--     16:38:52.968  spawn.palAt: placed new pal at (-345296,263050,4153); it reads back
+--                                (-345296,263050,4153), off by 0
+--     16:38:53.109  the same for the second call, 5.86 s after it, also off by 0
+-- The pal each pass moved was absent from the snapshot taken at 16:38:47, so it is not a
+-- leftover from an earlier run: SpawnMonster made it, and K2_TeleportTo put it on the requested
+-- point to the centimetre.
 --
--- WHAT dumps/cxx/ SETTLED (read 2026-07-26; UE4SS's own CXXHeaderDump of this install, 1579
--- headers of real signatures out of the shipping binary). Three candidate explanations for
--- that no-op are now DEAD, and the surviving one is named at TODO(pal-spawnmonster-signature):
---   * WRONG ARITY — dead. Pal.hpp:16176 declares UPalCheatManager::SpawnMonster(const FName
+-- WHAT WAS BROKEN WAS THE VERDICT, NOT THE ROUTE, and this file said the opposite in bold for
+-- weeks. SpawnMonster is ASYNCHRONOUS — ~5.9 s passed between the call and the pal being
+-- placeable — while every check here was synchronous or nearly so: a world count taken in the
+-- statement AFTER the call (no tick in between, so it could never have seen anything), plus one
+-- more look at a nominal 1.2 s. Both missed every time, and "the call ran and nothing spawned"
+-- was reported as a property of the build instead of as a stopwatch stopping too early. The
+-- correction is the observation windows at WATCH_MS / WATCH_TRIES below, whose numbers come
+-- from that log and not from taste.
+--
+-- WHAT IS STILL UNOBSERVED, and must not be smuggled in on the strength of the above: M.pal,
+-- the plain wild route. It issues the SAME call as M.palAt, so it very probably works too — but
+-- "probably" is the exact word that got this file into trouble, and no run has ever seen a pal
+-- from it (its 1.2 s look missed, and unlike M.palAt it had no retry chain to catch the late
+-- arrival). It now watches on the schedule that caught the other one, so the next run in a
+-- loaded world answers it in the log.
+--
+-- WHAT dumps/cxx/ CONTRIBUTES (read 2026-07-26; UE4SS's own CXXHeaderDump of this install, 1579
+-- headers of real signatures out of the shipping binary) — corroboration now, rather than the
+-- search for an explanation it used to be:
+--   * THE PARAMETER LIST. Pal.hpp:16176 declares UPalCheatManager::SpawnMonster(const FName
 --     CharacterID, int32 Level) and :16175 SpawnMonsterForPlayer(const FName& CharacterID,
---     int32 Num, int32 Level). Those are exactly the two lists this file passes. The
---     AddItem_ServerInternal shape (four passed, six declared) does NOT repeat here.
---   * A CLASS-WIDE GATE — dead. All 470 lines of `class UPalCheatManager : public
---     UCheatManager` (Pal.hpp:16085-16554) were read. It holds six members —
---     DebugWindowSetting, DebugProgressPresetDataTable, SpawnerInfoReporterClass, PalImGui,
---     PalCountSystem, SpawnInfoReporter — and not one of them is a spawn mode, a target, an
---     enable flag or a "spawn at the reticle" concept. There is no SpawnMonster_ToServer, no
---     _ServerInternal twin and no second overload anywhere on the class.
---   * A BLIND MEASUREMENT — dead, and this one matters most: the world delta below really
---     would have seen a pal. APalMonsterCharacter derives APalNPC derives APalCharacter
---     (Pal.hpp:10167, 10195, 8956), and dumps/reflection/04_live_objects.txt shows the
---     FindAllOf("PalCharacter") sweep returning BP_PinkCat_C out of a live world — a monster
---     blueprint, not a player. Subclasses are enumerated. A spawned pal would have been counted.
+--     int32 Num, int32 Level) — exactly the two lists this file passes. The live build agrees:
+--     every spawn line of the 16:38 run reads [evidence declared], which is core.signature
+--     saying it walked the real UFunction on the running game and the types matched.
+--   * THE CLASS. All 470 lines of `class UPalCheatManager : public UCheatManager`
+--     (Pal.hpp:16085-16554) were read. Six members — DebugWindowSetting,
+--     DebugProgressPresetDataTable, SpawnerInfoReporterClass, PalImGui, PalCountSystem,
+--     SpawnInfoReporter — and not one of them is a spawn mode, a target, an enable flag or a
+--     "spawn at the reticle" concept; no SpawnMonster_ToServer, no _ServerInternal twin, no
+--     second overload. Nothing has to be armed first, which is why the call works as written.
+--   * THE ENUMERATION. APalMonsterCharacter derives APalNPC derives APalCharacter
+--     (Pal.hpp:10167, 10195, 8956), so FindAllOf("PalCharacter") returns spawned monsters —
+--     predicted from the headers, then PROVEN by the run above, where that sweep is what found
+--     the new pal and handed it to the teleport.
 --
--- TWO CAPABILITIES, TWO OBJECTS, ONE ROUTE EACH — no route falls back onto another, so a false
--- names one call rather than hiding three.
+-- TWO CAPABILITIES, TWO OBJECTS, ONE ROUTE EACH — no route falls back onto another, so a
+-- failure names one call rather than hiding three.
 --   WILD, into the world (M.pal, M.palAt)  -> UPalCheatManager:SpawnMonster. The
 --     server-authoritative admin API enabled by the CheatManagerEnabler mod. On a DEDICATED
 --     SERVER no mod creates that object (the enabler hooks PlayerController:ClientRestart, which
@@ -62,18 +79,25 @@
 -- the engine as a row the game could match instead of as a string it never will. A literal
 -- game id passes through untouched.
 --
--- WHAT A `true` MEANS. None of these calls answers anything — an unknown CharacterID neither
--- throws nor reports — so "the native call RAN" is worth nothing and is no longer reported as
--- success. The only evidence in reach is the world itself: FindAllOf("PalCharacter")
--- immediately before the call and immediately again after it. M.pal and M.palAt return true
--- ONLY when a pal that was not there a statement ago is there now; otherwise they warn and
--- return false. That immediate look cannot be fooled by a wild pal streaming in — the two
--- enumerations are adjacent statements on the game thread with no tick between them — but it
--- CAN miss an actor that materializes a few frames late, so both routes still look AGAIN
--- ~1.2 s later and log what they find. That deferred line is what recorded the bug above, and
--- it is where the route coming alive would show up first.
--- The one exception is M.palForPlayer: it summons into the party/box, which nothing here can
--- enumerate, so its true still means only "the call was issued". It says so at its own doc.
+-- WHAT A `true` MEANS: THE CALL WAS ISSUED. Nothing more, and deliberately not more. None of
+-- these calls answers anything (an unknown CharacterID neither throws nor reports), and the
+-- world cannot be asked in their place either, because the pal arrives SECONDS after the caller
+-- has gone — no caller can block for six seconds, and a synchronous boolean cannot describe an
+-- asynchronous arrival without lying about one or the other. So every route here returns true
+-- when core.signature matched the live declaration and the native call ran without raising, and
+-- false when the call was refused, raised, or was never attempted at all (bad arguments, no
+-- cheat manager, no player state).
+-- That is a smaller claim than the old verdict PRETENDED to make and a larger one than it
+-- DELIVERED: the old true required a world count taken one statement after the call, which
+-- answered false for spawns that had in fact worked.
+-- WHERE ARRIVAL IS REPORTED, because it still is: in the log, by the deferred passes, which is
+-- where the truth about an async call has to live. M.pal watches the world on the WATCH
+-- schedule and prints when — or whether — a new pal shows up. M.palAt's placement chain does
+-- the same and additionally prints the coordinate read back off the pal it moved. Those two
+-- lines recorded both the false alarm above and its disproof, and a caller who must KNOW can
+-- poll FindAllOf itself over the same window.
+-- M.palForPlayer has always meant only "the call was issued"; it now means what its siblings
+-- mean, for the different reason written at its own doc (nothing here can enumerate a party/box).
 local log            = require("palforge.utils.log").scope("spawn")
 local object_manager = require("palforge.core.object_manager")
 local sig            = require("palforge.core.signature")
@@ -219,9 +243,11 @@ local function actorLoc(a)
     return nil
 end
 
--- How many live PalCharacters are in the world that were not in `before`. This is the whole
--- of what this module can measure: no spawn call on this build answers anything, so a count
--- taken against a snapshot is the only thing that can tell a spawn from a no-op.
+-- How many live PalCharacters are in the world that were not in `before`. This is the whole of
+-- what this module can measure: no spawn call on this build answers anything, so a count taken
+-- against a snapshot is the only thing that can tell a spawn from a no-op. What the 16:38 run
+-- added is WHEN it can tell: not before the pal exists, which was ~5.9 s after the call. It is
+-- therefore never asked at the call site any more — only from the deferred passes below.
 local function newPalCount(before)
     local n = 0
     for _, a in ipairs(palActors()) do
@@ -233,100 +259,137 @@ local function newPalCount(before)
     return n
 end
 
--- Deferred spawn CONFIRMATION, log-only, and the SECOND look: the immediate count at the call
--- site catches a spawn that is synchronous, this one catches an actor that materializes a few
--- frames late. Its warning is what recorded the standing bug — the call ran, nothing arrived —
--- so it stays armed on exactly the path that reported false. Costs one FindAllOf per spawn the
--- caller asked for, and nothing at all where the async pair is unavailable.
 local function canDefer()
     return type(LoopAsync) == "function" and type(ExecuteInGameThread) == "function"
 end
 
-local function confirmSpawnLater(before, what)
-    if not (before and canDefer()) then return end
-    LoopAsync(1200, function()
+-- ---- HOW LONG TO WATCH, and why these two numbers ---------------------------------------
+-- Straight off the 2026-07-26 run, and nothing here is a preference. Both coordinate spawns
+-- were issued at 16:38:47 and their pal was found, moved and read back at 16:38:52.97 and
+-- 16:38:53.11 — 5.9 s and 5.86 s of WALL CLOCK after the call. Two things follow, and this file
+-- has already made both mistakes once:
+--   * ARRIVAL IS SECONDS AWAY, NOT FRAMES. The single look at a nominal 1.2 s that used to be
+--     the only deferred check could not have caught it on any of the three calls in that run,
+--     and its warning was then written down as a property of the game.
+--   * A NOMINAL INTERVAL IS NOT A REAL ONE. The chain that DID catch it was six ticks of a
+--     nominal 400 ms: 2.4 s of paper budget that took 5.9 s to run, ~2.5x, because every tick
+--     hands back through LoopAsync + ExecuteInGameThread and the whole test suite was running
+--     beside it. A window sized by its nominal total is a window sized by luck — that success
+--     landed on or about the LAST of the six tries it had.
+-- 20 x 400 ms is therefore 8 s of nominal budget: a third again the longest arrival anyone has
+-- measured even on a quiet session where the ticks run at their nominal rate, and ~20 s of wall
+-- clock at the stretch actually observed. Both chains stop the moment they have an answer, so
+-- the extra tries are only ever paid for by a spawn that never arrives.
+local WATCH_MS    = 400
+local WATCH_TRIES = 20
+
+-- Deferred ARRIVAL WATCH for the wild route, log-only, and the ONLY observation M.pal has: the
+-- spawn is asynchronous, so there is nothing to see at the call site and everything to see a few
+-- seconds later. Costs one FindAllOf per look, only ever after a spawn the caller asked for, and
+-- nothing at all where the async pair is unavailable (in which case it answers false so the
+-- caller can say out loud that nothing is watching).
+--
+-- It prints ELAPSED SECONDS rather than the try number, because the try number is exactly what
+-- misled everyone before: this is the pass that has to notice if arrival takes 15 s on someone
+-- else's machine, and a nominal schedule cannot tell anyone that. os.clock is the clock this
+-- tree already uses for elapsed everywhere else (api/skill's cooldowns, test/probes/watch's
+-- timeline); it is approximate, which at this resolution does not matter.
+local function watchForArrival(before, what)
+    if not (before and canDefer()) then return false end
+    local t0, tries, done = os.clock(), 0, false
+    LoopAsync(WATCH_MS, function()
+        -- ExecuteInGameThread QUEUES its body, so `done` can be read one tick before the body
+        -- that sets it runs. One extra enumeration is the entire cost of that race.
         ExecuteInGameThread(function()
             pcall(function()
+                tries = tries + 1
                 local n = newPalCount(before)
                 if n > 0 then
-                    log.info(string.format("%s: %d new PalCharacter in the world 1.2 s later", what, n))
-                else
-                    log.warn(string.format("%s: the call ran but NO new PalCharacter appeared "
-                        .. "1.2 s later either — the route produced nothing (see TODO "
-                        .. "pal-spawnmonster-signature). A CharacterID the game does not have "
-                        .. "looks exactly the same from here", what))
+                    done = true
+                    log.info(string.format("%s: %d new PalCharacter in the world %.1f s after the "
+                        .. "call (look %d of %d)", what, n, os.clock() - t0, tries, WATCH_TRIES))
+                elseif tries >= WATCH_TRIES then
+                    done = true
+                    log.warn(string.format("%s: the call ran but NO new PalCharacter appeared in "
+                        .. "%.1f s (%d looks). This window is not the reason — the coordinate route "
+                        .. "received its pal ~5.9 s after the same call on 2026-07-26 — so this is "
+                        .. "a real miss. A CharacterID the game does not have looks exactly like "
+                        .. "this from here, and nothing reports the difference",
+                        what, os.clock() - t0, tries))
                 end
             end)
         end)
-        return true   -- one shot
+        return done   -- true stops the loop; keep looking until there is an answer
     end)
+    return true
 end
 
--- THE spawn call, made once for both world routes, wrapped in the only measurement available:
--- the world enumerated immediately before it and immediately after. Answers
---   ran       the native call executed without raising — worth nothing on its own,
---   appeared  how many PalCharacters exist now that did not exist a statement ago,
---   before    that snapshot, for the deferred pass that looks again 1.2 s later,
---   level     which evidence core.signature fired on ("declared" / "present"), or nil when
---             it refused and the game was never touched.
+-- THE spawn call, made once for both world routes. Answers
+--   ran     the native call was issued against a matched declaration and did not raise,
+--   before  the world snapshot taken immediately before it, which is the baseline every
+--           deferred pass measures arrival against,
+--   level   which evidence core.signature fired on ("declared" / "present"), or nil when it
+--           refused and the game was never touched.
 --
--- The declared shape is (const FName CharacterID, int32 Level) — dumps/cxx/Pal.hpp:16176 —
--- i.e. NameProperty then IntProperty, which is the same FName-plus-integer marshalling this
--- tree already performs successfully on this exact object every time utils/items unlocks a
--- technology through cm:UnlockOneTechnology(FName(...)) (Pal.hpp:16104). That is why "present"
--- evidence is acceptable for this call and would not be for a struct one.
+-- NO COUNT IS TAKEN AFTER THE CALL any more, and its removal is the fix this whole file just
+-- received. There used to be a newPalCount(before) in the statement following sig.call, and it
+-- was the VERDICT both world routes returned. It read 0 for every spawn that worked — the pal
+-- is ~6 s away — so all it ever bought was a second full UObject sweep per spawn in order to
+-- print a number that could not have been anything else. The snapshot stays, because the
+-- deferred passes need the baseline; the measuring moved to where the pal actually is.
 --
--- TODO(pal-spawnmonster-signature): THE SIGNATURE HALF IS CLOSED — the name is kept because
--- api/pal.lua, the pal test suite and test/probes/reflect.lua all cite it, but the unknown it
--- names has moved. What dumps/cxx/ ELIMINATED on 2026-07-26 is written out at the file header:
--- the parameter list is exactly the two arguments passed here, the cheat-manager class carries
--- no gate/mode/target/enable flag of any kind, and the world delta below really does enumerate
--- monster subclasses so it would have SEEN a pal. None of the three explanations anyone had
--- survives.
--- WHAT IS STILL UNKNOWN, and it is now one question rather than three: WHERE the call has to
--- run. The dump has no function bodies, so this is a hypothesis, offered because it is the
--- only one the headers still support — Palworld routes every mutating debug action through the
--- SERVER, never the local object. APalPlayerController declares a _ToServer twin for each one
--- (Debug_AddMoney_ToServer, Debug_AddPlayerExp_ToServer, Debug_Muteki_ToServer,
--- Debug_SetStatusPoint_ToServer, Debug_ForceSpawnRarePal_ToServer, and the general
--- Debug_CheatCommand_ToServer(FString Command) at Pal.hpp:10970 with
--- Debug_ReceiveCheatCommand_ToClient(FString Message) coming back at :10956), and
--- UPalCheatManager itself carries EnableCommandToServer() (:16440) and CommandToServer(const
--- FString Command) (:16501). Those exist because the game does NOT expect a cheat issued where
--- the caller lacks authority to do anything locally — which is precisely the observed
--- behaviour: runs, raises nothing, changes nothing. It also explains why UnlockOneTechnology
--- works on the same object: technology is the player's own replicated data, an actor is not.
--- WHY THAT DOES NOT MAKE THE FORWARD A FIX YET, and why it is not wired: every one of those
--- names is confirmed on the LIVE build (dumps/reflection/02_reflection.txt:190-213) but nothing
--- says the single-player session is non-authoritative, and on an authoritative controller a
--- Server RPC just runs its implementation locally — i.e. straight back into this same function.
--- Swapping a measured-dead direct call for the same call reached through an unverified command
--- STRING would trade one unknown for two. So the direct call stays and the forward is the named
--- next experiment.
--- WHAT THE NEXT RUN MUST DO (read-only first, one line each, in a loaded save):
---   1. print the network role — local pc = FindFirstOf("PalPlayerController"); print(pc.Role,
---      pc.RemoteRole, pc:HasAuthority()). An authoritative controller kills the hypothesis
---      outright and the search moves to the CharacterID and the spawn location instead.
---   2. only if step 1 says the session is NOT authority: in a THROWAWAY world,
---      pc:Debug_CheatCommand_ToServer("SpawnMonster ChickenPal 5") — one FString, which is a
---      scalar core.signature will pass — then count FindAllOf("PalCharacter") before and after.
---      A rise is the close; nothing is one more elimination and is worth as much.
+-- The declared shape is (const FName CharacterID, int32 Level) — dumps/cxx/Pal.hpp:16176 — i.e.
+-- NameProperty then IntProperty, and the live build says the same: every call of the 2026-07-26
+-- run logged [evidence declared], meaning core.signature walked the real UFunction and matched
+-- both types. It is also the same FName-plus-integer marshalling this tree already performs on
+-- this exact object every time utils/items unlocks a technology through
+-- cm:UnlockOneTechnology(FName(...)) (Pal.hpp:16104).
+--
+-- CLOSED (this was TODO(pal-spawnmonster-signature)) by the 2026-07-26 16:38 run. WHAT WAS
+-- LEARNED, in the order it matters:
+--   1. THE CALL WORKS. cm:SpawnMonster(FName("ChickenPal"), level) on a live cheat manager
+--      produces a real PalCharacter; the coordinate route found it, moved it, and read its
+--      position back off the pawn.
+--   2. IT IS ASYNCHRONOUS, BY SECONDS. That is the entire content of what looked like an
+--      outage: every "the call ran and nothing spawned" line ever written by this file was a
+--      stopwatch stopping at 1.2 s on an event that takes about six.
+--   3. THE SIGNATURE IS CONFIRMED ON THE INSTALLED BINARY, not just in a one-patch-old dump —
+--      [evidence declared] is core.signature reporting a successful parameter walk on the
+--      running game.
+--   4. THE AUTHORITY HYPOTHESIS IS RETIRED, unwired and unmissed. It held that the local call
+--      had to be forwarded to the server (Debug_CheatCommand_ToServer at Pal.hpp:10970,
+--      UPalCheatManager::CommandToServer at :16501) because a cheat issued without authority
+--      runs and changes nothing. It was a good explanation for an observation that turned out
+--      never to have happened. Those names are still real and still confirmed live
+--      (dumps/reflection/02_reflection.txt:190-213); they are where to start IF a dedicated
+--      server ever reports the direct call doing nothing, which no run has.
+-- WHAT IS STILL NOT KNOWN, and neither half is in the way of anything: whether an unknown
+-- CharacterID is distinguishable from a slow one (nothing reports either way — the watch simply
+-- times out), and whether this behaves the same on a dedicated server, where the cheat manager
+-- is one cheatManager() constructed rather than one the game made.
 local SPAWN_MONSTER_PARAMS = { "NameProperty", "IntProperty" }
 
 local function spawnMonster(cm, name, level)
     local before = snapshotPals()
     local ran, _, level_ = sig.call(cm, "SpawnMonster", SPAWN_MONSTER_PARAMS, FName(name), level)
-    return ran, (ran and newPalCount(before) or 0), before, level_
+    return ran, before, level_
 end
 
 -- Spawn a WILD pal of game CharacterID `charId` at `level` INTO THE WORLD, near the player
 -- (visible, un-owned). CharacterID is the game code id (e.g. "ChickenPal", "Kitsunebi",
 -- "BlueSkyDragon") = a PalForge Pal's id; a namespaced id resolves to its row spelling.
 --
--- Returns true ONLY when a PalCharacter that was not in the world a statement ago is in it
--- now. On this build that has never happened (see the file header): the call runs, nothing
--- appears, and this answers false. The 1.2 s confirmation still runs on that path — an actor
--- arriving late would show up there, and that is the line that would say the route came alive.
+-- Returns true when the native call was ISSUED — core.signature matched the live declaration
+-- and SpawnMonster ran without raising — and false when it was refused, raised, or never
+-- attempted (bad id, no cheat manager). It does NOT mean a pal is standing in the world yet:
+-- the pal materializes several seconds after the call (~5.9 s where it was measured), which is
+-- long after any caller has been handed this boolean.
+-- ⚠️ ARRIVAL THROUGH THIS PARTICULAR FUNCTION HAS NEVER BEEN OBSERVED, and its sibling's
+-- evidence is not its own. M.palAt makes the identical call and its pal arrived twice, so this
+-- very probably works — but the only runs that ever watched THIS function looked at 1.2 s and
+-- saw nothing, which is precisely what a working spawn looks like at 1.2 s. watchForArrival now
+-- looks on the schedule that caught the other one, so the answer will be in the
+-- [PalForge.spawn] log of the next run in a loaded world, on the "spawn.pal <id>" lines.
 function M.pal(charId, level)
     if type(charId) ~= "string" or #charId == 0 then return false end
     level = tonumber(level) or 1
@@ -336,7 +399,7 @@ function M.pal(charId, level)
         return false
     end
     local name = charName(charId)
-    local ran, appeared, before, evidence = spawnMonster(cm, name, level)
+    local ran, before, evidence = spawnMonster(cm, name, level)
     if not ran then
         -- core.signature has already logged WHY — a refusal (the live class does not declare
         -- SpawnMonster the way dumps/cxx does) or a binding error naming the arity it wanted.
@@ -344,27 +407,29 @@ function M.pal(charId, level)
             name, tostring(evidence)))
         return false
     end
-    if appeared > 0 then
-        log.info(string.format("spawn.pal(world) %s (lv %d): %d new PalCharacter in the world "
-            .. "[evidence %s]", name, level, appeared, evidence))
-        return true
+    if watchForArrival(before, "spawn.pal " .. name) then
+        log.info(string.format("spawn.pal(world) %s (lv %d): the call was issued [evidence %s]. "
+            .. "The pal arrives asynchronously, so the world is watched for up to %d looks and "
+            .. "the arrival line follows this one", name, level, evidence, WATCH_TRIES))
+    else
+        log.warn(string.format("spawn.pal(world) %s (lv %d): the call was issued [evidence %s], "
+            .. "but LoopAsync/ExecuteInGameThread are unavailable this session, so NOTHING will "
+            .. "watch for the pal — the true this returns is about the call, not an arrival",
+            name, level, evidence))
     end
-    log.warn(string.format("spawn.pal: SpawnMonster(%s, lv %d) ran [evidence %s] and NOTHING "
-        .. "spawned — no spawn route has been observed to work on this build, so this reports "
-        .. "false (see TODO pal-spawnmonster-signature). Watching for a late arrival",
-        name, level, evidence))
-    confirmSpawnLater(before, "spawn.pal " .. name)
-    return false
+    return true
 end
 
 -- ---- coordinate placement (post-spawn relocation) ----
 -- No spawn call in this file takes a location, so a coordinate spawn is spawn-then-move: we
 -- relocate the freshly-spawned actor once it materializes, identifying it by UObject address
--- so only the pal we just added is moved. That the actor appears NEAR THE PLAYER, and a few
--- frames late, is inherited belief — it is what the C++ bridge's UPalCharacterManager::
--- SpawnNewCharacter did (it ignored the requested SpawnParameter.SpawnLocation, verified
--- 2026-07-23), and that bridge is not installed here. Nothing has ever spawned through THIS
--- file, so the near-the-player anchor below is untested along with everything else.
+-- so only the pal we just added is moved. That the actor appears NEAR THE PLAYER used to be
+-- inherited belief — it is what the C++ bridge's UPalCharacterManager::SpawnNewCharacter did
+-- (it ignored the requested SpawnParameter.SpawnLocation, verified 2026-07-23), and that bridge
+-- is not installed here. It is inherited no longer: on 2026-07-26 the nearest-to-the-player
+-- anchor below picked the right pawn on both spawns of the run, and the teleport landed it on
+-- the requested point exactly. What the run corrected is "a few frames late" — it is SECONDS
+-- late, which is what WATCH_TRIES is sized for.
 
 -- ONE route, and the one deliberate exception to "every engine call goes through
 -- core.signature". K2_TeleportTo is the character-aware relocate — it updates the movement
@@ -373,9 +438,10 @@ end
 -- DestRotation)`: two StructProperty arguments. core.signature REFUSES a struct on "present"
 -- evidence, and "present" is what this build is expected to answer (a UFunction is a UObject in
 -- UE4SS's Lua API, so its parameter walk is often unavailable) — routing this through sig.call
--- would therefore not make the relocate safer, it would permanently delete a half that has never
--- yet had anything to move. So the existence of the function is checked through core.signature
--- (that much it can always answer) and the call itself is made directly.
+-- would therefore not make the relocate safer, it would permanently delete the only relocate
+-- this file has — and that relocate is now the one thing here measured EXACT: two pals moved on
+-- 2026-07-26, both reading back off by 0 cm. So the existence of the function is checked through
+-- core.signature (that much it can always answer) and the call itself is made directly.
 --
 -- The two fallbacks that used to follow are GONE, and the dump is why: K2_SetActorLocation
 -- declares an OUT parameter (Engine.hpp:7978 — `bool K2_SetActorLocation(FVector NewLocation,
@@ -397,51 +463,65 @@ local function teleportActor(a, x, y, z)
     return ok and r ~= false
 end
 
--- Relocate ONLY our freshly-spawned pal to (x,y,z). The spawn is expected to drop it right at
--- the player, so among pals absent from `before` we move the SINGLE one nearest the player's
--- spawn position (px,py,pz) — never a batch, so wild pals that streamed in meanwhile are not
--- dragged along (that was the "20 -> 40 floating pals" bug). Retries; the actor is expected
--- deferred. Returns true ONLY when a new pal was found AND the move reported success. Nobody
--- can receive that today — every call site is a retry timer that ran long after palAt returned
--- — so the return exists for the log line to be honest and for a future caller to poll on.
+-- Relocate ONLY our freshly-spawned pal to job.x/y/z. The spawn drops it right at the player,
+-- so among pals absent from job.before we move the SINGLE one nearest the player's position at
+-- spawn time (job.px/py/pz) — never a batch, so wild pals that streamed in meanwhile are not
+-- dragged along (that was the "20 -> 40 floating pals" bug). Retries; the actor arrives
+-- seconds late. Returns true ONLY when a new pal was found AND the move reported success.
+-- Nobody can receive that today — every call site is a retry timer that ran long after palAt
+-- returned — so the return exists for the log line to be honest and for a future caller to
+-- poll on.
 --
--- TODO(pal-spawn-placement): NARROWED by the 2026-07-26 in-game run, and now BLOCKED behind
--- pal-spawnmonster-signature. What that run settled: this pass RUNS in a live world. It
--- reached its own last line — "no new pal actor appeared to place" — twice, so the 400 ms
--- retry chain, the enumeration and the reporting all work end to end. What it could not
--- settle, and cannot until something spawns at all: the found / moved / landed half. No run
--- of teleportActor on a real pawn, and no read-back distance, exists anywhere in either tree.
--- NARROWED again by dumps/cxx/Engine.hpp: the relocate is no longer three guesses but the one
--- declared call, K2_TeleportTo(FVector, FRotator) at :7971 (see teleportActor). So a failure
--- here can no longer mean "we called the wrong name" — it means the teleport itself refused.
-local function placeNewPal(before, px, py, pz, x, y, z, tries)
-    tries = tries or 0
+-- ONE `job` TABLE RATHER THAN NINE POSITIONAL ARGUMENTS: this used to be
+-- placeNewPal(before, px, py, pz, x, y, z, tries) and the elapsed-time baseline the log line
+-- now prints would have made it nine, two of them bookkeeping counters threaded through a
+-- recursive schedule. The table carries the same fields, is created once per palAt, and is the
+-- thing the retry closure captures.
+--
+-- CLOSED (this was TODO(pal-spawn-placement)): OBSERVED END TO END, twice, in one keypress on
+-- 2026-07-26 —
+--     16:38:52.968  spawn.palAt: placed new pal at (-345296,263050,4153); it reads back
+--                                (-345296,263050,4153), off by 0
+-- and the same for the second spawn at :53.109. Every half that had never been seen is now
+-- seen: a new pal appears, the nearest-to-the-player anchor picks the right one, K2_TeleportTo
+-- (dumps/cxx/Engine.hpp:7971, the one declared relocate — see teleportActor) accepts it, and
+-- the read-back says it landed EXACTLY where it was asked to rather than approximately. So a
+-- failure here now means one specific thing: the teleport itself refused, on a pawn that was
+-- found.
+-- WHAT THAT RUN ALSO SHOWED is why this pass so nearly missed: it caught the pal on or about
+-- its LAST try under the old six-try budget, at 5.9 s against a nominal 2.4 s. The budget is
+-- now WATCH_TRIES; the reasoning is written there and it is the reasoning that matters more
+-- than the number.
+local function placeNewPal(job)
     local best, bd
     for _, a in ipairs(palActors()) do
         if a and a.IsValid and a:IsValid() then
             local id = actorId(a)
-            if id and not before[id] then
+            if id and not job.before[id] then
                 local l = actorLoc(a)
                 if l then
-                    local dx, dy, dz = l.X - px, l.Y - py, l.Z - pz
+                    local dx, dy, dz = l.X - job.px, l.Y - job.py, l.Z - job.pz
                     local d = dx * dx + dy * dy + dz * dz
                     if not bd or d < bd then bd, best = d, a end
                 end
             end
         end
     end
+    local x, y, z = job.x, job.y, job.z
     if best then
         local moved = teleportActor(best, x, y, z)
         if moved then
             -- Read the position BACK: the relocate calls report "the call ran", and only the
-            -- actor's own location says whether it landed. This is the one line that can ever
-            -- prove the coordinate route works, so it prints what was asked and what happened.
+            -- actor's own location says whether it landed. This is the line that PROVED the
+            -- coordinate route, so it prints what was asked, what happened, and — since the
+            -- whole outage was a timing misreading — how long the pal took to become movable.
             local l = actorLoc(best)
             if l then
                 local dx, dy, dz = (l.X or 0) - x, (l.Y or 0) - y, (l.Z or 0) - z
                 log.info(string.format("spawn.palAt: placed new pal at (%.0f,%.0f,%.0f); it "
-                    .. "reads back (%.0f,%.0f,%.0f), off by %.0f",
-                    x, y, z, l.X, l.Y, l.Z, math.sqrt(dx * dx + dy * dy + dz * dz)))
+                    .. "reads back (%.0f,%.0f,%.0f), off by %.0f (%.1f s after the call, look %d)",
+                    x, y, z, l.X, l.Y, l.Z, math.sqrt(dx * dx + dy * dy + dz * dz),
+                    os.clock() - job.t0, job.tries + 1))
             else
                 log.info(string.format("spawn.palAt: placed new pal at (%.0f,%.0f,%.0f) "
                     .. "(its position could not be read back)", x, y, z))
@@ -452,15 +532,18 @@ local function placeNewPal(before, px, py, pz, x, y, z, tries)
         end
         return moved
     end
-    if tries < 6 and canDefer() then
-        LoopAsync(400, function()
-            ExecuteInGameThread(function() pcall(placeNewPal, before, px, py, pz, x, y, z, tries + 1) end)
-            return true
+    job.tries = job.tries + 1
+    if job.tries < WATCH_TRIES and canDefer() then
+        LoopAsync(WATCH_MS, function()
+            ExecuteInGameThread(function() pcall(placeNewPal, job) end)
+            return true   -- one shot; this try schedules the next one itself
         end)
     else
-        log.warn("spawn.palAt: no new pal actor appeared to place — after ~2.4 s of retries "
-            .. "there is still nothing in the world that was not there before the spawn call, "
-            .. "so there is nothing to move (see TODO pal-spawnmonster-signature)")
+        log.warn(string.format("spawn.palAt: no new pal actor appeared to place — %d looks over "
+            .. "%.1f s and nothing in the world was absent from the pre-spawn snapshot, so there "
+            .. "is nothing to move to (%.0f,%.0f,%.0f). The window is not the reason: this same "
+            .. "chain received its pal ~5.9 s after the call on 2026-07-26",
+            job.tries, os.clock() - job.t0, x, y, z))
     end
     return false
 end
