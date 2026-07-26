@@ -129,7 +129,7 @@ Declared as `events = { onX = function(self, …) end }` inside `Pal{ … }`.
 
 | hook | fires | signature | ctx | meaning |
 |---|---|---|---|---|
-| `onSpawned` | manual | `fun(self: Pal.Handle, ctx: table)` | ctx.actor = the pawn | three candidate sources armed after world load, none seen firing - finished spawning into the world |
+| `onSpawned` | manual | `fun(self: Pal.Handle, ctx: table)` | ctx.actor = the pawn | fires when a pal finishes initialising; observed at world load, not yet on a fresh spawn |
 | `onDamaged` | LIVE | `fun(self: Pal.Handle, ctx: table)` | ctx.actor | LIVE - took damage |
 | `onDeath` | LIVE | `fun(self: Pal.Handle, ctx: table)` | ctx.actor | LIVE - HP reached zero |
 | `onCaptured` | LIVE | `fun(self: Pal.Handle, ctx: table)` | ctx.actor, ctx.comp = the pal's parameter component | LIVE - caught in a sphere |

@@ -40,7 +40,7 @@
 ---@field material? string # base material asset path to instance from
 
 ---@class Pal.Spec.Events
----@field onSpawned? fun(self: Pal.Handle, ctx: table) # three candidate sources armed after world load, none seen firing - finished spawning into the world
+---@field onSpawned? fun(self: Pal.Handle, ctx: table) # fires when a pal finishes initialising; observed at world load, not yet on a fresh spawn
 ---@field onDamaged? fun(self: Pal.Handle, ctx: table) # LIVE - took damage
 ---@field onDeath? fun(self: Pal.Handle, ctx: table) # LIVE - HP reached zero
 ---@field onCaptured? fun(self: Pal.Handle, ctx: table) # LIVE - caught in a sphere

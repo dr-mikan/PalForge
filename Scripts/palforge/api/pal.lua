@@ -161,8 +161,17 @@ local Events = schema.define("Pal.Spec.Events", {
     -- PalPlayerCharacter:OnCompleteInitializeParameter — not the broadcaster itself, which was
     -- hooked first, registered fine and never carried anything. That is the general lesson:
     -- RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
+    --
+    -- TODO(pal-spawned-fresh): unknown whether it fires for a pal that is genuinely NEW. Every
+    -- firing observed so far landed in the same second as world.ready, i.e. the load storm, when
+    -- every pal in range initialises at once. That proves the hook works and says nothing about
+    -- the case a pack actually cares about — a pal that did not exist a moment ago. The two look
+    -- identical from here because only the FIRST firing per channel is announced.
+    -- To settle it: release a pal from the box well after the world has loaded, or let a wild one
+    -- stream in while travelling, and watch for a pal.spawned line whose timestamp is nowhere
+    -- near world.ready.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-                    doc = "three candidate sources armed after world load, none seen firing - finished spawning into the world" },
+                    doc = "fires when a pal finishes initialising; observed at world load, not yet on a fresh spawn" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE - took damage" },
     { "onDeath",    type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
