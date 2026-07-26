@@ -1,5 +1,16 @@
 -- palforge/api/player.lua — PUBLIC player API. Thin facade over utils/player.
 local player = require("palforge.core.player")
+local schema = require("palforge.core.schema")
+
+---A world coordinate — what this module produces and what Pal:spawn consumes. It belongs
+---to no single domain, so it is named without a domain prefix; the type generator gives
+---such shapes their own "Common" section. Declared for the type definitions and for
+---schema.help("Coord"); nothing binds it.
+schema.define("Coord", {
+    { "x", type = "number", required = true, doc = "world X in centimetres" },
+    { "y", type = "number", required = true, doc = "world Y in centimetres" },
+    { "z", type = "number", required = true, doc = "world Z in centimetres" },
+})
 
 ---@class palforge.player
 local Player = {}

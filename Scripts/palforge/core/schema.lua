@@ -1,24 +1,43 @@
 -- PalForge core.schema: the generic MECHANISM behind every api spec. It holds no type
 -- definitions of its own — each api module declares its own shapes (they differ per
 -- domain) and this file only turns a declaration into something that validates, fills
--- defaults, documents itself, and can be called as a constructor.
+-- defaults and documents itself.
 --
 -- Declaring a shape (fields are an ARRAY, so their order is preserved for :help() and
 -- for the generated type definitions):
 --
 --   local schema = require("palforge.core.schema")
---   local Mesh = schema.define("Pal.Spec.Mesh", {
+--   local Spec = schema.define("Mesh.Spec", {
 --       { "kind",  type = "string", values = { "procedural", "static", "skeletal" },
---                  default = "procedural", doc = "which core.mesh backend renders it" },
+--                  default = "skeletal", doc = "which core.mesh backend renders it" },
 --       { "model", type = "string", required = true, doc = "asset path" },
 --       { "scale", type = "number", doc = "uniform scale" },
---   })
+--   }, { handle = "Mesh.Handle" })
 --
 -- Using it:
---   Mesh{ model = "/Game/X.X" }   -- validated COPY with defaults filled (a plain table)
---   Mesh.fields                   -- the ordered declaration, readable at runtime
---   Mesh:help()                   -- human-readable schema dump
---   Mesh:validate(t, "context")   -- same as calling it, with a context for error messages
+--   Spec:validate(t, "context")   -- validated COPY with defaults filled (a plain table)
+--   Spec.fields                   -- the ordered declaration, readable at runtime
+--   Spec:help()                   -- human-readable schema dump
+--
+-- SPECS ARE PRIVATE TO THEIR MODULE. An api module keeps its shapes as locals and does
+-- not publish them — `Pal` is a thing you CALL, not a namespace to browse. Everything
+-- that needs the declarations reaches them through the registry here instead:
+--
+--   schema.get("Pal.Spec")   -- the spec object
+--   schema.help("Pal.Spec")  -- its field list, printable
+--   schema.all()             -- every spec ever declared, in declaration order
+--   schema.derive(...)       -- the same shape with different per-field policy
+--
+-- That is what tools/gen-types.lua walks to generate the editor type definitions, so the
+-- annotations still cannot drift from what a define call actually accepts.
+--
+-- The `__spec` METAFIELD makes nesting work: a handle whose metatable carries it is
+-- unwrapped to the plain table it stands for before validation, which is how
+-- `mesh = Mesh{ ... }` passes a defined object into another definition without the
+-- schema knowing anything about handles. A spec whose values can arrive that way names
+-- the handle type ONCE, at its own declaration (`{ handle = "Mesh.Handle" }` above), so
+-- every field that points at it through `of` gets the union in the type definitions
+-- without restating it.
 --
 -- STRICTNESS: any problem is a hard error (the caller's define never half-succeeds) —
 -- an unknown field, a missing required one, a wrong type, a value outside `values`, a
@@ -40,6 +59,11 @@
 --   sig      string    for a function field, its LuaLS signature (e.g. "fun(self, ctx: table)").
 --                      Only the generated type definitions read it; validation ignores it.
 --   check    fun(v):boolean, string?   extra predicate; return false + reason to reject
+--
+-- SPEC OPTIONS (the third argument to define)
+--   handle   string    the handle type that also satisfies this shape, through `__spec`
+--                      (e.g. "Mesh.Handle"). Types-only, like `sig`: validation already
+--                      accepts it, this is what tells the editor so.
 
 local M = {}
 
@@ -113,7 +137,7 @@ local function typeOk(v, t)
     local actual = type(v)
     for want in tostring(t):gmatch("[^|]+") do
         if actual == want then return true end
-        -- a Spec is callable, so a "function" expectation also accepts one
+        -- a callable table stands in for a function wherever one is expected
         if want == "function" and actual == "table" and getmetatable(v)
             and getmetatable(v).__call then return true end
     end
@@ -133,14 +157,27 @@ local function fieldNames(fields)
 end
 
 --=============================================================================
+-- defined objects
+--=============================================================================
+
+-- A defined object (the handle `Mesh{ ... }` returns, say) stands for the table it was
+-- built from. When its metatable carries `__spec`, validation sees that table instead of
+-- the handle, so `mesh = Mesh{ ... }` and `mesh = { ... }` reach the nested spec
+-- identically — the caller can nest a definition without it becoming a special case.
+local function unwrap(v)
+    if type(v) ~= "table" then return v end
+    local mt = getmetatable(v)
+    local tospec = mt and rawget(mt, "__spec")
+    if type(tospec) == "function" then return tospec(v) end
+    return v
+end
+
+--=============================================================================
 -- Spec
 --=============================================================================
 
 local Spec = {}
 Spec.__index = Spec
-
--- Calling a spec validates: Mesh{ model = "..." } == Mesh:validate({ model = "..." }).
-Spec.__call = function(self, t, context) return self:validate(t, context) end
 
 -- Look up a field descriptor by name.
 function Spec:field(name)
@@ -148,12 +185,13 @@ function Spec:field(name)
 end
 
 -- Validate `t` against this spec and return a NEW plain table with defaults filled.
--- `context` is prepended to error messages (e.g. "Pal.define{ id = 'example:Boss' }").
+-- `context` is prepended to error messages (e.g. "Pal" for a Pal{ ... } call).
 -- The input is never mutated, and the result is a plain table so nothing downstream
 -- can tell a constructed value from a hand-written one.
 function Spec:validate(t, context)
     local where = context or self.name
     if t == nil then t = {} end
+    t = unwrap(t)
     if type(t) ~= "table" then
         fail(string.format("%s: expected a table, got %s. Fields: %s",
             where, type(t), fieldNames(self.fields)))
@@ -189,8 +227,11 @@ function Spec:validate(t, context)
         end
 
         if v ~= nil then
-            -- "Pal.define: field 'mesh'" — the reference a reader can act on. Array and
-            -- map elements extend the name itself (skills[2]) so the whole path is inside
+            -- only a nested shape can arrive as a defined handle, so only that case pays
+            -- for the unwrap (see the `__spec` metafield in the header)
+            if f.of then v = unwrap(v) end
+            -- "Pal: field 'mesh'" — the reference a reader can act on. Array and map
+            -- elements extend the name itself (skills[2]) so the whole path is inside
             -- one pair of quotes.
             local function at(suffix)
                 return string.format("%s: field %q", where, f.name .. (suffix or ""))
@@ -272,17 +313,30 @@ function Spec:help()
 end
 
 --=============================================================================
--- define
+-- define + the registry
+--
+-- Every spec is recorded here as it is declared, which is what lets an api module keep
+-- its shapes PRIVATE: nothing has to be hung off the module table for tooling to find
+-- it. Names are globally unique ("Pal.Spec", "Pal.Spec.Events", "Mesh.Spec"), so the
+-- registry doubles as a check that two modules never claim the same shape name.
 --=============================================================================
 
--- Build a spec named `name` from an ordered ARRAY of field descriptors. The returned
--- object is callable (a constructor), carries `.fields` / `.name` for introspection,
--- and is what an api module exposes as X.Spec.
-function M.define(name, fields)
+local registry = {}   -- name -> spec
+local order    = {}   -- specs in declaration order (nested ones come before the top spec)
+
+-- Build a spec named `name` from an ordered ARRAY of field descriptors, plus the optional
+-- spec `opts` (today: `handle`). The returned object carries `.fields` / `.name` for
+-- introspection. Keep it as a local in the module that declares it; reach it elsewhere
+-- via schema.get.
+function M.define(name, fields, opts)
     assert(type(name) == "string" and #name > 0, "schema.define: name (string) required")
     assert(type(fields) == "table", "schema.define: fields (array of descriptors) required")
+    if registry[name] then
+        error(string.format("PalForge: schema.define: %q is already declared", name), 0)
+    end
 
-    local self = setmetatable({ name = name, fields = {}, _byName = {} }, Spec)
+    local self = setmetatable({ name = name, fields = {}, _byName = {},
+                                handle = opts and opts.handle }, Spec)
     for i, f in ipairs(fields) do
         local fname = f[1]
         assert(type(fname) == "string" and #fname > 0,
@@ -297,12 +351,65 @@ function M.define(name, fields)
         self.fields[#self.fields + 1] = desc
         self._byName[fname] = desc
     end
+    registry[name] = self
+    order[#order + 1] = self
     return self
 end
 
--- Is `v` a spec built by define()? (Used by the type-definition generator.)
-function M.isSpec(v)
-    return type(v) == "table" and getmetatable(v) == Spec
+-- Declare `name` as a copy of `base` with per-field bits replaced — today `default`, the
+-- one thing that is genuinely the CONSUMER's policy rather than the shape's (a structure
+-- is a static mesh where a pal is a skeletal one, but both are the same ten fields).
+-- Deriving keeps the two in step: a field added to the base reaches every derivative.
+--
+--   local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
+--       kind = { default = "static" },
+--   })
+function M.derive(name, base, overrides)
+    assert(type(base) == "table" and getmetatable(base) == Spec,
+        "schema.derive: base must be a spec built by schema.define")
+    local fields = {}
+    for i, f in ipairs(base.fields) do
+        local copy = { f.name, type = f.type, required = f.required, default = f.default,
+                       values = f.values, of = f.of, arrayOf = f.arrayOf, mapOf = f.mapOf,
+                       doc = f.doc, sig = f.sig, check = f.check }
+        for key, value in pairs(overrides and overrides[f.name] or {}) do copy[key] = value end
+        fields[i] = copy
+    end
+    for fname in pairs(overrides or {}) do
+        assert(base._byName[fname],
+            string.format("schema.derive(%s): %q is not a field of %s", name, fname, base.name))
+    end
+    return M.define(name, fields, { handle = base.handle })
+end
+
+---A declared spec by name ("Pal.Spec", "Pal.Spec.Events", ...), or nil.
+---@param name string
+function M.get(name)
+    return registry[name]
+end
+
+---Every declared spec, in declaration order. The order matters to the type generator:
+---a nested shape is declared before the spec that references it, so emitting them in
+---this order declares each class before it is used.
+function M.all()
+    local out = {}
+    for i, s in ipairs(order) do out[i] = s end
+    return out
+end
+
+---The printable field list of a declared spec — the runtime "what can I pass here?".
+---@param name string
+---@return string
+function M.help(name)
+    local spec = registry[name]
+    if not spec then
+        local names = {}
+        for _, s in ipairs(order) do names[#names + 1] = s.name end
+        table.sort(names)
+        return string.format("PalForge: no spec named %q. Declared: %s",
+            tostring(name), table.concat(names, ", "))
+    end
+    return spec:help()
 end
 
 -- A non-empty string — the check every id field shares.

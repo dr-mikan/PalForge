@@ -8,11 +8,11 @@
 -- rows are global, so the pack id prefix prevents collisions between packs). Ids
 -- WITHOUT a colon are literal game ids ("Wood", "BlueSkyDragon").
 --
--- Registry: each domain's define() registers its class here, keyed by object TYPE:
+-- Registry: each domain's definition call registers its class here, keyed by object TYPE:
 --   register("building", "example:Bench", cls)
 --   get("building", "example:Bench")  -> cls | nil
 --   all("building")                   -> { id -> cls }  (a snapshot copy)
--- Type is one of: item | pal | building | skill | effect | audio | ui (one per api module).
+-- Type is one of: item | pal | building | skill | effect | audio | mesh | ui (one per api module).
 local M = {}
 
 local VALID = "^[%w_]+$"
@@ -81,7 +81,7 @@ end
 -- silently creating a junk bucket).
 local VALID_TYPES = {
     item = true, pal = true, building = true, skill = true, effect = true,
-    audio = true, ui = true,
+    audio = true, mesh = true, ui = true,
 }
 
 -- Exposed so tooling can enumerate the registry without hard-coding the list.
@@ -93,7 +93,7 @@ table.sort(M.TYPES)
 local registry = {}
 
 -- Register a class under (otype, id). `otype` is named to avoid shadowing type().
--- Returns cls on success, or nil + error (fail-soft: never throws). define() calls
+-- Returns cls on success, or nil + error (fail-soft: never throws). A definition calls
 -- this best-effort so a registry hiccup can't break class definition.
 function M.register(otype, id, cls)
     if not VALID_TYPES[otype] then

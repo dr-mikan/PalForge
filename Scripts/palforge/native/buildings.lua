@@ -5,7 +5,7 @@
 --   (b) M.get(id)  — a lazy, cached Building handle for ANY catalog id (nil otherwise).
 --   (c) CURATED    — a few hand-written definitions (mesh + lifecycle).
 --
--- Only the CURATED definitions run Building.define at load, so they self-register into
+-- Only the CURATED definitions call Building{ ... } at load, so they self-register into
 -- object_manager; the CATALOG stays plain DATA and get(id) defines on demand. That is why
 -- requiring this file never registers the hundreds of catalog ids.
 --
@@ -110,12 +110,12 @@ for _, id in ipairs(M.CATALOG) do set[id] = true end
 local cache = {}
 
 -- get(id): a Building wrapper for ANY real catalog id, built on first use + cached.
--- Returns nil if id is not a known build-object row. define() sets .id and registers
+-- Returns nil if id is not a known build-object row. defining sets .id and registers
 -- the class into object_manager. NOT called eagerly — nothing walks the whole catalog.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Building.define{ id = id }
+    local h = Building{ id = id }
     cache[id] = h
     return h
 end
@@ -127,9 +127,9 @@ end
 -- dump/04_live_objects + 06_events). The DT_BuildObjectDataTable row FName is spelled
 -- "Workbench" (lowercase b); the runtime keys off the BP id, so we define under
 -- "WorkBench" — which is therefore NOT itself a CATALOG member (pre-seeded below).
-M.WorkBench = Building.define{
+M.WorkBench = Building{
     id          = "WorkBench",
-    displayName = "Workbench",
+    name        = "Workbench",
     gridCm      = 100,
     mesh = {
         kind  = "static",
@@ -139,9 +139,9 @@ M.WorkBench = Building.define{
 
 -- PalBox — the base-camp Pal storage box. Real build id "PalBoxV2" (live actor
 -- BP_BuildObject_PalBoxV2_C; DT row FName also "PalBoxV2", a CATALOG member).
-M.PalBox = Building.define{
+M.PalBox = Building{
     id          = "PalBoxV2",
-    displayName = "Pal Box",
+    name        = "Pal Box",
     gridCm      = 100,
     mesh = {
         kind  = "static",

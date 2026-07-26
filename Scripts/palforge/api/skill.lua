@@ -1,12 +1,12 @@
 -- palforge/api/skill.lua — PUBLIC skill API + implementation (SELF-CONTAINED).
 --
 -- A skill is what a Pal can do: an active attack or a passive trait. Same shape as every
--- other api module (define / get / get_all + a Handle object with actions and grouped
--- `events`).
+-- other api module (call it to define, plus get / get_all + a Handle object with actions
+-- and grouped `events`).
 --
--- HOW IT INTEGRATES: Skill.define registers the definition class in object_manager under
+-- HOW IT INTEGRATES: Skill{ ... } registers the definition class in object_manager under
 -- ("skill", id), so it is discoverable (Skill.get / Skill.get_all / core.registry) and a
--- Pal declares which skills it owns by id (Pal.define{ skills = { ... } }).
+-- Pal declares which skills it owns by id (Pal{ skills = { ... } }).
 --
 -- HONEST STATE OF THE 導線: there is NO native skill source. The in-game event probe found
 -- no hook that says "this Pal used skill X", and Lua cannot inject a row into the skill
@@ -19,10 +19,10 @@
 -- When a native source is found it emits skill.* channels and these same handlers fire
 -- without any change to a pack's code.
 --
---   local Fireball = Skill.define{
+--   local Fireball = Skill{
 --       id = "example:Fireball", kind = "active", element = "fire",
 --       cooldown = 3.0, power = 50,
---       events = { onActivate = function(self, owner, ctx) --[[ ... ]] end },
+--       events = { onActivate = function(skill, owner, ctx) --[[ ... ]] end },
 --   }
 --   Fireball:activate(myPalActor)      -- runs onActivate unless still cooling down
 
@@ -31,19 +31,19 @@ local icons  = require("palforge.core.icons")
 local schema = require("palforge.core.schema")
 
 --=============================================================================
--- SPEC — the shape of Skill.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as Skill.Spec:
+-- SPEC — the shape of Skill{ ... }, declared as data so it is enforced on every call and
+-- so the editor type definitions can be generated from it. It stays a LOCAL; read it at
+-- runtime through the registry:
 --
---   Skill.Spec:help()          -- print every field, its type, default and meaning
---   Skill.Spec.fields          -- the same, as a table, for tooling
---   Skill.Spec.Events{ ... }   -- build (and validate) a nested value on its own
+--   schema.help("Skill.Spec")         -- every field, its type, default and meaning
+--   schema.get("Skill.Spec").fields   -- the same, as a table, for tooling
 --
--- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----The behaviour handlers a skill can respond to. All optional. Each receives the skill
----definition as `self`; only MANUAL invocation fires them today (see the header).
+---The behaviour handlers a skill can respond to. All optional. Each receives THIS skill's
+---handle as its first argument; only MANUAL invocation fires them today (see the header).
+---A handler this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Skill.Spec.Events", {
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "an active skill fired (self, owner, ctx)" },
@@ -55,11 +55,12 @@ local Events = schema.define("Skill.Spec.Events", {
                     doc = "a passive was removed (self, owner, ctx)" },
 })
 
----What you pass to Skill.define. `id` is the only required field.
+---What you pass to Skill{ ... }. `id` is the only required field.
 local Spec = schema.define("Skill.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "skill id: a game row id or \"pack:name\"" },
-    { "displayName", type = "string", doc = "shown in skill lists (defaults to id)" },
+    { "name",        type = "string", doc = "shown in skill lists (defaults to id)" },
+    { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "kind",        type = "string", values = { "active", "passive" }, default = "active",
                      doc = "an active skill is fired; a passive one is equipped" },
     { "element",     type = "string", doc = "attribute / element (fire, water, ...)" },
@@ -120,15 +121,13 @@ local function stamp(cls, owner)
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: Skill{ ... } / Skill.get / Skill.get_all
 --=============================================================================
 
+---The skill domain. CALL it to define one; the two named functions look existing ones up.
 ---@class palforge.skill
+---@overload fun(spec: Skill.Spec): Skill.Handle
 local Skill = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-Skill.Spec        = Spec
-Skill.Spec.Events = Events
 
 local wrap  -- forward decl; the Skill.Handle wrapper is defined in the BOTTOM section
 
@@ -136,11 +135,12 @@ local wrap  -- forward decl; the Skill.Handle wrapper is defined in the BOTTOM s
 ---`spec` is validated against Skill.Spec: `id` is required, unknown fields are an error.
 ---@param spec Skill.Spec
 ---@return Skill.Handle
-function Skill.define(spec)
-    spec = Spec:validate(spec, "Skill.define")
+local function define(spec)
+    spec = Spec:validate(spec, "Skill")
     local cls = setmetatable({
         id          = spec.id,
-        displayName = spec.displayName or spec.id,
+        name        = spec.name or spec.id,
+        description = spec.description,
         kind        = spec.kind,
         element     = spec.element,
         cooldown    = spec.cooldown,
@@ -149,12 +149,19 @@ function Skill.define(spec)
         data        = spec.data,
     }, Class)
     cls.__index = cls
-    if spec.events then
-        for name, handler in pairs(spec.events) do cls[name] = handler end  -- onActivate, ...
+    local handle = wrap(cls)
+    -- dispatch calls cls:onXxx(...) with the CLASS as self; a handler wants the HANDLE
+    -- (what the call returned, and what carries :activate / :equip), so each declared
+    -- handler goes in behind a forwarder that swaps it in.
+    for name, handler in pairs(spec.events or {}) do           -- onActivate, ...
+        cls[name] = function(_, ...) return handler(handle, ...) end
     end
     pcall(function() om.register("skill", spec.id, cls) end)
-    return wrap(cls)
+    return handle
 end
+
+-- Calling the module IS defining:  Skill{ id = "example:Fireball", ... }
+setmetatable(Skill, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING skill by id: a previously-defined one, else a thin definition over any
 ---game skill id. Never nil.
@@ -178,7 +185,7 @@ end
 -- BOTTOM — the skill OBJECT (Skill.Handle): actions + behaviour events
 --=============================================================================
 
----A definable skill. Obtain one from Skill.define / Skill.get / Skill.get_all.
+---A definable skill. Obtain one from Skill{ ... } / Skill.get / Skill.get_all.
 ---@class Skill.Handle
 ---@field id string   # the skill's id
 local Handle = {}
@@ -259,7 +266,9 @@ function Handle:onUnequip(owner, ctx) if self._cls.onUnequip then return self._c
 ---@return any?  # texture ref from the icon DataTable, else the declared icon
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 ---@return string  # "active" | "passive"
 function Handle:kind() return self._cls.kind or "active" end
 ---@return string?

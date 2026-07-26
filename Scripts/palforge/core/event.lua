@@ -703,7 +703,7 @@ local function resolvePalClass(ctx)
         if type(full) == "string" then id = full:match("BP_([%w_]+)_C") end
     end)
     if not id then return nil end
-    -- exact id: native pals define under the game id (e.g. Pal.define("ChickenPal")).
+    -- exact id: native pals define under the game id (e.g. Pal{ id = "ChickenPal" }).
     local cls = object_manager.get("pal", id)
     if cls then return cls end
     -- namespaced pals: a registered "pack:name" whose resolved fname == the BP id

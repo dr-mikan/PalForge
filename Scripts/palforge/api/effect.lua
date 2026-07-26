@@ -1,10 +1,10 @@
 -- palforge/api/effect.lua — PUBLIC effect API + implementation (SELF-CONTAINED).
 --
 -- An effect is a status applied to a character (a player or a Pal): buffs, debuffs,
--- damage-over-time, shields. Same shape as every other api module (define / get /
--- get_all + a Handle object with actions and grouped `events`).
+-- damage-over-time, shields. Same shape as every other api module (call it to define,
+-- plus get / get_all + a Handle object with actions and grouped `events`).
 --
--- HOW IT INTEGRATES: Effect.define registers the definition class in object_manager under
+-- HOW IT INTEGRATES: Effect{ ... } registers the definition class in object_manager under
 -- ("effect", id). The TIMING — duration, periodic interval, stacking, expiry — is owned
 -- HERE, driven off core/event's "tick" channel (the shared ~500 ms heartbeat). That makes
 -- this a REAL runtime, not a seam: :apply(target) starts a live application and the
@@ -17,14 +17,14 @@
 -- utils.items, an actor method). Native ailment application stays a `-- TODO:` in
 -- native/effects.lua.
 --
---   local Regen = Effect.define{
---       id = "example:Regen", displayName = "Regeneration",
+--   local Regen = Effect{
+--       id = "example:Regen", name = "Regeneration",
 --       duration = 10.0,   -- seconds; nil = until :remove()
 --       interval = 1.0,    -- seconds between onTick calls
 --       events = {
---           onApply  = function(self, target, ctx) end,
---           onTick   = function(self, target, ctx) --[[ heal target; ctx.elapsed ]] end,
---           onExpire = function(self, target, ctx) end,
+--           onApply  = function(effect, target, ctx) end,
+--           onTick   = function(effect, target, ctx) --[[ heal target; ctx.elapsed ]] end,
+--           onExpire = function(effect, target, ctx) end,
 --       },
 --   }
 --   Regen:apply(Player.character())
@@ -33,19 +33,19 @@ local om     = require("palforge.core.object_manager")
 local schema = require("palforge.core.schema")
 
 --=============================================================================
--- SPEC — the shape of Effect.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as Effect.Spec:
+-- SPEC — the shape of Effect{ ... }, declared as data so it is enforced on every call and
+-- so the editor type definitions can be generated from it. It stays a LOCAL; read it at
+-- runtime through the registry:
 --
---   Effect.Spec:help()          -- print every field, its type, default and meaning
---   Effect.Spec.fields          -- the same, as a table, for tooling
---   Effect.Spec.Events{ ... }   -- build (and validate) a nested value on its own
+--   schema.help("Effect.Spec")         -- every field, its type, default and meaning
+--   schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
 --
--- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----The lifecycle handlers an effect can respond to. All optional. Each receives the effect
----definition as `self`, the `target` it is applied to, and a context `ctx`.
+---The lifecycle handlers an effect can respond to. All optional. Each receives THIS
+---effect's handle as its first argument, the `target` it is applied to, and a context
+---`ctx`. An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Effect.Spec.Events", {
     { "onApply",  type = "function", sig = "fun(self: Effect.Handle, target: any, ctx: table)",
                   doc = "LIVE - applied to a target" },
@@ -57,11 +57,12 @@ local Events = schema.define("Effect.Spec.Events", {
                   doc = "LIVE - duration elapsed, removed, or target gone" },
 })
 
----What you pass to Effect.define. `id` is the only required field.
+---What you pass to Effect{ ... }. `id` is the only required field.
 local Spec = schema.define("Effect.Spec", {
     { "id",           type = "string", required = true, check = schema.nonEmpty,
                       doc = "effect id: a name or \"pack:name\"" },
-    { "displayName",  type = "string",  doc = "shown on the status bar (defaults to id)" },
+    { "name",         type = "string",  doc = "shown on the status bar (defaults to id)" },
+    { "description",  type = "string",  doc = "one-line description, for UI and tooling" },
     { "duration",     type = "number",  doc = "total lifetime in seconds (omit = until :remove())" },
     { "interval",     type = "number",  doc = "seconds between onTick calls (omit = no periodic tick)" },
     { "stackable",    type = "boolean", default = false, doc = "may several copies coexist on one target?" },
@@ -167,15 +168,13 @@ local function ensureDriver()
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: Effect{ ... } / Effect.get / Effect.get_all
 --=============================================================================
 
+---The effect domain. CALL it to define one; the two named functions look existing ones up.
 ---@class palforge.effect
+---@overload fun(spec: Effect.Spec): Effect.Handle
 local Effect = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-Effect.Spec        = Spec
-Effect.Spec.Events = Events
 
 local wrap  -- forward decl; the Effect.Handle wrapper is defined in the BOTTOM section
 
@@ -183,11 +182,12 @@ local wrap  -- forward decl; the Effect.Handle wrapper is defined in the BOTTOM 
 ---`spec` is validated against Effect.Spec: `id` is required, unknown fields are an error.
 ---@param spec Effect.Spec
 ---@return Effect.Handle
-function Effect.define(spec)
-    spec = Spec:validate(spec, "Effect.define")
+local function define(spec)
+    spec = Spec:validate(spec, "Effect")
     local cls = setmetatable({
         id           = spec.id,
-        displayName  = spec.displayName or spec.id,
+        name         = spec.name or spec.id,
+        description  = spec.description,
         duration     = spec.duration,
         interval     = spec.interval,
         stackable    = spec.stackable,
@@ -197,12 +197,19 @@ function Effect.define(spec)
         data         = spec.data,
     }, Class)
     cls.__index = cls
-    if spec.events then
-        for name, handler in pairs(spec.events) do cls[name] = handler end  -- onApply, ...
+    local handle = wrap(cls)
+    -- dispatch calls cls:onXxx(...) with the CLASS as self; a handler wants the HANDLE
+    -- (what the call returned, and what carries :apply / :remove), so each declared
+    -- handler goes in behind a forwarder that swaps it in.
+    for name, handler in pairs(spec.events or {}) do           -- onApply, ...
+        cls[name] = function(_, ...) return handler(handle, ...) end
     end
     pcall(function() om.register("effect", spec.id, cls) end)
-    return wrap(cls)
+    return handle
 end
+
+-- Calling the module IS defining:  Effect{ id = "example:Regen", ... }
+setmetatable(Effect, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING effect by id: a previously-defined one, else a thin definition. Never nil.
 ---@param id string
@@ -236,7 +243,7 @@ end
 -- BOTTOM — the effect OBJECT (Effect.Handle): actions + lifecycle events
 --=============================================================================
 
----A definable effect. Obtain one from Effect.define / Effect.get / Effect.get_all.
+---A definable effect. Obtain one from Effect{ ... } / Effect.get / Effect.get_all.
 ---@class Effect.Handle
 ---@field id string   # the effect's id
 local Handle = {}
@@ -345,7 +352,9 @@ function Handle:onExpire(target, ctx) if self._cls.onExpire then return self._cl
 ---@return any?
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 ---@return number?
 function Handle:duration() return self._cls.duration end
 ---@return number?

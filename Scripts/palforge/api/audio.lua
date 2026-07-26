@@ -1,11 +1,11 @@
 -- palforge/api/audio.lua — PUBLIC audio API + implementation (SELF-CONTAINED).
 --
 -- Audio is one playable sound: background music or a one-shot effect. Same shape as every
--- other api module (define / get / get_all + a Handle object with actions), except that
--- audio has no lifecycle events to subscribe to — you PLAY it, so the Handle's surface is
--- actions.
+-- other api module (call it to define, plus get / get_all + a Handle object with actions),
+-- except that audio has no lifecycle events to subscribe to — you PLAY it, so the Handle's
+-- surface is actions. `bgm` and `se` are named constructors that pin `kind`.
 --
--- HOW IT INTEGRATES: Audio.define registers the definition class in object_manager under
+-- HOW IT INTEGRATES: Audio{ ... } registers the definition class in object_manager under
 -- ("audio", id) and lowers the declaration into a source spec that core.sound resolves:
 --   soundId / soundPath -> { kind = "native" }  -> core.sound.native  (WORKING)
 --   soundFile           -> { kind = "file"   }  -> core.sound.file    (seam, no-op)
@@ -30,21 +30,23 @@ local sound  = require("palforge.core.sound")
 local schema = require("palforge.core.schema")
 
 --=============================================================================
--- SPEC — the shape of Audio.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as Audio.Spec:
+-- SPEC — the shape of Audio{ ... }, declared as data so it is enforced on every call and
+-- so the editor type definitions can be generated from it. It stays a LOCAL; read it at
+-- runtime through the registry:
 --
---   Audio.Spec:help()   -- print every field, its type, default and meaning
---   Audio.Spec.fields   -- the same, as a table, for tooling
+--   schema.help("Audio.Spec")         -- every field, its type, default and meaning
+--   schema.get("Audio.Spec").fields   -- the same, as a table, for tooling
 --
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----What you pass to Audio.define / Audio.bgm / Audio.se. `id` is required, plus ONE of
----soundId / soundPath / soundFile (or an own `source` override).
+---What you pass to Audio{ ... } / Audio.bgm / Audio.se. `id` is required; a definition
+---that names no sound falls back to its own id as the AkAudioEvent name.
 local Spec = schema.define("Audio.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "audio id: the AkAudioEvent name, or \"pack:name\"" },
-    { "displayName", type = "string", doc = "human label (defaults to id)" },
+    { "name",        type = "string", doc = "human label (defaults to id)" },
+    { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "kind",        type = "string", values = { "se", "bgm" }, default = "se",
                      doc = "descriptive only - the native play route is the same for both" },
     { "soundId",     type = "string", doc = "native AkAudioEvent name (the SoundID fallback route)" },
@@ -85,14 +87,13 @@ local function defaultActor()
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: Audio{ ... } / Audio.bgm / Audio.se / Audio.get / Audio.get_all
 --=============================================================================
 
+---The audio domain. CALL it to define a sound; bgm / se pin `kind`, get looks one up.
 ---@class palforge.audio
+---@overload fun(spec: Audio.Spec): Audio.Handle
 local Audio = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-Audio.Spec = Spec
 
 local wrap  -- forward decl; the Audio.Handle wrapper is defined in the BOTTOM section
 
@@ -100,13 +101,21 @@ local wrap  -- forward decl; the Audio.Handle wrapper is defined in the BOTTOM s
 ---`spec` is validated against Audio.Spec: `id` is required, unknown fields are an error.
 ---@param spec Audio.Spec
 ---@return Audio.Handle
-function Audio.define(spec)
-    spec = Spec:validate(spec, "Audio.define")
+local function define(spec)
+    spec = Spec:validate(spec, "Audio")
+    -- A definition that names no sound falls back to its own id as the AkAudioEvent name
+    -- — the same thing Audio.get does for an id it has never seen, so the short form
+    -- `Audio.bgm{ id = "AKE_BGM_Title" }` plays rather than resolving to nothing.
+    local soundId = spec.soundId
+    if soundId == nil and spec.soundPath == nil and spec.soundFile == nil and spec.source == nil then
+        soundId = spec.id
+    end
     local cls = setmetatable({
         id          = spec.id,
-        displayName = spec.displayName or spec.id,
+        name        = spec.name or spec.id,
+        description = spec.description,
         kind        = spec.kind,
-        soundId     = spec.soundId,
+        soundId     = soundId,
         soundPath   = spec.soundPath,
         soundFile   = spec.soundFile,
         data        = spec.data,
@@ -117,7 +126,10 @@ function Audio.define(spec)
     return wrap(cls)
 end
 
--- Sugar over define that pins `kind`. The caller's table is never mutated — a stray
+-- Calling the module IS defining:  Audio{ id = "AKE_BGM_Title", ... }
+setmetatable(Audio, { __call = function(_, spec) return define(spec) end })
+
+-- Same definition with `kind` pinned. The caller's table is never mutated — a stray
 -- `kind` in it would be a contradiction, so it is rejected rather than overwritten.
 local function defineAs(kind, spec, who)
     if spec ~= nil and type(spec) ~= "table" then
@@ -126,19 +138,19 @@ local function defineAs(kind, spec, who)
     local copy = {}
     for k, v in pairs(spec or {}) do copy[k] = v end
     if copy.kind ~= nil and copy.kind ~= kind then
-        error(string.format("PalForge: %s: kind is fixed to %q here, but got %q - use Audio.define to set it",
+        error(string.format("PalForge: %s: kind is fixed to %q here, but got %q - use Audio{ ... } to set it",
             who, kind, tostring(copy.kind)), 0)
     end
     copy.kind = kind
-    return Audio.define(copy)
+    return define(copy)
 end
 
----Define background music (kind = "bgm"). Sugar over define.
+---Define background music (kind = "bgm").
 ---@param spec Audio.Spec
 ---@return Audio.Handle
 function Audio.bgm(spec) return defineAs("bgm", spec, "Audio.bgm") end
 
----Define a one-shot sound effect (kind = "se"). Sugar over define.
+---Define a one-shot sound effect (kind = "se").
 ---@param spec Audio.Spec
 ---@return Audio.Handle
 function Audio.se(spec) return defineAs("se", spec, "Audio.se") end
@@ -165,7 +177,7 @@ end
 -- BOTTOM — the audio OBJECT (Audio.Handle): actions
 --=============================================================================
 
----A playable sound. Obtain one from Audio.define / Audio.bgm / Audio.se / Audio.get.
+---A playable sound. Obtain one from Audio{ ... } / Audio.bgm / Audio.se / Audio.get.
 ---@class Audio.Handle
 ---@field id string   # the sound's id
 local Handle = {}
@@ -213,7 +225,9 @@ function Handle:source() return self._cls:source() end
 ---@return string  # "bgm" | "se"
 function Handle:kind() return self._cls.kind or "se" end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 
 Audio.Class = Class   -- the base class (used for subclassing / override detection)
 return Audio

@@ -1,10 +1,10 @@
 -- palforge/api/item.lua — PUBLIC item API + implementation (SELF-CONTAINED).
 --
 -- An item is a piece of inventory content: materials, consumables, equipment, ammo.
--- Same shape as every other api module (define / get / get_all + a Handle object with
--- actions and grouped `events`).
+-- Same shape as every other api module (call it to define, plus get / get_all + a Handle
+-- object with actions and grouped `events`).
 --
--- HOW IT INTEGRATES: Item.define registers the definition class in object_manager under
+-- HOW IT INTEGRATES: Item{ ... } registers the definition class in object_manager under
 -- ("item", id). core/event's item source hooks the game's own calls and emits channels;
 -- DISPATCH resolves the class by the game item id carried on the event and calls
 -- cls:onXxx(ctx) with the class as self.
@@ -19,12 +19,14 @@
 -- ACTIONS are real: :give / :take move the count through the game's own server path
 -- (AddItem_ServerInternal, via utils.items) and :iconOf reads the live icon DataTable.
 -- Publishing a BRAND-NEW item row into the game's data tables is NOT possible from Lua
--- alone (that is PalSchema's job) — define() gives an existing id behaviour, it does not
+-- alone (that is PalSchema's job) — defining gives an existing id behaviour, it does not
 -- create inventory content.
 --
---   Item.define{
---       id = "Berries", displayName = "Red Berries", category = "consumable",
---       events = { onUse = function(self, ctx) log.info(tostring(ctx.actor)) end },
+--   Item{
+--       id = "Berries", name = "Red Berries", category = "consumable",
+--       events = {
+--           onUse = function(item, ctx) log.info(tostring(ctx.actor)) end,
+--       },
 --   }
 --   Item.get("Wood"):give(10)
 
@@ -34,14 +36,13 @@ local items  = require("palforge.utils.items")
 local schema = require("palforge.core.schema")
 
 --=============================================================================
--- SPEC — the shape of Item.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as Item.Spec:
+-- SPEC — the shape of Item{ ... }, declared as data so it is enforced on every call and
+-- so the editor type definitions can be generated from it. It stays a LOCAL; read it at
+-- runtime through the registry:
 --
---   Item.Spec:help()          -- print every field, its type, default and meaning
---   Item.Spec.fields          -- the same, as a table, for tooling
---   Item.Spec.Recipe{ ... }   -- build (and validate) a nested value on its own
+--   schema.help("Item.Spec")         -- every field, its type, default and meaning
+--   schema.get("Item.Spec").fields   -- the same, as a table, for tooling
 --
--- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
@@ -54,8 +55,9 @@ local Recipe = schema.define("Item.Spec.Recipe", {
     { "station",   type = "string", doc = "workbench / station id that can craft it" },
 })
 
----The lifecycle handlers an item can respond to. All optional. Each receives the item
----definition as `self` and the event context `ctx`.
+---The lifecycle handlers an item can respond to. All optional. Each receives THIS item's
+---handle as its first argument and the event context `ctx`. An event this list does not
+---name is a hard error, not a silent no-op.
 local Events = schema.define("Item.Spec.Events", {
     { "onObtain",  type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "LIVE - entered the inventory (ctx.count)" },
@@ -67,11 +69,12 @@ local Events = schema.define("Item.Spec.Events", {
                    doc = "declarable; no native source exists yet" },
 })
 
----What you pass to Item.define. `id` is the only required field.
+---What you pass to Item{ ... }. `id` is the only required field.
 local Spec = schema.define("Item.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "item id: a game ItemId (\"Wood\") or \"pack:name\"" },
-    { "displayName", type = "string", doc = "shown in UI (defaults to id)" },
+    { "name",        type = "string", doc = "shown in UI (defaults to id)" },
+    { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "category",    type = "string", default = "material",
                      values = { "material", "consumable", "equipment", "ammo", "ingredient", "other" },
                      doc = "what kind of inventory content this is" },
@@ -111,16 +114,13 @@ function Class:iconOf()
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: Item{ ... } / Item.get / Item.get_all
 --=============================================================================
 
+---The item domain. CALL it to define an item; the two named functions look existing ones up.
 ---@class palforge.item
+---@overload fun(spec: Item.Spec): Item.Handle
 local Item = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-Item.Spec        = Spec
-Item.Spec.Recipe = Recipe
-Item.Spec.Events = Events
 
 local wrap  -- forward decl; the Item.Handle wrapper is defined in the BOTTOM section
 
@@ -128,11 +128,12 @@ local wrap  -- forward decl; the Item.Handle wrapper is defined in the BOTTOM se
 ---`spec` is validated against Item.Spec: `id` is required, unknown fields are an error.
 ---@param spec Item.Spec
 ---@return Item.Handle
-function Item.define(spec)
-    spec = Spec:validate(spec, "Item.define")
+local function define(spec)
+    spec = Spec:validate(spec, "Item")
     local cls = setmetatable({
         id          = spec.id,
-        displayName = spec.displayName or spec.id,
+        name        = spec.name or spec.id,
+        description = spec.description,
         category    = spec.category,
         maxStack    = spec.maxStack,
         icon        = spec.icon,
@@ -140,12 +141,19 @@ function Item.define(spec)
         data        = spec.data,
     }, Class)
     cls.__index = cls
-    if spec.events then
-        for name, handler in pairs(spec.events) do cls[name] = handler end  -- onUse, ...
+    local handle = wrap(cls)
+    -- dispatch calls cls:onXxx(...) with the CLASS as self; a handler wants the HANDLE
+    -- (what the call returned, and what carries :give), so each declared handler goes in
+    -- behind a forwarder that swaps it in.
+    for name, handler in pairs(spec.events or {}) do           -- onUse, ...
+        cls[name] = function(_, ...) return handler(handle, ...) end
     end
     pcall(function() om.register("item", spec.id, cls) end)  -- so core/event + get() find it
-    return wrap(cls)
+    return handle
 end
+
+-- Calling the module IS defining:  Item{ id = "Berries", ... }
+setmetatable(Item, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING item by id: a previously-defined one, else a thin definition over any
 ---game ItemId (so vanilla items are actionable too). Never nil.
@@ -169,7 +177,7 @@ end
 -- BOTTOM — the item OBJECT (Item.Handle): actions + lifecycle events
 --=============================================================================
 
----A definable item. Obtain one from Item.define / Item.get / Item.get_all.
+---A definable item. Obtain one from Item{ ... } / Item.get / Item.get_all.
 ---@class Item.Handle
 ---@field id string   # the item's game ItemId
 local Handle = {}
@@ -202,12 +210,14 @@ function Handle:onDiscard(ctx) if self._cls.onDiscard then return self._cls:onDi
 
 -- ---- queries ----
 
----@return Item.Recipe?
+---@return Item.Spec.Recipe?
 function Handle:recipeOf() return self._cls:recipeOf() end
 ---@return any?  # texture ref from the icon DataTable, else the declared icon
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 ---@return string
 function Handle:category() return self._cls.category or "material" end
 ---@return integer

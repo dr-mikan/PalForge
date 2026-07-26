@@ -460,11 +460,11 @@ for _, id in ipairs(M.CATALOG) do set[id] = true end
 local cache = {}
 
 -- get(id): a Skill wrapper for ANY real catalog id, built on first use + cached; nil if
--- id is not a known skill row. define() sets .id and registers into object_manager.
+-- id is not a known skill row. defining sets .id and registers into object_manager.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Skill.define{ id = id }
+    local h = Skill{ id = id }
     cache[id] = h
     return h
 end
@@ -476,7 +476,7 @@ end
 -- FNames in these two tables are encounter-keyed (RAID_/GYM_/BOSS_) or passive-trait
 -- rows, so "FlameThrower" is NOT a CATALOG member (pre-seeded below). element/cooldown/
 -- power are framework-side metadata (the dump lists schema columns, not per-row values).
-M.Fireball = Skill.define{
+M.Fireball = Skill{
     id       = "FlameThrower",
     kind     = "active",
     element  = "fire",

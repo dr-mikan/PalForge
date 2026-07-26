@@ -2,9 +2,10 @@
 --
 -- A building is a placeable structure: workbenches, storage, machines, decorations —
 -- anything picked from the build menu and set into the world. Same shape as every other
--- api module (define / get / get_all + a Handle object with actions and grouped `events`).
+-- api module (call it to define, plus get / get_all + a Handle object with actions and
+-- grouped `events`).
 --
--- HOW IT INTEGRATES: Building.define registers the definition class in object_manager
+-- HOW IT INTEGRATES: Building{ ... } registers the definition class in object_manager
 -- under ("building", id). core/event owns the FULL building runtime and is the most
 -- complete 導線 in PalForge:
 --   * a RequestBuild_ToServer hook records the placement intent,
@@ -14,16 +15,20 @@
 --     crashes the game),
 --   * an OnBeginInteractBuilding hook drives the interact channel,
 --   * the shared heartbeat drives onTick (per-instance tickInterval + circuit breaker).
--- Every hook below is LIVE — this is the one domain where a placed structure really does
--- get its own stateful instance with save/load.
+-- This is the one domain where a placed structure really does get its own stateful
+-- instance with save/load, and where onPlace / onLoad / onRightClick / onRemove / onTick /
+-- onWorldLeft all fire for real.
 --
 -- The lifecycle receives the live INSTANCE as `self` (not the class): self.actor is the
 -- placed actor, self.pos its world position, self.state your persisted table, and
 -- self:save() writes it. onBuild / onLeftClick / onBreak are declarable but have no
 -- native source yet (no channel emits them); onPlace + onRemove cover place/destroy.
+-- onWorldReady is dispatched but unreachable: core/event emits world.ready at the moment
+-- it opens the worldReady gate, and the scan that creates instances is gated on that same
+-- flag, so the registry is still empty when the hook runs. Do the work in onLoad instead.
 --
---   Building.define{
---       id = "example:Bench", displayName = "Modded Bench", gridCm = 100,
+--   Building{
+--       id = "example:Bench", name = "Modded Bench", gridCm = 100,
 --       mesh  = { kind = "static", model = "/Game/.../SM_Bench.SM_Bench" },
 --       state = { uses = 0 },                       -- default persisted state
 --       events = {
@@ -39,27 +44,28 @@ local mesh   = require("palforge.core.mesh")
 local items  = require("palforge.utils.items")
 local schema = require("palforge.core.schema")
 
+require("palforge.api.mesh")   -- declares "Mesh.Spec", the shape this file derives from
+
 --=============================================================================
--- SPEC — the shape of Building.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as Building.Spec:
+-- SPEC — the shape of Building{ ... }, declared as data so it is enforced on every call
+-- and so the editor type definitions can be generated from it. It stays a LOCAL; read it
+-- at runtime through the registry:
 --
---   Building.Spec:help()        -- print every field, its type, default and meaning
---   Building.Spec.fields        -- the same, as a table, for tooling
---   Building.Spec.Mesh{ ... }   -- build (and validate) a nested value on its own
+--   schema.help("Building.Spec")         -- every field, its type, default and meaning
+--   schema.get("Building.Spec").fields   -- the same, as a table, for tooling
 --
--- Nested constructors are OPTIONAL sugar; a plain table is validated identically.
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----The mesh attached to a placed structure. `kind` picks the core.mesh backend.
-local Mesh = schema.define("Building.Spec.Mesh", {
-    { "kind",   type = "string", values = { "procedural", "static", "skeletal", "obj" },
-                default = "static", doc = "which core.mesh backend renders it" },
-    { "model",  type = "string", required = true,
-                doc = "UStaticMesh asset path, or an OBJ path for the procedural backend" },
-    { "scale",  type = "number", doc = "uniform scale applied to the attached mesh" },
-    { "offset", type = "table",  doc = "{ x, y, z } offset from the actor's origin" },
-    { "color",  type = "table",  doc = "tint { r, g, b, a } in 0..1" },
+---The mesh attached to a placed structure: exactly api/mesh's shape, so a named
+---`Mesh{ ... }` handle can be worn by a building too, with the one thing that is this
+---domain's own policy overridden — a structure is a static mesh where a pal is a
+---skeletal one. Deriving rather than re-declaring means a field added to Mesh.Spec
+---reaches buildings without anyone remembering to copy it.
+local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
+    kind   = { default = "static" },
+    model  = { doc = "UStaticMesh asset path, or an OBJ path for the procedural backend" },
+    offset = { doc = "{ x, y, z } offset from the actor's origin" },
 })
 
 local Material = schema.define("Building.Spec.Material", {
@@ -83,9 +89,9 @@ local Events = schema.define("Building.Spec.Events", {
     { "onTick",       type = "function", sig = "fun(self: Building.Instance, ctx: table)",
                       doc = "LIVE - heartbeat (see tickInterval)" },
     { "onWorldReady", type = "function", sig = "fun(self: Building.Instance, ctx: table)",
-                      doc = "LIVE - the world finished loading" },
+                      doc = "declarable; world.ready is emitted before the first scan, so no instance is live yet" },
     { "onWorldLeft",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
-                      doc = "LIVE - the world was unloaded" },
+                      doc = "LIVE - the world was unloaded (emitted while instances are still live)" },
     { "onBuild",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
                       doc = "declarable; no native source exists yet" },
     { "onLeftClick",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
@@ -94,16 +100,18 @@ local Events = schema.define("Building.Spec.Events", {
                       doc = "declarable; no native source exists yet" },
 })
 
----What you pass to Building.define. `id` is the only required field.
+---What you pass to Building{ ... }. `id` is the only required field.
 local Spec = schema.define("Building.Spec", {
     { "id",           type = "string", required = true, check = schema.nonEmpty,
                       doc = "build id: a game BuildObjectId (\"PalBoxV2\") or \"pack:name\"" },
-    { "displayName",  type = "string", doc = "shown in UI (defaults to id)" },
+    { "name",         type = "string", doc = "shown in UI (defaults to id)" },
+    { "description",  type = "string", doc = "one-line description, for UI and tooling" },
     { "gridCm",       type = "number", doc = "placement grid quantum in cm (default core.spatial.GRID_CM)" },
     { "buildIds",     type = "table", arrayOf = "string",
-                      doc = "extra game build ids this definition claims (default { id })" },
+                      doc = "the game build ids this definition claims; REPLACES the default { id }" },
     { "tickInterval", type = "number", default = 1, doc = "run onTick every N heartbeats" },
-    { "mesh",         type = "table", of = Mesh,     doc = "the mesh attached to the placed actor" },
+    { "mesh",         type = "table", of = Mesh,
+                      doc = "the mesh attached to the placed actor (inline, or a Mesh{ ... } handle)" },
     { "material",     type = "table", of = Material, doc = "material override applied to that mesh" },
     { "color",        type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
     { "texture",      type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
@@ -216,17 +224,13 @@ function Class:iconOf()
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: Building{ ... } / Building.get / Building.get_all
 --=============================================================================
 
+---The building domain. CALL it to define one; the two named functions look existing ones up.
 ---@class palforge.building
+---@overload fun(spec: Building.Spec): Building.Handle
 local Building = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-Building.Spec          = Spec
-Building.Spec.Mesh     = Mesh
-Building.Spec.Material = Material
-Building.Spec.Events   = Events
 
 local wrap  -- forward decl; the Building.Handle wrapper is defined in the BOTTOM section
 
@@ -235,11 +239,12 @@ local wrap  -- forward decl; the Building.Handle wrapper is defined in the BOTTO
 ---`spec` is validated against Building.Spec: `id` is required, unknown fields are an error.
 ---@param spec Building.Spec
 ---@return Building.Handle
-function Building.define(spec)
-    spec = Spec:validate(spec, "Building.define")
+local function define(spec)
+    spec = Spec:validate(spec, "Building")
     local cls = setmetatable({
         id           = spec.id,
-        displayName  = spec.displayName or spec.id,
+        name         = spec.name or spec.id,
+        description  = spec.description,
         gridCm       = spec.gridCm,
         buildIds     = spec.buildIds,
         tickInterval = spec.tickInterval,
@@ -253,11 +258,16 @@ function Building.define(spec)
     }, Class)
     cls.__index = cls  -- so a placed instance (cls:new) resolves the class methods
     if spec.events then
+        -- installed as-is: a building's handler receives the LIVE INSTANCE as `self`,
+        -- which is the object the event happened to (.actor / .pos / .state / :save()).
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onPlace, ...
     end
     pcall(function() om.register("building", spec.id, cls) end)  -- so core/event + get() find it
     return wrap(cls)
 end
+
+-- Calling the module IS defining:  Building{ id = "example:Bench", ... }
+setmetatable(Building, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING building by id: a previously-defined one, else a thin definition over
 ---any game BuildObjectId. Never nil.
@@ -284,7 +294,7 @@ end
 -- reach those with :instances().
 --=============================================================================
 
----A definable building. Obtain one from Building.define / Building.get / Building.get_all.
+---A definable building. Obtain one from Building{ ... } / Building.get / Building.get_all.
 ---@class Building.Handle
 ---@field id string   # the building's game BuildObjectId
 local Handle = {}
@@ -353,12 +363,14 @@ function Handle:onTick(ctx) if self._cls.onTick then return self._cls:onTick(ctx
 
 -- ---- queries ----
 
----@return Building.Mesh?
+---@return Building.Spec.Mesh?
 function Handle:mesh() return self._cls.meshSpec end
 ---@return any?  # texture ref from the icon DataTable, else the declared icon
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 ---@return number?
 function Handle:gridCm() return self._cls.gridCm end
 

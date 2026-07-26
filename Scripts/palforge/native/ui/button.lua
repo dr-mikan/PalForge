@@ -8,9 +8,9 @@
 local UI     = require("palforge.api.ui")
 local widget = require("palforge.native.ui._widget")
 
-return UI.define{
+return UI{
     id          = "palforge:Button",
-    displayName = "Button",
+    name        = "Button",
 
     -- Build one native menu button from self.label / self.onClick and place it under
     -- `root` (best-effort; placement is host-panel dependent). Fail-soft.

@@ -438,11 +438,11 @@ for _, id in ipairs(M.CATALOG) do set[id] = true end
 local cache = {}
 
 -- get(id): an Item wrapper for ANY real catalog id, built on first use + cached; nil
--- if id is not a known item row. define() sets .id and registers into object_manager.
+-- if id is not a known item row. defining sets .id and registers into object_manager.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Item.define{ id = id }
+    local h = Item{ id = id }
     cache[id] = h
     return h
 end
@@ -452,9 +452,9 @@ end
 -- Wood — the vanilla wood material. onObtain fires via the CONFIRMED item.obtain dispatch
 -- (PalPlayerState:AddItemGetLog_ToClient, ctx.itemId=="Wood") when the player picks up /
 -- harvests wood; the log proves the obtain 導線 like Berries.onUse does for use.
-M.Wood = Item.define{
+M.Wood = Item{
     id          = "Wood",
-    displayName = "Wood",
+    name        = "Wood",
     category    = "material",
     maxStack    = 9999,
     events = {
@@ -467,9 +467,9 @@ M.Wood = Item.define{
 -- Berries — the vanilla red-berry food (a consumable). onUse fires via the CONFIRMED
 -- item.use dispatch (UseItemToCharacter_ServerInternal, ctx.itemId=="Berries"); the log
 -- proves the item lifecycle 導線 like the ChickenPal demo does for pals.
-M.Berries = Item.define{
+M.Berries = Item{
     id          = "Berries",
-    displayName = "Red Berries",
+    name        = "Red Berries",
     category    = "consumable",
     maxStack    = 100,
     events = {
@@ -485,9 +485,9 @@ M.Berries = Item.define{
 
 -- Arrow — vanilla bow ammunition (siblings in the table include Arrow_Fire,
 -- Arrow_Poison, both CATALOG members).
-M.Arrow = Item.define{
+M.Arrow = Item{
     id          = "Arrow",
-    displayName = "Arrow",
+    name        = "Arrow",
     category    = "ammo",
     maxStack    = 999,
 }

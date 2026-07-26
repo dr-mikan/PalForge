@@ -153,11 +153,11 @@ for _, id in ipairs(M.CATALOG) do set[id] = true end
 local cache = {}
 
 -- get(id): a Pal wrapper for ANY real catalog id, built on first use + cached; nil if
--- id is not a known monster row. define() sets .id and registers into object_manager.
+-- id is not a known monster row. defining sets .id and registers into object_manager.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Pal.define{ id = id }
+    local h = Pal{ id = id }
     cache[id] = h
     return h
 end
@@ -169,9 +169,9 @@ end
 -- channel payload { actor = <pal actor> }). Each just logs to prove it fired.
 
 -- ChickenPal — id "ChickenPal" (live BP_ChickenPal_C; also a CATALOG member).
-M.Chicken = Pal.define{
+M.Chicken = Pal{
     id          = "ChickenPal",
-    displayName = "Chicken Pal (demo)",
+    name        = "Chicken Pal (demo)",
     mesh = {
         kind      = "skeletal",
         model     = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal",
@@ -193,9 +193,9 @@ M.Chicken = Pal.define{
 -- SheepBall — dispatch id "SheepBall" (live BP_SheepBall_C). The DT row FName is
 -- spelled "Sheepball" (lowercase b); the runtime keys off the BP id, so we define
 -- under "SheepBall" — which is therefore NOT itself a CATALOG member (pre-seeded).
-M.SheepBall = Pal.define{
+M.SheepBall = Pal{
     id          = "SheepBall",
-    displayName = "Sheepball (demo)",
+    name        = "Sheepball (demo)",
     mesh = {
         kind      = "skeletal",
         model     = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall",

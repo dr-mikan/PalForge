@@ -9,10 +9,11 @@
 --
 -- LAYERS
 --   api/    the PUBLIC surface a content pack writes against. One module per domain
---           (Pal, Item, Building, Skill, Effect, Audio, UI, Player), all the same shape:
---           define{ id, ..., events = {...} } / get(id) / get_all(), returning a Handle
---           that carries that domain's actions. Requiring palforge.api also installs the
---           bare globals (Pal, Item, Building, ...) for terse pack code.
+--           (Pal, Item, Building, Skill, Effect, Audio, Mesh, UI, Player), all the same
+--           shape: CALL the module to define — X{ id, ..., events = {...} } — plus
+--           X.get(id) / X.get_all(), each returning a Handle that carries that domain's
+--           actions. Requiring palforge.api also installs the bare globals
+--           (Pal, Item, Building, ...) for terse pack code.
 --   core/   the ENGINE. The kernel (registry), the one event system (event: channels +
 --           native sources + dispatch + the full building runtime), and the Palworld
 --           bridges api/ is built on (object_manager, spawn, mesh, sound, player, icons,

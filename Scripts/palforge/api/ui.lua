@@ -11,7 +11,7 @@
 --     per mount (idempotent, so re-mounting can never stack duplicate widgets); update()
 --     runs on each refresh. A concrete element never writes its own render-once guard.
 --
--- HOW IT INTEGRATES: UI.define registers the element class in object_manager under
+-- HOW IT INTEGRATES: UI{ ... } registers the element class in object_manager under
 -- ("ui", id), so tooling and other mods can look it up. The native elements in
 -- palforge/native/ui/ (Button, TitleMenu) are defined exactly this way and build their
 -- widgets through native/ui/_widget.lua — that part is LIVE and injects into the real
@@ -22,7 +22,7 @@
 -- changes, or opt into polling with :autoRefresh(ms) (built on core/event's heartbeat).
 -- No async policy is imposed by default.
 --
---   local Panel = UI.define{
+--   local Panel = UI{
 --       id = "example:Panel",
 --       render = function(self, root) --[[ build widgets under root ]] end,
 --       update = function(self) --[[ reflect changed state into the live widgets ]] end,
@@ -33,11 +33,12 @@ local om     = require("palforge.core.object_manager")
 local schema = require("palforge.core.schema")
 
 --=============================================================================
--- SPEC — the shape of UI.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as UI.Spec:
+-- SPEC — the shape of UI{ ... }, declared as data so it is enforced on every call and so
+-- the editor type definitions can be generated from it. It stays a LOCAL; read it at
+-- runtime through the registry:
 --
---   UI.Spec:help()   -- print every field, its type, default and meaning
---   UI.Spec.fields   -- the same, as a table, for tooling
+--   schema.help("UI.Spec")         -- every field, its type, default and meaning
+--   schema.get("UI.Spec").fields   -- the same, as a table, for tooling
 --
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 -- Per-element state does NOT go here — it belongs to an instance, so pass it to
@@ -45,11 +46,12 @@ local schema = require("palforge.core.schema")
 -- Use `data` for defaults every instance should share.
 --=============================================================================
 
----What you pass to UI.define. `id` is required; `render` is what makes it useful.
+---What you pass to UI{ ... }. `id` is required; `render` is what makes it useful.
 local Spec = schema.define("UI.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "element id, e.g. \"pack:Panel\"" },
-    { "displayName", type = "string",   doc = "human label (defaults to id)" },
+    { "name",        type = "string",   doc = "human label (defaults to id)" },
+    { "description", type = "string",   doc = "one-line description, for UI and tooling" },
     { "render",      type = "function", sig = "fun(self: UI.Handle, root: any)",
                      doc = "build the widget tree under `root` (self, root); runs once per mount" },
     { "update",      type = "function", sig = "fun(self: UI.Handle)",
@@ -109,14 +111,13 @@ function Class:unmount()
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: UI{ ... } / UI.get / UI.get_all
 --=============================================================================
 
+---The UI domain. CALL it to define an element; the two named functions look existing ones up.
 ---@class palforge.ui
+---@overload fun(spec: UI.Spec): UI.Handle
 local UI = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-UI.Spec = Spec
 
 local wrap  -- forward decl; the UI.Handle wrapper is defined in the BOTTOM section
 
@@ -125,9 +126,10 @@ local wrap  -- forward decl; the UI.Handle wrapper is defined in the BOTTOM sect
 ---`spec` is validated against UI.Spec: `id` is required, unknown fields are an error.
 ---@param spec UI.Spec
 ---@return UI.Handle
-function UI.define(spec)
-    spec = Spec:validate(spec, "UI.define")
-    local cls = setmetatable({ id = spec.id, displayName = spec.displayName or spec.id }, Class)
+local function define(spec)
+    spec = Spec:validate(spec, "UI")
+    local cls = setmetatable({ id = spec.id, name = spec.name or spec.id,
+                               description = spec.description }, Class)
     cls.__index = cls
     if spec.render then cls.render = spec.render end
     if spec.update then cls.update = spec.update end
@@ -139,6 +141,9 @@ function UI.define(spec)
     pcall(function() om.register("ui", spec.id, cls) end)
     return wrap(cls)
 end
+
+-- Calling the module IS defining:  UI{ id = "example:Panel", render = ... }
+setmetatable(UI, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING element by id: a previously-defined one, else a thin (inert) element.
 ---Never nil.
@@ -162,7 +167,7 @@ end
 -- BOTTOM — the UI OBJECT (UI.Handle): an instance you mount, refresh and unmount
 --=============================================================================
 
----A mountable UI element. Obtain one from UI.define / UI.get, or :new{...} for a fresh
+---A mountable UI element. Obtain one from UI{ ... } / UI.get, or :new{...} for a fresh
 ---instance. Inside render/update, `self` is this instance — set fields on it freely
 ---(self.widget = ..., read self.label, ...).
 ---@class UI.Handle
@@ -221,7 +226,9 @@ end
 ---@return table
 function Handle:state() return self._st end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 
 UI.Class = Class   -- the base class every element extends (lifecycle + seams)
 return UI

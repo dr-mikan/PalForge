@@ -5,10 +5,10 @@
 -- dev — loads the dev keybinds, runs the test suites, and exposes the catalog dumper.
 --
 -- Responsibility split (frame):
---   * object_manager = WHAT exists   (every api define() records its class there)
+--   * object_manager = WHAT exists   (every api definition call records its class there)
 --   * registry       = WHEN it loads (this file: load order + the dev gate)
 --   * event          = WHAT happens  (core/event.lua: channels, sources, dispatch)
--- Registration is NOT a separate step anymore: api/*.define() writes into object_manager
+-- Registration is NOT a separate step anymore: a definition call writes into object_manager
 -- itself, so loading a catalog module IS registering its content — no walk over an
 -- aggregator table, no per-class cls:register(). Going-live (indexing a build id, running
 -- the placement/tick runtime) is driven off the event channels; core/event.lua owns the
@@ -23,7 +23,7 @@ local object_manager = require("palforge.core.object_manager")
 
 local M = {}
 
--- The native content catalogs, in load order. Requiring one runs its CURATED define()
+-- The native content catalogs, in load order. Requiring one runs its CURATED definition
 -- calls, which self-register; the big CATALOG lists stay plain DATA and are materialized
 -- lazily by each module's get(id), so startup never registers the thousands of row ids.
 local CATALOGS = {
@@ -69,7 +69,7 @@ function M.initialize()
     local okApi, apiErr = pcall(require, "palforge.api")
     if not okApi then log.err("api load error: " .. tostring(apiErr)) end
 
-    -- ② load the native catalogs — each define() self-registers into object_manager
+    -- ② load the native catalogs — each definition self-registers into object_manager
     for _, module in ipairs(CATALOGS) do
         local ok, err = pcall(require, module)
         if not ok then log.err("native catalog '" .. module .. "' load error: " .. tostring(err)) end

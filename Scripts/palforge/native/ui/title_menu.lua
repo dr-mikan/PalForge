@@ -55,9 +55,9 @@ local function injectEntry(root, vbox, pc, e)
     return true
 end
 
-return UI.define{
+return UI{
     id          = "palforge:TitleMenu",
-    displayName = "Title Menu",
+    name        = "Title Menu",
 
     -- Inject every entry from self.entries into the title's VerticalBox_0. Called once by
     -- the api/ui lifecycle (mount). Fail-soft; returns true if any entry was injected.

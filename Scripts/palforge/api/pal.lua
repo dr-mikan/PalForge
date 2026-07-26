@@ -1,11 +1,12 @@
 -- palforge/api/pal.lua — PUBLIC pal API + implementation (SELF-CONTAINED).
 --
 -- A pal is a spawnable creature. This module is the TEMPLATE every other api module
--- follows: define / get / get_all + a Handle object carrying actions and grouped `events`.
--- Its only internal deps are core/object_manager (the registry core/event resolves pals
--- through), core/spawn (the spawn engine), core/mesh and core/icons.
+-- follows: the module itself is CALLED to define, plus get / get_all, and it returns a
+-- Handle object carrying actions and grouped `events`. Its only internal deps are
+-- core/object_manager (the registry core/event resolves pals through), core/spawn (the
+-- spawn engine), core/mesh and core/icons.
 --
--- HOW IT INTEGRATES: Pal.define registers the definition class in object_manager under
+-- HOW IT INTEGRATES: Pal{ ... } registers the definition class in object_manager under
 -- ("pal", id). core/event resolves a spawned pal's class by its BP class name
 -- (BP_<Id>_C -> id -> object_manager.get) and calls cls:onXxx(ctx) with the class as
 -- self — so a definition's lifecycle handlers just work.
@@ -19,62 +20,60 @@
 --     buildings do), so nothing drives a periodic pal hook. Declarable, never fires.
 --
 -- ACTIONS are real: :spawn goes through UPalCheatManager (server-verified), coordinate
--- placement included. Note that define() gives an EXISTING CharacterID behaviour — Lua
+-- placement included. Note that defining gives an EXISTING CharacterID behaviour — Lua
 -- cannot add a brand-new creature row (that is PalSchema's job).
 --
 -- LAYOUT
---   SPEC    — the shape of define(), declared as data (core/schema). It is enforced on
---             every call AND readable at runtime as Pal.Spec, and it is what
---             Scripts/palforge/types.lua is generated from for editor completion.
---   TOP     — module functions:   Pal.define / Pal.get / Pal.get_all
+--   SPEC    — the shape of Pal{ ... }, declared as data (core/schema). It is PRIVATE to
+--             this file: it is enforced on every call, and Scripts/palforge/types.lua is
+--             generated from it for editor completion, but it is not part of the surface.
+--             Read it at runtime with schema.help("Pal.Spec").
+--   TOP     — the module surface:   Pal{ ... } / Pal.get / Pal.get_all
 --   BOTTOM  — the pal OBJECT (Pal.Handle): actions (:spawn) + lifecycle events.
 --
--- Events are GROUPED under `events`; each handler is `function(self, ctx)`:
+-- A DEFINITION IS ONE PIECE OF DATA. Everything is named, a nested definition is passed
+-- as itself, and events are grouped under `events` as `function(pal, ctx)` — `pal` is
+-- THIS definition's handle (so :spawn / :renderOn are right there) and ctx.actor is the
+-- pawn the event happened to:
 --
---   Pal.define{
---       id = "NewPal",
---       events = {
---           onCaptured = function(self, ctx)
---               log.info("NewPal onCaptured: " .. tostring(ctx and ctx.actor))
+--   local pal = Pal{
+--       id          = "NewPal",
+--       name        = "New Pal",
+--       description = "the one that greets you",
+--       mesh        = Mesh{ id = "newpal:body", model = "/Game/.../SK_X" },
+--       events      = {
+--           onSpawned = function(pal, ctx)
+--               pal:renderOn(ctx.actor)
+--               Audio.get("AKE_BGM_Title"):play()   -- get, not define: a handler runs often
 --           end,
 --       },
---   }:spawn(Player.coordinate())
+--   }
+--   pal:spawn(Player.coordinate())
 
-local om     = require("palforge.core.object_manager")
-local spawn  = require("palforge.core.spawn")
-local mesh   = require("palforge.core.mesh")
-local icons  = require("palforge.core.icons")
-local schema = require("palforge.core.schema")
+local om      = require("palforge.core.object_manager")
+local spawn   = require("palforge.core.spawn")
+local mesh    = require("palforge.core.mesh")
+local icons   = require("palforge.core.icons")
+local schema  = require("palforge.core.schema")
+
+-- The mesh a spawned pawn wears is api/mesh's shape, not a copy of it, so `mesh = { ... }`
+-- written inline and `mesh = Mesh{ ... }` passed as a defined object are the same shape
+-- and can never drift apart. Requiring the module is what puts that shape in the registry.
+require("palforge.api.mesh")
+local Mesh = schema.get("Mesh.Spec")
 
 --=============================================================================
--- SPEC — the shape of Pal.define, declared as data so it is REFERENCEABLE at
--- runtime and enforced on every call. Reach it as Pal.Spec:
+-- SPEC — the shape of Pal{ ... }, declared as data so it is enforced on every call and
+-- so the editor type definitions can be generated from it. It stays a LOCAL: the module
+-- is a thing you call, not a namespace to browse. When you need to see the fields at
+-- runtime, ask the registry:
 --
---   Pal.Spec:help()        -- print every field, its type, default and meaning
---   Pal.Spec.fields        -- the same, as a table, for tooling
---   Pal.Spec.Mesh{ ... }   -- build (and validate) a nested value on its own
+--   schema.help("Pal.Spec")             -- every field, its type, default and meaning
+--   schema.get("Pal.Spec").fields       -- the same, as a table, for tooling
 --
--- Nested constructors are OPTIONAL sugar — `mesh = Pal.Spec.Mesh{ model = "..." }` and
--- `mesh = { model = "..." }` are validated identically, so use whichever reads better.
 -- Anything not declared here is a hard error at define time, with a did-you-mean: a
 -- silently ignored typo is exactly what this layer exists to prevent.
 --=============================================================================
-
----A world coordinate. Accepts { x=, y=, z= } or the array form { x, y, z }.
-local Coord = schema.define("Pal.Spec.Coord", {
-    { "x", type = "number", required = true, doc = "world X in centimetres" },
-    { "y", type = "number", required = true, doc = "world Y in centimetres" },
-    { "z", type = "number", required = true, doc = "world Z in centimetres" },
-})
-
-local Mesh = schema.define("Pal.Spec.Mesh", {
-    { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
-                   default = "skeletal", doc = "which core.mesh backend renders it" },
-    { "model",     type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" },
-    { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
-    { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
-    { "offset",    type = "table",  doc = "{ x, y, z } offset from the pawn's origin" },
-})
 
 local Material = schema.define("Pal.Spec.Material", {
     { "color",    type = "table",  doc = "tint { r, g, b, a } in 0..1" },
@@ -83,8 +82,9 @@ local Material = schema.define("Pal.Spec.Material", {
     { "material", type = "string", doc = "base material asset path to instance from" },
 })
 
----The lifecycle handlers a pal can respond to. All optional. Each receives the pal
----definition as `self` and an event context `ctx` (ctx.actor = the pawn in the world).
+---The lifecycle handlers a pal can respond to. All optional. Each receives THIS pal's
+---handle as its first argument and an event context `ctx` (ctx.actor = the pawn in the
+---world). An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Pal.Spec.Events", {
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE (candidate hook) - finished spawning into the world" },
@@ -98,13 +98,15 @@ local Events = schema.define("Pal.Spec.Events", {
                     doc = "declarable; no per-pal tick source exists yet" },
 })
 
----What you pass to Pal.define. `id` is the only required field.
+---What you pass to Pal{ ... }. `id` is the only required field.
 local Spec = schema.define("Pal.Spec", {
     { "id",          type = "string", required = true, check = schema.nonEmpty,
                      doc = "pal id: a game CharacterID (\"ChickenPal\") or \"pack:name\"" },
-    { "displayName", type = "string", doc = "shown in UI (defaults to id)" },
-    { "skills",      type = "table", arrayOf = "string", doc = "skill ids this pal owns (see Skill.define)" },
-    { "mesh",        type = "table", of = Mesh,     doc = "the mesh attached to a spawned pawn" },
+    { "name",        type = "string", doc = "shown in UI (defaults to id)" },
+    { "description", type = "string", doc = "one-line description, for UI and tooling" },
+    { "skills",      type = "table", arrayOf = "string", doc = "skill ids this pal owns (see Skill)" },
+    { "mesh",        type = "table", of = Mesh,
+                     doc = "the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)" },
     { "material",    type = "table", of = Material, doc = "material override applied to that mesh" },
     { "color",       type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
     { "texture",     type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
@@ -152,18 +154,13 @@ function Class:iconOf()
 end
 
 --=============================================================================
--- TOP — module functions
+-- TOP — the module surface: Pal{ ... } / Pal.get / Pal.get_all
 --=============================================================================
 
+---The pal domain. CALL it to define a pal; the two named functions look existing ones up.
 ---@class palforge.pal
+---@overload fun(spec: Pal.Spec): Pal.Handle
 local Pal = {}
-
--- The spec, exposed so it can be read, printed and used as a constructor.
-Pal.Spec          = Spec
-Pal.Spec.Coord    = Coord
-Pal.Spec.Mesh     = Mesh
-Pal.Spec.Material = Material
-Pal.Spec.Events   = Events
 
 local wrap  -- forward decl; the Pal.Handle wrapper is defined in the BOTTOM section
 
@@ -171,11 +168,12 @@ local wrap  -- forward decl; the Pal.Handle wrapper is defined in the BOTTOM sec
 ---`spec` is validated against Pal.Spec: `id` is required, unknown fields are an error.
 ---@param spec Pal.Spec
 ---@return Pal.Handle
-function Pal.define(spec)
-    spec = Spec:validate(spec, "Pal.define")
+local function define(spec)
+    spec = Spec:validate(spec, "Pal")
     local cls = setmetatable({
         id           = spec.id,
-        displayName  = spec.displayName or spec.id,
+        name         = spec.name or spec.id,
+        description  = spec.description,
         skills       = spec.skills,
         meshSpec     = spec.mesh,
         materialSpec = spec.material,
@@ -185,12 +183,19 @@ function Pal.define(spec)
         data         = spec.data,
     }, Class)
     cls.__index = cls  -- so a spawned instance (if ever made) resolves the class methods
-    if spec.events then
-        for name, handler in pairs(spec.events) do cls[name] = handler end  -- onSpawned, ...
+    local handle = wrap(cls)
+    -- dispatch calls cls:onXxx(...) with the CLASS as self; a handler wants the HANDLE
+    -- (what the call returned, and what carries :spawn / :renderOn), so each declared
+    -- handler goes in behind a forwarder that swaps it in.
+    for name, handler in pairs(spec.events or {}) do           -- onSpawned, ...
+        cls[name] = function(_, ...) return handler(handle, ...) end
     end
     pcall(function() om.register("pal", spec.id, cls) end)  -- so core/event + get() find it
-    return wrap(cls)
+    return handle
 end
+
+-- Calling the module IS defining:  Pal{ id = "NewPal", ... }
+setmetatable(Pal, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING pal by id: a previously-defined one, else a thin definition over any
 ---game CharacterID (so native / other-mod pals are spawnable too). Never nil.
@@ -217,7 +222,7 @@ end
 -- underlying class; the :onXxx below forward for manual use.
 --=============================================================================
 
----A definable/live pal. Obtain one from Pal.define / Pal.get / Pal.get_all.
+---A definable/live pal. Obtain one from Pal{ ... } / Pal.get / Pal.get_all.
 ---@class Pal.Handle
 ---@field id string   # the pal's game CharacterID
 local Handle = {}
@@ -294,7 +299,9 @@ function Handle:mesh() return self._cls.meshSpec end
 ---@return any?  # texture ref from the icon DataTable, else the declared icon
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
-function Handle:displayName() return self._cls.displayName or self.id end
+function Handle:name() return self._cls.name or self.id end
+---@return string?
+function Handle:description() return self._cls.description end
 
 Pal.Class = Class   -- the base hook table (used for override detection / subclassing)
 return Pal

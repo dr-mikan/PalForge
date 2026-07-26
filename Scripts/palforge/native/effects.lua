@@ -34,11 +34,11 @@ for _, id in ipairs(M.CATALOG) do set[id] = true end
 local cache = {}
 
 -- get(id): an Effect wrapper for ANY known ailment name, built on first use + cached;
--- nil if id is not a known ailment. define() sets .id and registers into object_manager.
+-- nil if id is not a known ailment. defining sets .id and registers into object_manager.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Effect.define{ id = id }
+    local h = Effect{ id = id }
     cache[id] = h
     return h
 end
@@ -47,7 +47,7 @@ end
 -- self.nativeStatus is the native EPalStatusEffectType value to resolve/apply; the
 -- apply/remove seams are `-- TODO:` until the native status layer is wired.
 
-M.Poison = Effect.define{
+M.Poison = Effect{
     id           = "Poison",
     nativeStatus = "Poison",
     duration     = 10.0,
@@ -62,7 +62,7 @@ M.Poison = Effect.define{
     },
 }
 
-M.Burn = Effect.define{
+M.Burn = Effect{
     id           = "Burn",
     nativeStatus = "Burn",
     duration     = 5.0,
@@ -77,7 +77,7 @@ M.Burn = Effect.define{
     },
 }
 
-M.Freeze = Effect.define{
+M.Freeze = Effect{
     id           = "Freeze",
     nativeStatus = "Freeze",
     duration     = 3.0,
