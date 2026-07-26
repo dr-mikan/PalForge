@@ -8,53 +8,43 @@
 --   items.count("Wood")            -- what the inventory holds right now, or nil (MEASURED)
 --   items.count("example:Potion")  -- namespaced ids resolve to their DataTable fname
 --   items.give("Wood", 10)         -- cheat-manager GetItem; true only if the count ROSE
---   items.take("Wood", 3)          -- cheat-manager DropItem: leaves the inventory ONTO THE
---                                  -- GROUND; true only if the count FELL
+--   items.take("Wood", 3)          -- remove 3 Wood from the inventory (MEASURED)
 --   items.unlockAllTech()          -- PalCheatManager: recipe + category + lv-cap
 --   items.unlockTech("example:Bench") -- unlock one technology row (ids resolve too;
 --                                     -- true only if that row really exists in game)
 --
--- HOW give AND take WRITE, AND WHY IT IS THIS ROUTE. Both used to be built around one call —
--- PalPlayerInventoryData:AddItem_ServerInternal(FName, Count, false, 0.0) — and the first run
--- inside a loaded save rejected it before it ever reached the engine:
---     give Wood x3 failed: ...utils/items/init.lua:142:
---       [UFunction::setup_metamethods -> __call] UFunction expected 6 parameters, received 4
--- Six parameters are declared there; PalForge only ever passed four. That call is NOT issued
--- from this file any more and must not come back until all six are known — a call whose
--- arguments do not match the declaration can fault NATIVELY inside UE4SS marshalling, where
--- pcall cannot see it. See TODO(item-additem-signature) below; that unknown is still open.
+-- GIVE AND TAKE GO THROUGH THE INVENTORY'S OWN WRITE, not through a cheat:
 --
--- What give and take go through instead is UPalCheatManager, which this file ALREADY drives
--- successfully on this build: every modded technology unlock is a cm:UnlockOneTechnology(FName)
--- on the same object, resolved by the same cheatManager() below, marshalling the same FName.
--- Two cheats of exactly that shape do the item work (dumps/cxx/Pal.hpp, UE4SS's own
--- CXXHeaderDump of this install, class UPalCheatManager : public UCheatManager):
---     16398:  void GetItem(FName StaticItemId, int32 Count);             -- give
---     16453:  void DropItem(const FName StaticItemId, const int32 Num);  -- take
--- Neither is called blind. Both go through core.signature, which finds the UFunction on the
--- LIVE class chain and compares its declared parameter list before an argument is marshalled,
--- and every call here logs which evidence it rested on: "declared" (the live parameter list was
--- walked and matched) or "present" (the function exists under that name, this build would not
--- walk its properties, so the types are the dump's). A refusal costs a false; the mistake it
--- prevents costs the session.
+--     PalPlayerInventoryData:AddItem_ServerInternal(
+--         FName StaticItemId, int32 Count, bool IsAssignPassive,
+--         float LogDelay, bool bNotifyLog) -> EPalItemOperationResult
 --
--- ⚠️ THE OBSERVATION IS STILL OWED. Nothing has yet watched GetItem or DropItem move an
--- inventory — the route is reasoned from a dump and a working sibling call, not from a run.
--- And the dump is a snapshot taken one game patch before the installed binary, already known to
--- be BEHIND on this very subject: it declares AddItem_ServerInternal with four parameters
--- (Pal.hpp:27053) where the running game demanded six. That is exactly why core.signature
--- checks the live class and why the verdicts below are measurements rather than "the call ran".
+-- read off the LIVE build, which matters: dumps/cxx/Pal.hpp declares four parameters and the
+-- installed binary has five. That fifth, `bNotifyLog`, is the whole of the "UFunction expected 6
+-- parameters, received 4" that blocked this file for so long — UE4SS counts the return as a
+-- slot, so six slots is five arguments. The dump was one game patch stale and the patch added
+-- the parameter. Nothing here is called until core.signature has matched the declaration against
+-- the live object, and this is why.
 --
--- Fail-soft everywhere: every engine call is pcall-wrapped (or refused outright by
--- core.signature) and reported via utils.log; helpers return true on success, false on failure
--- (never throw), and a capability that is broken fails HERE instead of raising into a pack's
--- handler. What "success" means differs per helper and each one says so on its own doc comment:
--- count MEASURES the live inventory through CountItemNum (observed in game answering 135 for
--- Wood, so its nil really does mean "could not read" and never "none"), give and take issue one
--- cheat each and then MEASURE it — a count that cannot be read makes them answer false rather
--- than claim a write nobody saw — unlockTech CHECKS that the name really is a row of the live
--- technology table before claiming anything, while unlockAllTech can only report that the
--- native cheats executed without raising — no cheat on this build reports back what it did.
+-- take is the same call with a NEGATIVE Count. That was the standing hypothesis for removal from
+-- the beginning and was set aside for one reason: a call whose parameter list is unread must not
+-- be made with any Count at all.
+--
+-- WHAT THE CHEAT ROUTE COST, since the comments here spent a long time defending it.
+-- UPalCheatManager::GetItem(FName, int32) is declared on this build, executes with evidence
+-- "declared", is called on the player controller's OWN cheat manager, on an inventory with room
+-- (0.0 of 300.0) for an id that inventory can count (137 Wood) — and moves nothing, still
+-- nothing 2.8 s later. It returns void, so it can never say why. Five in-game runs went into
+-- establishing that, and every one of them would have been unnecessary had the inventory's own
+-- write been read first. It answers with a named EPalItemOperationResult.
+--
+-- Fail-soft everywhere: every engine call is pcall-wrapped and reported via utils.log; helpers
+-- return true on success, false on failure, never throw. What "success" means differs per helper
+-- and each says so on its own doc comment. count MEASURES the live inventory through
+-- CountItemNum (observed answering 135 for Wood), give and take report what the count did AND
+-- what the inventory itself answered, unlockTech CHECKS that the name really is a row of the
+-- live technology table, and unlockAllTech can only report that the native cheats executed
+-- without raising.
 local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
 local poll           = require("palforge.core.poll")
@@ -133,6 +123,76 @@ end
 -- the marshalling this file already performs successfully on this build every time it unlocks a
 -- technology.
 local ITEM_CHEAT_PARAMS = { "NameProperty", "IntProperty" }
+
+-- THE INVENTORY'S OWN WRITE, read from the live build rather than from the dump:
+--   AddItem_ServerInternal — [StaticItemId:NameProperty, Count:IntProperty,
+--                             IsAssignPassive:BoolProperty, LogDelay:FloatProperty,
+--                             bNotifyLog:BoolProperty, ReturnValue:EnumProperty]
+--
+-- FIVE arguments and a return. That is the whole of "UFunction expected 6 parameters, received
+-- 4" — UE4SS counts the return value as a slot, PalForge passed four, and the fifth argument is
+-- `bNotifyLog`, which dumps/cxx/Pal.hpp does not have at all. The dump was generated one game
+-- patch before the installed binary and the patch added that parameter; this is the clearest
+-- illustration in the tree of why every dump-derived signature is checked against the live
+-- object before it is called.
+local ADD_ITEM_PARAMS = { "NameProperty", "IntProperty", "BoolProperty", "FloatProperty", "BoolProperty" }
+
+-- And it ANSWERS. EPalItemOperationResult, verbatim from dumps/cxx/Pal_enums.hpp — thirty-five
+-- named outcomes, so a refusal explains itself instead of being inferred from a count that did
+-- not move. This is what the cheat-manager route could never give: GetItem returns nothing at
+-- all, which is why "it ran and reached nothing" took five in-game runs to establish.
+local ITEM_RESULT = {
+    [0] = "Success",
+    [1] = "SuccessNoOperation",
+    [2] = "FailedTerminatedManager",
+    [3] = "FailedNotExistsInventoryData",
+    [4] = "FailedContainerOverflowSlotNum",
+    [5] = "FailedContainerItemInfoOverSlotNum",
+    [6] = "FailedContainerOverflowItemsInSlot",
+    [7] = "FailedContainerNotFoundContainer",
+    [8] = "FailedContainerNotFoundSlot",
+    [9] = "FailedContainerIsLocalOnly",
+    [10] = "FailedContainerNotEqualsId",
+    [11] = "FailedCreateDynamicItemData",
+    [12] = "FailedNoDynamicItemIds",
+    [13] = "FailedNotFoundContainer",
+    [14] = "FailedNotFoundSlot",
+    [15] = "FailedNotFoundStaticItemData",
+    [16] = "FailedNotEnoughSlotSpace",
+    [17] = "FailedSameSlotUseProduceAndConsume",
+    [18] = "FailedNotEnoughConsumes",
+    [19] = "FailedInValidItemInSlot",
+    [20] = "FailedNotEnoughNumInSlot",
+    [21] = "FailedNotEqualRequiredItemInSlot",
+    [22] = "FailedGetLocalSlotInServer",
+    [23] = "FailedEmptyConsumeItemInfo",
+    [24] = "FailedSlotCountIsZero",
+    [25] = "FailedCannotAggregateSlotItem",
+    [26] = "FailedInvalidPermission",
+    [27] = "FailedNotAllowedByFilter",
+    [28] = "FailedNotControllable",
+    [29] = "FailedRestrictedOperation",
+    [30] = "FailedRecievedItemNotEqual",
+    [31] = "FailedTransactionLockedOperation",
+    [32] = "FailedNotFoundRowNameOrHash",
+    [33] = "FailedUnknown",
+    [34] = "FailedUnknownLogOutput",
+}
+
+-- The result as a name, for a log line. Unknown values print their number rather than a guess.
+local function resultName(v)
+    local n = tonumber(v)
+    if n == nil then return tostring(v) end
+    return ITEM_RESULT[n] or ("EPalItemOperationResult(" .. n .. ")")
+end
+
+-- Did the write report success? Success and SuccessNoOperation are the only two that are not a
+-- failure; the latter means the call was legal and moved nothing (asking for zero, say), which
+-- the count check below then reports honestly rather than celebrating.
+local function resultOk(v)
+    local n = tonumber(v)
+    return n == 0 or n == 1
+end
 
 -- TODO(item-additem-signature): THE INVENTORY-DATA ROUTE IS STILL UNREAD. Unknown what the SIX
 -- parameters of /Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal ARE on this build —
@@ -316,28 +376,38 @@ function M.give(itemId, count)
         return false
     end
 
-    local cm
-    if not pcall(function() cm = cheatManager() end) then
-        log.err(string.format("give %s x%d failed: no PalCheatManager on this session "
-            .. "(needs CheatManagerEnabler)", resolved, count))
+    local inv
+    if not pcall(function() inv = playerInventory() end) then
+        log.err(string.format("give %s x%d failed: the player's inventory could not be reached",
+            resolved, count))
         return false
     end
 
     local before = liveCount(resolved)
-    local ok, _, level = sig.call(cm, "GetItem", ITEM_CHEAT_PARAMS, FName(resolved), count)
+    -- IsAssignPassive false (this is a plain item, not a rolled piece of gear), LogDelay 0.0 and
+    -- bNotifyLog false (no pickup banner for something a mod handed over silently).
+    local ok, result, level = sig.call(inv, "AddItem_ServerInternal", ADD_ITEM_PARAMS,
+        FName(resolved), count, false, 0.0, false)
     if not ok then
         -- core.signature has already logged WHY (refused on the declaration, or raised on
         -- binding); this line is the one that names the item and the count.
-        log.err(string.format("give %s x%d: GetItem did not execute [evidence %s]",
+        log.err(string.format("give %s x%d: AddItem_ServerInternal did not execute [evidence %s]",
             resolved, count, level))
+        return false
+    end
+    if not resultOk(result) then
+        -- The one thing the cheat route could never do: say why. This is a real answer from the
+        -- inventory, not an inference from a count.
+        log.err(string.format("give %s x%d refused by the inventory: %s [evidence %s]",
+            resolved, count, resultName(result), level))
         return false
     end
     local after = liveCount(resolved)
 
     if before == nil or after == nil then
-        log.warn(string.format("give %s x%d: GetItem executed [evidence %s], but the inventory "
-            .. "count could not be read (%s -> %s) — the add is unverified, so this reports false",
-            resolved, count, level, tostring(before), tostring(after)))
+        log.warn(string.format("give %s x%d: AddItem_ServerInternal answered %s, but the "
+            .. "inventory count could not be read (%s -> %s) — the add is unverified, so this "
+            .. "reports false", resolved, count, resultName(result), tostring(before), tostring(after)))
         return false
     end
     if after <= before then
@@ -348,20 +418,17 @@ function M.give(itemId, count)
         --   * room is readable directly. PalPlayerInventoryData declares GetNowItemWeight and
         --     GetMaxItemWeight, and a player at the cap is exactly the case where a cheat runs,
         --     raises nothing and moves nothing.
-        describeCheatManager(cm)
         recheckLater(resolved, before, count)
-        describeWriteRoutes()
         local now, max
         pcall(function()
             local inv = playerInventory()
             now = tonumber(inv:GetNowItemWeight())
             max = tonumber(inv:GetMaxItemWeight())
         end)
-        log.warn(string.format("give %s x%d: GetItem executed [evidence %s] and the count did "
-            .. "not rise (%d -> %d). The id is known — the inventory counted %d of them — so the "
-            .. "remaining candidates are weight (now %s of %s) and a cheat that is not reaching "
-            .. "this player's inventory",
-            resolved, count, level, before, after, before, tostring(now), tostring(max)))
+        log.warn(string.format("give %s x%d: AddItem_ServerInternal answered %s but the count "
+            .. "did not rise (%d -> %d). Weight is now %s of %s. A success that moves nothing is "
+            .. "worth reporting as a failure — the count is what a caller can see",
+            resolved, count, resultName(result), before, after, tostring(now), tostring(max)))
         return false
     end
     log.info(string.format("give %s x%d: %d -> %d [evidence %s]",
@@ -448,42 +515,57 @@ function M.take(itemId, count)
         return false
     end
 
-    local cm
-    if not pcall(function() cm = cheatManager() end) then
-        log.err(string.format("take %s x%d failed: no PalCheatManager on this session "
-            .. "(needs CheatManagerEnabler)", resolved, count))
+    local inv
+    if not pcall(function() inv = playerInventory() end) then
+        log.err(string.format("take %s x%d failed: the player's inventory could not be reached",
+            resolved, count))
         return false
     end
 
     local before = liveCount(resolved)
     if before == 0 then
-        log.warn(string.format("take %s x%d: the inventory holds none, so nothing is dropped",
+        log.warn(string.format("take %s x%d: the inventory holds none, so nothing is removed",
             resolved, count))
         return false
     end
     local num = count
     if before ~= nil and count > before then
         num = before
-        log.warn(string.format("take %s x%d: the inventory holds only %d, dropping that many",
+        log.warn(string.format("take %s x%d: the inventory holds only %d, removing that many",
             resolved, count, before))
     end
 
-    local ok, _, level = sig.call(cm, "DropItem", ITEM_CHEAT_PARAMS, FName(resolved), num)
+    -- A NEGATIVE Count through the same write. That was the standing hypothesis for removal long
+    -- before the signature was known, and it was set aside for one reason only: a call whose
+    -- parameter list is unread must not be made with any Count at all. The list is read now, and
+    -- the return value settles the rest — an inventory that will not subtract this way says so
+    -- with a named EPalItemOperationResult instead of leaving it to be guessed from a count.
+    --
+    -- This also removes the pile at the player's feet. The DropItem route this replaces did take
+    -- the items out of the bag, but it put them in the world, where the player walks straight
+    -- back over them — so it could never charge a cost, which is most of what :take is for.
+    local ok, result, level = sig.call(inv, "AddItem_ServerInternal", ADD_ITEM_PARAMS,
+        FName(resolved), -num, false, 0.0, false)
     if not ok then
-        log.err(string.format("take %s x%d: DropItem did not execute [evidence %s]",
+        log.err(string.format("take %s x%d: AddItem_ServerInternal did not execute [evidence %s]",
             resolved, num, level))
+        return false
+    end
+    if not resultOk(result) then
+        log.err(string.format("take %s x%d refused by the inventory: %s [evidence %s]",
+            resolved, num, resultName(result), level))
         return false
     end
     local after = liveCount(resolved)
 
     if before == nil or after == nil then
-        log.warn(string.format("take %s x%d: DropItem executed [evidence %s], but the inventory "
+        log.warn(string.format("take %s x%d: AddItem_ServerInternal answered %s, but the inventory "
             .. "count could not be read (%s -> %s) — the removal is unverified, so this reports "
-            .. "false", resolved, num, level, tostring(before), tostring(after)))
+            .. "false", resolved, num, resultName(result), tostring(before), tostring(after)))
         return false
     end
     if after >= before then
-        log.warn(string.format("take %s x%d: DropItem executed [evidence %s] and the count did "
+        log.warn(string.format("take %s x%d: AddItem_ServerInternal answered %s and the count did "
             .. "not fall (%d -> %d) — unknown item id, or the drop was refused",
             resolved, num, level, before, after))
         return false
