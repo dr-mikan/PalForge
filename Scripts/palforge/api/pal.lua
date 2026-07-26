@@ -156,56 +156,11 @@ local Material = schema.define("Pal.Spec.Material", {
 ---handle as its first argument and an event context `ctx` (ctx.actor = the pawn in the
 ---world). An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Pal.Spec.Events", {
-    -- TODO(pal-spawned-hook): NARROWED again, 2026-07-26, this time by dumps/cxx/Pal.hpp —
-    -- and the remaining doubt has MOVED, which is the useful part. What is now settled:
-    --   (a) the SHAPE. `void BroadcastOnCompleteInitializeParameter()` is declared on
-    --       APalCharacter with ZERO parameters (Pal.hpp:9087), so `self` is the character and
-    --       there is nothing else the hook could hand a handler. Also reflected in the live
-    --       build (02_reflection.txt:874), so the path is not a guess on either source.
-    --   (b) that a pal born AFTER world load really does broadcast. The map it broadcasts,
-    --       OnCompleteInitializeParameterDelegateMap (:9016), is keyed by
-    --       EPalCharacterCompleteDelegatePriority — and the game's own spawn entry point,
-    --       UPalCharacterManager::SpawnNewCharacterWithInitializeParameterCallback
-    --       (Pal.hpp:15538), takes a priority of that same enum for its
-    --       InitializeParameterCallback. "Tell me when this NEW character has initialised" IS
-    --       a subscription to this broadcast, so the broadcast happens on a fresh spawn.
-    --   (c) the three sibling hooks beside this one — SetIsCapturedProcessing,
-    --       OnDamageReaction, OnDeadCharacter — are all recorded FIRING in a live session
-    --       (06_events.txt), so the machinery around it works.
-    -- WHAT IS LEFT was "does the game run it" or "can RegisterHook SEE it", and 2026-07-26
-    -- ANSWERED IT: the second. Armed after world.ready in a real save (UE4SS logged the
-    -- registration as hooks 39, 40), pals were caught and released, and this channel carried
-    -- nothing while ten others announced in the same session. The broadcaster is not a
-    -- delegate target — a plain C++ call site never enters ProcessEvent, and a hook armed on
-    -- it sits there silently forever. Every hook in this tree that is PROVEN to fire is an
-    -- RPC, a BlueprintCallable static, or a dynamic-delegate target; this is none of the three.
-    -- THE REPLACEMENTS, from the same dump, are delegate TARGETS of the very map the
-    -- broadcaster broadcasts. Anything in the binary with the signature
-    -- `OnCompleteInitializeParameter__DelegateSignature(APalCharacter* InCharacter)`
-    -- (Pal.hpp:9052) is a bound handler, and a dynamic delegate is always broadcast through
-    -- ProcessEvent. Two are now armed beside the broadcaster:
-    --   APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter*)  (Pal.hpp:10637)
-    --     REFLECTED in the live build's own PalPlayerCharacter listing (02_reflection.txt, the
-    --     block at :738) + DECLARED — the strongest evidence any candidate on this channel has
-    --     had. `self` is the player and a1 is the character that initialised, so ctx.actor
-    --     reads off a1. Limit: only characters the PLAYER subscribed to (the otomo/party path).
-    --   APalNPC::OnCompletedInitParam(APalCharacter*)                       (Pal.hpp:10203)
-    --     DECLARED ONLY, but bound on the PAL's own side, so it does not need anyone else to
-    --     have subscribed — and APalMonsterCharacter (:10167) inherits it without redeclaring,
-    --     so the base UFunction is what ProcessEvent runs and this sees every pal.
-    -- ctx.via names which of the three carried the event; the log announces the first per
-    -- session. HOW TO GET THAT LINE, and the timing is the whole lesson: press F8, then release
-    -- a pal from the box or call Pal.get("ChickenPal"):spawn(coord) — and WATCH FOR AT LEAST
-    -- TEN SECONDS, because the pal arrives ~6 s after the call. A hook log that is empty at
-    -- 1.2 s says nothing about the hook.
-    -- TODO(pal-spawned-hook): the broadcaster is ruled out by measurement; whether either
-    -- delegate target is reachable is unmeasured.
-    -- TODO(pal-spawned-fresh): still open, and now separable — if OnCompletedInitParam fires
-    -- for a pal you just released but not while you stand still, that is a spawn signal rather
-    -- than a re-init signal, and both items close together. If it fires while idle, it is a
-    -- re-init signal and handlers must stay idempotent. If BOTH targets stay silent, no
-    -- pal-birth signal is reachable from Lua on this build and the 3 s onTick sweep
-    -- (first-seen actor = spawned) is the honest fallback.
+    -- onSpawned FIRES, observed 2026-07-26. The working sources are the bound TARGETS of the
+    -- initialise broadcast — PalNPC:OnCompletedInitParam for a pal, and
+    -- PalPlayerCharacter:OnCompleteInitializeParameter — not the broadcaster itself, which was
+    -- hooked first, registered fine and never carried anything. That is the general lesson:
+    -- RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "three candidate sources armed after world load, none seen firing - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",

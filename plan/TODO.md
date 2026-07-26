@@ -78,7 +78,7 @@ bound there can never be pressed — which is where `watch` sat, unreachable and
 it. The bindings are printed at startup now, so a key the game has taken is visible in the
 log rather than looking like a probe that found nothing.
 
-## Closed (28)
+## Closed (30)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -114,8 +114,10 @@ without the game running.
 - **`mesh-base-material`** — the material a procedural mesh is parented to. Closed by the same read. `dumps/reflection/05_assets.txt` never swept Material, so not one material in this tree was known to be LOADABLE and five plausible `/Engine/` paths were five guesses. A material that is currently RENDERING is cooked and shipped by construction — the player's own outfit instance now leads the candidate list and carries the `BaseColor` vector a tint needs. It is a character shader hung on a procedural cube, which is odd and is said plainly at the list rather than hidden; a working material that looks wrong can be improved, an unloadable one cannot be used at all.
 - **`item-craft-source`** — Item.Spec.Events.onCraft. **Observed live**, 2026-07-26: crafting at a real machine reaches `OnFinishWorkInServer` on one of the two work models that carry an item id, and the channel was seen carrying its first event in a real save. Wired on the header dump alone — neither class is among the 21 in the live reflection dump — and now reproducible by crafting anything. `ctx.count` stays nil: the count lives in the recipe row, and a hook is no place for a DataTable read.
 - **`item-discard-source`** — Item.Spec.Events.onDiscard. **Observed live**, 2026-07-26, with the slot resolving to a real item id. Two separate things had to be right. A drop does NOT go through `AddItem_ServerInternal` — that hook was armed and fired zero times across two sessions, because dropping goes through `UPalNetworkItemComponent`, one class over from everywhere the search had looked. And the container holding the dropped slot is not necessarily one the player's inventory helper lists: the first live firing reported "no container of the player's 6 matched", so the set comes from a world sweep now. The GUID match is exact, which is what makes the wider search safe.
+- **`skill-activate-source`** — Skill.Spec.Events.onActivate. **Observed live**, 2026-07-26, in real combat: `skill.activate carried its first event from source "PalActionBase:OnBeginAction"`. The source that works is the ACTION OBJECT, not a utility that builds one — a pal's move IS a `UPalActionWazaBase` and carries its own `EPalWazaID`, so hooking it puts the identity a handler needs on `self` rather than in someone else's argument list. `PlayActionByWazaID` stays armed as the control that proved it: it registered successfully and carried nothing while a pal fought and killed another pal, which is what sent the search to the action side.
+- **`pal-spawned-hook`** — Pal.Spec.Events.onSpawned. **Observed live**, 2026-07-26, from BOTH new sources: `PalNPC:OnCompletedInitParam` and `PalPlayerCharacter:OnCompleteInitializeParameter`. They are the bound TARGETS of the initialise broadcast, not the broadcaster — which was hooked first, registered fine, and never carried anything. That is the general lesson and it is worth keeping: RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
 
-## Open (10)
+## Open (8)
 
 ### Pal
 
@@ -197,41 +199,6 @@ F1 in a loaded world with a pal nearby prints both read-backs, the player's and 
 enum spelling question is settled — these parameters are `EnumProperty`, and `core/signature.lua`
 now accepts it.
 
-#### `pal-spawned-hook` — Pal.Spec.Events.onSpawned
-
-- **Probe:** F8
-- **Marked at:** Scripts/palforge/api/pal.lua:159
-
-**What a pack author sees**
-
-A declared onSpawned handler may simply never run. Capture, damage and death are confirmed
-firing in-game; the spawn hook has never been observed to fire once, so a pack that renders a
-mesh from onSpawned can see nothing happen at all.
-
-**What is still unknown**
-
-```text
-TODO(pal-spawned-hook): NARROWED by dumps/reflection/. Two halves of the old question
-are now answered: (a) BroadcastOnCompleteInitializeParameter IS a real UFunction on
-/Script/Pal.PalCharacter (02_reflection.txt), so the hook path is not a guess; (b) the
-three sibling hooks this channel sits beside — SetIsCapturedProcessing, OnDamageReaction,
-OnDeadCharacter — are all recorded FIRING in a live session (06_events.txt), so the
-source machinery around them works. What is left is ONE unknown: does that function run
-when a pal spawns AFTER world load, and is `self` then the new pal? 06_events cannot
-answer it — the probe mod that produced it had dropped this hook from its arming list,
-so there is no line there to be missing. Handlers stay idempotent until a post-load
-arming records a firing.
-```
-
-**What the probe prints**
-
-In a fully loaded world,
-RegisterHook("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter", function(self)
-print(os.clock(), self:get():GetClass():GetFullName()) end). Then log the count for three steps
-in order: (1) stand idle 30 s (expect 0 lines); (2) run Pal.get("ChickenPal"):spawn() and print
-every line for the next 10 s; (3) release one pal from the box. Paste the per-step line counts
-and the BP class names printed.
-
 #### `item-datatable-row-read` — Item.Handle:iconOf / Item.Handle:recipeOf
 
 - **Probe:** F5
@@ -280,61 +247,10 @@ printing name -> tostring(value). Repeat the whole sequence verbatim on
 FindObject('DataTable','DT_ItemRecipeDataTable_Common') with row FName('Arrow'), indexing
 Product_Count, WorkAmount, Material1_Id, Material1_Count.
 
-#### `skill-activate-source` — Skill.Spec.Events.onActivate
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:68
-
-**What a pack author sees**
-
-A pack that declares events.onActivate gets a handler that never runs by itself. Nothing in
-PalForge emits a skill channel (core/event.lua M.CHANNELS is gameStart / world.* / building.* /
-pal.* / item.* / tick) and no dispatch would resolve one to a definition, so the handler only
-fires when the pack itself calls Handle:activate(owner).
-
-**What is still unknown**
-
-```text
-TODO(skill-activate-source): NARROWED — candidates now have names. PlaySkill stays
-ruled out (armed in two in-game probes, 0 firings), but dumps/reflection/02_reflection
-.txt shows /Script/Pal.PalUtility carries PlayActionByWazaID and PlayAction, and
-/Script/Pal.PalPlayerController carries ActionComponent_PlayAction_ToServer_ForPlayer
-and OnActionBegin (PalPlayerCharacter has OnBeginAction); PalCharacter exposes
-GetActionComponent / :ActionComponent, so the executor is an action component, not the
-controller. PlayActionByWazaID is the standout: its name says the waza row id is a
-parameter, which is exactly the identity this channel needs.
-THE ONE THING LEFT: which of those actually runs when a PAL uses a move (none has ever
-been armed), and whether the waza id it carries is an FName or a struct. Until a
-RegisterHook run logs one firing, no skill.activate channel gets written.
-```
-
-**What the probe prints**
-
-In a loaded world, UE4SS Lua console. STEP 1 (enumerate): for each name in {"PalCharacter","PalP
-layerCharacter","PalPlayerController","PalActionComponent","PalCombatComponent","PalWazaBase","P
-alSkillBase","PalActionBase"} do `local c = StaticFindObject("/Script/Pal."..n)`; print n and
-whether c is non-nil; if non-nil call `c:ForEachFunction(function(f) print("FN", n,
-f:GetFName():ToString()) end)` and `c:ForEachProperty(function(p) print("PROP", n,
-p:GetFName():ToString(), p:GetClass():GetFName():ToString()) end)`, then walk `c =
-c:GetSuperStruct()` until nil and repeat (the walk idiom from PalServerTweaks
-.../ConsoleCommandsMod/Scripts/dump_object.lua:183-196). Also do the same starting from
-`FindFirstOf("PalPlayerCharacter"):GetClass()` so Blueprint subclasses are covered. Log EVERY
-function name; we are looking for ones containing Waza / Skill / Action / Activate / Execute /
-Fire / Shot / Attack. STEP 2 (signatures): for each candidate UFunction object f from STEP 1,
-print its parameters with `f:ForEachProperty(function(p) print(" PARAM",
-p:GetFName():ToString(), p:GetClass():GetFName():ToString(), p:GetOffset_Internal()) end)` — a
-NameProperty or a struct here is what would carry the skill id. STEP 3 (confirm live): arm the
-top candidates with the count-capped RegisterHook pattern from dump/auto_mod/main.lua:41-53 —
-`RegisterHook("/Script/Pal.<Class>:<Fn>", function(self, a1, a2, a3, a4) ... end)` logging
-`self:get():GetClass():GetFName():ToString()` and, for each param, `p:get()` normalised through
-`v.ToString and v:ToString() or tostring(v)`. Have a Pal use a move and a player use a partner
-skill. PASTE BACK: which hook labels fired, how many times, the self class, and every parameter
-value string.
-
 #### `skill-hit-source` — Skill.Spec.Events.onHit
 
 - **Probe:** F8
-- **Marked at:** Scripts/palforge/api/skill.lua:85
+- **Marked at:** Scripts/palforge/api/skill.lua:105
 
 **What a pack author sees**
 
@@ -377,7 +293,7 @@ name.
 #### `skill-passive-source` — Skill.Spec.Events.onEquip / Skill.Spec.Events.onUnequip
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:100
+- **Marked at:** Scripts/palforge/api/skill.lua:130
 
 **What a pack author sees**
 

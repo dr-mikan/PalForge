@@ -77,12 +77,9 @@ local Events = schema.define("Skill.Spec.Events", {
     --      action component, so it covers the player's own waza actions and NOT a pal's.
     -- ctx = { skillId, wazaId, owner, actor, target, via } (+ ctx.action for sources 2 and 3).
     -- `via` names which source carried it; the log announces the first one per session.
-    -- TODO(skill-activate-source): NARROWED. Source 1 is ruled out by measurement. What is
-    -- unmeasured is whether 2 is reachable (base UFunction vs BP override) and 3 covers
-    -- anything the player does. If both stay silent while a pal visibly attacks, the last lead
-    -- is UPalActionComponent:PlayAction_ToALL (:13171, a NetMulticast RPC — the shape that has
-    -- never failed here), which hands over a TSubclassOf rather than an id and would need the
-    -- class->waza direction of WazaActionInstancedMap (:29469) read first.
+    -- onActivate FIRES, observed 2026-07-26 in real combat, carried by
+-- PalActionBase:OnBeginAction. A pal's move is an action object that holds its own waza id;
+-- the utility function this used to hook registered fine and never carried anything.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "an active skill fired (self, owner, ctx) - three sources armed, none seen firing" },
     -- TWO SOURCES, same shape: the first is measured silent, the second replaces it.

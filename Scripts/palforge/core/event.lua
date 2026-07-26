@@ -1661,73 +1661,13 @@ end
 --        OwnerStaticItemId and no waza at all — so a ranged pal move is still uncovered by
 --        this hook, and by every other one in the dump.
 --
--- TODO(skill-activate-source): NARROWED, not closed. PlayActionByWazaID is MEASURED SILENT in
--- combat, so it is no longer a candidate — it is a ruled-out one kept armed for free. What is
--- unmeasured is whether either replacement is reachable: PalActionBase:OnBeginAction (does the
--- base UFunction run, or does a BP override take the ProcessEvent) and
--- PalPlayerCharacter:OnBeginAction (fires, but only for the player). If BOTH stay silent while
--- a pal visibly attacks, the remaining lead in the dump is UPalActionComponent's
--- PlayAction_ToALL (:13171) — a NetMulticast RPC, the shape that has never failed here — but
--- it hands over `TSubclassOf<UPalActionBase>` rather than an id, so it would need the class ->
--- waza direction of WazaActionInstancedMap (:29469) resolved first, and nothing in this tree
--- has read a TMap keyed by an enum yet.
--- TODO(skill-hit-source): NARROWED. MakeDamageInfoByWazaType is MEASURED SILENT while
--- pal.damaged fired in the same fight, so damage is not built through that helper. The
--- collision-notify route above replaces it for melee. What stays open is the PROJECTILE half:
--- no class in dumps/cxx carries both a bullet and an EPalWazaID, so if a ranged move must
--- report hits, the id has to come from the ACTION that spawned the bullet
--- (UPalActionWazaBase.WazaID) and be carried forward — which needs skill.activate to work
--- first. Do NOT go back to the damage structs: FPalDamageInfo (:1834, 40 fields) and
--- FPalDamageResult (:1896, 12 fields) both have no EPalWazaID, and that is settled.
---
--- The passive pair writes to a character rather than to the world:
---   equip   -> UPalIndividualCharacterParameter::AddPassiveSkill(FName AddSkill,
---              FName OverrideSkill)                                     (Pal.hpp:21155)
---   unequip -> UPalIndividualCharacterParameter::RemovePassiveSkill(FName SkillId)   (:21003)
--- EVIDENCE CLASS: REFLECTED + DECLARED, and stronger than the combat pair on the reflected
--- half — PalIndividualCharacterParameter is reflected in full in 02_reflection.txt:1107 and
--- both names are in that listing. The open question the TODO used to carry ("passive row FName
--- vs an index into a fixed-size array") is ANSWERED: both take FNames, one for remove and two
--- for add, and no struct is involved. The OWNER comes off the same object as the property
--- `APalCharacter* IndividualActor` (:20910), so nothing has to be searched for.
---
--- `OverrideSkill` is handed through as ctx.overrides and is NOT read as an unequip. The name
--- does not say which of the two ids is being displaced, and inventing an unequip out of an
--- ambiguous parameter is the kind of wiring this file refuses on principle.
---
--- AND THAT PAIR IS ALSO MEASURED SILENT. Same session, 2026-07-26: both registered (UE4SS
--- logged hooks 35-38), pals were caught and released, and neither channel carried anything.
--- So the passive list is not maintained one name at a time through those two — or at least
--- not through a call site RegisterHook can see.
---
---   equip/unequip (2) -> /Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf(
---        UObject* OwnerObject, const TArray<FName>& skillList)              (Pal.hpp:26582)
---        The dump's answer to "then how DOES a passive get attached": wholesale, as a LIST,
---        by the component that owns passive effects. UPalPassiveSkillComponent (:26565) is
---        the thing that actually applies them — it holds `TArray<FPalPassiveSkillEffectInfos>
---        SkillInfos` (:26573), broadcasts OnStartSkillEffect / OnEndSkillEffect (:26567-26572)
---        and rewrites damage through OverrideDamageInfoBySkill (:26584). SetupSkillFromSelf is
---        how the names get in.
---        BECAUSE IT IS A LIST AND NOT AN EVENT, this source DIFFS: the names it has last seen
---        for that component are remembered in a weak table, a name that is new emits
---        skill.equip and a name that has gone emits skill.unequip. Stated plainly, because it
---        is the cost of the only route the dump offers: the FIRST call for a component emits
---        equip for every passive that character already has. A pal streaming into the world
---        will therefore announce its four passives once. That is honest — at that moment those
---        passives really are being attached to that character — but it is not the same thing
---        as "the player just added one", and a handler must be idempotent for it.
---        EVIDENCE CLASS: DECLARED ONLY. Armed after world.ready like the pair above.
---
--- TODO(skill-passive-source): NARROWED. AddPassiveSkill / RemovePassiveSkill are MEASURED
--- SILENT across a session of catching and releasing pals, so they are ruled out as the route
--- (kept armed, since they cost nothing and cannot misfire). What is unmeasured is whether
--- SetupSkillFromSelf fires, and if it does, WHICH moments it covers — the expectation is
--- character init, capture-time assignment, and the Statue of Power, and none of the three is
--- observed. If it too is silent, the remaining lead is
--- UPalMapObjectOperatingTableModel:RequestChangePassiveSkill (Pal.hpp:24094), the bench's own
--- request, which takes the passive FName as its third parameter and is an ordinary server
--- request rather than a broadcast — narrower (the bench only), but reachable.
--- =====================================================================================
+-- OBSERVED LIVE, 2026-07-26, during real combat:
+--     skill.activate carried its first event from source "PalActionBase:OnBeginAction"
+-- The source that works is the ACTION OBJECT, not a utility that builds one. PlayActionByWazaID
+-- stays armed as the control that proved it: it registered successfully and carried nothing
+-- while a pal fought and killed another pal, which is what sent the search to the action side.
+-- A pal's move IS a UPalActionWazaBase, it carries its own EPalWazaID, and hooking it puts the
+-- identity a handler needs on `self` instead of in someone else's argument list.
 local function installSkillSource()
     -- EPalWazaID arrives as a bare integer (core/character.lua:449 documents that enum
     -- elements come through as numbers), and every public surface in this tree speaks skill
