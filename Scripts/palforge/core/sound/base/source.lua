@@ -5,7 +5,9 @@
 -- Contract:
 --   source:play(actor)  -> start this source on `actor`
 --   source:stop(actor)  -> stop this source on `actor`
--- Defaults are fail-soft no-ops.
+-- Both return true ONLY when a native call was actually issued — never merely because
+-- nothing threw. An impl that could not reach the engine returns false, so a caller can
+-- tell "nothing happened" from "something did". Defaults are fail-soft no-ops (false).
 local SoundSource = {}
 SoundSource.__index = SoundSource
 SoundSource.__name  = "SoundSource"
@@ -34,10 +36,10 @@ end
 
 -- ---- contract (override in an impl; defaults inert) ----
 
--- Start this source on `actor`. Returns true if a native call executed.
+-- Start this source on `actor`. True only if a native call was issued.
 function SoundSource:play(actor) return false end
 
--- Stop this source on `actor`.
+-- Stop this source on `actor`. True only if a native call was issued.
 function SoundSource:stop(actor) return false end
 
 return SoundSource

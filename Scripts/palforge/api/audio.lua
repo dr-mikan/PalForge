@@ -10,14 +10,19 @@
 --   soundId / soundPath -> { kind = "native" }  -> core.sound.native  (WORKING)
 --   soundFile           -> { kind = "file"   }  -> core.sound.file    (seam, no-op)
 --
--- The native route is CONFIRMED in-game: a catalog entry is a Wwise AkAudioEvent NAME with
--- an asset PATH, played via LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor.
--- Prefer passing BOTH soundId and soundPath (native/audio.lua's catalog does); the path is
--- what actually plays, the id is the SoundID-table fallback.
+-- The native route is a real engine call, not yet a recorded in-game success: a catalog entry
+-- is a Wwise AkAudioEvent NAME with an asset PATH, played via
+-- LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor. Prefer passing BOTH soundId and
+-- soundPath (native/audio.lua's catalog does); the path is what actually plays, the id is the
+-- SoundID-table fallback. Either one alone is a complete definition.
+--
+-- :play returns true only when a native play call was ISSUED for the sound — a definition
+-- that names nothing, or a world that has no player pawn, returns false rather than a
+-- reassuring true. It is still not a promise of audibility (the engine returns nothing).
 --
 -- Custom audio FILES are not playable yet — Palworld exposes no USoundWave loader we have
 -- confirmed, so a `soundFile` definition resolves and no-ops instead of pretending. Volume
--- is likewise unwired (no AkAudio RTPC / component-gain path observed).
+-- is likewise unwired, though not for want of a route: see Handle:setVolume.
 --
 --   local Theme = Audio.bgm{ id = "AKE_BGM_Title",
 --                            soundId = "AKE_BGM_Title", soundPath = "/Game/.../AKE_BGM_Title" }
@@ -187,8 +192,9 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 -- ---- actions ----
 
----Play this sound on `actor` (default: the local player pawn). Returns true if the native
----call executed; a missing world / unresolvable sound is a fail-soft false.
+---Play this sound on `actor` (default: the local player pawn). Returns true only when a
+---native play call was issued for this sound; a missing world, a definition that names no
+---sound and an unresolvable spec are all a fail-soft false.
 ---@param actor any?
 ---@return boolean ok
 function Handle:play(actor)
@@ -197,8 +203,10 @@ function Handle:play(actor)
     return sound.play(self._cls:source(), a)
 end
 
----Stop sounds on `actor` (default: the local player pawn). The native stop is not
----per-sound — it stops everything playing on that actor.
+---Stop sounds on `actor` (default: the local player pawn). ACTOR-WIDE by design: the native
+---call is StopSoundByActor, so it silences everything playing on that actor and WHICH sound
+---you called it on is ignored (a per-sound stop needs a Wwise PlayingID we do not capture
+---yet). Returns true only when that native call was issued.
 ---@param actor any?
 ---@return boolean ok
 function Handle:stop(actor)
@@ -207,13 +215,20 @@ function Handle:stop(actor)
     return sound.stop(a)
 end
 
----Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — no native volume/gain control
----has been confirmed (needs an AkAudio RTPC or component-gain path). Returns false so a
----caller can tell it did nothing.
+---Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell
+---it did nothing. A route does exist: the shipping binary reflects
+---UPalSoundUtility::SetRTPCValueByActor and UAkGameplayStatics::SetRTPCValue (plus
+---UAkComponent::SetOutputBusVolume on the actor's emitter). None of them is per-SOUND, so
+---wiring one most likely changes this signature to setVolume(volume, actor) or moves it to a
+---bus-level call — which is why it is not wired on a guess.
 ---@param volume number
 ---@return boolean ok
 function Handle:setVolume(volume)
-    -- TODO: apply volume once an AkAudio RTPC / component-gain route is observed.
+    -- TODO: route through UPalSoundUtility::SetRTPCValueByActor / UAkGameplayStatics::SetRTPCValue
+    -- (or UAkComponent::SetOutputBusVolume on the actor's emitter). The names are in the
+    -- shipping binary's reflection table; the parameter lists are NOT dumped yet, and the only
+    -- RTPCs Palworld declares are Field_Time / Sliding_Speed — no volume RTPC name is known —
+    -- so this needs a reflection probe before any of it can be written.
     return false
 end
 

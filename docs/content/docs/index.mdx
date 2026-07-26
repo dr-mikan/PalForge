@@ -1,46 +1,81 @@
 ---
 title: Introduction
-description: What PalForge is, how its layers fit together, and the shape every domain shares
+description: Add your own buildings, items, pals, sounds, effects, skills and menus to Palworld
 ---
 
-PalForge is a content framework for Palworld that runs as a UE4SS Lua mod. A content pack
-is Lua code that declares pals, items, buildings, skills, effects, sounds, meshes and UI,
-and attaches behaviour to them.
+PalForge is a base mod for Palworld that lets anyone add their own buildings, music,
+effects, pals, items, models, skills and menus — or build entirely new content out of
+them — and see it in the game straight away. You write a short Lua file describing what
+you want, and PalForge puts it in the world.
 
-## What PalForge is
+## What you can do after this page
 
-The install layout is a normal UE4SS Lua mod:
+- Add your own building, item, pal, sound or menu to Palworld.
+- Run your own code when a structure is placed, an item is picked up or a pal is caught.
+- Give a placed structure its own memory that is still there the next time you play.
+- Find the page for the exact thing you want to make.
 
-```text
-ue4ss/Mods/PalForge/Scripts/main.lua        <- entry point
-ue4ss/Mods/PalForge/Scripts/palforge/*.lua  <- modules
+## Your first building
+
+This is a whole content file. It gives the game's own campfire a new behaviour: right-click
+one and you get five wood.
+
+```lua title="Scripts/content/campfire.lua"
+require("palforge.api")
+
+Building{
+    id = "CampFire",
+    events = {
+        onRightClick = function(self, ctx)
+            Item.get("Wood"):give(5)
+        end,
+    },
+}
 ```
 
-`main.lua` is thin. It bootstraps `package.path` so `palforge.*` resolves relative to that
-`Scripts` directory, calls `registry.initialize()` inside a `pcall`, and publishes
-`_G.PalForge` for companion mods.
+Three things are happening. `Building{ ... }` declares a structure. `"CampFire"` is the
+game's own build id, so the campfire you already know is the one that changes. `events` is
+where your code goes, and `onRightClick` runs every time a player interacts with one.
 
-`registry.initialize()` runs a fixed order, once, at mod load:
+Put the file next to PalForge's own scripts and load it from your entry point —
+[Getting started](/docs/getting-started) shows the exact folder and the one line that
+requires it.
 
-1. require `palforge.api` — this installs the bare globals `Pal`, `Item`, `Building`,
-   `Skill`, `Effect`, `Audio`, `Mesh`, `UI`, `Player`.
-2. require the native catalogs (`palforge.native.buildings`, `.items`, `.pals`, `.skills`,
-   `.effects`, `.audio`, `.ui`). Each curated definition self-registers as it is defined.
-3. `event.start()` — the bus, the native sources and the dispatch.
-4. dev-only tooling, gated on `env.dev`: the dev keybinds, the `ps_catalog` console
-   command, and the test suites.
-5. `event.emit("gameStart")`.
+## What you can make
 
-`palforge/env.lua` is a process-wide singleton table holding `dev`, `name` and `version`.
-`dev` is the one dev/release switch — set it to `false` before `registry.initialize()`
-runs to ship a build that only registers content:
+Eight kinds of thing, one module each. Call the module to make one.
+
+| You want to make | What you declare | Page |
+| --- | --- | --- |
+| A placeable structure | Its look, its grid size, the data it remembers, and code for placed / used / removed / every few seconds. | [/docs/api/building](/docs/api/building) |
+| Inventory content | A name, a category, a stack limit, a recipe, and code for picked up / used. | [/docs/api/item](/docs/api/item) |
+| A creature | A model, a colour, the ids of its skills, and code for spawned / damaged / killed / captured. | [/docs/api/pal](/docs/api/pal) |
+| An ability | Active or passive, its element, its power, and a cooldown counted in Lua. | [/docs/api/skill](/docs/api/skill) |
+| A timed status | How long it lasts, how often it fires, how it stacks, what happens when it ends. | [/docs/api/effect](/docs/api/effect) |
+| A sound or music track | One playable game sound. `Audio.bgm` and `Audio.se` pin `kind` for you. | [/docs/api/audio](/docs/api/audio) |
+| A model | A model asset plus how to paint it. A pal or a building wears one. | [/docs/api/mesh](/docs/api/mesh) |
+| A panel or a button | Widgets built from Palworld's own UI kit, with `render` and `update`. | [/docs/api/ui](/docs/api/ui) |
+
+`Player` is the one module you do not make anything with. It tells you where the player is:
+`Player.character()`, `Player.coordinate()` and `Player.coordinateOffset(dx, dy, dz)` —
+[/docs/api/player](/docs/api/player).
+
+## Writing a definition
+
+Every module works the same way. Call it to make something, and use `get` and `get_all` to
+find what is already there.
 
 ```lua
-local env = require("palforge.env")
-env.dev = false
+local boss = Pal{ id = "example:Boss", name = "Boss" }  -- CALL the module to define
+Pal.get("ChickenPal")                                   -- an existing one, by id
+Pal.get_all()                                           -- every registered one
 ```
 
-The smallest useful pack is one definition:
+`X{ ... }` is Lua's shorthand for `X({ ... })` — the braces are the argument list, which is
+as close to named arguments as Lua gets. What comes back is a **Handle**: an object
+carrying that domain's actions, so `:spawn`, `:give`, `:play` and `:apply` are right there.
+
+Here is a definition with a bit more on it:
 
 ```lua title="Scripts/content/flint.lua"
 local api = require("palforge.api")
@@ -58,86 +93,12 @@ Item{
 }
 ```
 
-`Flint` is a real row in the game's item table. The definition does not create it — it
-gives that existing id a name, a category, a stack ceiling and a handler that runs when
-the player picks some up.
+`Flint` is already in the game. This gives that id a name, a category, a stack ceiling and
+a sound that plays when the player picks some up.
 
-## What PalForge is not
-
-PalForge does not publish DataTable rows. Lua alone cannot add a new item, creature or
-build-object row to Palworld's data tables; that is PalSchema's job. What a definition
-does is attach **behaviour and metadata to an id**, and give you actions on it.
-
-Ids follow one rule. A content pack writes `"packid:name"`, and
-`core/object_manager.resolve` maps that to the DataTable row FName `packid_name`. Both
-halves must be letters, digits or underscores. An id **without** a colon is a literal game
-id:
-
-```lua
-local om = require("palforge.core.object_manager")
-
-om.resolve("example:Potion")   --> "example_Potion"
-om.resolve("Wood")             --> "Wood"        (literal game id, passed through)
-om.resolve("bad pack:Potion")  --> nil, "invalid pack id 'bad pack' (letters/digits/_ only)"
-```
-
-So `Item{ id = "example:Potion" }` is only useful if PalSchema (or another mod) has
-published a row named `example_Potion`. Without that row the definition is still
-registered and still callable from Lua, but no in-game inventory refers to it.
-
-<Callout type="warn">
-Two more things PalForge does not do. A PalForge `Effect` does not toggle the game's own
-ailment enum `EPalStatusEffectType` — no native call to apply one has been confirmed, so
-the gameplay lives in your handlers. And there is no native source for skills: nothing in
-the game fires a `Skill` handler by itself, so you invoke it from your own code.
-</Callout>
-
-## The layer map
-
-Four directories, and only two of them are things a pack calls.
-
-| Layer | Role |
-| --- | --- |
-| `api/` | The public surface a pack writes against. One module per domain. |
-| `core/` | The engine. `registry` decides when things load, `event` owns channels, native sources, dispatch and the whole building runtime, and the Palworld bridges are `object_manager`, `spawn`, `mesh`, `sound`, `player`, `icons`, `spatial`, `schema`. |
-| `utils/` | The generic toolbox a pack does call: `log`, `json`, `file`, `items`. |
-| `native/` | Palworld's own content as data catalogs, plus a few curated definitions. |
-
-The responsibility split inside `core/` is three sentences: `object_manager` knows **what**
-exists, `registry` knows **when** it loads, `event` knows **what happens**.
-
-```mermaid
-flowchart LR
-  PACK["content pack"] -->|"defines"| API["api"]
-  API -->|"records"| OM["core.object_manager"]
-  GAME["native game event"] --> SRC["core.event SOURCE"]
-  SRC -->|"emit"| CH["channel"]
-  CH --> DIS["core.event DISPATCH"]
-  DIS -->|"resolve"| OM
-  DIS -->|"calls the handler"| PACK
-```
-
-Registration is not a separate step. A definition call writes into `object_manager` itself,
-so loading a module *is* registering its content. There is no aggregator table to walk and
-no per-class `register()` to remember.
-
-## The uniform shape of a domain
-
-Every domain module has exactly three public entry points:
-
-```lua
-local boss = Pal{ id = "example:Boss", name = "Boss" }  -- CALL the module to define
-Pal.get("ChickenPal")                                   -- an existing one, by id
-Pal.get_all()                                           -- every registered one
-```
-
-`X{ ... }` is Lua's call-with-a-table sugar for `X({ ... })`. The module itself is the
-constructor, through a `__call` metamethod — there is no `X.define`. Defining registers the
-definition class in `core/object_manager` under `(type, id)` and returns a **Handle**
-carrying that domain's actions.
-
-Requiring `palforge.api` installs the bare globals *and* returns the same table namespaced,
-so both spellings work:
+Requiring `palforge.api` gives you the bare names `Pal`, `Item`, `Building`, `Skill`,
+`Effect`, `Audio`, `Mesh`, `UI` and `Player`, and hands back the same table with those names
+on it. Both spellings work:
 
 <Tabs items={['Globals', 'Namespaced']}>
 <Tab value="Globals">
@@ -162,13 +123,19 @@ api.Item.get("Wood"):give(10)
 </Tab>
 </Tabs>
 
-UE4SS gives each Lua mod its own state, so those globals are mod-local. They do not clash
-with the game or with other mods.
+Those bare names belong to your mod alone. They do not clash with the game or with anyone
+else's mod.
 
-### Define once, act many times
+Beyond calling a module and `get` / `get_all`, there are three extras. `Audio.bgm` and
+`Audio.se` pin `kind` so you do not have to write it, and `Effect.activeOn(target)` gives
+you the ids of every effect currently on a target. Every module except `Player` also
+exposes `X.Class`, the base class a definition is built from — you need it only if you
+subclass one.
 
-`X{ ... }` registers. `X.get(id)` hands you a handle for something already registered. A
-handler runs on every event, so reach for `get` inside one:
+### Define once, use many times
+
+`X{ ... }` makes something. `X.get(id)` looks up something that already exists. A handler
+runs on every event, so use `get` inside one:
 
 ```lua
 Pal{
@@ -182,11 +149,12 @@ Pal{
 }
 ```
 
-### The handler's first argument
+### What your handler gets
 
-The first argument is the object the event happened to. For pal, item, skill and effect
-that is **that definition's Handle**, so the domain's actions are right there. For a
-building it is the **live instance** — `self.actor`, `self.pos`, `self.state`, `self:save()`.
+The first argument is the thing the event happened to. For a pal, item, skill or effect
+that is its Handle, so the domain's actions are already in scope. For a building it is the
+one structure the player touched: `self.actor` is the placed actor, `self.pos` its
+position, `self.state` your own table, and `self:save()` writes that table to disk.
 
 ```lua
 Item{
@@ -210,14 +178,14 @@ Building{
 }
 ```
 
-The later arguments are the domain's own: `(pal, ctx)`, `(item, ctx)`,
-`(skill, owner, ctx)`, `(effect, target, ctx)`, `(instance, ctx)`.
+The later arguments belong to the domain: `(pal, ctx)`, `(item, ctx)`,
+`(skill, owner, ctx)`, `(effect, target, ctx)`, `(instance, ctx)`. `ctx` is a plain table
+whose contents depend on the event — `ctx.actor`, `ctx.itemId`, `ctx.count` and so on.
 
-### Nesting a definition
+### Putting one definition inside another
 
-A nested definition can be passed as itself. A `Mesh` handle's metatable carries `__spec`,
-which the validator unwraps to the plain declaration, so the inline form and the named form
-are validated identically:
+A field that wants a definition takes either a plain table or a definition you already
+made. Both are checked in exactly the same way:
 
 ```lua
 -- inline
@@ -232,13 +200,36 @@ Pal{ id = "example:Boss", mesh = body }
 Pal{ id = "example:Add",  mesh = Mesh.get("example:BossBody") }
 ```
 
-### Validation is strict
+### Naming your content
 
-Shapes are declared as data with `core/schema` and enforced on every call. Every problem is
-a hard error and the call never half-succeeds: an unknown field (with a did-you-mean), a
-missing required field, a wrong type, a value outside the declared `values`, a bad
-`arrayOf` or `mapOf` element, or a failing `check`. Every message is prefixed `PalForge: `
-and names the domain and the field.
+An id with a colon, `"example:Potion"`, is content of your own. PalForge turns it into the
+row name `example_Potion` in the game's data. An id without a colon is a game id that
+already exists, like `Wood`, `ChickenPal` or `PalBoxV2`. Both halves of a namespaced id
+must be letters, digits or underscores:
+
+```lua
+local om = require("palforge.core.object_manager")
+
+om.resolve("example:Potion")   --> "example_Potion"
+om.resolve("Wood")             --> "Wood"        (literal game id, passed through)
+om.resolve("bad pack:Potion")  --> nil, "invalid pack id 'bad pack' (letters/digits/_ only)"
+```
+
+<Callout type="warn">
+You can give an id the game already has new behaviour and new metadata. Adding a brand-new
+row to the game's own tables — a new item, a new creature, a new build object — needs a
+different tool, because Lua cannot write one. So `Item{ id = "example:Potion" }` registers
+fine and works from your code, but no in-game inventory shows it until a row named
+`example_Potion` exists. Until then, build on ids the game already has.
+</Callout>
+
+### If you get a field wrong
+
+Every call is checked against the shape that domain accepts, and a problem stops the call
+outright — it never half-succeeds. An unknown field (with a did-you-mean), a missing
+required field, a wrong type, a value outside the allowed list, a bad `arrayOf` or `mapOf`
+element, or a failing `check` all raise. Every message starts with `PalForge: ` and names
+the domain and the field:
 
 ```text
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
@@ -247,8 +238,7 @@ PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMes
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
 ```
 
-The declarations stay private to their module — a domain is a thing you call, not a
-namespace to browse — but they are readable at runtime through the schema registry:
+To see what a domain accepts without leaving the game, ask at runtime:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -258,14 +248,62 @@ schema.get("Pal.Spec").fields         -- the same as a table, for tooling
 schema.all()                          -- every declared spec, in declaration order
 ```
 
-In the editor the same information comes from `Scripts/palforge/types.lua`, which is
-generated from those declarations by `lua5.4 tools/gen-types.lua`. It is annotations only;
-nothing requires it at runtime. LuaLS just has to see it in the workspace for `Pal{ ... }`
-to complete every field with its documentation.
+In an editor the same information comes from `Scripts/palforge/types.lua`, generated by
+`lua5.4 tools/gen-types.lua`. It holds annotations only and nothing requires it at runtime;
+LuaLS just has to see it in the workspace for `Pal{ ... }` to complete every field with its
+documentation. [Editor setup](/docs/concepts/editor-setup) covers it.
 
-## A worked example
+## What the game runs for you
 
-One pack file that touches Mesh, Effect, Skill, Building, Item, Audio, Pal and Player.
+You never call your own handlers for a building. You place a structure, and PalForge
+notices and runs your code.
+
+```mermaid
+flowchart LR
+  DEF["you define a building"] --> REG["PalForge registers it"]
+  PLACE["you place one in game"] --> FIND["PalForge finds it"]
+  FIND --> RUN["your onPlace code runs"]
+```
+
+How much of that happens by itself depends on the domain:
+
+- **Building** — the fullest one. `onPlace`, `onLoad`, `onRightClick`, `onRemove`,
+  `onTick`, `onWorldReady` and `onWorldLeft` all run on the live structure. `onBuild` runs
+  too, the moment a build finishes; it arrives before the structure exists, so it is handed
+  the definition rather than a live structure. A structure that streams in on a later pass
+  misses `onWorldReady`, so per-structure startup work belongs in `onLoad`.
+- **Pal** — all five run. `onCaptured`, `onDamaged` and `onDeath` come from confirmed game
+  calls. `onSpawned` rides a candidate hook that has not been proven to mean a fresh spawn
+  rather than a re-initialisation, so keep that handler safe to run twice. `onTick` is
+  driven by a sweep over the pals in the world, roughly every three seconds.
+- **Item** — `onObtain` and `onUse` run, with `ctx.itemId`, `ctx.count` and `ctx.actor`.
+- **Effect** — `onApply`, `onTick`, `onStack` and `onExpire` all run. PalForge keeps the
+  clock itself, off its own half-second heartbeat. It does not switch on the game's own
+  ailment icons (Poison, Burn, Freeze), so whatever the effect does to the target, your
+  handlers do.
+- **Audio, Mesh and UI** — no lifecycle events at all. You play a sound, a mesh is worn, and
+  a UI element is mounted, refreshed and unmounted by you. `Audio.Handle:stop(actor)` is not
+  per-sound: it silences everything playing on that actor.
+
+<Callout type="warn">
+These are declarable, so your code stays valid, but nothing runs them today. Put the work
+somewhere that does run:
+
+- Building `onLeftClick` and `onBreak` — use `onRightClick` and `onRemove`.
+- Item `onCraft` and `onDiscard` — use `onObtain` or `onUse`.
+- Skill handlers — nothing in the game fires a skill. Call `:activate(owner)`,
+  `:hit(target)`, `:equip(owner)` or `:unequip(owner)` from your own code, such as a pal's
+  handler, a building's `onRightClick` or a keybind. The cooldown is counted in Lua, and
+  `:activate` returns `false` while it is still cooling down.
+- `Audio.Handle:setVolume` returns `false` and changes nothing, and a `soundFile` of your
+  own resolves but plays nothing. Name a game sound id instead.
+- Nothing refreshes a UI element for you. Call `:refresh()` when your state changes, or
+  `:autoRefresh(ms)` to poll.
+</Callout>
+
+## A bigger example
+
+One file that makes a mesh, a status, an ability and a structure, and wires them together.
 
 ```lua title="Scripts/content/supply_bench.lua"
 local api = require("palforge.api")
@@ -349,142 +387,29 @@ Building{
 }
 ```
 
-What each piece really does:
+What each piece does:
 
 - `BenchBody` is registered under `("mesh", "example:BenchBody")` and nested into the
-  building by value. `kind` has to be pinned here: a named `Mesh{ ... }` is validated
-  against `Mesh.Spec` on its own, whose `kind` defaults to `"skeletal"`, and that
-  filled-in value travels with it. The `"static"` default belongs to
-  `Building.Spec.Mesh`, so it only applies to a mesh written inline in the building.
+  building by value. `kind` has to be pinned here: a named `Mesh{ ... }` is checked against
+  `Mesh.Spec` on its own, whose `kind` defaults to `"skeletal"`, and that filled-in value
+  travels with it. The `"static"` default belongs to `Building.Spec.Mesh`, so it only
+  applies to a mesh written inline in the building.
 - `WellFed:apply(target)` starts a live application: `onApply` now, `onTick` every
   `interval` seconds, `onExpire` after `duration` or on `:remove()`.
 - `Whistle:activate(owner)` runs `onActivate` immediately unless the 30-second cooldown
   blocks it, in which case it returns `false`.
-- `tickInterval = 20` with the 500 ms heartbeat means `onTick` runs every ten seconds.
-- `self:save()` writes the instance's `state` table to the per-world state file.
+- `tickInterval = 20` with the half-second heartbeat means `onTick` runs every ten seconds.
+- `self:save()` writes the structure's `state` table to the per-world state file.
 - `ctx.player` on `onRightClick` is the character that interacted; `ctx.actor` is the
   building actor.
-- `Audio.Handle:stop(actor)` is not per-sound. The native stop route stops everything
-  playing on that actor.
+- `Audio.Handle:stop(actor)` is not per-sound. It stops everything playing on that actor.
 
 <Callout type="info">
 `CampFire`, `Wood`, `Berries` and `ChickenPal` are real ids from
-`Scripts/palforge/native/*.lua`, and `AKE_BGM_Title` is a curated sound defined by
-`palforge.native.audio`. Registration is keyed on `(type, id)`, so defining an id the
-native catalogs already curated replaces that registration.
+`Scripts/palforge/native/*.lua`, and `AKE_BGM_Title` is a sound defined by
+`palforge.native.audio`. Registration is keyed on `(type, id)`, so defining an id that
+comes with PalForge replaces that registration.
 </Callout>
-
-## The domains
-
-| Domain | What it declares | Reference |
-| --- | --- | --- |
-| `Pal` | A spawnable creature: mesh, material, skill ids, and spawn / damage / death / capture handlers. | [/docs/api/pal](/docs/api/pal) |
-| `Item` | Inventory content: category, stack ceiling, recipe, and obtain / use handlers. | [/docs/api/item](/docs/api/item) |
-| `Building` | A placeable structure. The one domain with a live per-structure instance, persisted state and a full lifecycle. | [/docs/api/building](/docs/api/building) |
-| `Skill` | An active or passive ability with element, power and a Lua-enforced cooldown. | [/docs/api/skill](/docs/api/skill) |
-| `Effect` | A timed status on a target: duration, interval, stacking, expiry. | [/docs/api/effect](/docs/api/effect) |
-| `Audio` | One playable Wwise `AkAudioEvent`, played on an actor. `Audio.bgm` and `Audio.se` pin `kind`. | [/docs/api/audio](/docs/api/audio) |
-| `Mesh` | A model asset plus how to paint it, worn by a pal or a building. | [/docs/api/mesh](/docs/api/mesh) |
-| `UI` | A mountable element built from Palworld's own UMG kit, with `render` and `update`. | [/docs/api/ui](/docs/api/ui) |
-| `Player` | The local character and its coordinate. A plain facade, not callable. | [/docs/api/player](/docs/api/player) |
-
-Beyond the three entry points there are three extras, and they are the whole list:
-`Audio.bgm` and `Audio.se` pin `kind`, and `Effect.activeOn(target)` returns the ids of
-every effect currently on a target. `Player` has no entry points at all — it is
-`character()`, `coordinate()` and `coordinateOffset(dx, dy, dz)`. Every module except
-`Player` also exposes `X.Class`, the base definition class, used for subclassing and for
-`core/event`'s override detection.
-
-<Callout type="warn">
-Which hooks actually fire, today:
-
-- **Building** — these are live: `onPlace`, `onLoad`, `onRightClick`, `onRemove`,
-  `onTick`, `onWorldLeft`. `onBuild`, `onLeftClick` and `onBreak` are declarable but no
-  native source emits them. `onWorldReady` is dispatched and never reaches an instance:
-  `world.ready` is emitted at the moment the gate opens, and the scan that creates
-  instances waits on that same gate, so put the work in `onLoad`.
-- **Pal** — `onCaptured`, `onDamaged` and `onDeath` are live. `onSpawned` rides an
-  unconfirmed candidate hook. `onTick` is declarable only: pals have no instance scan, so
-  nothing drives it.
-- **Item** — `onObtain` and `onUse` are live. `onCraft` and `onDiscard` are declarable
-  only; the channels and dispatch exist, nothing emits them.
-- **Effect** — all four hooks are live, but the timing is owned by `api/effect` off the
-  `tick` channel, not by a native game event.
-- **Skill** — no native source at all. `:activate`, `:hit`, `:equip` and `:unequip` run the
-  handler now; drive them from your own code.
-- **Audio / Mesh / UI** — no lifecycle channels. `Audio.Handle:setVolume` is not
-  implemented and returns `false`, a `soundFile` resolves and no-ops, and nothing calls a
-  UI element's `refresh()` for you.
-</Callout>
-
-## The `_G.PalForge` surface
-
-After `main.lua` has run, companion mods loaded into the same Lua state reach everything
-through one table:
-
-```lua
-_G.PalForge = {
-    env    = env,                      -- dev / name / version
-    api    = require("palforge.api"),  -- Pal, Item, Building, Skill, Effect, Audio, Mesh, UI, Player
-    utils  = { log, json, file, items },
-    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons },
-    native = require("palforge.native"),
-}
-```
-
-`api` is what a content pack writes against. `utils` is the toolbox. `core` and `native`
-are exposed for advanced use — custom event channels, catalog lookups:
-
-```lua title="a companion mod"
-local PalForge = _G.PalForge
-local event    = PalForge.core.event
-local log      = PalForge.utils.log.scope("mymod")
-
--- Subscribe to any channel. Returns a subscription with :unsubscribe().
-local sub = event.on("item.obtain", function(ctx)
-    log.info("obtained " .. tostring(ctx.itemId) .. " x" .. tostring(ctx.count))
-end)
-
--- Run something on the shared heartbeat, quantized to event.TICK_MS (500 ms).
-event.every(5000, function()
-    log.info("live buildings: " .. tostring(#event.instances()))
-end)
-
--- Operator chains, because a channel is a hot Rx Subject.
-event.observable("building.interact")
-    :filter(function(ctx) return ctx.buildId == "PalBoxV2" end)
-    :subscribe(function(ctx) log.info("palbox opened") end)
-
--- Read the catalogs.
-local native = PalForge.native
-native.audio.MainTheme:play()
-native.items.get("Arrow_Fire"):give(20)
-
-sub:unsubscribe()
-```
-
-The channel list is `event.CHANNELS`, and every channel is pre-created so subscribing
-before the first emit works:
-
-```text
-gameStart
-world.ready   world.left
-building.place  building.load  building.interact  building.remove
-pal.spawned  pal.damaged  pal.death  pal.captured
-item.obtain  item.use  item.craft  item.discard
-tick
-```
-
-`registry.registered()` gives a snapshot of every registered class, keyed by object type
-then id — useful for tooling:
-
-```lua
-local registry = _G.PalForge.core.registry
-
-for id in pairs(registry.registered().building) do
-    print(id)
-end
-```
 
 ## Where to go next
 
@@ -492,10 +417,30 @@ end
   <Card title="Getting started" href="/docs/getting-started">
     Install PalForge, lay out a pack, and get a definition running in game.
   </Card>
+  <Card title="Your first content pack" href="/docs/guides/first-content-pack">
+    A full pack built step by step, from empty folder to something you can play.
+  </Card>
   <Card title="Definitions" href="/docs/concepts/definitions">
-    Specs, strict validation, handles, nesting and the id model in detail.
+    Specs, strict checking, handles, nesting and the id model in detail.
   </Card>
   <Card title="Lifecycle" href="/docs/concepts/lifecycle">
-    Channels, native sources, dispatch, the heartbeat, and which hooks are live.
+    Channels, the heartbeat, and exactly what fires each of your handlers.
   </Card>
 </Cards>
+
+## Summary
+
+- You add content by writing one Lua file. `Building{ ... }`, `Item{ ... }`, `Pal{ ... }`
+  and the rest all work the same way, and `id` is the only field every one of them needs.
+- An id with a colon is content of your own; an id without one is something the game
+  already has. Building on an existing id is the fastest way to see something in game.
+- Code you want to run goes in `events`. The first argument is the thing the event happened
+  to: the live structure for a building, that definition's Handle everywhere else.
+- A building remembers whatever you put in `state`, once you call `self:save()`.
+- A wrong field name stops the call with a message starting `PalForge: ` that suggests the
+  right one.
+- Skills never fire on their own, and Item `onCraft` / `onDiscard` and Building
+  `onLeftClick` / `onBreak` never run — put that work in a handler that does.
+
+Next, read [Getting started](/docs/getting-started) to install PalForge and get your file
+loading.

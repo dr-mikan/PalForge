@@ -6,7 +6,7 @@
 -- ONCE, named, and reused by name across pals, buildings and anything else that renders:
 --
 --   local body = Mesh{ id = "example:body",
---                      model = "/Game/Pal/Model/Character/Monster/X/SK_X",
+--                      model = "/Game/Pal/Model/Character/Monster/X/SK_X.SK_X",
 --                      texture = "C:/mods/example/body.png" }
 --   Pal{ id = "example:Boss", mesh = body }         -- nest the defined mesh
 --   Pal{ id = "example:Add",  mesh = Mesh.get("example:body") }
@@ -21,6 +21,8 @@
 -- HOW IT INTEGRATES: defining registers the definition in object_manager under
 -- ("mesh", id); attaching lowers the declaration to core.mesh, which dispatches on
 -- `kind` (procedural / static / skeletal / obj) and guards against re-stacking.
+-- core.mesh remembers which backend dressed each actor, so :setColor and :detach reach
+-- that same backend rather than guessing from a colour table that carries no kind.
 
 local om     = require("palforge.core.object_manager")
 local mesh   = require("palforge.core.mesh")
@@ -150,13 +152,25 @@ function Handle:attachTo(actor)
     return mesh.attachOnce(actor, self._cls:source())
 end
 
----Re-tint an already-attached mesh on `actor`.
+---Re-tint an already-attached mesh on `actor`. The re-tint goes to whichever backend
+---actually dressed the actor; this mesh's own `kind` is passed only as the hint for the
+---case where the attach did not go through PalForge.
 ---@param actor any
 ---@param color table  # { r, g, b, a } in 0..1
 ---@return boolean ok
 function Handle:setColor(actor, color)
     if not (actor and actor.IsValid and actor:IsValid()) then return false end
-    return mesh.setColor(actor, color)
+    return mesh.setColor(actor, color, self._cls.kind)
+end
+
+---Remove this mesh from `actor` again, undoing attachTo so the actor can be dressed
+---afresh. Only a backend that added a component of its own can do this (procedural /
+---static); a skeletal swap has nothing of PalForge's to remove and reports false.
+---@param actor any
+---@return boolean ok
+function Handle:detach(actor)
+    if not (actor and actor.IsValid and actor:IsValid()) then return false end
+    return mesh.detach(actor)
 end
 
 -- ---- queries ----

@@ -1,41 +1,49 @@
 ---
 title: コンテンツパックを作る
-description: 空の UE4SS モッドフォルダーから、スキルを発動し、パルを呼び、アイテムを配り、プレイヤーを強化するビーコンまでを一気に作る
+description: 空のモッドフォルダーから、設置して調べると動くビーコンまでを一気に作る
 ---
+
+## このページでできるようになること
+
+- 自分のモッドフォルダーを Palworld に置いて、読み込ませる
+- ビルドメニューの構造物に、調べたときの動きを付ける
+- その 1 回の操作で、音を鳴らし、強化を付け、パルを呼び、アイテムを配る
+- 置いた構造物ごとにカウンターを持たせ、次に遊ぶときも残す
+- 何かが起きなかったとき、ログを読んで理由を突き止める
 
 ## 作るもの
 
 **BeaconPack** という名前のパックです。ビルドメニューにある構造物をひとつ受け持ち、そこに
-振る舞いを与えます。
+動きを付けます。
 
 - ビーコンを調べるとクールダウン 30 秒のスキルが発動し、
 - スキルは調べたキャラクターに効果音を鳴らし、
-- 12 秒間・最大 3 スタックのエフェクトを付与し、
+- 12 秒間・最大 3 回まで重なる強化を付け、
 - ビーコンの位置に守護パルを呼び出します。
 - ビーコン自身はアイテムを配り、使用回数を数え、チャージを 1 消費し、その値をワールド
   ファイルに保存します。
-- ハートビートのハンドラーが、離れているあいだにチャージを回復させます。
+- 一定間隔で動くハンドラーが、離れているあいだにチャージを回復させます。
 
-これで Building・Skill・Audio・Effect・Pal・Item のすべてに触れることになります。しかも
-パック全体は独立した UE4SS モッドで、同じセッションに読み込まれている PalForge を再利用
-します。
+これで Building・Skill・Audio・Effect・Pal・Item のすべてに触れます。パック自体は独立した
+モッドフォルダーで、同じセッションに読み込まれている PalForge を再利用します。
 
 始める前の前提です。
 
 - PalForge がインストールされ、読み込まれていること。`ue4ss/Mods/PalForge/Scripts/main.lua`
   が動き、UE4SS コンソールに `[PalForge.main][info] ready` が出ていれば問題ありません。
-- `Pal.Handle:spawn` は `UPalCheatManager` を経由するため、パルを呼ぶにはそのセッションで
-  チートマネージャーが利用できる必要があります（CheatManagerEnabler モッド）。無い場合は
-  警告をログに出して `false` を返すだけで、パックの他の部分はそのまま動きます。
-- `Item.Handle:give` にチートマネージャーは不要です。インベントリ自身の
+- パルを呼ぶ処理は、ゲーム自身の管理用オブジェクト `UPalCheatManager` を通ります。PalForge
+  はそれを探し、無ければプレイヤーコントローラー上に自分で作るので、ワールドに入ってさえ
+  いれば動きます。コントローラーがまだ無い場合は警告をログに出して `false` を返すだけで、
+  パックの他の部分はそのまま動きます。
+- アイテムを配るのにそれは不要です。`Item.Handle:give` はインベントリー自身の
   `AddItem_ServerInternal` を通ります。
 
 <Callout type="info">
-Lua だけで新しい DataTable の行を追加することはできません。`Building{ id = "Altar" }` は
-**既存の**構造物に振る舞いとメタデータを与えるものであり、新しいビルドオブジェクト・
-アイテム・生物の行を publish するのは PalSchema の仕事です。そのため以下のパックは実在の
-ゲーム内 id を使います。自分の行に切り替えるときに変わるのは 1 行だけで、それは「応用」の
-セクションで示します。
+以下のビーコンは、ゲームにすでにある構造物・アイテム・生物を受け持ちます。Lua は既存の id に
+動きとメタデータを足せますが、ゲームのデータテーブルに新しい行そのものを追加することは
+できません。新しいビルドオブジェクト・アイテム・生物の行を publish するのは PalSchema の
+仕事です。自分の行ができたときに変わるのは 1 行だけで、それは「応用」の
+[自分の id に移行する](#自分の-id-に移行する)で示します。
 </Callout>
 
 ## パックの構成
@@ -57,11 +65,11 @@ ue4ss/Mods/BeaconPack/
             buildings.lua    <- the beacon itself
 ```
 
-モッドフォルダーを有効化するのがフォルダー内の `enabled.txt` なのか `mods.txt` の記述なのか
-は UE4SS 側の話で、PalForge は関知しません。ここで重要なのはその下の形、つまり 1 ドメイン
-1 ファイルと、それらを require する `init.lua` です。
+モッドフォルダーの有効化は、お使いの UE4SS の流儀で行ってください。フォルダー内の
+`enabled.txt` でも、`mods.txt` への 1 行でも構いません。大事なのはその下の形、つまり
+コンテンツの種類ごとに 1 ファイルと、それらを require する `init.lua` です。
 
-PalForge の `main.lua` は最後に自分自身を公開します。
+PalForge は読み込みの最後に、自分自身を `_G.PalForge` というグローバルに置きます。
 
 ```lua
 _G.PalForge = {
@@ -73,9 +81,9 @@ _G.PalForge = {
 }
 ```
 
-パックはこのテーブルを読みます。2 つのモッドのあいだの契約はこれがすべてです。`api` が
-コンテンツを書く相手、`utils.log` がロガー、`core.event` がバス、`native` が Palworld 自身の
-コンテンツをカタログにしたものです。
+パックはこのテーブルを読みます。PalForge から必要なものはこれがすべてです。`api` が
+コンテンツを書く相手、`utils.log` がゲームのコンソールに出すロガー、`core.event` が
+イベントバス、`native` が Palworld 自身のコンテンツを id ごとに並べたカタログです。
 
 ```mermaid
 flowchart TD
@@ -96,9 +104,8 @@ flowchart TD
   J --> K
 ```
 
-登録という別の手順はありません。`X{ ... }` の呼び出しが実行された時点で定義が
-`object_manager` に書き込まれるので、**モジュールを require することがコンテンツの登録**
-そのものです。
+モジュールを require すれば、その中身は登録されます。`X{ ... }` の呼び出しはファイルの
+読み込み中に実行され、定義を PalForge に書き込むので、**require そのものが登録**です。
 
 ## パックを作る
 
@@ -108,8 +115,8 @@ flowchart TD
 
 ### モッドフォルダーを作る
 
-`ue4ss/Mods/BeaconPack/Scripts/beacon/` を作り、UE4SS の流儀でモッドを有効化します。他に
-必要なものはありません。パックにマニフェストもディスクリプターもビルド手順もありません。
+`ue4ss/Mods/BeaconPack/Scripts/beacon/` を作り、UE4SS の流儀でモッドを有効化します。準備は
+これだけです。生成するものもビルドするものもありません。
 
 </Step>
 
@@ -117,9 +124,10 @@ flowchart TD
 
 ### エントリーポイントを書く
 
-`main.lua` がするのは 3 つだけです。自分の `Scripts` ディレクトリーを `package.path` に
-足すこと、PalForge が存在するか確かめること、パックを require することです。中身は薄く
-保ちます。コンテンツはモジュール側の仕事です。
+`main.lua` がするのは 3 つです。`require("beacon.audio")` が自分のファイルを見つけられる
+ように `Scripts` ディレクトリーを `package.path` に足すこと、PalForge が読み込まれているか
+確かめること、パックを require することです。中身は短く保ちます。コンテンツはモジュール側の
+仕事です。
 
 ```lua title="ue4ss/Mods/BeaconPack/Scripts/main.lua"
 -- BeaconPack — a PalForge content pack, running as its own UE4SS Lua mod.
@@ -150,15 +158,15 @@ else
 end
 ```
 
-`forge.utils.log.scope("beacon")` は `info` / `warn` / `err` を持つテーブルを返し、それぞれ
-メッセージを **1 つ**受け取ります。出力される行はすべて `[PalForge.beacon]` とログレベル
-（`[PalForge.beacon][info]`、`[PalForge.beacon][warn]`、`[PalForge.beacon][err]`）で始まる
-ので、フレームワーク本体と同じやり方でパックのログを絞り込めます。
+`forge.utils.log.scope("beacon")` は `info` / `warn` / `err` を持つロガーを返します。
+それぞれメッセージを 1 つ受け取ります。出力される行はすべて `[PalForge.beacon]` と
+ログレベル（`[PalForge.beacon][info]`、`[PalForge.beacon][warn]`、`[PalForge.beacon][err]`）
+で始まるので、PalForge 本体と同じやり方でパックのログを絞り込めます。
 
 <Callout type="warn">
-`_G.PalForge` は PalForge が動いている Lua ステートのグローバルです。これを読むパックは、
-同じステートに、かつ PalForge より後に読み込まれる必要があります。上のガードがエラーに
-せずそのまま抜けるのはそのためです。ガードが発動する場合は、2 つのモッドフォルダーの
+`_G.PalForge` は PalForge が読み込まれたあとにだけ、しかも同じ Lua ステートの中にだけ
+存在します。パックはその同じステートに、PalForge より後に読み込まれる必要があります。上の
+ガードはエラーにせず静かに抜けるので、このメッセージが出たら 2 つのモッドフォルダーの
 読み込み順を確認してください。
 </Callout>
 
@@ -168,7 +176,7 @@ end
 
 ### パックのインデックスを書く
 
-1 ドメインにつき 1 つの require を、依存順に並べます。スキルは効果音・エフェクト・守護パルを
+コンテンツの種類ごとに 1 つの require を、依存順に並べます。スキルは効果音・強化・守護パルを
 使い、建築はスキルと報酬アイテムを使います。
 
 ```lua title="Scripts/beacon/init.lua"
@@ -193,9 +201,9 @@ return M
 
 ### 効果音を宣言する
 
-`Audio` にライフサイクルはありません。鳴らすものです。定義では Wwise の `AkAudioEvent` を
-2 通りで指定します。実際に再生されるのは `soundPath`、`soundId` は SoundID 経由の
-フォールバックです。
+音は鳴らしたいときに自分で鳴らします。勝手に鳴るものではありません。定義では、ゲーム自身の
+サウンドイベント `AkAudioEvent` を 2 通りで指定します。実際に再生されるのはアセットパスの
+`soundPath`、`soundId` は名前で引くフォールバックです。
 
 ```lua title="Scripts/beacon/audio.lua"
 -- beacon.audio — the sounds this pack plays.
@@ -223,13 +231,14 @@ if not M.Reward then log.warn("AKE_CampLevelUp is not in the AkAudioEvent catalo
 return M
 ```
 
-`Audio.se` と `Audio.bgm` は `kind` を固定しただけの同じコンストラクターです。`kind` は説明
-用の値で、ネイティブの再生ルートは BGM も SE も同じ呼び出しです。
+`Audio.se` と `Audio.bgm` は `kind` を代わりに埋めてくれます。`kind` は自分のための目印で、
+BGM も効果音も再生の呼び出しは同じです。
 
 <Callout type="warn">
-このドメインには継ぎ目が 2 つあります。`Handle:setVolume` は未実装で `false` を返します。
-`soundFile`（独自の音声ファイル）は解決はされますが何もしません。確認できた `USoundWave`
-のローダーが無いためです。`Handle:stop` も音単位ではなく、そのアクターで再生中のものを
+このドメインには、まだ動かないものが 2 つあります。`Handle:setVolume` は `false` を返すだけで
+何も変わらないので、音量は最初から目的に近いサウンドイベントを選んで合わせてください。
+`soundFile`（独自の音声ファイル）は受け付けられますが何もしないので、カタログにある
+`AkAudioEvent` を使ってください。`Handle:stop` も音単位ではなく、そのアクターで再生中のものを
 すべて止めます。
 </Callout>
 
@@ -239,8 +248,8 @@ return M
 
 ### エフェクトを宣言する
 
-エフェクトのスケジュールは本物です。`:apply(target)` は実際の適用を開始し、PalForge が共有
-ハートビート（500 ms）で、期限切れか削除まで進行させます。
+エフェクトは自分のスケジュールを持ちます。`:apply(target)` が適用を開始し、PalForge が
+共有の 500 ms ハートビートで、期限切れか削除まで進めます。
 
 ```lua title="Scripts/beacon/effects.lua"
 -- beacon.effects — the blessing the beacon hands out.
@@ -276,7 +285,7 @@ M.Blessing = Effect{
             log.info(string.format("blessing tick at %.1fs", ctx.elapsed))
         end,
         onExpire = function(effect, target, ctx)
-            -- ctx.reason is "duration", "removed" or "target_gone".
+            -- ctx.reason is "duration", "removed", "target_gone" or "world_left".
             log.info("blessing ended: " .. tostring(ctx.reason))
         end,
     },
@@ -286,14 +295,15 @@ return M
 ```
 
 エフェクトのハンドラーの第 1 引数はこのエフェクトの**ハンドル**なので、`:remove` や
-`:timeLeft`、`:stacksOn` がそのまま使えます。`:apply(target, ctx)` に渡した context は
+`:timeLeft`、`:stacksOn` がそのまま使えます。`:apply(target, ctx)` に渡したものは
 `onApply` と `onStack` から読めます。`onTick` と `onExpire` が受け取るのはランタイム自身の
-context だけです（`effect`、`elapsed`、`stacks`、期限切れ時は `reason`）。
+context です（`effect`、`elapsed`、`stacks`、終了時は `reason`）。
 
 <Callout type="warn">
-PalForge のエフェクトはゲーム本来の状態異常アイコンを操作しません。`EPalStatusEffectType`
-はネイティブの enum で、それを適用する呼び出しは確認できていないため、`nativeStatus` は
-メタデータです。エフェクトが実際に「何をするか」はハンドラーに書く必要があります。
+PalForge のエフェクトは、ゲーム本来の状態異常アイコンを点けません。`EPalStatusEffectType`
+はゲーム内部の一覧で、それを適用する呼び出しは確認できていないため、`nativeStatus` は
+読み返せる目印であって、それ自体は何もしません。エフェクトが実際にすることは `onTick` に
+書いてください。
 </Callout>
 
 </Step>
@@ -302,9 +312,9 @@ PalForge のエフェクトはゲーム本来の状態異常アイコンを操�
 
 ### 守護パルを宣言する
 
-`"Kitsunebi"` は実在のゲーム内 CharacterID なので、この定義は既存の生物に振る舞いを与える
-ものです。mesh は宣言していません。パルは自前のモデルを持っており、`mesh` は別のモデルを
-着せたいときに使うものだからです。
+`"Kitsunebi"` はゲームにすでにある生物 id なので、この定義は既存の生物に動きを与えるもの
+です。`mesh` は省いてください。パルは自前のモデルを持っているので、`mesh` を書くのは別の
+モデルを着せたいときだけです。
 
 ```lua title="Scripts/beacon/pals.lua"
 -- beacon.pals — the guardian the beacon calls.
@@ -339,9 +349,15 @@ M.Guardian = Pal{
 return M
 ```
 
-ディスパッチはスポーンしたポーンのブループリントクラス名からこの定義を見つけます。
-`BP_Kitsunebi_C` から `Kitsunebi` を取り出し、レジストリーを引きます。PalForge の定義を
-持たないバニラのパルは解決されず、ディスパッチは何もしません。
+PalForge はスポーンした生物のブループリントクラス名からこの定義を見つけます。
+`BP_Kitsunebi_C` から `Kitsunebi` を取り出して引きます。自分の定義を持たないバニラのパルは
+どれにも一致せず、ハンドラーは呼ばれません。
+
+パルには `onTick` も書けます。PalForge が 3 秒ごとにワールド内の生きたパルを見て回り、
+1 体につき 1 回呼びます。`ctx.actor` がその個体、`ctx.count` がハートビート番号、`ctx.now`
+が時刻です。同じ id の個体すべてでハンドルは 1 つなので、個体ごとの値は `ctx.actor` を
+キーにして自分で持ってください。間隔は
+`require("palforge.core.event").PAL_SCAN_MS = 5000` で変えられ、`0` にすると止まります。
 
 </Step>
 
@@ -384,11 +400,11 @@ return M
 ```
 
 <Callout type="warn">
-`onObtain` を駆動しているのはゲーム自身の「アイテムを入手した」ログ
-（`PalPlayerState:AddItemGetLog_ToClient`）で、拾得・戦利品・報酬で発火します。入手ログに
-出ないインベントリー追加は対象外なので、自分で呼んだ `:give` が `onObtain` として返って
-くると仮定してはいけません。`onCraft` と `onDiscard` は宣言できますが、まだチャンネルに
-何も emit していません。
+`onObtain` が追いかけているのは、ゲーム自身の「アイテムを入手した」ログ
+（`PalPlayerState:AddItemGetLog_ToClient`）で、拾得・戦利品・報酬で発火します。この入手ログに
+出ないインベントリー追加は対象外なので、自分で呼んだ `:give` が `onObtain` として返ってくると
+思わないでください。記録したいなら `:give` を呼んだ場所で書きます。`onCraft` と `onDiscard` は
+書けますが、まだ何も送られてきません。
 </Callout>
 
 </Step>
@@ -397,8 +413,8 @@ return M
 
 ### シグナル（スキル）を宣言する
 
-スキルにはネイティブのソースがありません。ゲームが勝手に発動させることはありません。動くの
-は手動の呼び出しで、`:activate` は Lua 側でクールダウンを守ります。これはビーコンに必要な
+スキルのハンドラーをゲームが呼ぶことはありません。自分で呼びます。`:activate(owner)` は
+その場で `onActivate` を走らせ、クールダウン中なら断ります。この「断り」が、ビーコンに必要な
 ゲートそのものです。
 
 ```lua title="Scripts/beacon/skills.lua"
@@ -444,10 +460,10 @@ return M
 
 ### ビーコン本体を宣言する
 
-建築は、構造物ごとの実行時インスタンスを持つ唯一のドメインです。以下のハンドラーの `self`
-はその**ライブインスタンス**で、`self.actor` が設置されたアクター、`self.pos` がワールド
-座標、`self.state` が永続化されるテーブル、`self.key` が安定したレジストリーキー、
-`self:save()` が state をワールドファイルに書き出します。
+設置した構造物には、1 つずつ専用のライブオブジェクトが付きます。それが以下のハンドラーの
+`self` です。`self.actor` が設置されたアクター、`self.pos` がワールド座標、`self.state` が
+保存される自分用のテーブル、`self.key` がセーブ内での安定した名前、`self:save()` が state を
+ワールドファイルに書き出します。
 
 ```lua title="Scripts/beacon/buildings.lua"
 -- beacon.buildings — the structure the player interacts with.
@@ -526,8 +542,8 @@ return M
 
 見落としやすい点が 2 つあります。
 
-- `onTick` は、実際にそれを宣言した定義でだけ動きます。PalForge は何もしないベースクラスと
-  比較し、上書きされていないものは tick 対象に入れません。
+- `onTick` は、それを書いた定義でだけ動きます。`onTick` の無い建築は tick の対象リストにも
+  入りません。
 - `tickInterval` は秒ではなくハートビート数です。ハートビートは 500 ms なので、`4` は
   およそ 2 秒です。
 
@@ -549,7 +565,7 @@ UE4SS のコンソールに一部始終が出ます。
 [PalForge.beacon.buildings][info] beacon placed at 12345/-6789/420
 [PalForge.beacon.buildings][info] beacon tracked fresh: 0 use(s), 3 charge(s)
 [PalForge.beacon.effects][info] blessing applied by Altar@123,-68,4
-[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) @ (12345,-6789,420) via SpawnMonster+teleport
+[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) accepted; relocation to (12345,-6789,420) scheduled (SpawnMonster+teleport)
 [PalForge.beacon.skills][info] flare fired from Altar@123,-68,4
 [PalForge.items][info] give Ruby x3
 [PalForge.beacon.effects][info] blessing tick at 3.0s
@@ -565,11 +581,11 @@ UE4SS のコンソールに一部始終が出ます。
 
 ## 実行時に起きること
 
-ビーコンの設置はひとつのイベントではありません。アクターが存在するより前に
-`RequestBuild_ToServer` のフックが設置の意図を記録し、同じ 500 ms のハートビートで走る
-スキャンが後から本物のアクターを見つけ、インスタンスを作り、永続化し、宣言された mesh を
-*その次の*パスで取り付けます。設置されたフレームで取り付けるとゲームがクラッシュするため
-です。
+ビーコンの設置は 1 つのイベントではありません。ゲームはアクターが存在する前に
+`RequestBuild_ToServer` のフックで設置を知らせ、同じ 500 ms のハートビートで走るスキャンが
+後から本物のアクターを見つけ、ライブオブジェクトを作り、保存し、宣言された mesh を*その次の*
+パスで取り付けます。設置されたフレームで取り付けるとゲームがクラッシュするため、mesh は
+待たされます。
 
 ```mermaid
 sequenceDiagram
@@ -583,13 +599,13 @@ sequenceDiagram
   S->>I: attach the mesh on a later pass
 ```
 
-設置された構造物に固有の id は無いため、インスタンスはビルド id と量子化されたセルで
-キー付けされます。`gridCm = 100` のビーコンなら `Altar@123,-68,4` です。これが `self.key`
-で、保存レコードもこのキーで格納されます。
+設置された構造物には固有の id が無いため、PalForge はビルド id と丸めた座標で名前を付けます。
+`gridCm = 100` のビーコンなら `Altar@123,-68,4` です。これが `self.key` で、保存レコードも
+この名前で格納されます。
 
-インタラクトは短い経路です。`OnBeginInteractBuilding` のフックが 1 秒間の連打を抑制して
-`building.interact` を emit し、ディスパッチがアクターからライブインスタンスを解決して
-その `onRightClick` を呼びます。
+インタラクトは短い経路です。`OnBeginInteractBuilding` のフックが 1 秒以内の連打を無視して
+`building.interact` を送り、PalForge がアクターからライブオブジェクトを見つけて、その
+`onRightClick` を呼びます。
 
 ```mermaid
 flowchart LR
@@ -604,63 +620,70 @@ flowchart LR
   D --> J["instance save"]
 ```
 
-ビーコンの残りの一生も、同じハートビートとワールドゲートの上で動きます。
+ビーコンの残りの一生も、同じハートビートと同じワールドゲートの上で動きます。
 
 - **ワールド準備完了。** 1 秒ごとのポーリングで有効な `PalPlayerCharacter` を 5 回連続で
-  見つけるとワールドが ready になり、`world.ready` が emit され、すべてのライブインスタンスの
-  `onWorldReady` が呼ばれます。それまで建築スキャンは何もしません。これがロード直後の嵐から
-  距離を取る仕組みであり、同時にこの時点ではインスタンスがまだ 1 つも無い理由でもあります。
-  つまり `onWorldReady` を受け取るものはありません。
-- **Tick。** `LoopAsync(500)` が `tick` を emit します。`onTick` を宣言したクラスのライブ
-  インスタンスが、それぞれの `tickInterval` に従って呼ばれます。ハンドラーが 5 回失敗すると
-  そのインスタンスの `onTick` は無効化され、警告がログに出ます。他のインスタンスは動き続け
-  ます。
-- **削除。** スキャンで 6 回連続して見つからなかったインスタンスは `building.remove` を
-  emit してから（つまり `onRemove` はまだインスタンスを見られます）破棄され、保存レコードも
-  消えます。
-- **ワールド退出。** プレイヤーポーンが無効になると `world.left` が emit され、すべての
-  ライブインスタンスの `onWorldLeft` が走り、ワールドファイルがフラッシュされ、ライブ
-  インスタンスは破棄されます。保存レコードは残り、次回それを `onLoad` が復元します。
+  見つけるとゲートが開き、その後に最初に終わったスキャンが `world.ready` を送って、生きて
+  いる構造物すべての `onWorldReady` を呼びます。ゲートが開くまで建築スキャンは何もしません。
+  これがロード直後の嵐から距離を取る仕組みです。
+- **Tick。** `LoopAsync(500)` が `tick` を送ります。`onTick` を書いた定義の生きている構造物
+  が、それぞれの `tickInterval` に従って呼ばれます。ハンドラーが 5 回失敗するとその構造物の
+  `onTick` は止められ、警告がログに出ます。他は動き続けます。
+- **削除。** スキャンで 6 回連続して見つからなかった構造物は `building.remove` を送って
+  （つまり `onRemove` はまだそれを見られます）破棄され、保存レコードも消えます。
+- **ワールド退出。** プレイヤーポーンが無効になると `world.left` が送られ、生きている構造物
+  すべての `onWorldLeft` が走り、ワールドファイルが書き出され、ライブオブジェクトは破棄され
+  ます。保存レコードは残り、次回それを `onLoad` が復元します。
 
-state の永続化には入口が 2 つあります。`self:save()` はインスタンスを dirty にして、今すぐ
-ワールドファイルを書きます。`self:setDirty()` は印を付けるだけで、1 秒に 2 回走るような
-ハンドラーではこちらが適切です。書き込みは次の `save()` かワールド退出時に行われます。
+state の保存には 2 つのやり方があります。`self:save()` は変更ありの印を付けて、今すぐワールド
+ファイルを書きます。`self:setDirty()` は印を付けるだけで、1 秒に 2 回走るようなハンドラーでは
+こちらが適切です。書き込みは次の `save()` かワールド退出時に行われます。
 
-起動後に登録された定義も問題ありません。建築ランタイムはスキャンのたびに、そして設置意図を
+起動後に登録された定義も問題ありません。建築ランタイムはスキャンのたびに、そして設置を
 記録する前に定義を読み直すので、PalForge の数分後に読み込まれたパックの構造物もきちんと
 追跡されます。
 
-## ゲームが駆動するもの、自分で駆動するもの
+## ゲームが動かすもの、自分で動かすもの
 
-フックを前提に設計する前に、ここは正直に把握しておいてください。
+ハンドラーを前提に設計する前に、ここを確認してください。
 
-| ドメイン | 自動で発火するもの | 自分で呼ぶもの |
+| ドメイン | ゲームが呼ぶもの | 自分で呼ぶもの |
 | --- | --- | --- |
-| Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
-| Pal | `onCaptured`, `onDamaged`, `onDeath`, `onSpawned` | `:spawn()`, `:renderOn(actor)` |
-| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()` |
-| Effect | `onApply`, `onTick`, `onStack`, `onExpire`（PalForge 自身のスケジュール） | `:apply()`, `:remove()`, `:isActive()`, `:timeLeft()` |
+| Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
+| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`, `:renderOn(actor)`, `:skillsOf()` |
+| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()`, `:recipeOf()` |
+| Effect | `onApply`, `onTick`, `onStack`, `onExpire`（PalForge 自身のスケジュール） | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
 | Skill | なし | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()` |
 | Audio | なし | `:play()`, `:stop()` |
 
-宣言はできるものの、チャンネルに emit するネイティブソースがまだ無く発火しないもの:
-`Building.onBuild` / `onLeftClick` / `onBreak`、`Pal.onTick`、`Item.onCraft` / `onDiscard`。
-将来ソースが見つかったときにパックを書き換えずに済むよう、宣言だけは通ります。
+書けるけれどまだ動かないハンドラーが 4 つあります。ゲーム側に知らせる仕組みが無いためです。
+`Building.onLeftClick`、`Building.onBreak`、`Item.onCraft`、`Item.onDiscard` です。構造物には
+`onRightClick` と `onRemove` を、アイテムには `onObtain` と `onUse` を使ってください。将来
+ソースが見つかったときにパックを書き換えずに済むよう、宣言だけは通ります。
 
-`Building.onWorldReady` はまた別のケースです。`world.ready` は emit され dispatch もされ
-ますが、インスタンスを作るスキャンが同じフラグでゲートされていてまだ走っていないため、
-dispatch は空の集合をたどります。処理は `onLoad` に置いてください。セーブから戻ってきた
-ことは `ctx.reconstructed` で分かります。`event.on("world.ready", fn)` でチャンネルを直接
-購読するのでも構いません。
+`Building.onBuild` は建築が完了したときに走ります。ライブオブジェクトができるまで最大で
+スキャン 1 回ぶんの時間があるので、`self` がライブオブジェクトではなく定義になる唯一の建築
+ハンドラーです。`self.actor`、`self.pos`、`self.state`、`self:save()` はありません。あるのは
+`ctx.buildId` と `ctx.model` です。同じ合図はセーブを開いたときに既存の構造物すべてでも
+発火するため、PalForge はワールドの読み込みが終わってから聞き始めます。設置の処理は
+`onPlace` が安全です。`onBuild` はまず捨ててよいワールドで試してください。
+
+`Building.onWorldReady` は、構造物ごとではなくワールドロード時の 1 回だけの合図です。
+`world.ready` はワールドが開いたあと最初に終わったスキャンが送るので、プレイヤーの近くの
+構造物はすでに追跡されていて受け取れますが、後のスキャンで出てくるものは受け取れません。
+構造物ごとの初期化は `onLoad` に置いてください。セーブから戻ってきたことは
+`ctx.reconstructed` で分かります。`event.on("world.ready", fn)` でチャンネルを直接購読する
+のでも構いません。
 
 `Pal.onSpawned` は `BroadcastOnCompleteInitializeParameter` に接続されていますが、これは
-確定したフックではなく候補です。ベストエフォートとして扱ってください。
+確定したフックではなく候補で、PalForge もワールドの読み込み後にだけ有効にします。ベスト
+エフォートとして扱い、2 回走っても平気なハンドラーにしてください。
 
 ## 応用
 
 ### ビーコンに専用の mesh を持たせる
 
-mesh は独立したドメインなので、一度宣言すれば複数の定義から着せられます。モジュールを
+mesh もひとつのコンテンツなので、一度宣言すれば複数の定義から着せられます。モジュールを
 追加します。
 
 ```lua title="Scripts/beacon/meshes.lua"
@@ -684,9 +707,9 @@ return M
 
 そのうえで `beacon/buildings.lua` の先頭で require し
 （`local meshes = require("beacon.meshes")`）、定義の `mesh` にハンドルを渡します
-（`gridCm` の隣に `mesh = meshes.Beacon,`）。定義済みの mesh をそのまま入れ子にできるのは、
-そのメタテーブルがバリデーターの読む宣言を持っているからです。`mesh = meshes.Beacon` と
-インラインの `mesh = { kind = "static", model = "..." }` はまったく同じ検証を通ります。
+（`gridCm` の隣に `mesh = meshes.Beacon,`）。ハンドルを渡しても、その場に直接書いても
+構いません。`mesh = meshes.Beacon` と `mesh = { kind = "static", model = "..." }` は
+まったく同じように検証されます。
 
 mesh が取り付けられていれば、`self.color` と `self:update()` でハンドラーから色を塗り直せ
 ます。
@@ -700,17 +723,17 @@ onTick = function(self, ctx)
 end,
 ```
 
-`update()` は PalForge が取り付けた mesh が無いアクターでは安全に何もしないので、mesh を
+`update()` は PalForge が取り付けた mesh の無いアクターでは安全に何もしないので、mesh を
 持たない定義で色を変えても失敗はせず、単に何も起きません。
 
 ### 自分の id に移行する
 
-名前空間付きの id `"beacon:Beacon"` は DataTable の行名 `beacon_Beacon` に解決されます。
+コロンを含む id `"beacon:Beacon"` は、データテーブルの行名 `beacon_Beacon` になります。
 PalSchema がその行を publish したら、パックの変更は 1 か所だけです。
 
 ```lua
 M.Beacon = Building{
-    id   = "beacon:Beacon",           -- was "Altar"
+    id   = "beacon:Beacon",           -- your own row instead of "Altar"
     name = "Signal Beacon",
     -- ... everything else identical
 }
@@ -724,13 +747,13 @@ MOD で追加した建築のテクノロジーは、解決後の id と同じ名
 _G.PalForge.api.Building.get("beacon:Beacon"):unlock()
 ```
 
-この呼び出しは `PalCheatManager` を通るので、そのセッションでチートマネージャーが使える
-必要があります。
+この呼び出しは `PalCheatManager` がすでにセッションに存在している必要があるので、
+CheatManagerEnabler モッドを入れておいてください。
 
 ### デバッグ用モジュールを足す
 
-イベントバスは公開されているので、診断用モジュールは数行で書けます。購読のコストは無く、
-すべてのチャンネルは emit より前に生成済みなので、購読が先でも取りこぼしません。
+イベントバスは自由に使えるので、診断用モジュールは数行で書けます。購読のコストは無く、
+すべてのチャンネルは何かが送られる前に用意されているので、先に購読しても取りこぼしません。
 
 ```lua title="Scripts/beacon/debug.lua"
 -- beacon.debug — diagnostics for the pack. Require it from init.lua while developing.
@@ -764,13 +787,14 @@ end)
 return M
 ```
 
-`event.every(ms, fn)` は 500 ms のハートビートに量子化されます。購読はどれも
+`event.every(ms, fn)` は 500 ms のハートビートに丸められます。購読はどれも
 `:unsubscribe()` を持つオブジェクトを返します。
 
 ## 動かないとき
 
-**定義の呼び出しがエラーになる。** 検証は厳格で、問題はすべてハードエラーです。呼び出しが
-中途半端に成功することはありません。フィールド名のタイプミス:
+**定義の呼び出しがエラーになる。** 問題はすべてハードエラーなので、呼び出しが中途半端に
+成功することはありません。メッセージを読んでください。たいていそこに答えが全部あります。
+フィールド名のタイプミス:
 
 ```text
 PalForge: Building: unknown field "tickinterval" (did you mean "tickInterval"?). Valid fields: id, name, description, gridCm, buildIds, tickInterval, mesh, material, color, texture, icon, state, events, data
@@ -783,7 +807,7 @@ PalForge: Building: unknown field "tickinterval" (did you mean "tickInterval"?).
 PalForge: Building: field "events" (Building.Spec.Events): unknown field "onRightclick" (did you mean "onRightClick"?). Valid fields: onPlace, onLoad, onRightClick, onRemove, onTick, onWorldReady, onWorldLeft, onBuild, onLeftClick, onBreak
 ```
 
-必須フィールドの欠落。そのフィールド自身のドキュメントが説明として付きます:
+必須フィールドの欠落。そのフィールド自身の説明が付きます:
 
 ```text
 PalForge: Building: field "id" is required (build id: a game BuildObjectId ("PalBoxV2") or "pack:name")
@@ -797,61 +821,81 @@ print(schema.help("Building.Spec"))        -- every field, type, default and mea
 print(schema.help("Building.Spec.Events"))
 ```
 
-**調べても何も起きない。** まず `[PalForge.event][info] world ready` を確認します。建築
-ランタイムはこれで開きます。次にインスタンスの存在を確認します:
+**調べても何も起きない。** まず `[PalForge.event][info] world ready` を探します。建築ランタイム
+はこれを待っています。次に構造物が追跡されているか確認します:
 `#Building.get("Altar"):instances()`。空のリストなら、スキャンがアクターと定義を結び付けら
-れていません。たいていは `Building{ id = ... }` の id が、そのゲーム内構造物の id と違う
-のが原因です。
+れていません。たいていは `Building{ id = ... }` の id が、そのゲーム内構造物の id と違うのが
+原因です。
 
-**パルが出てこない。** チートマネージャーが無い場合、座標指定のスポーンは
-`spawn.palAt: no PalCheatManager (CheatManagerEnabler mod missing this session?)` をログに
-出して `false` を返します。`at` を渡さない `:spawn()` は同じ内容を `spawn.pal:` として出します。
+**パルが出てこない。** 座標指定のスポーンにはセッション内にプレイヤーコントローラーが必要
+です。無い場合は
+`spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`
+をログに出して `false` を返します。`at` を渡さない `:spawn()` は同じ内容を `spawn.pal:` と
+して出します。`true` はスポーンが受け付けられ、指定座標への移動が予約されたという意味で、
+パルがそこに立っている保証ではありません。その先はログに出ます。
 
 **スキルが 2 回目から発動しない。** `cooldown` が働いています。`:activate` はクールダウン中
-に `false` を返します。passive のスキル、そしてハンドラー自身が例外を投げた場合も `false`
-です。
+に `false` を返します。`kind` が `"passive"` のスキル、そしてハンドラー自身が例外を投げた
+場合も `false` です。
 
 **エフェクトは tick しているのに何も変わらない。** エフェクトが回すのは自分のスケジュール
 であって、ゲームの状態異常システムではありません。実際の効果は `onTick` に書きます。
 
-**同じ id の定義が 2 つある。** 同じ `(type, id)` に登録すると先のクラスが置き換わるので、
-最後に走った定義が勝ちます。定義はロード時に行い、ハンドラーの中では再定義せず
-`X.get(id)` を使ってください。
+**同じ id の定義が 2 つある。** 同じ種類のコンテンツで同じ id を 2 回登録すると先のものが
+置き換わるので、最後に走った定義が勝ちます。定義はロード時に行い、ハンドラーの中では
+再定義せず `X.get(id)` を使ってください。
 
 ## 次に読むもの
 
 <Cards>
   <Card title="Building" href="/docs/api/building">
-    インスタンス、state、スキャン、そして定義の全フィールド。
+    ライブオブジェクト、state、スキャン、そして定義の全フィールド。
   </Card>
   <Card title="Lifecycle" href="/docs/concepts/lifecycle">
     チャンネル・ソース・ディスパッチを端から端まで。
   </Card>
   <Card title="Skill" href="/docs/api/skill">
-    手動の発動、クールダウン、そして欠けているネイティブソース。
+    自分でスキルを発動する方法と、クールダウンの持ち方。
   </Card>
   <Card title="Effect" href="/docs/api/effect">
     duration・interval・スタックと、ハートビートごとの処理。
   </Card>
   <Card title="Pal" href="/docs/api/pal">
-    スポーン、mesh、そしてどのフックが動くか。
+    スポーン、mesh、そしてパルのハンドラー全部。
   </Card>
   <Card title="Item" href="/docs/api/item">
     give と take、レシピ、動く 2 つのイベント。
   </Card>
   <Card title="Audio" href="/docs/api/audio">
-    ネイティブの再生ルート、カタログ、そして継ぎ目。
+    音が鳴るまでの道筋、カタログ、そして足りないもの。
   </Card>
   <Card title="Mesh" href="/docs/api/mesh">
     名前付きのビジュアル、バックエンド、マテリアル上書き。
   </Card>
   <Card title="Definitions" href="/docs/concepts/definitions">
-    なぜ全ドメインが同じ 3 つの入口を持つ呼び出し可能モジュールなのか。
+    どのコンテンツにも共通する 3 つの入口。
   </Card>
   <Card title="Schema" href="/docs/concepts/schema">
-    spec の宣言・検証・読み出し。
+    フィールドの形の宣言・検証・読み出し。
   </Card>
   <Card title="Editor setup" href="/docs/concepts/editor-setup">
     spec から生成される、全フィールドの補完。
   </Card>
 </Cards>
+
+## まとめ
+
+- パックは `Scripts/main.lua` を持つ独立したモッドフォルダーです。`_G.PalForge` を読み、
+  自分のモジュールを require すると、その中の `X{ ... }` が読み込み時にコンテンツを登録します。
+- どのコンテンツでも必須フィールドは `id` だけです。コロンを含む id（`"beacon:Flare"`）は
+  自分のもの、含まない id（`"Altar"`、`"Ruby"`、`"Kitsunebi"`）はゲームにすでにあるものです。
+- 専用のライブオブジェクトを持つのは、設置した建築だけです。`self.state` が自分のテーブルで、
+  `self:save()` でワールドファイルに書けば次のセッションにも残ります。
+- 建築・パル・アイテムのハンドラーはゲームが呼びます。スキルと音は自分で鳴らし、エフェクトは
+  PalForge のスケジュールで動きます。
+- `tickInterval` は秒ではなく 500 ms のハートビート数です。
+- 定義が間違っていると、フィールド名と正しい候補を示すメッセージで呼び出しが止まります。同じ
+  一覧は `schema.help("Building.Spec")` で実行時にも読めます。
+
+次は [Building](/docs/api/building) を読むと、構造物に書ける全フィールドと、ライブオブジェクト
+でできることが分かります。

@@ -195,8 +195,11 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 -- ---- actions (the working entry points — see the header on why these are manual) ----
 
----Fire this skill for `owner` NOW, unless it is still cooling down. Returns false if the
----cooldown blocked it (or the skill is passive), true if the handler ran.
+---Fire this skill for `owner` NOW, unless it is still cooling down. Returns false when the
+---skill is passive (nothing is touched, not even the cooldown), false when the cooldown
+---blocked it, and otherwise true — the handler ran to completion. A handler that RAISES is
+---swallowed here (fail-soft) and reported as false too, with the cooldown already stamped:
+---the clock is stamped before the handler runs, so a raising handler still consumed it.
 ---@param owner any?   # the Pal / character using the skill
 ---@param ctx   table? # extra context handed to onActivate
 ---@return boolean fired
@@ -209,28 +212,35 @@ function Handle:activate(owner, ctx)
     return ok
 end
 
----Report a hit on `target` (runs onHit).
+---Report a hit on `target`: runs onHit. Ignores the cooldown and `kind`.
 ---@param target any
 ---@param ctx table?
----@return boolean ok
+---@return boolean ok  # false only when the handler raised
 function Handle:hit(target, ctx)
-    return pcall(function() self._cls:onHit(target, ctx or {}) end)
+    local ok = pcall(function() self._cls:onHit(target, ctx or {}) end)
+    return ok
 end
 
----Attach this (passive) skill to `owner` — runs onEquip.
+---Run this skill's onEquip handler for `owner` — the "a passive was attached" moment.
+---Nothing is attached FOR you: PalForge keeps no equipped set and the game is never told,
+---so whatever "equipped" means is what your handler does. Ignores the cooldown and `kind`.
 ---@param owner any
 ---@param ctx table?
----@return boolean ok
+---@return boolean ok  # false only when the handler raised
 function Handle:equip(owner, ctx)
-    return pcall(function() self._cls:onEquip(owner, ctx or {}) end)
+    local ok = pcall(function() self._cls:onEquip(owner, ctx or {}) end)
+    return ok
 end
 
----Remove this (passive) skill from `owner` — runs onUnequip.
+---Run this skill's onUnequip handler for `owner` — the counterpart of :equip. Nothing is
+---detached FOR you (nothing was attached); undo in the handler what :equip's did. Ignores
+---the cooldown and `kind`.
 ---@param owner any
 ---@param ctx table?
----@return boolean ok
+---@return boolean ok  # false only when the handler raised
 function Handle:unequip(owner, ctx)
-    return pcall(function() self._cls:onUnequip(owner, ctx or {}) end)
+    local ok = pcall(function() self._cls:onUnequip(owner, ctx or {}) end)
+    return ok
 end
 
 ---Seconds until this skill is ready again for `owner` (0 when ready).

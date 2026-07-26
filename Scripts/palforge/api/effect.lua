@@ -8,7 +8,10 @@
 -- ("effect", id). The TIMING — duration, periodic interval, stacking, expiry — is owned
 -- HERE, driven off core/event's "tick" channel (the shared ~500 ms heartbeat). That makes
 -- this a REAL runtime, not a seam: :apply(target) starts a live application and the
--- handlers fire on schedule until it expires or is removed.
+-- handlers fire on schedule until it expires or is removed. The runtime also listens on
+-- "world.left" and releases everything it is holding when the world unloads, so no
+-- application survives a world reload (reason "world_left"); it is not persisted, so
+-- nothing is re-applied on the next world.
 --
 -- What is NOT wired: the game's own ailments (EPalStatusEffectType — Poison / Burn /
 -- Freeze) are a native enum, and no native call to apply one was confirmed, so a PalForge
@@ -95,7 +98,8 @@ function Class:onExpire(target, ctx) end
 function Class:iconOf() return self.icon end
 
 --=============================================================================
--- RUNTIME — the live applications, advanced by core/event's "tick" channel.
+-- RUNTIME — the live applications, advanced by core/event's "tick" channel and released
+-- wholesale on its "world.left" channel.
 -- apps: target -> { [effectId] = app }. Weak-keyed: an application must never keep a
 -- pawn alive, and a target that is garbage-collected takes its applications with it.
 --=============================================================================
@@ -116,7 +120,8 @@ local function targetAlive(target)
     return ok and valid ~= false
 end
 
--- End one application: fire onExpire and drop it from the table.
+-- End one application: fire onExpire and drop it from the table. `reason` is one of
+-- "duration" / "removed" / "target_gone" / "world_left" and reaches the handler as ctx.reason.
 local function expire(byId, id, app, reason)
     byId[id] = nil
     pcall(function()
@@ -127,7 +132,7 @@ end
 
 -- One heartbeat: advance every live application (periodic tick, then expiry).
 local function step()
-    for _, byId in pairs(apps) do
+    for key, byId in pairs(apps) do
         for id, app in pairs(byId) do
             if not targetAlive(app.target) then
                 expire(byId, id, app, "target_gone")
@@ -150,18 +155,37 @@ local function step()
                 end
             end
         end
+        -- an emptied bucket would otherwise sit in `apps` until its target is collected
+        -- (and for ever, for GLOBAL and plain-table keys), so drop it here.
+        if next(byId) == nil then apps[key] = nil end
     end
 end
 
--- Subscribe to the heartbeat on FIRST use, so requiring this module costs nothing and
--- no tick subscriber exists until a pack actually applies an effect. Lazy-requires
--- core.event (which requires api.building) to keep module load order free of cycles.
+-- Release EVERY live application. The world is going away, so nothing that was applied
+-- inside it can still be running — this is the effect-side counterpart of core/event's
+-- dropAllInstances, which drops live building instances on the same signal. The reason is
+-- its OWN value, "world_left", so a handler can tell a world unload apart from a duration
+-- expiry, a :remove() or a despawned target.
+local function dropAll()
+    for key, byId in pairs(apps) do
+        for id, app in pairs(byId) do expire(byId, id, app, "world_left") end
+        -- same prune as step(); only when it really emptied, so an onExpire handler that
+        -- re-applies something during the teardown does not lose it.
+        if next(byId) == nil then apps[key] = nil end
+    end
+end
+
+-- Subscribe to the heartbeat AND to the world-unload signal on FIRST use, so requiring
+-- this module costs nothing and no subscriber exists until a pack actually applies an
+-- effect. Lazy-requires core.event (which requires api.building) to keep module load
+-- order free of cycles.
 local function ensureDriver()
     if driverInstalled then return true end
     local ok = pcall(function()
         local event = require("palforge.core.event")
         DT = (tonumber(event.TICK_MS) or 500) / 1000
         event.on("tick", step)
+        event.on("world.left", dropAll)
     end)
     driverInstalled = ok
     return ok

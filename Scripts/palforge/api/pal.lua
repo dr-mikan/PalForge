@@ -9,19 +9,56 @@
 -- HOW IT INTEGRATES: Pal{ ... } registers the definition class in object_manager under
 -- ("pal", id). core/event resolves a spawned pal's class by its BP class name
 -- (BP_<Id>_C -> id -> object_manager.get) and calls cls:onXxx(ctx) with the class as
--- self — so a definition's lifecycle handlers just work.
+-- self — so a definition's lifecycle handlers just work. The same one resolver serves both
+-- halves of the 導線: the four native hooks below and the onTick sweep.
 --
---   WIRED (live, confirmed native hooks — see core/event installPalSource):
+--   WIRED (live — see core/event installPalSource):
 --     onCaptured <- PalCharacterParameterComponent:SetIsCapturedProcessing(true)
---     onDamaged  <- PalCharacter:OnDamageReaction
---     onDeath    <- PalCharacter:OnDeadCharacter
---     onSpawned  <- PalCharacter:BroadcastOnCompleteInitializeParameter (UNCONFIRMED candidate)
---   NOT WIRED: onTick — no per-pal instance tracking exists (pals have no scan the way
---     buildings do), so nothing drives a periodic pal hook. Declarable, never fires.
+--                   (ctx.actor = the pal, ctx.comp = its parameter component)
+--     onDamaged  <- PalCharacter:OnDamageReaction        (ctx.actor)
+--     onDeath    <- PalCharacter:OnDeadCharacter         (ctx.actor)
+--     onSpawned  <- PalCharacter:BroadcastOnCompleteInitializeParameter (ctx.actor).
+--                   Still an UNCONFIRMED candidate, and now ARMED LATE: core/event
+--                   registers it on world.ready, never at mod load, because it fires for
+--                   every pal in the world-load init storm and doing that once wedged the
+--                   shared UE4SS hook dispatch — which would take the three confirmed hooks
+--                   down with it. Late arming protects them; it does not make the hook
+--                   proven. It is still unshown that it signals a FRESH spawn rather than a
+--                   re-init, so keep the handler idempotent.
+--     onTick     <- core/event's pal sweep. There is NO native hook behind this one; the
+--                   sweep is the source, and it is described in full below.
+--   NOT WIRED: nothing. All five declared events have a source.
 --
--- ACTIONS are real: :spawn goes through UPalCheatManager (server-verified), coordinate
--- placement included. Note that defining gives an EXISTING CharacterID behaviour — Lua
--- cannot add a brand-new creature row (that is PalSchema's job).
+-- THE onTick SWEEP — what it is and what it costs, because it is the one hook driven by
+-- polling rather than by the game. Pals have no per-instance tracking (dispatch resolves a
+-- CLASS, not an object), so nothing but a sweep can drive a periodic pal hook. core/event
+-- walks FindAllOf("PalCharacter") on its own cadence and calls onTick once per matching
+-- live pawn, with ctx.actor = that pawn, ctx.count = the heartbeat number and ctx.now =
+-- os.clock(). It is gated on the same worldReady flag as everything else, each call is
+-- pcall'd, and a handler that raises five times in a row is logged and then switched off
+-- for the rest of the session — for every pawn of that id, since the breaker sits on the
+-- definition, not on the pawn. The building tick's discipline, reused.
+--   INTERVAL: core.event.PAL_SCAN_MS, 3000 ms by default. Deliberately not the 500 ms
+--   heartbeat, and re-read on every heartbeat so a pack can retune it live —
+--   `require("palforge.core.event").PAL_SCAN_MS = 5000`; 0 or nil turns the sweep off.
+--   COST, which is why that number is what it is: FindAllOf walks every UObject and is the
+--   known periodic-hitch source (the old scheduler backed off to 4 s settled / ~15 s idle
+--   for exactly that reason), and the building scan already runs one such sweep every
+--   500 ms. So this one is throttled to ~1 sweep / 3 s, does no FindAllOf AT ALL while no
+--   pal is registered, and resolves each actor's class exactly ONCE: the result — the class, or a
+--   miss — is memoized in a weak actor-keyed table that is dropped only when the registered
+--   pal count changes. A world of ~20-40 vanilla pals therefore costs one failed lookup
+--   each and a table read per sweep thereafter, and a definition that never overrides
+--   onTick is never called at all.
+--   NO PER-PAL STATE: `self` is this definition's handle, one handle for every pawn of that
+--   id, so anything per-pawn has to be keyed by ctx.actor yourself.
+--
+-- ACTIONS are real: :spawn goes through UPalCheatManager (server-verified; core/spawn
+-- constructs one itself on a dedicated server, where nothing else does). A coordinate
+-- spawn is a spawn-then-relocate, so it reports that the spawn was ACCEPTED, not that
+-- the pal reached the coordinate — see :spawn below. Note that defining gives an
+-- EXISTING CharacterID behaviour — Lua cannot add a brand-new creature row (that is
+-- PalSchema's job).
 --
 -- LAYOUT
 --   SPEC    — the shape of Pal{ ... }, declared as data (core/schema). It is PRIVATE to
@@ -87,7 +124,7 @@ local Material = schema.define("Pal.Spec.Material", {
 ---world). An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Pal.Spec.Events", {
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-                    doc = "LIVE (candidate hook) - finished spawning into the world" },
+                    doc = "LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE - took damage" },
     { "onDeath",    type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -95,7 +132,7 @@ local Events = schema.define("Pal.Spec.Events", {
     { "onCaptured", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE - caught in a sphere" },
     { "onTick",     type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-                    doc = "declarable; no per-pal tick source exists yet" },
+                    doc = "LIVE - core/event's pal sweep, once per live pawn every core.event.PAL_SCAN_MS (default 3 s)" },
 })
 
 ---What you pass to Pal{ ... }. `id` is the only required field.
@@ -129,6 +166,9 @@ function Class:onSpawned(ctx) end
 function Class:onDamaged(ctx) end
 function Class:onDeath(ctx) end
 function Class:onCaptured(ctx) end
+-- Inert like the rest, and load-bearing as a BASELINE: core/event's pal sweep compares a
+-- definition's onTick against this very function to decide whether the definition really
+-- implements it, so a pal that declares no onTick costs nothing per sweep.
 function Class:onTick(ctx) end
 
 function Class:skillsOf() return self.skills or {} end
@@ -136,11 +176,13 @@ function Class:mesh() return self.meshSpec end
 
 -- The material descriptor applied to the mesh, from the declared data fields. Consumed by
 -- core.mesh: { color = {r,g,b,a}, texture = <abs png path>, params = {...}, material = ... }
+-- `material = { ... }` (Pal.Spec.Material) carries all four; the top-level `color` /
+-- `texture` shorthands carry those two and nothing else — there is no shorthand spelling
+-- for params / material, so nothing else can be assembled here.
 function Class:material()
     if self.materialSpec then return self.materialSpec end
-    if self.color or self.texture or self.materialParams or self.baseMaterial then
-        return { color = self.color, texture = self.texture,
-                 params = self.materialParams, material = self.baseMaterial }
+    if self.color or self.texture then
+        return { color = self.color, texture = self.texture }
     end
     return nil
 end
@@ -236,8 +278,13 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 ---  :spawn(coord)                          -- { x, y, z } or { x=, y=, z= }
 ---  :spawn{ at = coord, level =, toPlayer =, num = }
 ---  :spawn()                               -- default placement (wild, near player)
+---
+---`true` means the native spawn call was ACCEPTED, not that a pal is standing there:
+---the game spawns the actor a few frames later, and the coordinate form additionally
+---relocates it in a deferred pass that finishes long after this returns (its outcome is
+---logged, not returned). `false` is definite — nothing was even attempted.
 ---@param arg Coord|table|nil
----@return boolean ok
+---@return boolean accepted   # the spawn call was accepted (see above), NOT arrival
 function Handle:spawn(arg)
     local opts = {}
     if type(arg) == "table" then
@@ -253,8 +300,12 @@ function Handle:spawn(arg)
 end
 
 ---Attach this pal's declared mesh to a live pawn (one-shot; core.mesh guards against
----re-stacking). Pals have no instance scan, so the caller supplies the actor — typically
----`ctx.actor` inside onSpawned. Fail-soft false when there is no mesh or no valid actor.
+---re-stacking). Pals get no tracked instance, so the caller supplies the actor — typically
+---`ctx.actor` inside onSpawned, or inside onTick if the sweep is how you find your pawns.
+---Fail-soft false when there is no mesh or no valid actor.
+---NOTE: the material fields (color / texture / params / material) are applied by the
+---procedural / obj backends only; on the default skeletal backend they are carried but
+---inert, so a true return there means the MESH was swapped, not that it was painted.
 ---@param actor any   # the pawn to decorate (e.g. ctx.actor)
 ---@return boolean ok
 function Handle:renderOn(actor)
@@ -262,8 +313,8 @@ function Handle:renderOn(actor)
     local m = self._cls:mesh()
     if not (type(m) == "table" and m.model) then return false end
     local def = {
-        kind = m.kind,  -- nil -> procedural, the default backend
-        model = m.model, scale = m.scale, offset = m.offset,
+        kind = m.kind,  -- filled by Mesh.Spec's default ("skeletal") when declared inline
+        model = m.model, animClass = m.animClass, scale = m.scale, offset = m.offset,
         color = m.color, texture = m.texture, params = m.params, material = m.material,
     }
     local mat = self._cls:material()
@@ -280,13 +331,13 @@ end
 
 ---@param ctx table  # ctx.actor = the pawn
 function Handle:onSpawned(ctx) if self._cls.onSpawned then return self._cls:onSpawned(ctx) end end
----@param ctx table
+---@param ctx table  # ctx.actor
 function Handle:onDamaged(ctx) if self._cls.onDamaged then return self._cls:onDamaged(ctx) end end
----@param ctx table
+---@param ctx table  # ctx.actor
 function Handle:onDeath(ctx) if self._cls.onDeath then return self._cls:onDeath(ctx) end end
----@param ctx table
+---@param ctx table  # ctx.actor, ctx.comp = the pal's parameter component
 function Handle:onCaptured(ctx) if self._cls.onCaptured then return self._cls:onCaptured(ctx) end end
----@param ctx table
+---@param ctx table  # ctx.actor, ctx.count = heartbeat number, ctx.now
 function Handle:onTick(ctx) if self._cls.onTick then return self._cls:onTick(ctx) end end
 
 -- ---- queries ----
@@ -303,5 +354,6 @@ function Handle:name() return self._cls.name or self.id end
 ---@return string?
 function Handle:description() return self._cls.description end
 
-Pal.Class = Class   -- the base hook table (used for override detection / subclassing)
+Pal.Class = Class   -- the base hook table (core/event's pal sweep compares onTick against
+                    -- it for override detection; also the base for subclassing)
 return Pal

@@ -18,6 +18,7 @@ export const DOC_SLUGS = [
   'api/ui',
   'api/player',
   'guides/first-content-pack',
+  'guides/testing',
 ] as const;
 
 // Empty against the local static server, `/PalForge` against GitHub Pages. Set

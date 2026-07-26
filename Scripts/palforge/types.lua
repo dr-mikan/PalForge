@@ -40,11 +40,11 @@
 ---@field material? string # base material asset path to instance from
 
 ---@class Pal.Spec.Events
----@field onSpawned? fun(self: Pal.Handle, ctx: table) # LIVE (candidate hook) - finished spawning into the world
+---@field onSpawned? fun(self: Pal.Handle, ctx: table) # LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world
 ---@field onDamaged? fun(self: Pal.Handle, ctx: table) # LIVE - took damage
 ---@field onDeath? fun(self: Pal.Handle, ctx: table) # LIVE - HP reached zero
 ---@field onCaptured? fun(self: Pal.Handle, ctx: table) # LIVE - caught in a sphere
----@field onTick? fun(self: Pal.Handle, ctx: table) # declarable; no per-pal tick source exists yet
+---@field onTick? fun(self: Pal.Handle, ctx: table) # LIVE - core/event's pal sweep, once per live pawn every core.event.PAL_SCAN_MS (default 3 s)
 
 ---@class Pal.Spec
 ---@field id string # pal id: a game CharacterID ("ChickenPal") or "pack:name"
@@ -116,9 +116,9 @@
 ---@field onRightClick? fun(self: Building.Instance, ctx: table) # LIVE - primary interaction
 ---@field onRemove? fun(self: Building.Instance, ctx: table) # LIVE - the structure vanished
 ---@field onTick? fun(self: Building.Instance, ctx: table) # LIVE - heartbeat (see tickInterval)
----@field onWorldReady? fun(self: Building.Instance, ctx: table) # declarable; world.ready is emitted before the first scan, so no instance is live yet
+---@field onWorldReady? fun(self: Building.Instance, ctx: table) # LIVE - world loaded; emitted after the first scan, so only structures already tracked get it
 ---@field onWorldLeft? fun(self: Building.Instance, ctx: table) # LIVE - the world was unloaded (emitted while instances are still live)
----@field onBuild? fun(self: Building.Instance, ctx: table) # declarable; no native source exists yet
+---@field onBuild? fun(self: Building.Definition, ctx: table) # LIVE - build completed; nothing is placed yet, so `self` is the DEFINITION (ctx.buildId, ctx.model)
 ---@field onLeftClick? fun(self: Building.Instance, ctx: table) # declarable; no native source exists yet
 ---@field onBreak? fun(self: Building.Instance, ctx: table) # declarable; no native source exists yet
 
@@ -208,8 +208,9 @@
 ---@field id string # element id, e.g. "pack:Panel"
 ---@field name? string # human label (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
----@field render? fun(self: UI.Handle, root: any) # build the widget tree under `root` (self, root); runs once per mount
+---@field render? fun(self: UI.Handle, root: any): boolean? # build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted
 ---@field update? fun(self: UI.Handle) # refresh the already-built widgets (self); runs on each :refresh()
+---@field destroy? fun(self: UI.Handle) # remove the widgets render() built (self); runs on :unmount()
 ---@field data? table # default fields shared by every instance of this element
 
 --=============================================================================

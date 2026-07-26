@@ -8,6 +8,9 @@
 -- instance by its QUANTIZED WORLD POSITION (a BlockPos analog):
 --   key = "<buildId>@<qx>,<qy>,<qz>"
 -- The canonical position is always the live actor's GetActorLocation.
+--
+-- The neighbour index is not automatic: it has a small drive contract (what to call
+-- on place, on remove and to query) written out at "hash-grid neighbour index" below.
 local M = {}
 
 M.GRID_CM = 100  -- default cell size (1 m). Dense entities (pipes) can override.
@@ -42,8 +45,39 @@ M.dist2 = dist2
 
 -- ---- hash-grid neighbour index ----
 -- Buckets instances by a coarse cell so neighbour queries are O(neighbours), not
--- O(all buildings). The domain calls indexAdd/indexRemove on instance add/remove.
--- Bucket size is a fixed coarse grid independent of per-entity GRID overrides.
+-- O(all buildings). Bucket size is a fixed coarse grid independent of per-entity
+-- GRID overrides. The index is a plain in-memory map over whatever the caller puts
+-- in it: it stores instance TABLES (anything carrying `pos = {x,y,z}`), never reads
+-- the game, and holds STRONG references — an instance dropped without indexRemove
+-- stays alive in here until indexReset.
+--
+-- DRIVING IT — the whole contract, in call order:
+--   on place / load   spatial.indexAdd(inst)       -- building runtime: core/event.lua:253
+--   on remove         spatial.indexRemove(inst)    -- building runtime: core/event.lua:269
+--   on world left     spatial.indexReset()         -- building runtime: core/event.lua:492
+--   after a move      spatial.indexUpdate(inst)    -- NOBODY calls this; see the gap below
+--   to query          spatial.neighbors(pos, radiusCm, exclude) -> { inst, ... }
+--
+-- Placed buildings are therefore already in the index; querying is the caller's half
+-- and needs nothing but a position (core.spatial is public as PalForge.core.spatial):
+--
+--   local spatial = require("palforge.core.spatial")
+--   for _, inst in ipairs(require("palforge.core.event").instances("MyPipe")) do
+--       local near = spatial.neighbors(inst.pos, 350, inst)   -- everything within 3.5 m
+--   end
+--
+-- Nothing in PalForge queries it today. The consumer it was built for is the sibling
+-- mod's logistics graph (PalLogistics/network.lua: exactly the call above at
+-- CONNECT_RADIUS 350, then union-find over the resulting adjacency) — a reference, not
+-- a live caller: that file still requires the removed `palsmith.*` modules and would
+-- need its requires swapped to palforge.core.* before it loads again.
+--
+-- KNOWN GAP, deliberately NOT fixed here: the building scan refreshes an instance's
+-- position in place (core/event.lua:359 `bound.pos = p`) without re-bucketing it, so an
+-- instance that MOVES far enough keeps its old bucket and a query can miss it. The fix is
+-- one line — spatial.indexUpdate(bound) next to that refresh — but it belongs to the
+-- building runtime, and core.spatial deliberately knows nothing about it. Until that hook
+-- exists, a caller whose instances can move calls reindexAll() before a batch of queries.
 M.BUCKET_CM = 200
 M.index = {}  -- bucketKey -> { [instance]=true }
 
@@ -79,6 +113,26 @@ function M.indexUpdate(instance)
         M.indexRemove(instance)
         M.indexAdd(instance)
     end
+end
+
+-- Re-bucket a whole collection: `instances` is any table whose VALUES are instances —
+-- an array (core.event.instances(buildId)) or a key->instance map. Returns how many
+-- entries were visited. This is the caller-side stand-in for the missing per-scan
+-- indexUpdate hook described in the section header: run it once before a batch of
+-- neighbour queries if your instances can move. It is O(n) and touches buckets only for
+-- the entries whose cell actually changed, so re-running it on a static base is cheap.
+-- It does NOT remove index entries that are absent from `instances` — dropping an
+-- instance is still indexRemove's job.
+function M.reindexAll(instances)
+    if type(instances) ~= "table" then return 0 end
+    local n = 0
+    for _, inst in pairs(instances) do
+        if type(inst) == "table" and inst.pos then
+            M.indexUpdate(inst)
+            n = n + 1
+        end
+    end
+    return n
 end
 
 -- Instances within `radiusCm` of `pos`, excluding `exclude`. Scans a

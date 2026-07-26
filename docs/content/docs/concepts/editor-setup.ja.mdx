@@ -1,58 +1,37 @@
 ---
 title: エディタ設定
-description: パックを書くときの補完とホバードキュメント — types.lua、.luarc.json、そして両者を同期させるジェネレータ
+description: 書いているそばからエディタが全項目を一覧し、意味を教え、打ち間違いをゲーム起動前に見つけてくれるようにします
 ---
 
-コンテンツパックはただの Lua です。PalForge にビルド手順も IDE プラグインも必要ありません。
-[lua-language-server](https://github.com/LuaLS/lua-language-server)（LuaLS）に PalForge の
-`Scripts` ディレクトリを見せるだけで、すべての `X{ ... }` 呼び出しが、定義時にバリデータが
-強制するのと同じ説明つきでフィールドを補完するようになります。
+## このページでできるようになること
 
-## types.lua とは
+- パルやアイテム、建物に指定できる項目を、打ちながらエディタに一覧してもらう
+- 各項目の意味と、書かなかったときの既定値をその場で確認する
+- 項目名の打ち間違いを、ゲームを起動する前にエディタで見つける
+- 決まった値しか取らない項目で、使える値の中から選ぶ
+- エディタから離れているときは、同じ一覧をゲーム内で表示する
 
-`Scripts/palforge/types.lua` は生成された LuaLS の型定義ファイルです。中身はアノテーション
-だけで、api が受け取るすべての形について `---@class` と `---@alias` を宣言しており、実行され
-るステートメントは 1 行もありません。ヘッダに `---@meta` が入っているため LuaLS はこのファイル
-を型の記述として扱い、フレームワーク側がこれを require することは一切ありません。
+コンテンツパックはただの Lua ファイルです。コンパイルも、エディタのプラグインの導入も必要
+ありません。
 
-```lua title="Scripts/palforge/types.lua"
--- PalForge type definitions — GENERATED, do not edit.
---
--- Regenerate with:  lua5.4 tools/gen-types.lua
--- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
----@meta
+やることは 1 つ、PalForge の場所を 1 つのプログラムに教えるだけです。そのプログラムが
+[lua-language-server](https://github.com/LuaLS/lua-language-server)、通称 LuaLS で、エディタ
+が Lua を理解するために裏で動いています。PalForge の `Scripts` フォルダを教えておくと、
+`Pal{ ... }` や `Item{ ... }`、`Building{ ... }` を書いたときにフィールドの候補が出るように
+なります。フィールドとは、波かっこの中の `name =` や `mesh =` のような 1 行のことです。候補
+には、パック読み込み時に PalForge が照合するのと同じ説明が付いてきます。
 
----@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
----@class Mesh.Spec
----@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
----@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # USkeletalMesh / UStaticMesh asset path
-```
+## エディタを設定する
 
-現在このファイルには、宣言済みのスペックごとに 1 つずつ、18 個のクラスが入っています。
-`Pal.Spec`、`Pal.Spec.Events`、`Pal.Spec.Material`、`Item.Spec`、`Item.Spec.Recipe`、
-`Item.Spec.Events`、`Building.Spec`、`Building.Spec.Mesh`、`Building.Spec.Material`、
-`Building.Spec.Events`、`Skill.Spec`、`Skill.Spec.Events`、`Effect.Spec`、
-`Effect.Spec.Events`、`Audio.Spec`、`UI.Spec`、`Mesh.Spec`、`Coord` です。
-
-<Callout type="info">
-`types.lua` を削除すると壊れるのは補完だけです。ゲームはこのファイルを読みませんし、
-`Pal{ ... }` の検証結果もあるとき・ないときで完全に同じです。検証は
-`Scripts/palforge/api/*.lua` のスキーマ宣言に対して行われ、このファイルもその宣言から生成
-されています。
-</Callout>
-
-## 言語サーバーに Scripts を見せる
-
-LuaLS から `Scripts/palforge/` が*見えている*必要があります。`.luarc.json` をどこに置くかは、
-PalForge のチェックアウト内で編集しているか、自分のパック用フォルダで編集しているかで
-変わります。
+LuaLS から `Scripts/palforge/` フォルダが*見えている*必要があります。どこを見るかは
+`.luarc.json` というファイルで指定します。このファイルを置く場所は、パックを自分のフォルダで
+管理しているか、PalForge のフォルダの中で書いているかで変わります。
 
 <Tabs items={['パック専用フォルダ', 'PalForge リポジトリ内']}>
 <Tab value="パック専用フォルダ">
 
-`.luarc.json` をパックのルートに置き、PalForge の `Scripts` ディレクトリをライブラリとして
-追加します。パスはこのファイルからの相対です。
+`.luarc.json` をパックのフォルダの一番上に置き、PalForge の `Scripts` ディレクトリをライブラリ
+として並べます。パスは `.luarc.json` からの相対です。
 
 ```json title=".luarc.json"
 {
@@ -68,8 +47,8 @@ PalForge のチェックアウト内で編集しているか、自分のパッ�
 }
 ```
 
-絶対パスも使えます。パックを UE4SS の mods ツリーに置き、PalForge を別の場所にチェック
-アウトしている場合はこちらが向いています。
+フルパスでも書けます。パックを UE4SS の mods フォルダに置き、PalForge はディスク上の別の場所
+にある、という場合はこちらが向いています。
 
 ```json title=".luarc.json"
 {
@@ -82,9 +61,9 @@ PalForge のチェックアウト内で編集しているか、自分のパッ�
 </Tab>
 <Tab value="PalForge リポジトリ内">
 
-`Scripts` はすでにワークスペースに入っているので、`workspace.library` に足すものはありま
-せん。意味があるのはランタイムのバージョンと、フレームワーク自身が呼ぶ UE4SS のグローバル
-だけです。
+`Scripts` はすでにエディタで開いているので、`workspace.library` に足すものはありません。Lua の
+バージョンを指定し、UE4SS が実行時に渡してくる名前を並べて、エディタが下線を引かないように
+します。
 
 ```json title=".luarc.json"
 {
@@ -100,10 +79,9 @@ PalForge のチェックアウト内で編集しているか、自分のパッ�
 </Tab>
 </Tabs>
 
-リポジトリのチェックアウトには、ディスク上に残されたデッドコードのディレクトリが 2 つ
-あります。`Scripts/palforge/deprecated/` と `Scripts/palforge/tmp/` です。どちらも
-gitignore 対象なのでリリース版には含まれませんが、手元にある場合は古い定義が補完に混ざら
-ないよう除外してください。
+PalForge のコピーによっては、`Scripts/palforge/deprecated/` と `Scripts/palforge/tmp/` という
+フォルダがディスク上にあります。リリースには含まれないので、手元にない場合もあります。ある
+場合は、古い定義が候補に混ざらないよう、エディタに読み飛ばしてもらってください。
 
 ```json title=".luarc.json"
 {
@@ -114,19 +92,19 @@ gitignore 対象なのでリリース版には含まれませんが、手元に�
 }
 ```
 
-## エディタに出るもの
+## エディタに出てくるもの
 
-パック側のファイルに import するものはありません。api を require するとむき出しのグローバル
-が入り、`api/init.lua` がそれぞれにモジュール型を注釈しているため、`Pal`、`Item`、
-`Building`、`Skill`、`Effect`、`Audio`、`Mesh`、`UI`、`Player` は `local` なしで解決されます。
+パック側のファイルに import するものはありません。`Pal`、`Item`、`Building`、`Skill`、
+`Effect`、`Audio`、`Mesh`、`UI`、`Player` は最初からグローバルとして置かれ、それぞれに型が
+書かれているので、`local` を書かずにそのまま使えます。
 
 ```lua title="Scripts/palforge/api/init.lua"
 ---@type palforge.pal
 _G.Pal = Pal
 ```
 
-各モジュールは `---@overload` つきで宣言されており、これがモジュールそのものの呼び出しを
-型のついた呼び出しにしています。
+波かっこの中身が補完されるのは、各モジュールに付いた `---@overload` の行のおかげです。
+`Pal{ ... }` が `Pal.Spec` を受け取り `Pal.Handle` を返す、とエディタに伝えています。
 
 ```lua title="Scripts/palforge/api/pal.lua"
 ---@class palforge.pal
@@ -134,8 +112,8 @@ _G.Pal = Pal
 local Pal = {}
 ```
 
-**設定前** — `Scripts` がワークスペースの外にあると `Pal.Spec` は何にも解決されず、波かっこ
-はただの無名テーブルです。
+**設定前** — `Scripts` がワークスペースの外にあると、エディタは `Pal.Spec` を知らないので、
+波かっこはただのテーブルで、出せる候補がありません。
 
 ```text
 Pal{
@@ -143,8 +121,8 @@ Pal{
 }
 ```
 
-**設定後** — 補完リストは `Pal.Spec` のフィールド一覧そのもので、宣言順に並び、スキーマが
-宣言したドキュメント文字列がそれぞれに付きます。
+**設定後** — 候補一覧は `Pal.Spec` のフィールドそのもので、宣言された順に並び、それぞれに説明
+が付きます。
 
 ```text
 Pal{
@@ -165,18 +143,18 @@ Pal{
 
 ここで一度に 4 つのことが手に入ります。
 
-- **各フィールドとその説明。** `---@field` 行の `#` の後ろのテキストは、スキーマ宣言の
-  `doc =` 文字列そのものです。`maxStack` にホバーすれば *inventory stack ceiling
-  (default 1)* が出て、デフォルト値も含まれます。
-- **列挙値のエイリアス。** `values` リストを持つフィールドは、スペック名とフィールド名から
-  名付けられた専用のエイリアスになります。生成されるファイルには 5 つあり、
-  `Mesh.Spec.Kind`、`Item.Spec.Category`、`Building.Spec.Mesh.Kind`、`Skill.Spec.Kind`、
-  `Audio.Spec.Kind` です。`kind =` の後で引用符を打つと、
-  `"procedural"`、`"static"`、`"skeletal"`、`"obj"` だけが候補に出ます。
-- **ネストした形の両方の書き方。** `mesh` の型は `Mesh.Spec|Mesh.Handle` です。バリデータが
-  インラインのテーブルと、`Mesh{ ... }` 呼び出しが返したハンドルの両方を受け取るからです。
-- **ハンドルのメソッド。** `Pal{ ... }` は `Pal.Handle` を返すので、`pal:` と打てば `spawn`、
-  `renderOn`、`skillsOf`、`mesh`、`iconOf`、`name`、`description`、そしてイベントの
+- **各フィールドとその説明。** `---@field` 行の `#` の後ろは、スペック宣言の `doc =` の文字列
+  そのものです。`maxStack` にホバーすれば *inventory stack ceiling (default 1)* と出て、既定値
+  まで含まれます。
+- **決まった値しか取らない項目の、短い選択肢。** `values` を持つフィールドは専用の型になります。
+  全部で 5 つ、`Mesh.Spec.Kind`、`Item.Spec.Category`、`Building.Spec.Mesh.Kind`、
+  `Skill.Spec.Kind`、`Audio.Spec.Kind` です。
+  `kind =` の後で引用符を打つと、
+  `"procedural"`、`"static"`、`"skeletal"`、`"obj"` だけが出て、それ以外は出ません。
+- **ネストした形は、どちらの書き方でも。** `mesh` の型は `Mesh.Spec|Mesh.Handle` です。メッシュ
+  をその場に直接書いても、`Mesh{ ... }` が返したものを渡しても、どちらでも通ります。
+- **返ってきたもので何ができるか。** `Pal{ ... }` は `Pal.Handle` を返すので、`pal:` と打つと
+  `spawn`、`renderOn`、`skillsOf`、`mesh`、`iconOf`、`name`、`description` とイベントの
   フォワーダが、`api/pal.lua` でそれぞれの上に書かれたコメントつきで出ます。
 
 ```lua title="content/pals.lua"
@@ -199,10 +177,10 @@ local pal = Pal{
 pal:spawn(Player.coordinate())              -- Player.coordinate returns Coord?
 ```
 
-ハンドルの型は生成物ではなく、メソッドが実装されている場所に手書きされています。
+ハンドルとビルディングインスタンスの型は、メソッドの実装のすぐ隣に手で書かれています。
 `Pal.Handle` は `api/pal.lua`、`Building.Handle` と `Building.Instance` は
-`api/building.lua`、という具合です。だからビルディングのハンドラではインスタンスの
-フィールドが補完されます。
+`api/building.lua`、という具合です。だからビルディングのハンドラでは、インスタンスの側も
+補完されます。
 
 ```lua title="content/buildings.lua"
 Building{
@@ -217,9 +195,44 @@ Building{
 }
 ```
 
+## 候補を運んでくるファイル
+
+補完に出てくる文字列は、すべて `Scripts/palforge/types.lua` から来ています。LuaLS 用の定義
+ファイルで、中身は説明だけ、実行されるコードはありません。api が受け取るすべての形について
+`---@class` と `---@alias` を宣言しています。先頭の `---@meta` の行が、これは実際のコードでは
+なく型の記述だと LuaLS に伝えていて、フレームワーク側がこのファイルを読み込むことはありません。
+
+```lua title="Scripts/palforge/types.lua"
+-- PalForge type definitions — GENERATED, do not edit.
+--
+-- Regenerate with:  lua5.4 tools/gen-types.lua
+-- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
+---@meta
+
+---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
+---@class Mesh.Spec
+---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
+---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
+---@field model string # USkeletalMesh / UStaticMesh asset path
+```
+
+このファイルには、宣言済みの形ごとに 1 つずつ、18 個のクラスが入っています。`Pal.Spec`、
+`Pal.Spec.Events`、`Pal.Spec.Material`、`Item.Spec`、`Item.Spec.Recipe`、`Item.Spec.Events`、
+`Building.Spec`、`Building.Spec.Mesh`、`Building.Spec.Material`、`Building.Spec.Events`、
+`Skill.Spec`、`Skill.Spec.Events`、`Effect.Spec`、`Effect.Spec.Events`、`Audio.Spec`、
+`UI.Spec`、`Mesh.Spec`、`Coord` です。
+
+<Callout type="info">
+`types.lua` を削除して壊れるのは補完だけです。ゲームはこのファイルを読みませんし、
+`Pal{ ... }` のチェック結果もあるとき・ないときで同じです。チェックは
+`Scripts/palforge/api/*.lua` のスペック宣言に対して行われ、このファイルもそこから作られて
+います。
+</Callout>
+
 ## types.lua を再生成する
 
-ジェネレータは開発用ツールです。ゲームがなくても素の Lua インタプリタで動きます。
+スペックを変えたらジェネレータを実行します。開発用のツールで、ゲームを閉じたまま素の Lua
+インタプリタで動きます。
 
 ```bash
 cd /path/to/PalForge
@@ -230,29 +243,28 @@ lua5.4 tools/gen-types.lua
 wrote ./Scripts/palforge/types.lua (18 classes, 223 lines)
 ```
 
-書き出し先は、渡したルート（既定はカレントディレクトリ）からの相対で
-`Scripts/palforge/types.lua` です。別の場所から実行することもできます。
+書き出し先は、渡したルート（既定は今いるフォルダ）の下の `Scripts/palforge/types.lua` です。
+別の場所から実行することもできます。
 
 ```bash
 lua5.4 tools/gen-types.lua /path/to/PalForge
 ```
 
-`schema.define` や `schema.derive` の呼び出しが変わったら、そのつど再実行してください。
-フィールドの追加、`values` の追加、`default` の変更、`doc` の書き換え、いずれもです。
-`types.lua` はリポジトリにコミットされているので、再生成したファイルはスキーマ変更と同じ
-コミットに含めます。
+`schema.define` や `schema.derive` の呼び出しが変わったら、そのつど実行し直してください。
+フィールドの追加、使える値の追加、既定値の変更、説明の書き換え、いずれもです。`types.lua` は
+リポジトリにコミットされているので、再生成したファイルはスペック変更と同じコミットに入れます。
 
 <Callout type="warn">
 `types.lua` を手で編集しないでください。次にジェネレータを実行した時点でファイル全体が
-上書きされます。`Scripts/palforge/api/*.lua` の `schema.define` を変更して再生成します。
+書き直されます。`Scripts/palforge/api/*.lua` の `schema.define` を変更して再生成します。
 </Callout>
 
-## 定義がずれない理由
+## 候補がいつもゲームと一致する理由
 
-ジェネレータは `types.lua` を読みませんし、フィールド一覧の 2 つ目のコピーも持っていません。
-`palforge.api` を require することで全部の形をスキーマレジストリに載せ、そのうえで
-`schema.all()` を辿ります。定義呼び出しのたびに `Spec:validate` が使うのと、まったく同じ
-スペックオブジェクトです。
+エディタは `types.lua` を読み、ゲームは `Scripts/palforge/api/*.lua` のスペック宣言を読みます。
+この 2 つは、別々に合わせ込む一覧ではありません。ジェネレータは `palforge.api` を読み込んで
+すべての形をスキーマレジストリに載せ、`schema.all()` を辿ります。定義呼び出しのたびに
+`Spec:validate` が使うのと同じスペックオブジェクトです。
 
 ```mermaid
 flowchart LR
@@ -263,9 +275,9 @@ flowchart LR
   E --> F["lua-language-server"]
 ```
 
-したがって、エディタが提示するフィールドはバリデータが受け付けるフィールドであり、
-バリデータが弾くフィールドが補完に現れることはありません。各ディスクリプタが生成行に
-及ぼす効果は次のとおりです。
+そのため、エディタが出すフィールドはゲームが受け付けるフィールドであり、ゲームが弾く
+フィールドが候補に出ることはありません。フィールド宣言の各要素は、生成される行に決まった形で
+効きます。
 
 | スキーマのディスクリプタ | 生成されるアノテーション |
 | --- | --- |
@@ -280,26 +292,25 @@ flowchart LR
 | `check = schema.nonEmpty` | 何も出ません。check は定義時にだけ走ります |
 | `type` なし | `any` |
 
-知っておくとよい帰結が 2 つあります。
+知っておくとよいことが 2 つあります。
 
-- `schema.derive` で宣言したスペックは、独自のクラスと独自のエイリアスを持ちます。
-  `Building.Spec.Mesh` は `Mesh.Spec` に 3 つのフィールド単位の上書き — `kind` の既定値を
-  `"skeletal"` から `"static"` へ、`model` と `offset` の説明の書き換え — を加えたものなので、
-  同じ 4 つの値を持ち既定値の記述だけが違う `Building.Spec.Mesh.Kind` が生成されます。
-- クラスは宣言順に出力され、スペック名の最初のセグメントでグループ化されます。だから
-  `Mesh.Spec` は `Mesh` の見出しの下に並び、ドメイン接頭辞を持たない `Coord` は
-  `Common` に入ります。
+- `schema.derive` で宣言した形は、独自のクラスと独自の値リストを持ちます。
+  `Building.Spec.Mesh` は `Mesh.Spec` の 3 フィールドを調整したもので、`kind` の既定値を
+  `"skeletal"` から `"static"` へ、`model` と `offset` の説明をより具体的にしてあります。
+  そのため `Building.Spec.Mesh.Kind` が、同じ 4 つの値と別の既定値の記述で生成されます。
+- クラスは宣言順に出力され、形の名前の最初の部分でまとめられます。だから `Mesh.Spec` は
+  `Mesh` の見出しの下に並び、ドメイン接頭辞を持たない `Coord` は `Common` に入ります。
 
-## UE4SS のグローバルの扱い
+## UE4SS がゲーム実行中に足す名前
 
 `FindFirstOf`、`FindAllOf`、`StaticFindObject`、`LoadAsset`、`RegisterHook`、
 `RegisterKeyBind`、`RegisterConsoleCommandHandler`、`ExecuteInGameThread`、`LoopAsync`、
-`FName`、`Key` は UE4SS が実行時に注入します。どの Lua ファイルにも存在しないため、列挙して
-おかない限り LuaLS は未定義のグローバルとして報告します。上の `diagnostics.globals` はその
-ためのものです。
+`FName`、`Key` は、PalForge が動く土台である MOD ローダー UE4SS から来ます。どの Lua ファイル
+にも書かれていないため、並べておかない限り LuaLS は未定義として印を付けます。上の
+`diagnostics.globals` はそのためのものです。
 
-ジェネレータ側の扱いは違います。ゲームの外で api モジュールを実際に*動かす*必要があるので、
-何かを読み込む前に同じ一覧をスタブします。
+ジェネレータ側の扱いは違います。ゲームを閉じたまま api モジュールを実際に*動かす*必要がある
+ので、何かを読み込む前に、それぞれの名前に何もしない代役を置きます。
 
 ```lua title="tools/gen-types.lua"
 for _, name in ipairs({ "FindFirstOf", "FindAllOf", "StaticFindObject", "LoadAsset",
@@ -311,18 +322,17 @@ _G.FName = function(s) return { ToString = function() return s end } end
 _G.Key = {}
 ```
 
-api モジュールを require してもテーブルが組み立てられるだけなので、スタブが呼ばれることは
-ありません。一緒に読み込まれるネイティブ側が、名前が存在することだけを期待しています。
+api モジュールを読み込んでもテーブルが組み立てられるだけなので、代役が呼ばれることはありま
+せん。一緒に読み込まれるゲーム寄りのファイルは、名前が存在することだけを求めています。
 
 UE4SS の Lua 型定義を持っているなら、そのフォルダも `workspace.library` に追加し、対応する
-名前を `diagnostics.globals` から外してください。何も表示されない代わりに、実際のシグネチャ
-が出るようになります。PalForge はその型定義を同梱していません。
+名前を `diagnostics.globals` から外してください。何も出ない代わりに、実際のシグネチャが出る
+ようになります。PalForge はその型定義を同梱していません。
 
-## 同じ情報を実行時に読む
+## 同じ一覧をゲーム内で見る
 
-エディタはあくまで便宜的なもので、情報源そのものではありません。すべてのスペックは実行中
-のゲームからもスキーマレジストリ経由で読めます。キーバインドやコンソールハンドラから、
-あるいは検証エラーの原因を切り分けている最中に役立ちます。
+すべての形は、実行中のゲームからも読めます。キーバインドやコンソールコマンドから、あるいは
+検証エラーの原因を追っている最中に役立ちます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -350,15 +360,15 @@ Pal.Spec {
 }
 ```
 
-宣言されていない名前を渡すと、宣言済みの名前一覧が返ってきます。
+宣言されていない名前を渡すと、宣言済みの名前の一覧が返ってきます。
 
 ```text
 PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
 ```
 
-同じ情報の 3 つ目の出どころはバリデータ自身です。問題はすべてハードエラーで、ドメイン名、
-フィールド名、そして有効な選択肢を挙げてくれます。つまり読み込みに成功したパックは綴りが
-正しかったということです。
+同じ情報が出てくる 3 つ目の場所は、エラーそのものです。問題が見つかると読み込みは止まり、
+ドメイン名、フィールド名、そして有効な選択肢が示されます。つまり読み込みに成功したパックは、
+綴りが正しかったということです。
 
 ```text
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
@@ -408,7 +418,7 @@ mods/
 </Step>
 
 <Step>
-### コンテンツを書いて補完を確認する
+### コンテンツを書いて補完を確かめる
 
 ```lua title="MyPack/content/pals.lua"
 local pal = Pal{
@@ -425,15 +435,15 @@ local pal = Pal{
 return pal
 ```
 
-`Pal` も `Item` も `require` は不要です。`api/init.lua` がグローバルとして設置し、それぞれ
-に注釈を付けているので、LuaLS はライブラリパス越しにそれを拾います。
+`Pal` も `Item` も `require` は不要です。`api/init.lua` がグローバルとして置き、型も書いて
+くれているので、LuaLS はライブラリパス越しにそれを拾います。
 </Step>
 
 </Steps>
 
 ### スペックを変えたら再生成する
 
-フィールドの追加は宣言 1 つとコマンド 1 つです。その形を所有しているモジュールで宣言します。
+フィールドの追加は、宣言 1 つとコマンド 1 つです。その形を持っているモジュールで宣言します。
 
 ```lua title="Scripts/palforge/api/skill.lua"
 local Spec = schema.define("Skill.Spec", {
@@ -455,8 +465,8 @@ lua5.4 tools/gen-types.lua
 git add Scripts/palforge/api/skill.lua Scripts/palforge/types.lua
 ```
 
-クラスは宣言順に出力されるので新しいアノテーションは最後に並び、`range` は `Skill{ ... }` に
-受け付けられるのと同時にエディタからも提示されます。
+クラスは宣言順に出力されるので新しい行は最後に並び、`range` は `Skill{ ... }` に受け付けられる
+のと同時に、エディタからも候補に出ます。
 
 ```lua title="Scripts/palforge/types.lua"
 ---@alias Skill.Spec.Kind "active"|"passive"
@@ -492,8 +502,8 @@ event.on("world.ready", function()
 end)
 ```
 
-各行は `[PalForge.mypack][info] ...` の形で出ます。全部を出さずに 1 つの形だけを見たい
-場合は、ディスクリプタを自分で走査します。
+各行は `[PalForge.mypack][info] ...` の形で出ます。全部を出さずに 1 つの形だけを見たいときは、
+フィールドのディスクリプタを自分で走査します。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -507,7 +517,19 @@ for _, f in ipairs(schema.get("Effect.Spec").fields) do
 end
 ```
 
-形が補完されるようになったら、各フィールドの意味はドメインごとのページ
-（[Pal](/docs/api/pal)、[Mesh](/docs/api/mesh)）を、ディスクリプタキーとそこから出るエラーは
-[フィールドと検証](/docs/concepts/schema)を、宣言したハンドラのうち実際に発火するのはどれかは
-[ライフサイクルとイベント](/docs/concepts/lifecycle)を参照してください。
+## まとめ
+
+- `.luarc.json` の `workspace.library` に PalForge の `Scripts` フォルダを足すと、すべての
+  `X{ ... }` がフィールドを補完し、ゲームが照合するのと同じ説明を見せてくれます。
+- UE4SS の名前（`FindFirstOf`、`LoadAsset`、`RegisterHook` など）を `diagnostics.globals` に
+  並べると、エディタが未定義扱いするのをやめます。
+- 補完を運んでいるのは `Scripts/palforge/types.lua` です。手で編集せず、スペックを変えたら
+  `lua5.4 tools/gen-types.lua` を実行し、両方のファイルをコミットします。
+- エディタが出すフィールドはゲームが受け付けるフィールドです。どちらも
+  `Scripts/palforge/api/*.lua` の同じスペック宣言から来ているからです。
+- エディタから離れていても、`schema.help("Pal.Spec")` が同じ一覧をゲーム内に出しますし、
+  検証エラーは必ずフィールド名と有効な選択肢を教えてくれます。
+
+次は [フィールドと検証](/docs/concepts/schema) がディスクリプタの各キーとそこから出るエラーを、
+[Pal](/docs/api/pal) や [Mesh](/docs/api/mesh) などのドメインごとのページが各フィールドの意味を、
+[ライフサイクルとイベント](/docs/concepts/lifecycle) が実際に発火するハンドラを説明します。

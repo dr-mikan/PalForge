@@ -1,19 +1,28 @@
 ---
 title: Building
-description: Placeable structures, their live per-instance state and the runtime that tracks them
+description: Add behaviour, saved data and your own model to placeable structures
 ---
 
-A building is a placeable structure: workbenches, chests, machines, decorations — anything
-picked from the build menu and set into the world. It is the only PalForge domain with a
-per-instance runtime. A placed structure becomes an **instance** with its own actor, world
-position and persisted state, and every lifecycle handler you declare runs on that instance.
+## What you can do after this page
+
+- Give a workbench, chest or machine in your game behaviour of your own
+- Run your code the moment a structure is placed, used or destroyed
+- Store numbers on each structure and find them again the next time you play
+- Put your own 3D model and colour on a structure standing in the world
+- Make a structure do work on a timer while you play
+
+## Defining a building
+
+A building is anything you pick from the build menu and set down in the world: workbenches,
+chests, machines, decorations. Once one is standing there, PalForge gives it a live object of
+its own — its own position, its own saved data, and the handlers you wrote.
 
 ```lua
 local api      = require("palforge.api")   -- also installs the bare globals
 local Building = api.Building
 ```
 
-Three entry points, the same as every other module:
+There are three things you do with `Building`:
 
 ```lua
 local bench = Building{ id = "example:Bench", name = "Modded Bench" }   -- define
@@ -21,21 +30,18 @@ local box   = Building.get("PalBoxV2")                                 -- look o
 local all   = Building.get_all()                                       -- every registered one
 ```
 
-## Defining a building
-
 The only required field is `id`.
 
 ```lua
 Building{ id = "WorkBench" }
 ```
 
-That single call is what makes the runtime care about the id: `Building{ ... }` registers the
-definition class in `core/object_manager` under `("building", id)`, and the reconstruction
-scan only tracks build ids that resolve to a registered definition. `Building.get(id)` on an
-id nobody defined returns a usable handle, but it does **not** register anything, so
-`:instances()` on it stays empty.
+That one call is what puts the id on PalForge's watch list. The scan that finds placed
+structures in the world only tracks build ids you have defined. `Building.get(id)` on an id
+nobody defined still hands back a handle you can call methods on, but it does not add the id
+to the list, so `:instances()` on it stays empty.
 
-A full definition reads as one piece of data:
+A full definition reads as one table:
 
 ```lua title="content/buildings/bench.lua"
 local bench = Building{
@@ -61,9 +67,8 @@ local bench = Building{
 }
 ```
 
-The mesh can be written inline or reused from a named `Mesh{ ... }` definition. Both reach
-the same validator, because a handle's metatable carries `__spec` and the validator unwraps
-it.
+The mesh — the 3D model the placed structure wears — can be written inline, or reused from a
+named `Mesh{ ... }` definition. Both go through the same checks.
 
 <Tabs items={['Inline', 'Named']}>
 <Tab value="Inline">
@@ -78,7 +83,7 @@ Building{
 }
 ```
 
-An inline table that omits `kind` gets `"static"`, the `Building.Spec.Mesh` default.
+An inline table that leaves out `kind` gets `"static"`, the `Building.Spec.Mesh` default.
 
 </Tab>
 <Tab value="Named">
@@ -94,9 +99,9 @@ Building{ id = "example:Bench", mesh = benchMesh }
 Building{ id = "example:Bench2", mesh = Mesh.get("example:bench_body") }
 ```
 
-A named mesh is validated against `Mesh.Spec` first, which fills `kind` with `"skeletal"`
-before the building ever sees the table. The building default cannot apply any more, so
-write `kind` yourself when you nest a named mesh into a building.
+A named mesh is checked against `Mesh.Spec` first, and that fills `kind` with `"skeletal"`
+before the building ever sees the table. The building default cannot apply any more, so write
+`kind` yourself when you nest a named mesh into a building.
 
 </Tab>
 </Tabs>
@@ -104,23 +109,24 @@ write `kind` yourself when you nest a named mesh into a building.
 ### Ids
 
 An id without a colon is a literal game `BuildObjectId` — `"WorkBench"`, `"PalBoxV2"`,
-`"ItemChest"`. An id of the form `"pack:name"` resolves to the DataTable row FName
-`pack_name`, which is also what `:unlock()` unlocks and what the runtime matches against.
+`"ItemChest"`. An id written as `"pack:name"` becomes the row name `pack_name` in the game's
+own data tables. That resolved name is what `:unlock()` unlocks, and what the runtime matches
+a placed structure against.
 
 <Callout type="warn">
-Defining does not create a new entry in the build menu. Lua alone cannot publish a DataTable
-row — that is PalSchema's job. What a definition does is give an id that already exists
-behaviour, state, a mesh and metadata.
+Defining does not add a new entry to the build menu. Lua alone cannot add a row to the game's
+data tables — that is PalSchema's job. What a definition does is give an id that already
+exists behaviour, saved data, a model and metadata.
 </Callout>
 
-Defining the same id twice replaces the earlier registration. The native catalogs load
-before pack code, so a pack that defines `WorkBench` takes over from
-`native.buildings.WorkBench`, including its mesh — restate anything you still want.
+Defining the same id twice replaces the earlier one. Palworld's own catalog loads before your
+pack code, so a pack that defines `WorkBench` takes over from `native.buildings.WorkBench`,
+mesh included — restate anything you still want.
 
 ### The native catalog
 
 `native/buildings.lua` carries every `DT_BuildObjectDataTable_Common` row id as plain data,
-plus two curated definitions.
+plus two ready-made definitions.
 
 ```lua
 local buildings = require("palforge.native.buildings")
@@ -131,10 +137,13 @@ buildings.get("ItemChest")   -- defines + registers on first use, then cached; n
 buildings.CATALOG            -- the id list, as data
 ```
 
-Requiring the module registers only the two curated definitions. `get(id)` is what
-materializes a catalog id, so startup never registers the hundreds of rows.
+Requiring the module registers only those two. `get(id)` is what turns a catalog id into a
+real definition, so startup never registers the hundreds of rows.
 
 ## Spec fields
+
+Everything you can pass to `Building{ ... }`. Most buildings need only `id`, then `state` and
+`events` once you want them to do something.
 
 <TypeTable
   type={{
@@ -149,13 +158,14 @@ materializes a catalog id, so startup never registers the hundreds of rows.
     color: { description: 'Base tint r, g, b, a in 0..1; shorthand for material.color', type: 'table' },
     texture: { description: 'Absolute png path applied to the mesh; shorthand for material.texture', type: 'string' },
     icon: { description: 'Fallback icon used when the DataTable lookup misses', type: 'any' },
-    state: { description: 'Default persisted state for a new instance: a table, or a factory returning one', type: 'table | fun(): table' },
+    state: { description: 'Default saved state for a new structure: a table, or a factory returning one', type: 'table | fun(): table' },
     events: { description: 'Lifecycle handlers, grouped', type: 'Building.Spec.Events' },
     data: { description: 'Free-form payload of your own, carried onto the definition', type: 'table' },
   }}
 />
 
-Validation is strict and every problem is a hard error, so a call never half-succeeds.
+Every problem is a hard error, so a call never half-succeeds. A misspelled field tells you the
+name it expected:
 
 ```lua
 Building{ id = "example:Bench", grid = 100 }
@@ -170,7 +180,7 @@ PalForge: Building: field "id" is required (build id: a game BuildObjectId ("Pal
 PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
 ```
 
-Read the shape at runtime instead of memorizing it:
+Rather than memorise the list, print it while the game runs:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -182,8 +192,9 @@ schema.get("Building.Spec").fields   -- the same, as a table, for tooling
 
 ### state — a table or a factory
 
-`state` is the default persisted state a **new** instance starts with. It is read once, when
-the scan first creates an instance for which no saved record exists.
+`state` is the data a **new** structure starts with. PalForge writes it to disk for you and
+hands it back the next time you play. It is read once: when the scan first creates a structure
+for which no saved record exists.
 
 ```lua
 state = { uses = 0 }                       -- a table
@@ -191,18 +202,18 @@ state = function() return { uses = 0 } end -- a factory, called per new instance
 ```
 
 The factory is called with the definition class as its argument, so
-`state = function(cls) ... end` works too. If it throws or returns a non-table, the instance
-starts with an empty table.
+`state = function(cls) ... end` works too. If it throws, or returns something that is not a
+table, the structure starts with an empty table.
 
 <Callout type="warn">
 Prefer the factory. A plain table is stored on the definition and handed to every new
-instance by reference — two structures placed from the same definition then share one state
-table, and both persisted records point at it. The factory builds a fresh table per instance.
+structure by reference — two structures placed from the same definition then share one state
+table, and both saved records point at it. The factory builds a fresh table per structure.
 </Callout>
 
-State is persisted as JSON, so keep it to strings, numbers, booleans and nested tables of
-those. A restored instance gets exactly the record that was saved — the default state is not
-merged in — so a field added after the fact needs a guard:
+State is saved as JSON, so keep it to strings, numbers, true/false and nested tables of those.
+A restored structure gets exactly the record that was saved — the default state is not merged
+in — so a field you add in a later version needs a guard:
 
 ```lua
 onLoad = function(self, ctx)
@@ -211,31 +222,32 @@ onLoad = function(self, ctx)
 end,
 ```
 
-### gridCm — how a placement is quantized
+### gridCm — how a structure is recognised again
 
-A placed structure has no stable per-instance id, so the runtime keys an instance by its
-quantized world position. `core/spatial` rounds each axis to the nearest cell,
-`math.floor(v / gridCm + 0.5)`, and formats the key as `buildId@qx,qy,qz`:
+A placed structure carries no stable id of its own, so PalForge identifies one by rounding its
+world position to a grid cell. `core/spatial` rounds each axis with
+`math.floor(v / gridCm + 0.5)` and writes the result as `buildId@qx,qy,qz`:
 
 ```text
 WorkBench@1234,-56,78
 ```
 
-`gridCm` defaults to `core.spatial.GRID_CM`, which is `100` — one metre. That key is the
-identity of the persisted record, so it is what re-attaches saved state to a rediscovered
-structure on the next session. A smaller quantum separates structures that stand close
-together; a larger one tolerates more position drift between sessions. Two structures whose
-positions land in the same cell collide on the key: the scan keeps the instance bound to the
-first valid actor and skips the second.
+`gridCm` defaults to `core.spatial.GRID_CM`, which is `100` — one metre. That key names the
+saved record, so it is what reattaches saved data to a structure found again in your next
+session. A smaller cell separates structures that stand close together; a larger one tolerates
+more drift in the reported position between sessions. Two structures whose positions land in
+the same cell collide on the key: the scan keeps the structure bound to the first valid actor
+and skips the second.
 
-Within one session identity is the actor itself, not the key — a placed building's reported
-location jitters by more than a cell between scans, and keying live instances off that would
-churn one actor into endless instances.
+While you are playing, a structure is tracked by its actor — the object the game put in the
+world — not by that key. A placed structure's reported location moves by more than a cell
+between scans, so tracking by actor is what stops one structure turning into an endless stream
+of new ones.
 
 ### buildIds — claiming more than one game id
 
-`buildIds` is the list of game build ids the definition matches. It **replaces** the default
-`{ id }`, so include the id itself if you still want it matched:
+`buildIds` is the list of game build ids this definition answers for. It **replaces** the
+default `{ id }`, so include the id itself if you still want it matched:
 
 ```lua
 Building{
@@ -250,44 +262,65 @@ Building{
 }
 ```
 
-Each entry is resolved through `object_manager.resolve` (so `"pack:name"` becomes
-`pack_name`) and indexed to this definition. An instance records which one it matched in
-`self.buildId`, while `self.id` stays the definition id.
+Each entry goes through `object_manager.resolve` (so `"pack:name"` becomes `pack_name`) and is
+indexed to this definition. A placed structure records the one it matched in `self.buildId`,
+while `self.id` stays the definition id.
 
-Matching runs in three tiers: the actor's class name `BP_BuildObject_<Id>_C`, then
-`MapObjectModel.BuildObjectId`, then a position match against a saved record. An entry only
-works through the first tier if it is spelled as the blueprint spells it — that is why the
-curated definition uses `"WorkBench"` while the DataTable row is spelled `Workbench`.
+Matching is tried three ways, in order: the actor's class name `BP_BuildObject_<Id>_C`, then
+`MapObjectModel.BuildObjectId`, then a position match against a saved record. The first way
+works only if the id is spelled the way the blueprint spells it — that is why the ready-made
+definition uses `"WorkBench"` while the data table row is spelled `Workbench`.
 
 ### mesh and material
 
-`Building.Spec.Mesh` is `Mesh.Spec` with `kind` defaulting to `"static"` instead of
-`"skeletal"`, so a field added to `Mesh.Spec` reaches buildings automatically. `material`,
-`color` and `texture` layer over whatever the mesh declares: `Class:material()` returns the
-declared `material` table, or builds one from `color` / `texture` when you used the
-shorthands, and `Class:render()` lets the material win field by field.
+`Building.Spec.Mesh` is the shape described on [Mesh](/docs/api/mesh), with one change: `kind`
+defaults to `"static"` rather than `"skeletal"`. `material`, `color` and `texture` layer over
+whatever the mesh declares: `Class:material()` returns the declared `material` table, or builds
+one from `color` / `texture` when you used the shorthands, and `Class:render()` lets the
+material win field by field.
 
-<Callout type="warn">
-Of the three backends behind `kind`, only `procedural` (aliased as `obj`) is implemented for
-a placed structure. It parses an OBJ file from disk at `model` and adds a
-ProceduralMeshComponent with collision disabled. `static` is a stub that returns `false`, and
-`skeletal` drives a character's `Mesh` component, which a build object does not have. The
-curated `WorkBench` and `PalBoxV2` therefore declare a mesh that currently attaches nothing.
-</Callout>
+Two of the three backends behind `kind` attach for real on a placed structure. `static` — the
+default here — adds a `UStaticMeshComponent`, finds `model` through `LoadAsset` with a
+`StaticFindObject` fallback, sets the asset, and then reads it back off the component before
+reporting success, so a game build where the setter is missing gets an honest `false` and no
+orphaned component left behind. `procedural` (also spelled `obj`) reads a Wavefront OBJ file
+from disk at `model` and adds a ProceduralMeshComponent. Both turn collision off — a decorative
+collider would block the raycast the game uses to place the structure — and both set the world
+scale explicitly, because the empty transform handed to `AddComponentByClass` starts it at
+zero.
 
 ```lua
+-- a UE-authored asset, the Building.Spec.Mesh default kind
+mesh = {
+    kind  = "static",
+    model = "/Game/Pal/Model/Other/PalBox/SM_PalBox.SM_PalBox",
+    scale = 1.0,
+    offset = { x = 0, y = 0, z = 50 },
+},
+
+-- an OBJ file, parsed from disk when the mesh attaches
 mesh = {
     kind  = "procedural",
-    model = "C:/mods/example/models/bench.obj",   -- parsed from disk when the mesh attaches
+    model = "C:/mods/example/models/bench.obj",
     scale = 1.0,
     offset = { x = 0, y = 0, z = 50 },
 },
 ```
 
+The ready-made `WorkBench` and `PalBoxV2` declare `static` meshes, so they attach on the scan
+after the one that first sees the actor.
+
+<Callout type="warn">
+`skeletal` swaps the asset on the pawn's own `Mesh` component. A build object does not carry
+one, so a structure declaring `kind = "skeletal"` attaches nothing and its `render()` returns
+`false`. That backend is also unconfirmed in-game — it reports which setter executed, not that
+anything rendered.
+</Callout>
+
 ## The live instance
 
-Nothing you define is alive until the runtime finds a real actor for it. `core/event` owns
-the whole path.
+Nothing you define is alive until a real structure stands in the world. Here is what happens
+when you place one.
 
 ```mermaid
 sequenceDiagram
@@ -306,11 +339,12 @@ sequenceDiagram
   SC-->>IN: render on a LATER scan
 ```
 
-The mesh attach is deliberately deferred. Adding a component to an actor still mid-init — the
-frame it is placed — can touch an invalid native object and crash the game, so the instance is
-marked pending and rendered on the next scan that sees the same actor again.
+The model appears one scan after the structure does, not the instant it is placed. Adding a
+component to an actor that is still setting itself up — the frame it is placed — can touch an
+invalid game object and crash the game, so the structure is marked pending and gets its model
+on the next scan that sees the same actor again.
 
-How the scan decides what it is looking at:
+How a scan decides what it is looking at:
 
 ```mermaid
 flowchart TD
@@ -325,11 +359,11 @@ flowchart TD
   H --> I
 ```
 
-`building.place` is only emitted when a fresh instance is matched to a recorded placement
-intent for the same build id within 300 cm. Every instance the scan newly tracks then emits
+`building.place` is emitted only when a fresh structure is matched to a recorded placement
+request for the same build id within 300 cm. Every structure the scan newly tracks then emits
 `building.load` — including the one that just emitted `building.place` — with
-`ctx.reconstructed` telling you whether it came from a saved record. The instance-creation
-branch runs once per key, so `onPlace` fires exactly once per placement.
+`ctx.reconstructed` telling you whether it came from a saved record. A structure is created
+once per key, so `onPlace` fires exactly once per placement.
 
 ### Instance fields
 
@@ -341,13 +375,13 @@ branch runs once per key, so `onPlace` fires exactly once per placement.
     actor: { description: 'The placed APalBuildObject', type: 'any' },
     pos: { description: 'World position x, y, z in cm, refreshed every scan', type: 'table' },
     cell: { description: 'The quantized cell qx, qy, qz the key was built from', type: 'table' },
-    state: { description: 'Your persisted table; mutate in place, then save', type: 'table' },
+    state: { description: 'Your saved table; change it in place, then save', type: 'table' },
     def: { description: 'The internal def: resolved buildIds, gridCm, tickInterval, hooks', type: 'table' },
   }}
 />
 
-Anything the definition declared is reachable through the class metatable, so `self.name`,
-`self.data`, `self.gridCm` and the rest resolve on the instance too.
+Anything the definition declared is reachable through the class, so `self.name`, `self.data`,
+`self.gridCm` and the rest resolve on the placed structure too.
 
 ### Instance methods
 
@@ -362,8 +396,8 @@ self:material()    -- the declared material, or one built from color / texture
 self:iconOf()      -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
 ```
 
-`currentColor()` returns `self.color`, which resolves to the definition's tint by default.
-Set the field on the instance to make the look follow the state, then push it:
+`currentColor()` returns `self.color`, which is the definition's tint by default. Set the field
+on the structure itself to make the look follow the state, then push it:
 
 ```lua
 onTick = function(self, ctx)
@@ -375,12 +409,13 @@ end,
 ```
 
 <Callout type="info">
-`update()` re-tints through the material instance the procedural backend created when it
-attached the mesh. With no procedurally attached mesh there is nothing to tint and it returns
-`false`.
+`update()` goes through `core/mesh`, which remembers which backend dressed each actor and sends
+the re-tint back to that same backend. Only `procedural` implements one, writing to the
+material instance it created on attach. A `static` mesh attaches but has no re-tint, so
+`update()` returns `false` there.
 </Callout>
 
-### Persistence
+### Saving state
 
 State lives in one JSON file per world, written by `utils/file` into the mod's `state`
 directory:
@@ -390,8 +425,9 @@ directory:
 ```
 
 `saveId` comes from `core/spatial`: `w_` plus the game instance's `WorldGuid`,
-`WorldSaveName` or `SaveName` with non-alphanumerics replaced by `_`, and plain `world` when
-none of them can be read. The file holds one record per instance key:
+`WorldSaveName` or `SaveName` with anything that is not a letter, digit or underscore replaced
+by `_`, and plain `world` when none of them can be read. The file holds one record per
+structure key:
 
 ```json
 {
@@ -407,19 +443,19 @@ none of them can be read. The file holds one record per instance key:
 }
 ```
 
-A record's `state` is the same table as `inst.state`, so mutating in place is enough to
+A record's `state` is the same table as `inst.state`, so changing it in place is enough to
 change what will be written. Nothing writes on its own:
 
 - `self:setDirty()` marks the world cache dirty. Cheap.
-- `self:save()` marks it dirty and flushes the file immediately.
-- world unload flushes once, then drops the live instances and keeps every record.
+- `self:save()` marks it dirty and writes the file straight away.
+- Leaving the world writes once, then drops the live structures and keeps every record.
 
-Call `save()` when the change matters and `setDirty()` in a hot loop, otherwise a per-tick
-`save()` writes the file on every heartbeat.
+Call `save()` when the change matters and `setDirty()` in a hot loop, otherwise a `save()` on
+every tick writes the file on every heartbeat.
 
-Records are deleted only on genuine removal. An instance the scan fails to see for six
-consecutive passes — about three seconds at the 500 ms cadence — emits `building.remove` and
-is dropped along with its record.
+Records are deleted only on real removal. A structure the scan fails to see for six scans in a
+row — about three seconds at the 500 ms cadence — emits `building.remove` and is dropped along
+with its record.
 
 ```mermaid
 stateDiagram-v2
@@ -432,8 +468,8 @@ stateDiagram-v2
   Dropped --> [*]
 ```
 
-`Removed` deletes the persisted record. `Dropped` keeps it, so the structure comes back with
-its state on the next load.
+`Removed` deletes the saved record. `Dropped` keeps it, so the structure comes back with its
+data on the next load.
 
 ### Reaching the instances
 
@@ -447,14 +483,15 @@ event.instanceOfActor(ctx.actor)           -- the instance bound to an actor, or
 event.isWorldReady()                       -- has the world finished loading
 ```
 
-`:instances()` is empty until the scan has run, which needs a loaded world: the ready watch
+`:instances()` is empty until the scan has run, and the scan needs a loaded world: a watch
 polls for a valid `PalPlayerCharacter` once a second and only opens the gate after five
-consecutive successful polls.
+successful polls in a row.
 
 ## Lifecycle events
 
-Handlers are declared under `events` and installed on the definition class as-is, so the
-first argument is the **live instance** the event happened to.
+Handlers go under `events`. The first argument is the placed structure the event happened to,
+so `self.state`, `self.pos` and `self.actor` are right there. `onBuild` is the one exception,
+because it fires before anything is standing in the world.
 
 ```lua
 events = {
@@ -471,24 +508,23 @@ events = {
 | `onRightClick` | `building.interact` | LIVE | `actor`, `player`, `buildId` |
 | `onRemove` | `building.remove` | LIVE | `key`, `buildId`, `actor`, `reason` |
 | `onTick` | `tick` | LIVE | `count`, `now` |
-| `onWorldReady` | `world.ready` | dispatched, see below | empty table |
+| `onBuild` | `building.build` | LIVE, once the world has loaded | `buildId`, `model` |
+| `onWorldReady` | `world.ready` | LIVE | empty table |
 | `onWorldLeft` | `world.left` | LIVE | empty table |
-| `onBuild` | — | never | — |
 | `onLeftClick` | — | never | — |
 | `onBreak` | — | never | — |
 
 <Callout type="warn">
-`onBuild`, `onLeftClick` and `onBreak` are declarable so a pack's code is future-proof, but no
-channel emits them and no native source exists yet. They never run. Use `onPlace` for
-placement and `onRemove` for disappearance.
+`onLeftClick` and `onBreak` can be declared, but nothing in the game emits them, so they never
+run. Use `onRightClick` for interaction and `onRemove` for a structure that disappears.
 </Callout>
 
 ### onPlace
 
-Fires once, on the scan that discovers the new actor and matches it to a placement intent
-recorded by the `RequestBuild_ToServer` hook. `ctx.player` is the `PalPlayerCharacter` the
-hook found when it recorded the intent, `ctx.firstSeen` is always `true`, and `ctx.pos` is
-the actor's real location, not the requested one.
+Fires once, on the scan that discovers the new actor and matches it to a placement request
+recorded by the `RequestBuild_ToServer` hook. `ctx.player` is the `PalPlayerCharacter` the hook
+saw when it recorded the request, `ctx.firstSeen` is always `true`, and `ctx.pos` is the
+actor's real location, not the requested one.
 
 ```lua
 onPlace = function(self, ctx)
@@ -499,9 +535,9 @@ end,
 
 ### onLoad
 
-Fires for every instance the scan starts tracking, including the one it just emitted
-`onPlace` for. `ctx.reconstructed` is `true` when the state came from a saved record and
-`false` for a brand-new instance.
+Fires for every structure the scan starts tracking, including the one it just fired `onPlace`
+for. `ctx.reconstructed` is `true` when the state came from a saved record and `false` for a
+brand-new structure. This is the place for per-structure startup work.
 
 ```lua
 onLoad = function(self, ctx)
@@ -514,10 +550,9 @@ end,
 
 ### onRightClick
 
-Driven by `PalBuildObject:OnBeginInteractBuilding`. The interactor is filtered to
-`PalCharacter` subclasses, so building-to-building interactions do not reach you, and repeat
-interactions on the same actor are debounced for one second. Dispatch resolves the instance
-from `ctx.actor`.
+Driven by `PalBuildObject:OnBeginInteractBuilding`. Only `PalCharacter` subclasses count as the
+one interacting, so building-to-building interactions never reach you, and repeat interactions
+on the same actor are ignored for one second. The structure is found from `ctx.actor`.
 
 ```lua
 onRightClick = function(self, ctx)
@@ -528,8 +563,8 @@ end,
 
 ### onRemove
 
-`ctx.reason` is `"missing"` — the only reason the runtime emits today. The instance is still
-tracked while the handler runs, so `self.state` and `self.pos` are readable; the record is
+`ctx.reason` is `"missing"`, the only reason the runtime gives today. The structure is still
+tracked while your handler runs, so `self.state` and `self.pos` are readable; the record is
 deleted immediately afterwards.
 
 ```lua
@@ -541,11 +576,10 @@ end,
 ### onTick
 
 The heartbeat is `LoopAsync(500)`, published on the `tick` channel, and `ctx.count` is the
-heartbeat number. Only instances whose definition actually overrides `onTick` are put on the
+heartbeat number. Only structures whose definition actually writes an `onTick` are put on the
 tick list, so declaring nothing costs nothing.
 
-`tickInterval` is a divisor on that count: the handler runs when
-`ctx.count % tickInterval == 0`.
+`tickInterval` divides that count: the handler runs when `ctx.count % tickInterval == 0`.
 
 ```lua
 Building{
@@ -560,33 +594,88 @@ Building{
 }
 ```
 
-A non-integer or sub-1 `tickInterval` is coerced back to `1` when the definition is lowered.
+A `tickInterval` that is not a whole number, or is below 1, is rounded back up to `1`.
 
 <Callout type="warn">
-`onTick` is guarded by a circuit breaker. Every failure is logged and counted; after five
-failures the instance is marked broken and stops ticking for the rest of its life, which
-includes the rest of the session unless it is removed and rediscovered. One success resets
-the counter. Keep the handler defensive — check `self:isValid()` before touching `self.actor`.
+`onTick` has a circuit breaker. Every failure is logged and counted; after five failures the
+structure is marked broken and stops ticking for the rest of its life, which means the rest of
+the session unless it is removed and found again. One success resets the counter. Keep the
+handler defensive — check `self:isValid()` before touching `self.actor`.
+</Callout>
+
+### onBuild
+
+Fires when the game finishes building a structure whose build id this definition claims. It
+arrives up to one scan before the placed structure exists, and the game hands over a
+`UPalMapObjectModel` rather than the actor, so `self` here is the **definition**, not a placed
+structure: `self.id`, `self.name`, `self.data` and `self:iconOf()` are there, while
+`self.actor`, `self.pos`, `self.state` and `self:save()` are not.
+
+```lua
+Building{
+    id = "example:Bench",
+    events = {
+        onBuild = function(self, ctx)
+            log.info(self.id .. " completed as " .. tostring(ctx.buildId))
+        end,
+    },
+}
+```
+
+<Callout type="warn">
+`onBuild` only starts listening once the world has finished loading. Its native hook,
+`PalPlayerRecordData:OnCompleteBuild_ServerInternal`, also fires for every structure that
+already exists during the world-load rush, and reading a half-built `UPalMapObjectModel` there
+faults in a way Lua cannot catch. Two things follow. In a session where the world never
+finishes loading, `onBuild` never runs at all. And on a second world load in the same session
+it is already listening, so it will be called during that rush. `onPlace` stays the safe
+placement hook; try `onBuild` in a throwaway world first.
 </Callout>
 
 ### onWorldReady and onWorldLeft
 
-Both are dispatched to every live instance when the world gate flips.
+Both go to every live structure, and both are world-load moments rather than per-structure
+ones.
 
-`onWorldLeft` runs while the instances are still live and before they are dropped, so it is
-the last chance to touch state — though the world cache is flushed for you right afterwards.
+`world.ready` arrives from the scan that turns actors into live structures, not the instant the
+world opens. So the structures around the player are already tracked when your handler runs,
+and they have already had their `onLoad` in that same pass. The wait is at most one scan —
+500 ms — after the world opened.
+
+```lua title="content/buildings/sessions.lua"
+Building{
+    id     = "WorkBench",
+    name   = "Workbench",
+    state  = function() return { uses = 0, sessions = 0 } end,
+    events = {
+        onLoad = function(self, ctx)
+            self.state.uses = self.state.uses or 0        -- per-instance startup
+        end,
+        onWorldReady = function(self, ctx)
+            self.state.sessions = (self.state.sessions or 0) + 1
+            self:save()
+            log.info(string.format("%s present at load %d, %d use(s)",
+                self.key, self.state.sessions, self.state.uses))
+        end,
+    },
+}
+```
 
 <Callout type="warn">
-`onWorldReady` is wired, but the scan that creates instances is gated on the same
-`worldReady` flag and has not run yet at the moment `world.ready` is emitted. The instance
-registry is empty then, so in practice no instance receives it. Use `onLoad`, which fires for
-every instance the scan tracks, or subscribe to the channel directly with
-`event.on("world.ready", fn)`.
+`onWorldReady` fires once per world load, on the structures that first scan found. A structure
+that streams in on a later scan misses it, and so does anything you place during the session.
+Per-structure startup work belongs in `onLoad`, which fires for every structure the scan
+tracks. Leaving the world before that first scan completes cancels the announcement, so a world
+you passed through never announces itself.
 </Callout>
+
+`onWorldLeft` runs while the structures are still live and before they are dropped, so it is
+the last chance to touch state — though the world cache is written for you right afterwards.
 
 ### Subscribing to the channels directly
 
-Dispatch is only one subscriber on each channel. For cross-cutting logic, subscribe yourself:
+PalForge listens on these channels to call your handlers, and you can listen too. Use it for
+logic that spans many buildings at once:
 
 ```lua
 local event = require("palforge.core.event")
@@ -603,12 +692,13 @@ local sub = event.every(5000, function() log.info("five seconds") end)
 sub:unsubscribe()
 ```
 
-`event.every(ms, fn)` is quantized to the 500 ms heartbeat, like the scan itself.
+`event.every(ms, fn)` is rounded to the 500 ms heartbeat, like the scan itself.
 
 ## Handle actions and queries
 
-`Building{ ... }`, `Building.get` and `Building.get_all` all return a `Building.Handle` — the
-definition-level view. Instances are the per-structure view; the handle is how you reach them.
+`Building{ ... }`, `Building.get` and `Building.get_all` all hand you a `Building.Handle`. It
+stands for the definition: use it to read what you declared, and to reach the structures placed
+from it.
 
 ```lua
 local box = Building.get("PalBoxV2")
@@ -627,7 +717,7 @@ Building.get("example:Bench"):unlock()
 ```
 
 Unlocks the technology row named after the resolved id (`example_Bench`) through
-`PalCheatManager:UnlockOneTechnology`, which is how a PalSchema-injected building tech gets
+`PalCheatManager:UnlockOneTechnology`. That is how a building tech injected by PalSchema gets
 into the build menu. Returns `false` and logs when no cheat manager is available.
 
 ### instances, render, update
@@ -636,24 +726,30 @@ into the build menu. Returns `false` and logs when no cheat manager is available
 local kiln = Building.get("example:Kiln")
 
 #kiln:instances()   --> how many are placed in this world
-kiln:render()       --> attach the mesh to every live instance; returns how many calls came back clean
-kiln:update()       --> re-tint every live instance from its currentColor
+kiln:render()       --> attach the mesh to every live instance; returns how many attached
+kiln:update()       --> re-tint every live instance; returns how many were re-tinted
 ```
 
+Both counts come from the per-structure method's own return value, not from whether the call
+survived. A structure whose backend declined is not counted: no `model` in the mesh, an asset
+that will not resolve, a `kind` that cannot dress a build object, no colour to apply, no live
+material instance to write to. So `render()` returning `0` over a non-empty `:instances()`
+means nothing attached, not that nothing threw.
+
 `render()` is normally unnecessary — the scan attaches the mesh one pass after it first sees
-the actor. Reach for it after changing what `mesh()` returns at runtime.
+the actor. Reach for it after changing what `mesh()` returns while the game runs.
 
 ### The event forwarders
 
 The handle also carries `:onPlace(ctx)`, `:onLoad(ctx)`, `:onRightClick(ctx)`,
-`:onLeftClick(ctx)`, `:onBuild(ctx)`, `:onBreak(ctx)`, `:onRemove(ctx)` and `:onTick(ctx)` for
-manual invocation.
+`:onLeftClick(ctx)`, `:onBuild(ctx)`, `:onBreak(ctx)`, `:onRemove(ctx)` and `:onTick(ctx)`, so
+you can run a handler yourself.
 
 <Callout type="warn">
-A forwarder calls the handler with the definition **class** as `self`, not a live instance.
-`self.state`, `self.actor`, `self.key` and `self:save()` are absent there. Use them for
-testing a handler in isolation; use the real event, or an instance from `:instances()`, for
-anything else.
+A forwarder calls the handler with the definition **class** as `self`, not a placed structure.
+`self.state`, `self.actor`, `self.key` and `self:save()` are absent there. That matches the
+real event for `onBuild` and for nothing else, so use the forwarders to test a handler on its
+own, and the real event — or an instance from `:instances()` — for anything else.
 </Callout>
 
 ## Recipes
@@ -692,9 +788,9 @@ return Building{
 }
 ```
 
-The count survives because `onRightClick` calls `save()`. Without it the mutation would still
-be visible in memory and would still be written the next time anything flushes the world
-file, which is not a guarantee worth relying on.
+The count survives because `onRightClick` calls `save()`. Without it the change would still be
+visible in memory and would still be written the next time anything flushes the world file,
+which is not a guarantee worth relying on.
 
 ### A machine that consumes an item on a timer
 
@@ -749,8 +845,8 @@ return Building{
 
 <Callout type="info">
 `:take` moves the count through the game's own server path and returns whether the call
-executed, not whether the player actually had that much. Track what you consumed in `state`
-if the machine needs a real balance.
+executed, not whether the player actually had that much. Track what you consumed in `state` if
+the machine needs a real balance.
 </Callout>
 
 ### A structure that spawns a pal when interacted with
@@ -795,7 +891,23 @@ return Building{
 }
 ```
 
-Redefining `PalBoxV2` replaces the curated definition from `native/buildings.lua`, so the
-mesh is restated here. The vanilla pal box UI still opens — the interact hook observes the
-call, it does not consume it. See [Pal](/docs/api/pal) for what `:spawn` accepts and
-[Item](/docs/api/item) for `:give` and `:take`.
+Defining `PalBoxV2` again replaces the ready-made definition from `native/buildings.lua`, so
+the mesh is restated here. The vanilla pal box UI still opens — the interact hook watches the
+call, it does not swallow it.
+
+## Summary
+
+- Write `Building{ ... }` to define one. Only `id` is required, and it has to be an id the game
+  already has.
+- Put anything you want remembered in `state`, change it in place, then call `self:save()`.
+- Handlers go in `events`, and the first argument is the placed structure, so `self.state`,
+  `self.pos` and `self.actor` are right there.
+- `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady` and
+  `onWorldLeft` all run. `onLeftClick` and `onBreak` never do.
+- A structure is found again by its rounded world position, so `gridCm` decides how close two
+  of them can stand.
+- `Building.get(id):instances()` gives you every structure of that definition standing in the
+  world right now.
+
+Next, read [Item](/docs/api/item) for `:give` and `:take`, which is how a building hands things
+to the player.

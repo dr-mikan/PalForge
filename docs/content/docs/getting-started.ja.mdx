@@ -1,11 +1,21 @@
 ---
 title: セットアップ
-description: PalForge を UE4SS Mod として導入し、ロードを確認して最初の定義を動かす
+description: PalForge を導入し、ロードされたことを確認して、最初のコンテンツをゲームで動かす
 ---
 
-PalForge は UE4SS の Lua Mod として動作します。`Scripts/main.lua` と `Scripts/palforge/` のモジュールツリーを
-所定の場所に配置し、Mod を有効化して、UE4SS のログでカーネルが起動したことを確認します。そのあとは、
-`Pal{ ... }` / `Item{ ... }` / `Building{ ... }` などを呼ぶ Lua コードがコンテンツパックになります。
+PalForge を使うと、自分で作った建物・アイテム・パル・スキル・音・エフェクト・メニューを Palworld に
+追加できます。短い Lua ファイルに「こういうものが欲しい」と書くと、それがゲームに出てきます。
+
+このページでは、導入して、動いていることを確かめて、最初の定義がゲーム内の操作に反応するところまで
+進めます。
+
+## このページでできるようになること
+
+- 自分の Palworld で PalForge を動かす
+- ゲームのログを見るだけで、起動したかどうかが分かる
+- 自分のアイテムを追加して、拾ったときにメッセージを出す
+- 開けた回数を数えるチェストを追加して、次に遊ぶときも回数が残るようにする
+- 何かが出てこないとき、自分で原因を突き止める
 
 ## インストール
 
@@ -15,8 +25,12 @@ PalForge は UE4SS の Lua Mod として動作します。`Scripts/main.lua` と
 
 ### ファイルを配置する
 
-`main.lua` は自分自身のディレクトリから `package.path` を組み立てるため、配置は固定です。`palforge/` は
-`main.lua` と同じ階層に置いてください。
+PalForge は UE4SS 上で動きます。UE4SS は、Palworld で Lua 製の Mod を動かすためのローダーです。ほかの
+Palworld の Lua Mod がすでに動いているなら、UE4SS は入っています。
+
+`ue4ss/Mods/` の下に `PalForge` というフォルダを作り、次のように配置してください。`palforge/` は
+`main.lua` と同じ階層に置きます。`main.lua` は自分のフォルダを基準に PalForge の残りを探すため、配置が
+違うとすべて動かなくなります。
 
 ```text
 ue4ss/
@@ -35,17 +49,18 @@ ue4ss/
                 └── utils/
 ```
 
-`Scripts/palforge/types.lua` は型注釈だけのファイルで、実行時にはどこからも require されません。LuaLS が
-定義のフィールドを補完するために存在します。[エディタ設定](/docs/concepts/editor-setup) を参照してください。
+`Scripts/palforge/types.lua` は型注釈だけのファイルで、ゲームの実行中はどこからも読み込まれません。
+入力中にエディタが定義のフィールドを補完できるようにするためのものです。
+[エディタ設定](/docs/concepts/editor-setup) を参照してください。
 
 </Step>
 
 <Step>
 
-### Mod を有効化する
+### Mod を有効にする
 
-UE4SS で Lua Mod を有効にする方法は 2 つあります。Mod フォルダ内に空の `enabled.txt` を置くか、
-`ue4ss/Mods/mods.txt` に行を追加します。
+UE4SS で Lua Mod を有効にする方法は 2 つあります。Mod フォルダの中に空の `enabled.txt` を置くか、
+`ue4ss/Mods/mods.txt` に 1 行追加します。
 
 ```text title="ue4ss/Mods/mods.txt"
 CheatManagerEnablerMod : 1
@@ -53,9 +68,13 @@ ConsoleEnablerMod : 1
 PalForge : 1
 ```
 
-`Pal.Handle:spawn` は `UPalCheatManager` を経由するため、パルをスポーンさせるなら
-`CheatManagerEnablerMod` を有効なままにしてください。無効な場合、`core/spawn` は
-`spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)` と記録して `false` を返します。
+パルをスポーンさせたい場合は `CheatManagerEnablerMod` を有効なままにしてください。`Pal.Handle:spawn`
+はゲーム本体の `UPalCheatManager` を経由するため、この Mod がないと `core/spawn` は次の行を出して
+`false` を返し、何もしません。
+
+```text
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+```
 
 </Step>
 
@@ -63,25 +82,25 @@ PalForge : 1
 
 ### ゲームを起動してログを読む
 
-PalForge のメッセージはすべて `utils/log` を通り、既定のシンクが
-`[PalForge.<scope>][<level>] <msg>` の形式で出力します。ゲームのロード中に UE4SS のコンソール
-（および `UE4SS.log`）を確認してください。期待される行は次の節にあります。
+UE4SS は Mod の出力を自分のコンソールウィンドウに表示し、同じ内容を `UE4SS.log` というファイルにも
+書き出します。PalForge のメッセージはすべて `utils/log` を通り、`[PalForge.<scope>][<level>] <msg>` の
+形式になります。ゲームのロード中にこれを見てください。確認すべき行は次の 2 つの節にあります。
 
 </Step>
 
 </Steps>
 
-## ロード時に main.lua が行うこと
+## ゲーム起動時に何が起きるか
 
-`main.lua` は薄いエントリポイントです。順に次を行います。
+UE4SS が実行するのは `main.lua` 1 ファイルだけです。順に次を行います。
 
-1. 自分自身のディレクトリを `package.path` の先頭に追加します
-   （`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`）。これにより `require("palforge.api")` が
-   その `Scripts/` フォルダを基準に解決されます。
-2. `palforge.env` を require し、バージョンと dev フラグを出力します。
-3. `registry.initialize()` を `pcall` の中で呼び、失敗時は `initialize failed: <err>`、成功時は `ready` を
-   出力します。
-4. コンパニオン Mod のために `_G.PalForge` を公開します。
+1. Lua の `package.path` を自分のフォルダに向けます
+   （`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`）。これで `require("palforge.api")` が隣にある
+   モジュールを見つけられます。
+2. `palforge.env` を読み込み、バージョンと dev フラグを出力します。
+3. `registry.initialize()` を `pcall` の中で呼び、失敗したら `initialize failed: <err>`、成功したら
+   `ready` を出力します。
+4. `_G.PalForge` を公開し、ほかの Mod が動作中の PalForge をそのまま使えるようにします。
 
 ```lua title="Scripts/main.lua (excerpt)"
 local thisDir = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
@@ -94,7 +113,7 @@ local log      = require("palforge.utils.log").scope("main")
 log.info("PalForge v" .. tostring(env.version) .. " starting (dev=" .. tostring(env.dev) .. ")")
 ```
 
-`registry.initialize()` はカーネルのエントリポイントで、5 つのステップを実行します。
+すべてが立ち上がるのは `registry.initialize()` の中です。5 つのステップを実行します。
 
 ```mermaid
 flowchart TD
@@ -107,12 +126,12 @@ flowchart TD
   G --> H["_G.PalForge published"]
 ```
 
-カタログのロード順は `buildings`、`items`、`pals`、`skills`、`effects`、`audio`、`ui` です。登録は独立した
-ステップではありません。定義の呼び出し自体が `core/object_manager` に書き込むため、カタログモジュールを
-require することがそのままコンテンツの登録になります。巨大なカタログ配列は単なるデータのまま残り、各
-モジュールの `get(id)` が遅延的に実体化します。だからこそ起動時に数千件の行 ID が登録されることはありません。
+カタログのロード順は `buildings`、`items`、`pals`、`skills`、`effects`、`audio`、`ui` です。カタログを
+読み込むことがそのまま登録になります。定義の呼び出しが、実行されたときに自分自身を
+`core/object_manager` に書き込むからです。それらのファイルに並んでいる長い ID のリストは、`get(id)` で
+要求されるまで単なるデータのままなので、起動時に何千もの行 ID が一度に登録されることはありません。
 
-`_G.PalForge` には下流向けのサーフェスがすべて載ります。
+`_G.PalForge` には、ほかの Mod が必要とするものが一式載っています。
 
 ```lua
 _G.PalForge = {
@@ -129,26 +148,26 @@ _G.PalForge = {
 
 ## 正常な起動ログ
 
-`env.dev = true`（同梱の既定値）の場合、正常な起動は次のようになります。
+同梱の既定値は `env.dev = true` です。この状態での正常な起動は次のようになります。
 
 ```text
 [PalForge.main][info] PalForge v0.3.0 starting (dev=true)
 [PalForge.event][info] tick source live
-[PalForge.event][info] event wired: bus + sources (tick/world/building live; pal/item TODO(dump)) + dispatch
-[PalForge.keyboard][info] bound F1
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard TODO(dump)) + dispatch
 [PalForge.keyboard][info] bound F4
-[PalForge.keyboard][info] keybinds loaded (2 function file(s): F1,F4)
+[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
 [PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
-[PalForge.unittests][info] tests: 8 passed, 0 failed (8 total)
+[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
+[PalForge.keyboard][info] bound F1
 [PalForge.registry][info] initialized (dev=true, 19 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-クラス数は登録された数そのものです。19 は同梱の native カタログが宣言しているキュレーション済み定義の
-数で、自分の定義を追加すればその分増えます。
+クラス数は、登録された定義の数そのものです。同梱カタログが宣言しているものに、自分の定義が加わります。
+PalForge が起動したことを示す行は `[PalForge.main][info] ready` です。
 
-次の 2 行はワールドのゲートに対応します。1 行目はセーブデータのロードが完了したとき、2 行目はその
-ワールドを離れたときに出ます。
+もう 2 行はワールドのゲートに対応します。PalForge はセーブデータのロードが終わるまでワールド内の
+オブジェクトに触れません。1 行目はセーブの準備ができたとき、2 行目はそのワールドを離れたときに出ます。
 
 ```text
 [PalForge.event][info] world ready - building dispatch enabled
@@ -156,17 +175,17 @@ _G.PalForge = {
 ```
 
 <Callout type="info">
-world ソースは 1000 ms ごとに `FindFirstOf("PalPlayerCharacter")` をポーリングし、有効な結果が 5 回連続で
-得られてから `world.ready` を発行します。それまで building / pal / item の各ソースは早期リターンするため、
-タイトル画面にいる間はこれらは何もディスパッチしません。Mod のロード直後から動くソースは tick の
-ハートビートだけです。ポーリングループ自体を設置できなかった場合はログに
-`ready-watch unavailable (...) - dispatch always on` が出て、ランタイムはフェイルオープンします。
+world ソースは 1000 ms ごとに `FindFirstOf("PalPlayerCharacter")` を確認し、有効な結果が 5 回連続で
+得られてから `world.ready` を発行します。それまで building / pal / item の各ソースは早期リターンするので、
+タイトル画面にいる間は自分のハンドラは動きません。Mod のロード直後から動くソースは tick の
+ハートビートだけです。確認ループ自体を設置できなかった場合はログに
+`ready-watch unavailable (...) - dispatch always on` が出て、そのまま全部動きます。
 </Callout>
 
 ## dev トグル
 
-`Scripts/palforge/env.lua` は共有のランタイム設定です。`require()` にキャッシュされるため、このテーブルは
-プロセス全体で 1 つのシングルトンになります。
+`Scripts/palforge/env.lua` には、PalForge が実行時に読む設定が入っています。`require()` にキャッシュ
+されるため、どのモジュールも同じテーブルを見ます。
 
 ```lua title="Scripts/palforge/env.lua"
 return {
@@ -178,12 +197,13 @@ return {
 
 `dev` が true のとき、`registry.initialize()` は追加で次を行います。
 
-- キーバインドの動作ファイル（`core/keyboard/`）をロードします。**F1** は
-  `Pal.get(id):spawn{ at = ... }` を通してプレイヤーの約 6 m 前方にレベル 5 の `ChickenPal` をスポーンし、
-  着地位置をアナウンスします。**F4** は `utils.items.unlockAllTech` を呼んでカスタムの建築物やチェストを
-  ビルドメニューに出します。
-- `ps_catalog` コンソールコマンドを登録します。これはオプトインの DataTable ダンパーで、自動実行は決してしません。
-- `palforge.tests` を require して登録済みスイートをすべて実行します。`tests: ...` の行はこれによるものです。
+- `core/keyboard/` のキーバインドファイルを読み込みます。これにより **F4** が
+  `utils.items.unlockAllTech` になり、押すとカスタムの建物やチェストがビルドメニューに出ます。
+- `ps_catalog` コンソールコマンドを登録します。これは手動で実行する DataTable ダンパーで、自動では
+  決して動きません。
+- `palforge.tests` のヘッドレステスト一式を実行します。`tests: ...` の行はこれによるものです。
+- ゲーム内テストスイート `palforge.test` を読み込み、**F1** に割り当てます。キーを押すまで何も実行され
+  ません。これらのテストはパルをスポーンさせたりアイテムを配ったりするからです。
 
 コンテンツカタログだけを登録する静かなリリースビルドにするには `dev = false` にします。
 
@@ -207,14 +227,14 @@ end
 ```
 
 <Callout type="warn">
-dev ゲートは `registry.initialize()` の内部で読まれます。初期化後に
-`require("palforge.env").dev` を書き換えても、自分のコードから見える値が変わるだけで、dev ツールの
-ロード状態は変わりません。確実に切り替えるには `env.lua` を編集してください。
+dev ゲートは `registry.initialize()` の内部で読まれます。そのあとに `require("palforge.env").dev` を
+書き換えても、自分のコードから見える値が変わるだけで、dev ツールのロード状態は変わりません。確実に
+切り替えるには `env.lua` を編集してください。
 </Callout>
 
 ## 最初の定義
 
-自分のコードは `main.lua` と同じ階層に、独立したファイルとして置きます。`package.path` はそのディレクトリを
+自分のコードは `main.lua` と同じ階層に、独立したファイルとして置きます。`package.path` はそのフォルダを
 すでに含んでいるので、素の `require` で読み込めます。
 
 ```lua title="ue4ss/Mods/PalForge/Scripts/mypack.lua"
@@ -234,7 +254,7 @@ api.Item{
 }
 ```
 
-カーネルが起動したあと、`main.lua` の末尾から読み込みます。
+PalForge 本体が立ち上がったあと、`main.lua` の末尾から読み込みます。
 
 ```lua title="ue4ss/Mods/PalForge/Scripts/main.lua"
 _G.PalForge = {
@@ -248,17 +268,19 @@ return _G.PalForge
 ```
 
 <Callout type="warn">
-自分のファイルは `registry.initialize()` の実行**後**に require してください。それより前ではグローバルが
-インストールされておらず、native カタログもロードされていません。`pcall` も重要です。スペックのエラーは
-ハードエラーであり、保護しないと `main.lua` の残りが中断されます。
+自分のファイルは `registry.initialize()` が走った**あと**に require してください。それより前では
+グローバルがインストールされておらず、native カタログもロードされていません。`pcall` も重要です。
+定義のフィールドを間違えるとハードエラーになり、保護しないと `main.lua` の残りが止まります。
 </Callout>
 
-`Item{ id = "Stone" }` は、ゲームに既に存在する ID に振る舞いとメタデータを与えます。まったく新しい
-DataTable の行を発行することは Lua だけでは不可能で、それは PalSchema の仕事です。例がバニラのアイテム ID を
-使っているのはそのためです。コロンを含まない ID はゲームの実 ID を指し、`"pack:name"` は行 FName
-`pack_name` に解決される名前空間付き ID です。
+`Item{ id = "Stone" }` は、ゲームにすでにある ID に自分の振る舞いとメタデータを結び付けます。Lua だけで
+ゲームのアイテム・パル・建物のテーブルに新しい行を追加することはできません。これらはゲームの DataTable
+で、そこに新しい行を書くのは PalSchema の仕事です。ですから、すでにある ID の上に作ります。例が
+バニラの ID を使っているのはそのためです。コロンを含まない ID はゲームの実 ID（`Stone`、`Wood`、
+`PalBoxV2`）を指し、`"pack:name"` は自分の名前空間付き ID で、行名 `pack_name` に対応します。
 
-2 つ目は状態を持つ定義です。建築インスタンスは `self.actor`、`self.pos`、`self.state`、`self:save()` を持ちます。
+次は、何かを覚えておく定義です。建築のインスタンスは `self.actor`、`self.pos`、`self.state`、
+`self:save()` を持ちます。
 
 ```lua title="ue4ss/Mods/PalForge/Scripts/mypack.lua"
 local api = require("palforge.api")
@@ -282,10 +304,10 @@ api.Building{
 }
 ```
 
-native カタログがキュレーションしている ID を定義し直すと、その登録を置き換えます。`object_manager` の
-エントリは `(type, id)` をキーにしているためです。`native/buildings` は `WorkBench` と `PalBoxV2`、
-`native/items` は `Wood` / `Berries` / `Arrow`、`native/pals` は `ChickenPal` と `SheepBall` を
-キュレーションしているので、置き換えたい場合を除いて別の ID を選んでください。
+1 つの ID が持てる定義は 1 つだけです。`object_manager` は種類と ID をキーにしているため、PalForge が
+すでに定義を同梱している ID を定義すると、そちらを置き換えます。`native/buildings` は `WorkBench` と
+`PalBoxV2`、`native/items` は `Wood` / `Berries` / `Arrow`、`native/pals` は `ChickenPal` と `SheepBall`
+を同梱しています。置き換えたい場合を除いて、別の ID を選んでください。
 
 パルの例では、ハンドラではなくアクションを見てみます。
 
@@ -339,7 +361,8 @@ chicken:spawn(api.Player.coordinateOffset(300, 0, 0))
 
 ### 同梱デモを動かす
 
-native カタログにはすでにライブのハンドラが入っているので、自分でコードを書かなくてもディスパッチを確認できます。
+PalForge が同梱している定義にはすでにライブのハンドラが付いているので、自分で何も書かなくても配線が
+動いていることを確認できます。
 
 ```text
 [PalForge.native.items][info] Wood onObtain: count=1
@@ -371,8 +394,8 @@ flowchart LR
   D --> E["your onObtain runs"]
 ```
 
-`ctx.itemId` と `ctx.count` はゲーム自身の取得ログ構造体から取り出され、ディスパッチはその ID を
-`object_manager` で引きます。定義していないバニラ ID は何にも解決されず、ディスパッチは何もしません。
+`ctx.itemId` と `ctx.count` はゲーム自身の取得ログ構造体から取り出され、その ID が `object_manager` で
+引かれます。自分が定義していないバニラ ID は何にも一致せず、その場合は静かに何も起きません。
 
 </Step>
 
@@ -389,20 +412,20 @@ for id in pairs(registry.registered().item) do
 end
 ```
 
-`registry.registered()` はオブジェクト型 → ID のスナップショットを返します。型は `item`、`pal`、
-`building`、`skill`、`effect`、`audio`、`mesh`、`ui` です。
+`registry.registered()` は種類 → ID のスナップショットを返します。種類は `item`、`pal`、`building`、
+`skill`、`effect`、`audio`、`mesh`、`ui` です。
 
 </Step>
 
 </Steps>
 
-`env.dev = true` なら、F1（前方に `ChickenPal` をスポーン）と F4（すべてのテクノロジーを解放）が
-そのままスモークテストになります。
+`env.dev = true` なら、**F1**（ゲーム内テストスイートの実行）と **F4**（すべてのテクノロジーを解放）が
+そのまま動作確認に使えます。
 
 ## API へのアクセス方法
 
-`palforge.api` を require すると、素のグローバルがインストールされ、**同時に**同じテーブルが名前空間付きで
-返ります。どちらのスタイルでも実体は同じオブジェクトです。
+`require("palforge.api")` は同時に 2 つのことをします。すべてが載ったテーブルを返し、さらにそのまま
+使えるグローバル名も作ります。どちらも指している実体は同じです。
 
 <Tabs items={['名前空間', 'グローバル', 'コンパニオン Mod']}>
 
@@ -427,7 +450,8 @@ Pal.get("ChickenPal"):spawn(Player.coordinate())
 ```
 
 グローバルは `Pal`、`Item`、`Building`、`Skill`、`Effect`、`Audio`、`Mesh`、`UI`、`Player` です。UE4SS は
-Lua Mod ごとに独立した state を与えるため、これらは Mod ローカルであり、ゲームや他の Mod と衝突しません。
+Lua Mod ごとに独立した Lua state を与えるため、これらの名前は自分の Mod だけのもので、ゲームや他の Mod と
+衝突しません。
 
 </Tab>
 
@@ -440,25 +464,25 @@ api.Item.get("Wood"):give(10)
 api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
 ```
 
-自分の `package.path` が PalForge の `Scripts/` を指しておらず、`require("palforge.*")` が使えない場合は
-この形にします。
+自分の `package.path` が PalForge の `Scripts/` フォルダを指しておらず、`require("palforge.*")` が
+使えない場合はこの形にします。
 
 </Tab>
 
 </Tabs>
 
-すべてのドメインモジュールは同じ 3 つのエントリポイントを持つので、1 つ覚えれば残りも同じです。
+どの種類のコンテンツも同じ形なので、1 つ覚えれば残りも同じです。
 
 ```lua
-local pal = Pal{ id = "example:Boss", name = "Boss" }   -- CALL the module to define
-Pal.get("ChickenPal")                                   -- an existing one, by id
-Pal.get_all()                                           -- every registered one
+local pal = Pal{ id = "example:Boss", name = "Boss" }   -- make one
+Pal.get("ChickenPal")                                   -- find one by id
+Pal.get_all()                                           -- list every one
 ```
 
-## コンテンツパックを独立した UE4SS Mod にする
+## 自分のパックを独立した Mod にする
 
-`main.lua` が `_G.PalForge` を公開しているので、別の Mod はフレームワークをもう 1 つ読み込む代わりに、
-動作中のものを再利用できます。
+`main.lua` が `_G.PalForge` を公開しているので、別の Mod は PalForge をもう 1 つ読み込む代わりに、すでに
+動いているものを使えます。
 
 ```mermaid
 flowchart LR
@@ -499,17 +523,17 @@ api.Item{
 log.info("mypack loaded")
 ```
 
-`ue4ss/Mods/mods.txt` では PalForge を自分のパックより上に書き、定義が走る前にカーネルが初期化される
-ようにします。
+`ue4ss/Mods/mods.txt` では PalForge を自分のパックより上に書き、自分の定義が走る前に PalForge の起動が
+終わっているようにします。
 
 <Callout type="warn">
 UE4SS は Lua Mod ごとに独立した Lua state を与えます。`_G.PalForge` は PalForge の `main.lua` が走った
 state にロードされたコードから参照できますが、別の Mod フォルダがその state を共有するかどうかは UE4SS の
 ビルドとロード構成に依存します。`if not PF then ... return end` のガードは必ず残し、これに引っかかる場合は
-「最初の定義」の節のように、PalForge 自身の `Scripts/` ディレクトリからファイルを読み込んでください。
+「最初の定義」の節のように、PalForge 自身の `Scripts/` フォルダからファイルを読み込んでください。
 </Callout>
 
-公開テーブルには `api` のほかにツールボックスとエンジンも入っています。
+公開テーブルには `api` のほかに、ツールボックスとエンジンも入っています。
 
 ```lua
 local PF = _G.PalForge
@@ -524,8 +548,9 @@ PF.core.event.on("tick", function(ctx)
 end)
 ```
 
-起動後に定義しても問題ありません。あとから定義した建築は次の再構築スキャンで拾われ、パルとアイテムの
-ディスパッチは発行時に ID で解決するため、`gameStart` の 1 分後に登録した定義でもイベントを受け取れます。
+起動後に定義しても問題ありません。あとから定義した建築は次のスキャンで拾われ、パルとアイテムの
+イベントは発生した時点で ID から解決されるため、`gameStart` の 1 分後に登録した定義でもイベントを
+受け取れます。
 
 ## トラブルシューティング
 
@@ -534,9 +559,9 @@ end)
 Mod がロードされていません。次の順に確認します。
 
 - `Scripts/main.lua` が `ue4ss/Mods/PalForge/` の直下にあり、`palforge/` がその隣にあるか。`main.lua` は
-  自身のファイル位置から `package.path` を導出するため、ツリーがずれるとすべての `require` が壊れます。
+  自分のファイルの位置から `package.path` を割り出すため、フォルダが動くとすべての `require` が壊れます。
 - Mod が有効か。Mod フォルダ内の空の `enabled.txt`、または `ue4ss/Mods/mods.txt` の `PalForge : 1`。
-- UE4SS 自体が Lua Mod をロードしているか（他の Lua Mod が自分の行を出力しているか）。
+- そもそも UE4SS が Lua Mod をロードしているか（他の Lua Mod が自分の行を出力しているか）。
 
 ### `initialize failed: ...`
 
@@ -544,9 +569,9 @@ Mod がロードされていません。次の順に確認します。
 [PalForge.main][err] initialize failed: ...
 ```
 
-`registry.initialize()` からエラーが抜けました。`main.lua` が捕捉するのでゲームは動き続けますが、ソース・
-ディスパッチ・カタログのいずれもライブになりません。コロンより後ろが実際のエラーです。カタログ単位の失敗は
-`native catalog 'palforge.native.items' load error: ...` として別に記録されます。
+`registry.initialize()` からエラーが抜けました。`main.lua` が捕捉するのでゲームは動き続けますが、ソースも
+ディスパッチもカタログも何一つライブになりません。コロンより後ろが実際のエラーです。1 つのカタログだけが
+失敗した場合は、`native catalog 'palforge.native.items' load error: ...` として別の行に出ます。
 
 ### 未知のフィールド
 
@@ -554,14 +579,14 @@ Mod がロードされていません。次の順に確認します。
 PalForge: Pal: unknown field "meshSpec" (did you mean "mesh"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 ```
 
-バリデーションは厳格です。スペックに宣言されていないものはすべて did-you-mean 付きのハードエラーになるため、
-装飾された名前が黙って無視されることはありません。同じチェックは `events` テーブルを含むネストした形にも走ります。
+定義に存在しないフィールドは、修正候補付きのハードエラーになります。名前を打ち間違えても黙って無視される
+ことはありません。同じチェックは `events` を含むネストしたテーブルにも走ります。
 
 ```text
 PalForge: Pal: field "events" (Pal.Spec.Events): unknown field "onSpawn" (did you mean "onSpawned"?). Valid fields: onSpawned, onDamaged, onDeath, onCaptured, onTick
 ```
 
-呼び出しが何を受け付けるかはレジストリに問い合わせられます。
+呼び出しが何を受け付けるかは、自分のコードから問い合わせることもできます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -577,8 +602,8 @@ schema.get("Pal.Spec").fields           -- the same as a table, for tooling
 PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
 ```
 
-`id` はどのドメインでも必須です。括弧内はそのフィールド自身のドキュメントなので、どういう値を渡すべきかが
-メッセージから分かります。
+`id` はどの種類のコンテンツでも必須です。括弧内はそのフィールド自身のドキュメントなので、どういう値を
+渡すべきかがメッセージから分かります。
 
 ### 値や型が不正
 
@@ -588,34 +613,42 @@ PalForge: Item: field "maxStack" expects number, got string
 PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
 ```
 
-呼び出しが中途半端に成功することはありません。バリデーションが落ちた時点で、何も登録される前にエラーになります。
+呼び出しが中途半端に成功することはありません。チェックが落ちた時点で、何も登録される前にエラーになります。
 
 ### ハンドラが呼ばれない
 
-- そのフックにネイティブソースが存在するか確認します。アイテムの `onCraft` と `onDiscard`、パルの `onTick`、
-  建築の `onBuild` / `onLeftClick` / `onBreak` は宣言できますが、まだ何も発行しません。ライブなものは
-  [ライフサイクル](/docs/concepts/lifecycle) にまとまっています。
-- ワールドのゲートを確認します。`world ready - building dispatch enabled` より前にソースは動きません。
-- 無効化されたフックがないか確認します。
+- そのフックを呼ぶものがあるか確認します。アイテムの `onCraft` と `onDiscard`、建築の `onLeftClick` と
+  `onBreak` は書けますが、まだ何も発行しません。代わりに `onUse` / `onObtain`、`onRightClick` /
+  `onRemove` を使ってください。ライブなものは [ライフサイクル](/docs/concepts/lifecycle) にまとまっています。
+- ワールドのゲートを確認します。`world ready - building dispatch enabled` より前は何も動きません。
+- ゲーム側の都合で設置できなかったフックがないか確認します。
 
   ```text
   [PalForge.event][warn] hook unavailable (feature disabled): /Script/Pal.PalBuildObject:OnBeginInteractBuilding -> ...
   ```
 
-- ID を確認します。ディスパッチはアイテムを `ctx.itemId` で、パルを BP クラス名（`BP_<Id>_C`）で解決します。
-  `object_manager` にない ID は、エラーではなく静かな no-op になります。
+- ID を確認します。アイテムは `ctx.itemId` で、パルはブループリントのクラス名（`BP_<Id>_C`、そのパルの
+  アクターに対するゲーム内部の名前）で照合されます。`object_manager` にない ID は静かに何もしません。
+  エラーにはなりません。
 
-### ハンドラは呼ばれるが何も起きない
+### ハンドラは呼ばれるが、中で何かが壊れている
 
-ディスパッチはフックを `pcall` の中で呼び、失敗をログに出しません。つまりハンドラ内の実行時エラーは
-握りつぶされます。唯一の例外は建築の `onTick` です。
+ハンドラは `pcall` の中で走るので、間違いがあってもゲームは落ちません。エラーは、発生したチャンネルと
+フックの名前付きでログに書かれます。
+
+```text
+[PalForge.event][err] item.use -> onUse handler failed: ...
+```
+
+建築の `onTick` は、失敗が続くと停止されます。壊れたハンドラ 1 つがハートビートを永久に消費しないように
+するためです。
 
 ```text
 [PalForge.event][err] onTick 'WorkBench@1204,-431,84' failed: ...
 [PalForge.event][warn] onTick 'WorkBench@1204,-431,84' disabled after 5 failures
 ```
 
-開発中は危険な処理を自分で包んでください。
+開発中は危険な処理を自分で包み、出るメッセージを自分で決めておくと楽です。
 
 ```lua
 events = {
@@ -640,15 +673,32 @@ events = {
 
 <Cards>
   <Card title="定義" href="/docs/concepts/definitions">
-    共通のモジュール形状。呼び出して定義する、get、get_all、そして返ってくる Handle。
+    作り方、探し方、一覧の取り方、そして返ってくるもの。
   </Card>
   <Card title="スキーマ" href="/docs/concepts/schema">
-    スペックの宣言方法、バリデーション、実行時の読み出し方。
+    各コンテンツが受け付けるフィールドと、実行時の読み出し方。
   </Card>
   <Card title="ライフサイクル" href="/docs/concepts/lifecycle">
-    チャンネル、ネイティブソース、ディスパッチ、そしてどのフックがライブなのか。
+    どのハンドラが、いつ呼ばれ、`ctx` に何が入るのか。
   </Card>
   <Card title="最初のコンテンツパック" href="/docs/guides/first-content-pack">
-    各ドメインを通しで組み上げた完全なパック。
+    あらゆる種類のコンテンツを通しで組み上げた完全なパック。
   </Card>
 </Cards>
+
+## まとめ
+
+- PalForge は `ue4ss/Mods/PalForge/Scripts/` に置き、`palforge/` を `main.lua` の隣に置きます。
+  配置が違うと動きません。
+- `[PalForge.main][info] ready` は PalForge が起動した合図、
+  `world ready - building dispatch enabled` は自分のハンドラが動き出せる合図です。
+- 自分のコンテンツは `main.lua` と同じ階層の自分のファイルに書き、`registry.initialize()` のあと、
+  `main.lua` の末尾から `require` します。
+- `Item{ ... }`、`Building{ ... }`、`Pal{ ... }` はどれも同じ形です。テーブルを渡して呼べば作れて、
+  `get(id)` で探せて、`get_all()` で一覧できます。
+- コロンを含まない ID はゲームのもの、`"pack:name"` は自分のものです。
+- フィールド名を間違えると、その名前と正しい候補を並べたメッセージで呼び出しが止まります。推測せずに
+  メッセージを読んでください。
+
+次は [定義](/docs/concepts/definitions) を読むと、定義の呼び出しが何を返し、それで何ができるのかが
+分かります。

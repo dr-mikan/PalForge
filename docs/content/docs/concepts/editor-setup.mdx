@@ -1,56 +1,36 @@
 ---
 title: Editor setup
-description: Completion and hover docs while writing a pack — types.lua, .luarc.json, and the generator that keeps them in step
+description: Get your editor to list every field, explain what it means, and catch typos before you launch the game
 ---
 
-A content pack is plain Lua. Nothing about PalForge needs a build step or an IDE plugin: you
-point [lua-language-server](https://github.com/LuaLS/lua-language-server) (LuaLS) at
-PalForge's `Scripts` directory and every `X{ ... }` call starts completing its fields with
-the same documentation the validator enforces at define time.
+## What you can do after this page
 
-## What types.lua is
+- Have your editor list every setting a pal, item or building takes, while you type it
+- See what each setting means, and what it falls back to when you leave it out
+- Catch a misspelled setting in the editor instead of finding out when the game loads
+- Choose from the allowed values on settings that only accept a few
+- Print the same list from inside the running game, when you are away from your editor
 
-`Scripts/palforge/types.lua` is a generated LuaLS definition file. It is annotations only —
-it declares `---@class` and `---@alias` for every shape the api accepts, and contains no
-executable statements. Its header carries `---@meta`, which tells LuaLS the file describes
-types rather than runtime code, and nothing in the framework ever requires it.
+A content pack is plain Lua files. Nothing to compile, no editor plugin to install.
 
-```lua title="Scripts/palforge/types.lua"
--- PalForge type definitions — GENERATED, do not edit.
---
--- Regenerate with:  lua5.4 tools/gen-types.lua
--- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
----@meta
+You only have to show one program where PalForge lives:
+[lua-language-server](https://github.com/LuaLS/lua-language-server), usually called LuaLS —
+the background program your editor uses to understand Lua. Point it at PalForge's `Scripts`
+folder and every `Pal{ ... }`, `Item{ ... }` or `Building{ ... }` you write starts suggesting
+its fields. A field is one line inside the braces, like `name =` or `mesh =`. Each suggestion
+carries the same description PalForge checks against when it loads your pack.
 
----@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
----@class Mesh.Spec
----@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
----@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # USkeletalMesh / UStaticMesh asset path
-```
+## Set your editor up
 
-The file currently holds 18 classes, one per declared spec: `Pal.Spec`, `Pal.Spec.Events`,
-`Pal.Spec.Material`, `Item.Spec`, `Item.Spec.Recipe`, `Item.Spec.Events`, `Building.Spec`,
-`Building.Spec.Mesh`, `Building.Spec.Material`, `Building.Spec.Events`, `Skill.Spec`,
-`Skill.Spec.Events`, `Effect.Spec`, `Effect.Spec.Events`, `Audio.Spec`, `UI.Spec`,
-`Mesh.Spec` and `Coord`.
-
-<Callout type="info">
-Deleting `types.lua` breaks completion and nothing else. The game does not read it, and
-`Pal{ ... }` validates exactly the same with or without it — validation runs off the schema
-declarations in `Scripts/palforge/api/*.lua`, which is also what the file is generated from.
-</Callout>
-
-## Point the language server at Scripts
-
-LuaLS needs to *see* `Scripts/palforge/`. Where you put `.luarc.json` depends on whether you
-are editing inside the PalForge checkout or in a pack folder of your own.
+LuaLS has to be able to *see* the folder `Scripts/palforge/`. You tell it where to look in a
+file called `.luarc.json`. Where that file goes depends on whether you keep your pack in its
+own folder or write inside the PalForge folder itself.
 
 <Tabs items={['Separate pack folder', 'Inside the PalForge repo']}>
 <Tab value="Separate pack folder">
 
-Put `.luarc.json` at the root of your pack and add PalForge's `Scripts` directory as a
-library. The path is relative to the file.
+Put `.luarc.json` at the top of your pack folder and list PalForge's `Scripts` directory as a
+library. The path is relative to the `.luarc.json` file.
 
 ```json title=".luarc.json"
 {
@@ -66,8 +46,8 @@ library. The path is relative to the file.
 }
 ```
 
-An absolute path works too, and is what you want when your pack lives in the UE4SS mods tree
-while PalForge is checked out somewhere else:
+A full path works too. Use one when your pack sits in the UE4SS mods folder and your copy of
+PalForge lives somewhere else on disk:
 
 ```json title=".luarc.json"
 {
@@ -80,9 +60,9 @@ while PalForge is checked out somewhere else:
 </Tab>
 <Tab value="Inside the PalForge repo">
 
-`Scripts` is already in the workspace, so there is nothing to add to `workspace.library`.
-The only settings that matter are the runtime version and the UE4SS globals the framework
-itself calls.
+`Scripts` is already open in your editor, so there is nothing to add to
+`workspace.library`. Set the Lua version, and list the names UE4SS hands the framework at
+runtime so the editor stops underlining them.
 
 ```json title=".luarc.json"
 {
@@ -98,9 +78,9 @@ itself calls.
 </Tab>
 </Tabs>
 
-A repo checkout keeps two directories of dead code on disk, `Scripts/palforge/deprecated/`
-and `Scripts/palforge/tmp/`. Both are gitignored, so a released copy will not have them; when
-yours does, exclude them so their stale definitions stay out of completion:
+Some copies of PalForge carry two extra folders on disk, `Scripts/palforge/deprecated/` and
+`Scripts/palforge/tmp/`. They are left out of releases, so you may not have them at all. If
+you do, tell the editor to skip them, or their stale definitions turn up in your suggestions:
 
 ```json title=".luarc.json"
 {
@@ -111,19 +91,19 @@ yours does, exclude them so their stale definitions stay out of completion:
 }
 ```
 
-## What the editor shows
+## What the editor shows you
 
-Nothing is imported into your pack file. Requiring the api installs the bare globals, and
-`api/init.lua` annotates each one with its module type, so `Pal`, `Item`, `Building`,
-`Skill`, `Effect`, `Audio`, `Mesh`, `UI` and `Player` resolve without a `local`:
+You do not import anything into your pack file. `Pal`, `Item`, `Building`, `Skill`, `Effect`,
+`Audio`, `Mesh`, `UI` and `Player` are already there as globals, and each one is labelled with
+its type, so you can use them without writing a `local`:
 
 ```lua title="Scripts/palforge/api/init.lua"
 ---@type palforge.pal
 _G.Pal = Pal
 ```
 
-Each module is declared with an `---@overload`, which is what makes calling the module
-itself a typed call:
+The `---@overload` line on each module is what makes the braces complete — it tells the editor
+that `Pal{ ... }` takes a `Pal.Spec` and hands back a `Pal.Handle`:
 
 ```lua title="Scripts/palforge/api/pal.lua"
 ---@class palforge.pal
@@ -131,8 +111,8 @@ itself a typed call:
 local Pal = {}
 ```
 
-**Before** — with `Scripts` outside the workspace, `Pal.Spec` resolves to nothing, so the
-braces are just an anonymous table:
+**Before** — with `Scripts` outside your workspace, the editor has never heard of `Pal.Spec`,
+so the braces are just a table with nothing to offer:
 
 ```text
 Pal{
@@ -140,8 +120,8 @@ Pal{
 }
 ```
 
-**After** — the completion list is the field list of `Pal.Spec`, in declaration order, each
-carrying the doc string the schema declared:
+**After** — the suggestion list is the field list of `Pal.Spec`, in the order the fields were
+declared, each with its description:
 
 ```text
 Pal{
@@ -160,21 +140,21 @@ Pal{
 }
 ```
 
-That covers four things at once:
+You get four things at once:
 
-- **Every field with its doc.** The text after `#` in a `---@field` line is the `doc =`
-  string from the schema declaration, so hovering `maxStack` shows *inventory stack ceiling
-  (default 1)* — the default included.
-- **Enumerated values as aliases.** A field with a `values` list becomes its own alias, named
-  after the spec and the field. The generated file holds five: `Mesh.Spec.Kind`,
-  `Item.Spec.Category`, `Building.Spec.Mesh.Kind`, `Skill.Spec.Kind` and `Audio.Spec.Kind`.
+- **Every field with its description.** The text after `#` in a `---@field` line is the
+  `doc =` string from the spec declaration, so hovering `maxStack` shows *inventory stack
+  ceiling (default 1)* — the default value included.
+- **A short menu where only a few values are allowed.** A field with a `values` list gets its
+  own named type. There are five: `Mesh.Spec.Kind`, `Item.Spec.Category`,
+  `Building.Spec.Mesh.Kind`, `Skill.Spec.Kind` and `Audio.Spec.Kind`.
   Typing a quote after `kind =` offers exactly
   `"procedural"`, `"static"`, `"skeletal"`, `"obj"` and nothing else.
-- **Nested shapes both ways.** `mesh` is typed `Mesh.Spec|Mesh.Handle`, because the validator
-  accepts an inline table *or* the handle a `Mesh{ ... }` call returned.
-- **Handle methods.** `Pal{ ... }` returns a `Pal.Handle`, so `pal:` offers `spawn`,
-  `renderOn`, `skillsOf`, `mesh`, `iconOf`, `name`, `description` and the event forwarders,
-  each with the doc comment written above it in `api/pal.lua`.
+- **Nested shapes, written either way.** `mesh` is typed `Mesh.Spec|Mesh.Handle`, because you
+  can write the mesh inline *or* pass what a `Mesh{ ... }` call gave you back.
+- **What you can do with the result.** `Pal{ ... }` hands you back a `Pal.Handle`, so typing
+  `pal:` offers `spawn`, `renderOn`, `skillsOf`, `mesh`, `iconOf`, `name`, `description` and
+  the event forwarders, each with the comment written above it in `api/pal.lua`.
 
 ```lua title="content/pals.lua"
 local pal = Pal{
@@ -196,9 +176,9 @@ local pal = Pal{
 pal:spawn(Player.coordinate())              -- Player.coordinate returns Coord?
 ```
 
-Handle types are hand-written where the methods live, not generated: `Pal.Handle` is declared
-in `api/pal.lua`, `Building.Handle` and `Building.Instance` in `api/building.lua`, and so on.
-That is why a building handler completes on instance fields:
+The types for handles and building instances are written by hand, next to the methods
+themselves: `Pal.Handle` in `api/pal.lua`, `Building.Handle` and `Building.Instance` in
+`api/building.lua`, and so on. That is why a building handler completes on the instance too:
 
 ```lua title="content/buildings.lua"
 Building{
@@ -213,9 +193,43 @@ Building{
 }
 ```
 
+## The file that carries the suggestions
+
+`Scripts/palforge/types.lua` is where all of that completion text comes from. It is a
+definition file for LuaLS: descriptions only, no code that runs. It declares a `---@class` and
+a `---@alias` for every shape the api accepts. The `---@meta` line at the top tells LuaLS the
+file describes types rather than real code, and nothing in the framework loads it.
+
+```lua title="Scripts/palforge/types.lua"
+-- PalForge type definitions — GENERATED, do not edit.
+--
+-- Regenerate with:  lua5.4 tools/gen-types.lua
+-- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
+---@meta
+
+---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
+---@class Mesh.Spec
+---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
+---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
+---@field model string # USkeletalMesh / UStaticMesh asset path
+```
+
+The file holds 18 classes, one per declared shape: `Pal.Spec`, `Pal.Spec.Events`,
+`Pal.Spec.Material`, `Item.Spec`, `Item.Spec.Recipe`, `Item.Spec.Events`, `Building.Spec`,
+`Building.Spec.Mesh`, `Building.Spec.Material`, `Building.Spec.Events`, `Skill.Spec`,
+`Skill.Spec.Events`, `Effect.Spec`, `Effect.Spec.Events`, `Audio.Spec`, `UI.Spec`,
+`Mesh.Spec` and `Coord`.
+
+<Callout type="info">
+Deleting `types.lua` breaks completion and nothing else. The game does not read it, and
+`Pal{ ... }` is checked exactly the same with or without it — the check runs off the spec
+declarations in `Scripts/palforge/api/*.lua`, which is also where the file comes from.
+</Callout>
+
 ## Regenerating types.lua
 
-The generator is a dev tool. It runs on a plain Lua interpreter with the game absent:
+Run the generator whenever a spec changes. It is a dev tool, and it runs on a plain Lua
+interpreter with the game closed:
 
 ```bash
 cd /path/to/PalForge
@@ -226,28 +240,28 @@ lua5.4 tools/gen-types.lua
 wrote ./Scripts/palforge/types.lua (18 classes, 223 lines)
 ```
 
-It writes `Scripts/palforge/types.lua` relative to the root you give it, defaulting to the
-current directory, so you can also run it from elsewhere:
+It writes `Scripts/palforge/types.lua` under whichever root you give it, defaulting to the
+folder you are standing in, so you can also run it from elsewhere:
 
 ```bash
 lua5.4 tools/gen-types.lua /path/to/PalForge
 ```
 
 Re-run it whenever a `schema.define` or `schema.derive` call changes: a new field, a new
-`values` entry, a changed `default`, a reworded `doc`. `types.lua` is checked in, so the
-regenerated file is part of the same commit as the schema change.
+allowed value, a changed default, a reworded description. `types.lua` is committed to the
+repo, so the regenerated file belongs in the same commit as the spec change.
 
 <Callout type="warn">
-Do not edit `types.lua` by hand. The next run of the generator overwrites the whole file.
+Do not edit `types.lua` by hand. The next run of the generator rewrites the whole file.
 Change the `schema.define` call in `Scripts/palforge/api/*.lua` and regenerate.
 </Callout>
 
-## Why it cannot drift
+## Why the suggestions always match the game
 
-The generator does not read `types.lua` and does not carry a second copy of the field lists.
-It requires `palforge.api`, which is what puts every shape into the schema registry, then
-walks `schema.all()` — the exact same spec objects that `Spec:validate` runs against on every
-define call.
+Your editor reads `types.lua`. The game reads the spec declarations in
+`Scripts/palforge/api/*.lua`. Those are not two lists to keep in step: the generator loads
+`palforge.api`, which puts every shape into the schema registry, then walks `schema.all()` —
+the same spec objects `Spec:validate` runs against on every definition call.
 
 ```mermaid
 flowchart LR
@@ -258,9 +272,9 @@ flowchart LR
   E --> F["lua-language-server"]
 ```
 
-A field the editor offers is therefore a field the validator accepts, and a field the
-validator rejects can never appear in completion. Each descriptor has a fixed effect on the
-generated line:
+So a field the editor offers is a field the game accepts, and a field the game rejects can
+never appear in the suggestion list. Each part of a field declaration has a fixed effect on
+the line the generator writes:
 
 | Schema descriptor | Generated annotation |
 | --- | --- |
@@ -275,25 +289,25 @@ generated line:
 | `check = schema.nonEmpty` | nothing — a check runs at define time only |
 | no `type` | `any` |
 
-Two consequences worth knowing:
+Two things worth knowing:
 
-- A spec declared with `schema.derive` gets its own class and its own aliases. `Building.Spec.Mesh`
-  is `Mesh.Spec` with three per-field overrides — `kind` defaulting to `"static"` instead of
-  `"skeletal"`, and reworded `model` and `offset` docs — so it emits
-  `Building.Spec.Mesh.Kind` with the same four values and a different documented default.
-- Classes are emitted in declaration order and grouped by the first segment of the spec name,
-  which is why `Mesh.Spec` sits under a `Mesh` banner and `Coord`, having no domain prefix,
+- A shape declared with `schema.derive` gets its own class and its own value lists.
+  `Building.Spec.Mesh` is `Mesh.Spec` with three fields adjusted — `kind` defaulting to
+  `"static"` instead of `"skeletal"`, and clearer wording on `model` and `offset` — so it
+  emits `Building.Spec.Mesh.Kind` with the same four values and a different stated default.
+- Classes come out in declaration order, grouped by the first part of the shape's name. That
+  is why `Mesh.Spec` sits under a `Mesh` banner, and `Coord`, which has no domain prefix,
   lands under `Common`.
 
-## How the UE4SS globals are handled
+## The names UE4SS adds while the game runs
 
 `FindFirstOf`, `FindAllOf`, `StaticFindObject`, `LoadAsset`, `RegisterHook`, `RegisterKeyBind`,
-`RegisterConsoleCommandHandler`, `ExecuteInGameThread`, `LoopAsync`, `FName` and `Key` are
-injected by UE4SS at runtime. They exist in no Lua file, so LuaLS reports them as undefined
-globals unless you list them — that is what the `diagnostics.globals` block above is for.
+`RegisterConsoleCommandHandler`, `ExecuteInGameThread`, `LoopAsync`, `FName` and `Key` come
+from UE4SS, the mod loader PalForge runs on. They live in no Lua file, so LuaLS marks them as
+undefined until you list them — that is what the `diagnostics.globals` block above is for.
 
-The generator handles them differently, because it has to *run* the api modules outside the
-game. It stubs the same list before loading anything:
+The generator deals with them another way, because it has to actually *run* the api modules
+with the game closed. It puts a do-nothing stand-in behind each name before loading anything:
 
 ```lua title="tools/gen-types.lua"
 for _, name in ipairs({ "FindFirstOf", "FindAllOf", "StaticFindObject", "LoadAsset",
@@ -305,18 +319,17 @@ _G.FName = function(s) return { ToString = function() return s end } end
 _G.Key = {}
 ```
 
-Requiring an api module only builds tables, so the stubs are never called; the natives pulled
-in alongside them just expect the names to exist.
+Loading an api module only builds tables, so the stand-ins are never called; the game-facing
+files pulled in alongside them just need the names to exist.
 
-If you have a copy of the UE4SS Lua type definitions, add its folder to `workspace.library`
-as well and drop the corresponding names from `diagnostics.globals` — the annotations then
-give you real signatures instead of silence. PalForge does not ship those definitions.
+If you have a copy of the UE4SS Lua type definitions, add that folder to `workspace.library`
+as well and drop the matching names from `diagnostics.globals`. You then get real signatures
+for them instead of silence. PalForge does not ship those definitions.
 
-## The same information at runtime
+## The same list inside the game
 
-The editor is a convenience, not the source. Every spec is readable in the running game
-through the schema registry, which is useful from a keybind, a console handler, or while
-bisecting a validation error.
+You can read every shape from the running game as well, which helps from a keybind, a console
+command, or while you are tracking down a validation error:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -344,15 +357,15 @@ Pal.Spec {
 }
 ```
 
-A name that was never declared answers with the list of names that were:
+Ask for a name that was never declared and you get the list of names that were:
 
 ```text
 PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
 ```
 
-The third source of the same information is the validator itself. Every problem is a hard
-error naming the domain, the field and the valid alternatives, so a pack that loads at all
-was spelled correctly:
+The errors themselves are the third place the same information shows up. Every problem stops
+the load and names the domain, the field and the valid alternatives, so a pack that loads at
+all was spelled correctly:
 
 ```text
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
@@ -419,8 +432,8 @@ local pal = Pal{
 return pal
 ```
 
-`Pal`, `Item` and the rest need no `require` — `api/init.lua` installs them as globals and
-annotates each one, and LuaLS picks that up from the library path.
+`Pal`, `Item` and the rest need no `require`. They are installed as globals and labelled with
+their types by `api/init.lua`, and LuaLS picks that up through the library path.
 </Step>
 
 </Steps>
@@ -450,8 +463,8 @@ lua5.4 tools/gen-types.lua
 git add Scripts/palforge/api/skill.lua Scripts/palforge/types.lua
 ```
 
-Classes are emitted in declaration order, so the new annotation lands last, and `range` is
-simultaneously accepted by `Skill{ ... }` and offered by the editor:
+Classes come out in declaration order, so the new line lands last, and `range` is accepted by
+`Skill{ ... }` and offered by the editor at the same time:
 
 ```lua title="Scripts/palforge/types.lua"
 ---@alias Skill.Spec.Kind "active"|"passive"
@@ -471,8 +484,8 @@ simultaneously accepted by `Skill{ ... }` and offered by the editor:
 
 ### Dump every declared shape to the UE4SS log
 
-Useful when you are away from the editor and want the field list in the log next to the error
-that sent you looking for it.
+Useful when you are away from the editor and want the field list in the log, right next to the
+error that sent you looking for it.
 
 ```lua title="MyPack/content/dev.lua"
 local schema = require("palforge.core.schema")
@@ -487,8 +500,8 @@ event.on("world.ready", function()
 end)
 ```
 
-Each line arrives as `[PalForge.mypack][info] ...`. To inspect one shape without printing all
-of them, walk the descriptors yourself:
+Each line arrives as `[PalForge.mypack][info] ...`. To look at one shape without printing all
+of them, walk the field descriptors yourself:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -502,8 +515,20 @@ for _, f in ipairs(schema.get("Effect.Spec").fields) do
 end
 ```
 
-Once the shapes are completing, the per-domain pages describe what each field does —
-[Pal](/docs/api/pal), [Mesh](/docs/api/mesh) —
-[Fields and validation](/docs/concepts/schema) covers every descriptor key and the errors
-they produce, and [Lifecycle and events](/docs/concepts/lifecycle) covers which of the
-declared handlers actually fire.
+## Summary
+
+- Add PalForge's `Scripts` folder to `workspace.library` in `.luarc.json`, and every
+  `X{ ... }` call completes its fields with the description the game checks against.
+- List the UE4SS names (`FindFirstOf`, `LoadAsset`, `RegisterHook`, ...) in
+  `diagnostics.globals` so the editor stops calling them undefined.
+- `Scripts/palforge/types.lua` carries the completions. Never edit it by hand; run
+  `lua5.4 tools/gen-types.lua` after any spec change and commit both files.
+- A field the editor offers is a field the game accepts, because both come from the same spec
+  declarations in `Scripts/palforge/api/*.lua`.
+- Away from the editor, `schema.help("Pal.Spec")` prints the same field list in the game, and
+  every validation error names the field and the valid alternatives.
+
+Next, [Fields and validation](/docs/concepts/schema) explains every descriptor key and the
+errors it produces; the per-domain pages such as [Pal](/docs/api/pal) and
+[Mesh](/docs/api/mesh) say what each field actually does, and
+[Lifecycle and events](/docs/concepts/lifecycle) says which handlers really fire.

@@ -1,12 +1,42 @@
 ---
 title: Lifecycle and events
-description: How a native game event becomes a hook call on your definition, and which hooks actually fire
+description: How to run your own code when something happens in the game, and which hooks really fire
 ---
 
-One file owns the whole path from a native Palworld event to your handler:
-`Scripts/palforge/core/event.lua`. It holds the channels, the native hooks that feed
-them, the dispatch that turns a channel into a method call on your object, and the
-building instance runtime.
+## What you can do after this page
+
+- Run your own code the moment a player places a building, uses an item, or takes down a pal
+- Build a structure that keeps working while you play and remembers its numbers after a reload
+- Make something happen on a timer, like a bush that grows berries every twenty seconds
+- Know which moments the game really reports, so you never wait on one that never arrives
+- Read the log to find out why a handler did not run
+
+## Say when your code runs
+
+A definition is a table. Put a function in its `events` table, and PalForge calls that
+function when the matching thing happens in the game.
+
+```lua title="content/berries.lua"
+Item{
+    id = "Berries",
+    events = {
+        onUse = function(item, ctx)
+            Item.get("Wood"):give(1)      -- eat a berry, get a log
+        end,
+    },
+}
+```
+
+Eat a berry in game and a log lands in your inventory. The name of the key is how you say
+*when*: `onUse` means "when a player uses this item".
+
+Every domain has its own set of names. A building has `onPlace`, `onRightClick`, `onTick`
+and more. A pal has `onDamaged`, `onDeath`, `onCaptured`. An item has `onObtain` and
+`onUse`. The full list per domain, and which ones the game really fires today, is further
+down this page.
+
+You can also listen without a definition. `event.on` subscribes to a **channel** — a named
+moment, such as `pal.spawned` — and runs your function every time something pushes to it.
 
 ```lua
 local event = require("palforge.core.event")
@@ -15,13 +45,14 @@ event.on("pal.spawned", function(ctx) print(ctx.actor) end)
 event.emit("example:custom", { note = "channels are created on demand" })
 ```
 
-You rarely need to require it. Declaring `events = { ... }` on a definition is the normal
-way in, and dispatch calls those handlers for you.
+Most packs never need that. Writing `events = { ... }` on a definition is the normal way
+in, and it reaches you through the same channels.
 
-## The three parts
+## How an event reaches your code
 
-`core/event.lua` is split into three layers, and every lifecycle moment travels through
-all three in order.
+Three steps sit between a moment in the game and your handler, and every moment goes
+through all three in order. You never call them yourself. Knowing the names helps when you
+are reading a log line.
 
 | Layer | What it is |
 | --- | --- |
@@ -40,14 +71,14 @@ flowchart LR
     C --> U["your own event.on subscriber"]
 ```
 
-The bus is the only shared point. A source never calls a hook directly, and a hook never
-knows which native call produced it. That is why a channel with no source yet
-(`item.craft`) still has working dispatch: the day something emits it, existing packs
-start receiving it with no code change.
+A few channels have the last two steps but nothing pushing to them yet. `item.craft` is
+one: an `onCraft` handler is accepted and never runs. Put that work somewhere that does
+run — `onObtain` fires when the crafted item lands in the inventory.
 
 ### Wiring order at startup
 
-`registry.initialize()` is the single entry point `main.lua` calls at mod load.
+`registry.initialize()` is what `main.lua` calls when the mod loads. It puts everything in
+place before your pack can see a single event.
 
 ```mermaid
 flowchart TD
@@ -60,14 +91,15 @@ flowchart TD
     F --> G
 ```
 
-`event.start()` is guarded by a `started` flag, so calling it again does nothing. Every
-channel in `event.CHANNELS` is pre-created before any source runs, which is what makes
-subscribe-before-emit safe.
+`event.start()` only ever runs once; calling it again does nothing. Every channel in
+`event.CHANNELS` exists before the first game event arrives, so you can subscribe while
+your pack is still loading and miss nothing.
 
-### Resolving the object
+### Which object the event happened to
 
-DISPATCH never guesses. `resolve(otype, ctx)` maps a context table onto a concrete object,
-and returns `nil` when there is nothing to call — dispatch then no-ops.
+Before calling a hook, dispatch works out which of your definitions the event belongs to.
+`resolve(otype, ctx)` maps the context table onto a concrete object, and returns `nil` when
+there is nothing to call. Then nothing is called.
 
 ```mermaid
 flowchart TD
@@ -78,21 +110,27 @@ flowchart TD
     B2 -->|hit| BI
     B3 -->|hit| BI
     P["pal ctx"] --> P1["actor BP class name to a pal id"]
-    P1 --> PC["the registered Pal class"]
-    I["item ctx"] --> I1["ctx.itemId to an item id"]
-    I1 --> IC["the registered Item class"]
+    P1 --> PX["exact id or a walk for a namespaced match"]
+    PX --> PC["the registered Pal class"]
+    I["item ctx"] --> I1["ctx.itemId"]
+    I1 --> IX["exact id or a walk for a namespaced match"]
+    IX --> IC["the registered Item class"]
 ```
 
-Buildings resolve to a **live instance**. Pals and items have no instance tracking, so
-they resolve to the registered **class**, and the handler reads the actor off `ctx`.
-A vanilla pal or item with no PalForge definition resolves to `nil` and dispatch no-ops.
-An item ctx costs one failed table lookup. A pal ctx costs that lookup plus a walk over
-the registered pal ids, which is how a namespaced `pack:name` pal is matched to the
-`BP_<resolved>_C` class the game actually spawned.
+A building resolves to a **live instance**: the one structure standing in the world that
+the event happened to. Pals and items are not tracked one by one, so they resolve to the
+registered **class** instead, and your handler reads the actor off `ctx`. A vanilla pal or
+item you never defined resolves to nothing, and the hook is skipped.
+
+Pals and items are matched in two steps: the exact id first, in one table lookup, and on a
+miss a walk over that domain's registered ids, comparing each id's resolved DataTable row
+name against the id the game reported. That is why a namespaced id still gets its events:
+the game spawns `BP_example_Boss_C` and reports the item row `example_Ration`, never the
+colon form.
 
 ## Channels
 
-`event.CHANNELS` is the full list, in declaration order:
+A channel is one named moment. `event.CHANNELS` is the full list, in declaration order:
 
 ```lua
 event.CHANNELS   --> {
@@ -105,10 +143,12 @@ event.CHANNELS   --> {
 -- }
 ```
 
+What sends each one, what it puts in `ctx`, and which hook it ends up calling:
+
 | Channel | Emitted by | `ctx` carries | Dispatches to |
 | --- | --- | --- | --- |
 | `gameStart` | `registry.initialize`, after `event.start()` | no payload | nothing; direct subscribers only |
-| `world.ready` | the ready watch: `LoopAsync(1000)` polling `PalPlayerCharacter`, after 5 consecutive valid polls | no payload | `onWorldReady` on every live building instance; none are tracked yet at that point |
+| `world.ready` | the first reconstruction scan that completes after the gate opens; the gate itself is the ready watch, `LoopAsync(1000)` polling `PalPlayerCharacter`, after 5 consecutive valid polls | no payload | `onWorldReady` on every live building instance, and that first scan has already tracked them |
 | `world.left` | the same watch, when the pawn goes invalid | no payload | `onWorldLeft` on every live building instance, then live instances are dropped |
 | `building.place` | the reconstruction scan, when a new instance is created and matches a pending build intent | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
 | `building.load` | the reconstruction scan, on every newly tracked instance | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
@@ -134,11 +174,13 @@ receives `nil`. The building dispatch substitutes an empty table before calling
 Every native hook except the heartbeat returns early while the world is not ready. The
 building scan, the interact hook, the place-intent hook and all four pal hooks and both
 item hooks check `worldReady` first. If the ready watch cannot be installed at all, the
-gate fails open and dispatch runs from the start.
+gate fails open and dispatch runs from the start. `world.ready` is armed in that fallback
+too, but nothing emits it: without `LoopAsync` there is no heartbeat, so there is no scan
+to announce it.
 </Callout>
 
-Channel names are not a closed set at the bus level: `event.emit` and `event.on` create a
-Subject on demand, so your own names work.
+You can invent your own channel names. `event.emit` and `event.on` create the channel the
+first time you name one, so a pack can talk to itself, or to another pack.
 
 ```lua
 local event = require("palforge.core.event")
@@ -150,12 +192,12 @@ end)
 event.emit("mypack:quest.completed", { reward = 25 })
 ```
 
-Only the names in `event.CHANNELS` have a SOURCE and a DISPATCH behind them. A name of
-your own is a plain pub/sub channel.
+Only the names in `event.CHANNELS` have the game behind them. A name of your own is a
+plain message that you send and you receive.
 
 ## The heartbeat
 
-`event.TICK_MS = 500`. One `LoopAsync(500)` emits `tick` from inside
+PalForge runs one timer, every 500 ms (`event.TICK_MS = 500`). It emits `tick` from inside
 `ExecuteInGameThread`, so every subscriber runs on the game thread.
 
 ```lua
@@ -165,13 +207,14 @@ event.on("tick", function(ctx)
 end)
 ```
 
-Everything periodic in PalForge rides that one loop, except the ready watch, which polls
-on its own `LoopAsync(1000)`.
+Everything periodic rides that one loop. The only other timer is the ready watch, which
+polls on its own `LoopAsync(1000)`.
 
 ```mermaid
 flowchart LR
     L["LoopAsync 500 ms"] --> T["emit tick with count and now"]
     T --> S["scanOnce - building reconstruction"]
+    S --> W["emit world.ready - once on the first scan after the gate opens"]
     T --> B["tickAll - building onTick"]
     T --> E["effect step - advance live applications"]
     T --> U["event.every callbacks"]
@@ -179,9 +222,8 @@ flowchart LR
 
 ### event.every
 
-`event.every(ms, fn)` accumulates `TICK_MS` per heartbeat and fires when the accumulator
-reaches `ms`, then resets it. The real period is therefore `ms` rounded up to a multiple
-of 500.
+`event.every(ms, fn)` adds `TICK_MS` per heartbeat and fires when the total reaches `ms`,
+then starts again from zero. The real period is `ms` rounded up to a multiple of 500.
 
 ```lua
 local event = require("palforge.core.event")
@@ -206,20 +248,20 @@ not reported. Log inside the callback if you need to see failures.
 
 ### The building scan rides the same cadence
 
-The reconstruction scan is installed as `event.every(500, scanOnce)`, using the same
-constant. There is no second scan timer. That gives one number to reason about: a placed
-building becomes a live instance within roughly one heartbeat, its mesh appears one
-heartbeat after that, and a removed building is dropped after 6 consecutive misses,
-roughly three seconds.
+The scan that finds your placed structures runs from one `event.every(500, ...)` callback,
+using the same constant. That callback calls `scanOnce()` and then owns the deferred
+`world.ready` emit, in that order. One number covers the whole runtime: a placed building
+becomes a live instance within roughly one heartbeat, its mesh appears one heartbeat after
+that, and a removed building is dropped after 6 consecutive misses, roughly three seconds.
 
-## What actually fires
+## Which hooks actually run
 
-A hook being declarable is not a promise that anything emits it. Per domain:
+Being allowed to write a hook is not a promise that something fires it. Per domain, with
+what to reach for when a hook is not wired.
 
 ### Building
 
-Every hook with a source is live except `onWorldReady`, and this is the only domain with
-per-structure state.
+Every hook with a source is live, and this is the only domain with per-structure state.
 
 | Hook | State | Source |
 | --- | --- | --- |
@@ -228,26 +270,73 @@ per-structure state.
 | `onRightClick` | LIVE | `OnBeginInteractBuilding` |
 | `onRemove` | LIVE | the scan removal sweep |
 | `onTick` | LIVE | the heartbeat, gated by `tickInterval` |
-| `onWorldReady` | never reached | the ready watch, which emits before the first scan |
+| `onWorldReady` | LIVE | the first scan that completes after the ready gate opens |
 | `onWorldLeft` | LIVE | the ready watch |
 | `onBuild` | declarable | no native source yet |
 | `onLeftClick` | declarable | no native source yet |
 | `onBreak` | declarable | no native source yet |
 
-`onPlace` and `onRemove` cover placement and destruction. `onBuild`, `onLeftClick` and
-`onBreak` are accepted by the spec and never called.
+`onBuild`, `onLeftClick` and `onBreak` are accepted by the spec and never called. Use
+`onPlace` in place of `onBuild`, `onRemove` in place of `onBreak`, and `onRightClick` for
+player interaction.
 
 `onRightClick` is filtered and debounced at the source: only a `PalCharacter` interactor
 counts, and a second interact on the same structure within one second is dropped.
 
-<Callout type="warn">
-`onWorldReady` is dispatched, but nothing receives it. The ready watch sets the gate and
-emits `world.ready` in the same step, and the scan that creates instances is gated on
-that same flag, so no instance exists yet when the dispatch walks the live set. Leaving a
-world drops every live instance, so a second load behaves the same way. Use `onLoad`,
-which fires for every instance the first scan tracks, with `ctx.reconstructed` telling
-you it came from a save. A `world.ready` you emit yourself is the only way to reach
-`onWorldReady`.
+`onWorldReady` reaches live instances. The ready watch only opens the gate; the channel is
+emitted by the first reconstruction scan that completes afterwards. The scan is what turns
+actors into tracked instances, so by the time the dispatch walks the live set the
+structures around the player are in it. The notification lands at most one heartbeat, 500
+ms, after the gate opened.
+
+```mermaid
+flowchart TD
+    R1["ready watch - 5 valid polls"] --> R2["worldReady gate opens"]
+    R2 --> R3["next scan discovers and tracks the structures"]
+    R3 --> R4["emit world.ready"]
+    R4 --> R5["onWorldReady on every tracked instance"]
+```
+
+Leaving a world drops every live instance and clears the pending emit, so a second load
+runs the same sequence again from a clean registry.
+
+```lua title="content/lamp.lua"
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("lamp")
+
+Building{
+    id     = "example:Lamp",
+    name   = "Signal Lamp",
+    gridCm = 100,
+    state  = { loads = 0 },
+    mesh   = {
+        kind  = "static",
+        model = "/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBenchPrimitive.SM_WorkBenchPrimitive",
+    },
+    events = {
+        onWorldReady = function(inst, ctx)
+            -- once per world load, on every lamp the first scan tracked
+            inst.state.loads = (inst.state.loads or 0) + 1
+            inst:save()
+            log.info(inst.key .. " online, load #" .. tostring(inst.state.loads))
+        end,
+        onRightClick = function(inst, ctx)
+            log.info(inst.key .. " has survived " .. tostring(inst.state.loads) .. " loads")
+        end,
+    },
+}
+
+-- the same moment, as a cross-cutting subscriber
+event.on("world.ready", function()
+    log.info(tostring(#event.instances()) .. " structures tracked")
+end)
+```
+
+<Callout type="info">
+`onWorldReady` is a one-shot world-load moment, not a per-structure one. A structure that
+streams in on a later scan misses it, because the emit already happened. Per-instance
+startup work belongs in `onLoad`, which fires for every instance the scan tracks, whenever
+that scan happens, with `ctx.reconstructed` telling you it came from a save.
 </Callout>
 
 ### Pal
@@ -270,7 +359,8 @@ effort and verify before you build a feature on it.
 <Callout type="warn">
 Pal `onTick` never fires. Pals have no instance scan the way buildings do, so nothing
 drives a per-pal periodic hook. If you need per-pal work on a schedule, subscribe to
-`tick` yourself and walk the actors you care about.
+`tick` yourself and walk the actors you care about. There is a recipe for it at the end of
+this page.
 </Callout>
 
 ### Item
@@ -285,30 +375,65 @@ drives a per-pal periodic hook. If you need per-pal work on a schedule, subscrib
 `onObtain` rides the game's own "obtained item" log, so it fires on pickup, loot and
 rewards. Silent internal adds that never surface a get-log are not covered.
 `item.craft` and `item.discard` have a channel and a dispatch subscriber, and nothing
-emits them.
+emits them, so `onCraft` and `onDiscard` never run.
+
+Both live item channels carry a game item id, and dispatch matches it against your
+definitions in two steps: the exact id, then the resolved DataTable row name of every
+registered id. A namespaced `Item{ id = "example:Ration" }` therefore receives events even
+though the game only ever reports `example_Ration`.
+
+```lua title="content/rations.lua"
+local log = require("palforge.utils.log").scope("rations")
+
+Item{
+    id       = "example:Ration",
+    name     = "Field Ration",
+    category = "consumable",
+    maxStack = 20,
+    events = {
+        onObtain = function(item, ctx)
+            log.info("picked up " .. tostring(ctx.count) .. " x " .. tostring(ctx.itemId))
+        end,
+        onUse = function(item, ctx)
+            -- ctx.itemId is "example_Ration" here: the row name, not the colon form
+            Item.get("Berries"):give(1)
+        end,
+    },
+}
+```
+
+<Callout type="warn">
+`ctx.actor` on `item.use` is the native call's first parameter, and under the signature
+that was confirmed in game that parameter is the item data object, not the character. The
+target is an `FPalInstanceID` in the second parameter, which has never been probed. Use
+`ctx.itemId`, and reach the player through `Player.character()` rather than trusting
+`ctx.actor` to be a pawn.
+</Callout>
 
 ### Effect
 
-All four hooks are live, but the timing is owned by `api/effect.lua`, not by a native
-game event. `:apply(target)` starts a real application that the `tick` channel advances.
+All four hooks run. Their timing comes from `api/effect.lua` and the heartbeat, not from a
+game event: `:apply(target)` starts a real application that the `tick` channel advances,
+and `world.left` ends.
 
 | Hook | State | Driven by |
 | --- | --- | --- |
 | `onApply` | LIVE | `:apply(target)` on a target that does not have it |
 | `onTick` | LIVE | the heartbeat, every `interval` seconds |
 | `onStack` | LIVE | `:apply(target)` on a target that already has it |
-| `onExpire` | LIVE | `duration` reaching zero, `:remove(target)`, or the target going invalid |
+| `onExpire` | LIVE | `duration` reaching zero, `:remove(target)`, the target going invalid, or the world unloading |
 
 <Callout type="warn">
 A PalForge effect does not touch the game's own ailments. `EPalStatusEffectType` is a
 native enum and no native call to apply one was confirmed, so `nativeStatus` is metadata
-only and the status icon never changes. The gameplay lives in your handlers.
+only and the status icon never changes. Put the gameplay in your handlers: drain health,
+give an item, spawn something.
 </Callout>
 
 ### Skill
 
-There is no native skill source. No channel emits `skill.*`, so nothing fires these
-automatically. What works is manual invocation, with the cooldown enforced in Lua.
+Nothing in the game fires a skill for you. No channel emits `skill.*`. What works is
+calling the skill yourself, with the cooldown enforced in Lua.
 
 ```lua
 local log = require("palforge.utils.log").scope("fireball")
@@ -338,7 +463,7 @@ building's `onRightClick`, or a keybind.
 No lifecycle channels. Audio is played, a mesh is worn, and a UI element has `render` and
 `update` plus mount, refresh and unmount that you call.
 
-## Handler signatures
+## Handler arguments
 
 The first argument is always **the object the event happened to**.
 
@@ -350,9 +475,10 @@ The first argument is always **the object the event happened to**.
 | Skill | `Skill.Handle` | `function(skill, owner, ctx)` |
 | Effect | `Effect.Handle` | `function(effect, target, ctx)` |
 
-For pals, items, skills and effects, dispatch calls the registered class, and a forwarder
-installed at define time swaps the handle in. That is why `:spawn`, `:give`, `:activate`
-and `:apply` are reachable straight from inside a handler.
+For pals, items, skills and effects that first argument is the handle you got back when you
+defined the thing, so `:spawn`, `:give`, `:activate` and `:apply` are reachable straight
+from inside a handler. For buildings it is the live instance, so `self.actor`, `self.pos`,
+`self.state` and `self:save()` are right there.
 
 ```lua title="content/handlers.lua"
 local log = require("palforge.utils.log").scope("handlers")
@@ -370,7 +496,7 @@ Item{
     id = "Berries",
     events = {
         onUse = function(item, ctx)             -- item is the Item.Handle
-            log.info(item.id .. " used by " .. tostring(ctx.actor))
+            log.info(item.id .. " used as " .. tostring(ctx.itemId))
         end,
     },
 }
@@ -400,13 +526,27 @@ Effect{
 }
 ```
 
-`ctx` is a plain table. Its keys depend on the channel, and the table above is the only
-list of them.
+`ctx` is a plain table. Its keys depend on the channel, and the channel table lists them
+for every channel.
+
+### When a handler throws
+
+Dispatch calls your handler inside `pcall` and logs what it catches, naming the channel and
+the hook. A typo in a handler body therefore looks different from a hook that never fired.
+
+```text
+[PalForge.event][err] item.use -> onUse handler failed: content/rations.lua:12: attempt to index a nil value
+[PalForge.event][err] world.ready -> onWorldReady handler failed on 'example_Lamp@12,-8,3': ...
+```
+
+The world hooks name the instance key too, because they run over every live building: one
+broken instance is skipped and the rest still get the call. Building `onTick` has its own
+report on top of that, and its own circuit breaker.
 
 ## The building runtime
 
-Buildings are the one domain where a placed thing gets its own object with its own state,
-saved per world. Everything below is in `core/event.lua`.
+A placed building is the one thing that gets its own object, with its own state, saved per
+world. Two lamps in two places have two separate counters, and both survive a reload.
 
 ### From key press to onPlace
 
@@ -465,11 +605,11 @@ location jitters by more than a cell between scans.
 <Step>
 ### Creation and persistence
 
-`def.cls:new{ ... }` produces the instance, so it is an instance of your definition class
-and every method you declared resolves on it. State comes from the saved record if there
-is one, otherwise from the definition's `state` field, which may be a table or a factory
-function. A fresh instance is written to `state/entities_<saveId>.json` under the mod
-folder. `saveId` falls back to `world` when the world guid cannot be read.
+`def.cls:new{ ... }` produces the instance, so every method you declared on the definition
+resolves on it. State comes from the saved record if there is one, otherwise from the
+definition's `state` field, which may be a table or a factory function. A fresh instance is
+written to `state/entities_<saveId>.json` under the mod folder. `saveId` falls back to
+`world` when the world guid cannot be read.
 </Step>
 
 <Step>
@@ -491,14 +631,13 @@ attach happens on a **later** scan, once the same actor has been seen again.
 </Steps>
 
 <Callout type="error">
-The mesh attach is deferred on purpose. Adding a procedural mesh component to an actor
-that is still mid-initialisation, on the frame it is placed, touches an invalid native
-object and crashes the game. A native access violation cannot be caught by `pcall`, so
-the runtime waits for the actor to prove it survived a scan instead. For the same reason
-there is no `OnCompleteBuild_ServerInternal` hook: it fires for every building during the
-world-load storm and reading half-initialised `UPalMapObjectModel` memory there faulted.
+Attaching a mesh on the frame a building is placed touches a native object that is still
+being set up, and crashes the game. A native access violation cannot be caught by `pcall`,
+so the runtime waits until the actor has survived a scan.
 
-Practical consequence: inside `onPlace` the mesh is not attached yet.
+Practical consequence: inside `onPlace` the mesh is not attached yet. If you need to do
+something with the finished visual, do it in `onRightClick` or `onTick`, or call
+`inst:render()` yourself later.
 </Callout>
 
 ### The instance object
@@ -527,8 +666,8 @@ Methods on the instance:
 | `inst:update()` | Re-tints the live material from `inst:currentColor()` |
 | `inst:mesh()` | The mesh descriptor; override for a state-driven mesh |
 
-The persisted record's `state` is the same table reference as `inst.state`, so mutating in
-place is enough and `:save()` only decides when it hits disk.
+The saved record's `state` is the same table as `inst.state`, so changing it in place is
+enough. `:save()` only decides when it hits disk.
 
 ```lua title="content/buildings.lua"
 local log = require("palforge.utils.log").scope("counter")
@@ -570,8 +709,8 @@ Building{
 silently forced back to 1. An instance ticks only when `ctx.count % tickInterval == 0`,
 so `tickInterval = 4` means one call every four heartbeats, that is every two seconds.
 
-Only classes that actually override `onTick` go into the tick list, so a definition
-without the hook costs nothing per heartbeat.
+A building without an `onTick` hook costs nothing per heartbeat: only classes that override
+`onTick` go into the tick list.
 
 ```lua
 Building{
@@ -608,10 +747,10 @@ stateDiagram-v2
     removed --> [*]
 ```
 
-Two exits differ in what they do to the save file. A removal through the miss threshold
-emits `building.remove`, calls `onRemove`, and deletes the persisted record. Leaving the
-world emits `world.left`, calls `onWorldLeft` on every live instance while they are still
-live, then drops the live instances and **keeps** the records, so the next world load
+The two exits differ in what they do to the save file. A removal through the miss threshold
+emits `building.remove`, calls `onRemove`, and deletes the saved record. Leaving the world
+emits `world.left`, calls `onWorldLeft` on every live instance while they are still live,
+then drops the live instances and **keeps** the records, so the next world load
 reconstructs them.
 
 ### Reaching live instances
@@ -627,15 +766,15 @@ event.isWorldReady()                    -- is the building runtime allowed to to
 Building.get("example:Counter"):instances()   -- the same list, from the handle
 ```
 
-`Handle:instances()` is empty until the scan has seen the structures, so it stays empty
-before `world.ready`.
+`Handle:instances()` is empty until the scan has seen the structures. `world.ready` is
+emitted by that first scan, so inside an `onWorldReady` handler or a `world.ready`
+subscriber the list is already populated; structures that stream in later join it on the
+scan that finds them.
 
-## Effect applications
+## Effects that run over time
 
-An effect's timing lives in `api/effect.lua`. The first `:apply` in the session
-subscribes a single stepper to the `tick` channel, so requiring the module costs nothing
-until a pack actually applies something. The stepper advances every live application by
-`TICK_MS / 1000`, that is 0.5 seconds per heartbeat.
+An effect's timing lives in `api/effect.lua` and rides the heartbeat: every live
+application advances by `TICK_MS / 1000`, that is 0.5 seconds per heartbeat.
 
 ```mermaid
 stateDiagram-v2
@@ -645,12 +784,18 @@ stateDiagram-v2
     active --> expired: duration reached zero
     active --> expired: remove called
     active --> expired: target no longer valid
+    active --> expired: the world unloaded
     expired --> [*]
 ```
 
-Applications are stored in a weak-keyed table under the target, so a despawned pawn takes
-its applications with it. `:apply(nil)` files the application under a global sentinel
+Applications are stored under the target in a weak-keyed table, so a pawn that despawns
+takes its applications with it. `:apply(nil)` files the application under a global sentinel
 instead, which is how you run a world-wide effect.
+
+Leaving a world releases every live application, each through `onExpire` with the reason
+`"world_left"`. Applications are not saved, so nothing comes back on the next world load.
+Re-apply from `onWorldReady`, `onLoad` or a `world.ready` subscriber if the effect should
+return.
 
 ### Stacking
 
@@ -707,7 +852,8 @@ Regen:remove(me)             -- onExpire with reason "removed"
 | `onTick` | `effect`, `elapsed`, `stacks` |
 | `onExpire` | `effect`, `reason`, `elapsed`, `stacks` |
 
-`ctx.reason` on expiry is one of `"duration"`, `"removed"` or `"target_gone"`.
+`ctx.reason` on expiry is one of `"duration"`, `"removed"`, `"target_gone"` or
+`"world_left"`.
 
 <Callout type="info">
 Because the stepper advances in 0.5 s units, an `interval` below 0.5 does not tick faster
@@ -715,11 +861,11 @@ than the heartbeat; the accumulator catches up by looping, so a small interval m
 several `onTick` calls in the same heartbeat rather than more frequent ones.
 </Callout>
 
-## Subscribing directly
+## Subscribing to a channel yourself
 
-Declaring `events = { ... }` covers the common case. Subscribe to the bus when you want
-cross-cutting behaviour, or a channel that has no per-object dispatch, such as `gameStart`
-or `tick`.
+Declaring `events = { ... }` covers the common case. Subscribe to a channel when you want
+one piece of code to react across many definitions, or when the channel has no per-object
+hook at all, such as `gameStart` or `tick`.
 
 | Call | Returns |
 | --- | --- |
@@ -752,8 +898,7 @@ sub:unsubscribe()
 `event.observable(name)` gives you the channel as an Rx Observable, so the usual operators
 apply. `filter`, `map`, `take`, `tap`, `distinctUntilChanged`, `scan`, `pluck` and the
 rest are pure and safe here. Time-based operators such as `debounce` and `delay` need a
-scheduler that is not driven anywhere in PalForge, so avoid them and use `event.every`
-instead.
+scheduler that nothing in PalForge drives, so avoid them and use `event.every` instead.
 
 ```lua
 local event = require("palforge.core.event")
@@ -778,14 +923,16 @@ event.observable("tick")
 sub:unsubscribe()
 ```
 
-Subscribing to a channel does not replace dispatch, and it does not suppress it. Both run.
+Subscribing to a channel does not replace the hook call, and it does not suppress it. Both
+run.
 
 <Callout type="warn">
-Dispatch wraps every hook call in `pcall`, but a plain `event.on` subscriber does not get
-that protection from the bus. An error thrown inside your subscriber propagates into the
-emit call. Emits are themselves wrapped in `pcall`, at the source or at the heartbeat, so
-a throwing subscriber will not stop the heartbeat, but it can stop the remaining
-subscribers on that emit. Wrap risky work in `pcall` yourself.
+Dispatch wraps every hook call in `pcall` and logs what it catches, but a plain `event.on`
+subscriber gets neither from the bus. An error thrown inside your subscriber propagates
+into the emit call. Emits are themselves wrapped in `pcall`, at the source or at the
+heartbeat, so a throwing subscriber will not stop the heartbeat, but it can stop the
+remaining subscribers on that emit, without a word in the log. Wrap risky work in `pcall`
+yourself, and log the failure.
 </Callout>
 
 ## Recipes
@@ -998,3 +1145,20 @@ teardown, so marking dirty is enough.
   <Card title="Pal" href="/docs/api/pal">Spawning, meshes and the pal hooks</Card>
   <Card title="Item" href="/docs/api/item">Give, take and the item hooks</Card>
 </Cards>
+
+## Summary
+
+- Put a function in a definition's `events` table and it runs when that moment happens in
+  the game. The key name says when.
+- The first argument is the thing it happened to: a building handler gets the live
+  structure, everything else gets its handle.
+- A building keeps state across reloads: change `inst.state`, then call `inst:save()`.
+- Everything periodic runs on one 500 ms heartbeat — building `onTick`, effect timing and
+  `event.every(ms, fn)`.
+- Some hooks are accepted but never called: pal `onTick`, item `onCraft` and `onDiscard`,
+  building `onBuild`, `onLeftClick` and `onBreak`. Drive that work from `tick` or from a
+  hook that does fire.
+- No skill fires by itself. Call `:activate` or `:hit` from your own code.
+
+Next, read [Building](/docs/api/building) for the definition fields behind the runtime on
+this page.

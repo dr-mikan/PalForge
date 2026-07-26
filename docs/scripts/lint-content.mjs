@@ -45,7 +45,24 @@ const BANNED = [
   /(?:丁寧に|しっかりと|わかりやすく)(?:整理|まとめ|解説)しました/,
   /本(?:記事|稿|ドキュメント)では/,
   /いかがでしたか/,
+
+  // Design history and API archaeology. The reader never saw the old shape, so telling
+  // them what it is NOT only teaches them a name that does not exist.
+  /\b(?:Pal|Item|Building|Skill|Effect|Audio|Mesh|UI)\.define\b/,
+  /\bthe module (?:itself )?is the constructor\b/i,
+  /\bcalling the module IS defining\b/i,
+  /\b(?:used to be|previously (?:called|named)|was renamed|has been renamed|no longer exists)\b/i,
+  /モジュール自体が(?:コンストラクタ|定義)/,
+  /(?:以前は|かつては|旧|従来)[^。]{0,20}(?:でした|呼ばれ|という名|form)/,
+  /(?:改名|リネーム)(?:されました|しました)/,
 ];
+
+// The two structural sections every page carries, in both languages.
+const INTRO_HEADINGS = [
+  'What you can do after this page',
+  'このページでできるようになること',
+];
+const SUMMARY_HEADINGS = ['Summary', 'まとめ'];
 
 const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u;
 
@@ -135,6 +152,20 @@ for (const full of files) {
   if (localeLink) fail(file, 'internal link includes the locale prefix');
 
   checkMermaid(file, body);
+
+  // A page opens by telling the reader what they will be able to do, and closes by
+  // recapping it — both as H2s, the first and last on the page.
+  const h2s = [...body.matchAll(/^##\s+(.+?)\s*$/gm)].map((m) => m[1].trim());
+  if (h2s.length === 0) {
+    fail(file, 'has no H2 sections');
+  } else {
+    if (!INTRO_HEADINGS.includes(h2s[0])) {
+      fail(file, `first section must be one of ${INTRO_HEADINGS.map((h) => `"${h}"`).join(' / ')}, got "${h2s[0]}"`);
+    }
+    if (!SUMMARY_HEADINGS.includes(h2s[h2s.length - 1])) {
+      fail(file, `last section must be one of ${SUMMARY_HEADINGS.map((h) => `"${h}"`).join(' / ')}, got "${h2s[h2s.length - 1]}"`);
+    }
+  }
 
   const stats = {
     file,

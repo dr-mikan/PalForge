@@ -1,10 +1,19 @@
 ---
 title: Player
-description: ローカルプレイヤーのキャラクターとそのワールド座標
+description: プレイヤーが今どこに立っているかを調べて、その近くにものを置く
 ---
 
-`Player` が答えるのは 2 つだけです。ローカルプレイヤーのポーンは誰か、そしてどこに立っ
-ているか。関数は 3 つ、状態は持たず、定義するものもありません。
+## このページでできるようになること
+
+- プレイヤーが今どこに立っているかを調べる
+- プレイヤーの足元や、少し離れた場所にパルを出す
+- プレイヤーを囲むように、複数のものを円状に並べる
+- プレイヤーと建物の距離を測る
+- プレイヤーがワールドに入るまで待ってから、上のことを実行する
+
+## プレイヤーの居場所を知る
+
+`Player` には関数が 3 つあります。プレイヤーの位置が必要になったら、そのつど呼び出します。
 
 ```lua
 local me = Player.character()                 -- APalPlayerCharacter, or nil
@@ -12,24 +21,8 @@ local at = Player.coordinate()                -- a Coord in centimetres, or nil
 local up = Player.coordinateOffset(0, 0, 200) -- the same point, 2 m higher, or nil
 ```
 
-## 呼び出せないモジュール
-
-他のモジュールはすべて「呼び出して」コンテンツを定義します（`Pal{ ... }`、`Item{ ... }`、
-`Building{ ... }`）。`Player` は違います。`__call` メタメソッドを持たない素のテーブルで、
-レジストリにも登録されず、ハンドルも返しません。
-
-```lua
-local api = require("palforge.api")
-
-api.Player.coordinate()   -- namespaced access
-Player.coordinate()       -- the installed global; the same table
-
-Player{ id = "me" }       -- Lua error: Player is a table you index, not one you call
-Player.get("me")          -- Lua error: Player.get does not exist
-```
-
-`Player.get` も `Player.get_all` も `Player.Class` も `Player.Spec` もありません。
-公開されているのは次の 3 つだけです。
+3 つとも、プレイヤーがワールドにいないときは `nil` を返します。使う前に値を確認して
+ください。
 
 | 関数 | 戻り値 | `nil` になる条件 |
 | --- | --- | --- |
@@ -37,14 +30,25 @@ Player.get("me")          -- Lua error: Player.get does not exist
 | `Player.coordinate()` | `Coord`（`x`、`y`、`z` をセンチメートルで） | ポーンがない、または座標の読み取りに失敗した |
 | `Player.coordinateOffset(dx, dy, dz)` | 上の座標をオフセットした `Coord` | `coordinate()` と同じ条件 |
 
-このモジュールが持つ唯一の形が `Coord` ですが、これもドメインではありません。
+呼び出し方は 2 通りあります。どちらも同じテーブルです。
+
+```lua
+local api = require("palforge.api")
+
+api.Player.coordinate()   -- namespaced access
+Player.coordinate()       -- the installed global; the same table
+```
+
+位置は `Coord`、つまり数値 3 つの小さなテーブルとして返ります。
 [Coord の形](#coord-の形)を参照してください。
 
 ## character
 
-`Player.character()` は `FindFirstOf("PalPlayerCharacter")` でポーンを探し、`IsValid()`
-を確認してから返します。途中で何かが失敗すれば `nil` になります。`FindFirstOf` の検索は
-`pcall` で保護されているため、検索が例外を投げてもエラーにはならず `nil` が返るだけです。
+`Player.character()` は、ワールドにいるプレイヤー自身のキャラクターを返します。Unreal の
+用語では「ポーン」、つまりプレイヤーが操作して歩き回っているアクターのことです。
+`FindFirstOf("PalPlayerCharacter")` でポーンを探し、`IsValid()` を確認してから返します。
+途中で何かが失敗すれば `nil` になります。検索は `pcall` の中で実行されるので、検索が例外を
+投げてもエラーにはならず `nil` が返るだけです。
 
 ```lua
 local me = Player.character()
@@ -53,9 +57,9 @@ if me then
 end
 ```
 
-検索は呼び出しのたびに実行され、キャッシュは一切ありません。これは重要です。ワールドを
-ロードするとポーンは作り直されるため、ロード時にアップバリューへ保存したキャラクターは
-すぐに古くなります。使う場所で取得してください。
+取得は使う場所で行ってください。検索は呼び出しのたびに実行され、キャッシュは一切ありません。
+そしてポーンはワールドをロードするたびに作り直されるため、起動時に変数へ入れておいた
+キャラクターは、もう存在しないものを指しています。
 
 ```lua
 local event = require("palforge.core.event")
@@ -71,15 +75,15 @@ event.every(5000, function()
 end)
 ```
 
-返ってくるのは PalForge のハンドルではなく、生の Unreal アクターです。ゲームがそのアクター
-に公開しているものには手が届きますが、それはこの API の外側なので、`pcall` の中に閉じ込め
-てください（後述の「プレイヤーの正面にスポーンさせる」レシピがまさにそれです）。
+返ってくるのは PalForge のオブジェクトではなく、ゲーム自身のアクターです。ゲームがそのアクター
+に載せているものには手が届きますが、それはこの API の外側なので、`pcall` の中に閉じ込めて
+ください（後述の「プレイヤーの正面にスポーンさせる」レシピがまさにそれです）。
 
 ## coordinate
 
-`Player.coordinate()` は `character()` に座標の読み取りを足したものです。まず
-`K2_GetActorLocation` を試し、なければ `GetActorLocation` にフォールバックします。ポーン
-がない場合も、読み取りが例外を投げた場合も `nil` になります。
+`Player.coordinate()` はポーンを探して、その位置を読み取ります。まず
+`K2_GetActorLocation` を試し、なければ `GetActorLocation` にフォールバックします。ポーンが
+ない場合も、読み取りが例外を投げた場合も `nil` になります。
 
 ```mermaid
 flowchart LR
@@ -91,7 +95,7 @@ flowchart LR
 ```
 
 返されるテーブルは、同じ 3 つの数値を 3 通りのキーで持ちます。そのため Lua 的なコードにも、
-UE 的なコードにも、位置引数を取るヘルパーにもそのまま渡せます。
+UE 的なコードにも、位置を順番に受け取るヘルパーにも、変換せずそのまま渡せます。
 
 ```lua
 local c = Player.coordinate()
@@ -107,8 +111,9 @@ end
 
 ## coordinateOffset
 
-`Player.coordinateOffset(dx, dy, dz)` は `coordinate()` の各軸にオフセットを足したもの
-です。`nil` になる条件はまったく同じで、省略した引数は `0` として扱われます。
+`Player.coordinateOffset(dx, dy, dz)` は、プレイヤーの位置の各軸にオフセットを足したもの
+です。「ちょっとあっち」を手早く指定するための関数です。`nil` になる条件は `coordinate()`
+とまったく同じで、省略した引数は `0` として扱われます。
 
 ```lua
 Player.coordinateOffset(300, 0, 0)      -- 3 m along +X
@@ -119,11 +124,14 @@ Player.coordinateOffset(nil, nil, 50)   -- only lift by 50 cm
 単位はセンチメートルなので、`100` が 1 メートルです。これは建築グリッドと同じ単位です
 （`core.spatial.GRID_CM` は `100`、1 セルが 1 メートル）。`z` が上方向です。
 
-オフセットはワールド軸に対して適用されます。プレイヤーがどちらを向いているかは考慮され
-ないため、`coordinateOffset(600, 0, 0)` はプレイヤーが見ていようが背を向けていようが
-+X 方向に 6 m の地点です。向きを基準にした地点が必要なら、後述のレシピを参照してください。
+オフセットはプレイヤー基準ではなく、ワールドの軸に対して適用されます。プレイヤーがどちらを
+向いているかは考慮されないため、`coordinateOffset(600, 0, 0)` はプレイヤーが見ていようが
+背を向けていようが +X 方向に 6 m の地点です。正面の地点が必要なら、後述のレシピを参照して
+ください。
 
 ## Coord の形
+
+`Coord` は、センチメートル単位の数値 3 つを持つテーブルです。形はこれだけです。
 
 <TypeTable
   type={{
@@ -133,10 +141,7 @@ Player.coordinateOffset(nil, nil, 50)   -- only lift by 50 cm
   }}
 />
 
-`Coord` は `api/player.lua` の `schema.define("Coord", ...)` で宣言されています。どの
-ドメインにも属さないため、`Pal.Spec` や `Mesh.Spec` と違ってドメイン名の接頭辞が付かず、
-どこにもバインドされていません。つまり、引数を `Coord` として検証する呼び出しは存在しま
-せん。実行時に形を読めるようにするため、そして生成される型定義に載せるための宣言です。
+同じ内容はゲーム内から出力することもできます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -151,7 +156,7 @@ Coord {
 }
 ```
 
-これを消費するのが `Pal.Handle:spawn` で、名前付きの形と配列の形の両方を受け取ります。
+これを主に受け取るのが `Pal.Handle:spawn` で、名前付きの形と配列の形の両方を受け取ります。
 
 ```lua
 Pal.get("ChickenPal"):spawn(Player.coordinate())            -- named form, straight through
@@ -190,7 +195,8 @@ flowchart LR
 適用され、成功したように見えます。先にガードしてください。
 </Callout>
 
-ワールドを待つなら `world.ready` チャネルを使います。
+ワールドを待つなら `world.ready` チャネルを購読します。これは、プレイヤーがロード済みの
+ワールドにいることを PalForge が知らせる合図です。
 
 ```lua
 local event = require("palforge.core.event")
@@ -244,8 +250,8 @@ end)
 
 ### プレイヤーの正面にスポーンさせる
 
-PalForge に前方ベクトルのヘルパーはありません。キャラクターからベクトルを取り、XY 平面に
-潰して正規化し、座標に足してください。
+「今どちらを向いているか」を返す専用のヘルパーはありません。キャラクターから前方ベクトルを
+取り、XY 平面に潰して正規化し、座標に足してください。
 
 ```lua title="content/spawn_ahead.lua"
 ---The point `distanceCm` ahead of where the player is facing, or nil.
@@ -279,7 +285,7 @@ end
 
 ### プレイヤーの周囲に円状に配置する
 
-`coordinateOffset` が最も効くのは、1 つの原点を基準に複数の地点が必要なときです。
+`coordinateOffset` が最も効くのは、1 つの原点のまわりに複数の地点が必要なときです。
 
 ```lua title="content/ring.lua"
 local ring = { { 400, 0 }, { -400, 0 }, { 0, 400 }, { 0, -400 } }
@@ -298,8 +304,8 @@ end
 
 ### ワールド上の何かとの距離を測る
 
-ライブな建築インスタンスは `pos` を持ち、これも `x, y, z` をセンチメートルで表す同じ形
-です。したがって単純な距離計算に他のものは要りません。
+ライブな建築は `pos` を持ち、これも `x, y, z` をセンチメートルで表す同じ形です。したがって
+単純な距離計算に他のものは要りません。
 
 ```lua title="content/nearest_palbox.lua"
 ---The live PalBoxV2 nearest to the player, plus its distance in centimetres.
@@ -325,6 +331,16 @@ if box then
     print(string.format("nearest PalBox is %.1f m away", distance / 100))
 end
 ```
+
+## まとめ
+
+- `Player.coordinate()` はプレイヤーの立っている位置です。単位はセンチメートルで、`100` が 1 メートル、`z` が上方向です。
+- `Player.coordinateOffset(dx, dy, dz)` はその位置をワールド軸方向にずらした地点です。「自分のとなり」を短く書けます。
+- `Player.character()` はプレイヤー自身のアクターです。プレイヤーに直接何かを適用したいときに使います。
+- 3 つともワールドがないときは `nil` を返すので、使う前に必ず確認してください。
+- 値は毎回取り直してください。どれもスナップショットで、ポーンはワールドをロードするたびに作り直されます。
+
+次は [Pal](/docs/api/pal) を読むと、いま求めた座標を `:spawn` がどう使うのかがわかります。
 
 <Cards>
   <Card title="Pal" href="/docs/api/pal">座標を受け取る側の spawn 呼び出し</Card>

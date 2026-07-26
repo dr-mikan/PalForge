@@ -1,46 +1,79 @@
 ---
 title: はじめに
-description: PalForge とは何か、レイヤー構成、そしてすべてのドメインが共有する形
+description: 自分の建築物・アイテム・パル・サウンド・エフェクト・スキル・メニューを Palworld に追加する
 ---
 
-PalForge は UE4SS の Lua MOD として動作する Palworld 向けのコンテンツフレームワークです。
-コンテンツパックとは、パル・アイテム・建築物・スキル・効果・サウンド・メッシュ・UI を宣言し、
-それらに挙動を結び付ける Lua コードのことです。
+PalForge は Palworld のベース MOD です。自分の建築物・音楽・エフェクト・パル・アイテム・
+モデル・スキル・メニューを追加でき、それらを組み合わせてまったく新しいコンテンツを作ることも
+できます。しかも、すぐゲームの中で確認できます。作りたいものを短い Lua ファイルに書けば、
+PalForge がそれをワールドに反映します。
 
-## PalForge とは
+## このページでできるようになること
 
-インストール構成は通常の UE4SS Lua MOD と同じです。
+- 自分の建築物・アイテム・パル・サウンド・メニューを Palworld に追加する
+- 建築物を置いたとき、アイテムを拾ったとき、パルを捕まえたときに自分のコードを走らせる
+- 置いた建築物ごとにデータを覚えさせて、次に遊ぶときも残す
+- 作りたいものに対応するページを見つける
 
-```text
-ue4ss/Mods/PalForge/Scripts/main.lua        <- entry point
-ue4ss/Mods/PalForge/Scripts/palforge/*.lua  <- modules
+## はじめての建築物
+
+これで 1 つのコンテンツファイルです。ゲームにある焚き火に新しい挙動を与えます。右クリックすると
+木材が 5 個手に入ります。
+
+```lua title="Scripts/content/campfire.lua"
+require("palforge.api")
+
+Building{
+    id = "CampFire",
+    events = {
+        onRightClick = function(self, ctx)
+            Item.get("Wood"):give(5)
+        end,
+    },
+}
 ```
 
-`main.lua` は薄い入口です。`palforge.*` がその `Scripts` ディレクトリを基準に解決されるよう
-`package.path` を設定し、`registry.initialize()` を `pcall` で呼び、コンパニオン MOD 向けに
-`_G.PalForge` を公開します。
+やっていることは 3 つです。`Building{ ... }` が建築物を宣言します。`"CampFire"` はゲーム側の
+建築 id なので、すでにある焚き火そのものが変わります。`events` が自分のコードを書く場所で、
+`onRightClick` はプレイヤーが操作するたびに走ります。
 
-`registry.initialize()` は MOD ロード時に一度だけ、決まった順序で実行されます。
+このファイルは PalForge のスクリプトの隣に置き、入口から読み込みます。置き場所と、読み込むための
+1 行は [はじめかた](/docs/getting-started) にあります。
 
-1. `palforge.api` を require します。これにより `Pal`、`Item`、`Building`、`Skill`、
-   `Effect`、`Audio`、`Mesh`、`UI`、`Player` のグローバルが導入されます。
-2. ネイティブカタログ（`palforge.native.buildings`、`.items`、`.pals`、`.skills`、
-   `.effects`、`.audio`、`.ui`）を require します。厳選された定義は、定義された時点で自身を登録します。
-3. `event.start()` — バス、ネイティブソース、ディスパッチを起動します。
-4. `env.dev` で制御される開発用ツール。開発用キーバインド、`ps_catalog` コンソールコマンド、
-   テストスイートを読み込みます。
-5. `event.emit("gameStart")`。
+## 作れるもの
 
-`palforge/env.lua` は `dev`、`name`、`version` を保持する、プロセス全体で共有されるテーブルです。
-`dev` が唯一の開発／リリース切り替えスイッチで、コンテンツだけを登録するビルドを配布したい場合は
-`registry.initialize()` が走る前に `false` にします。
+8 種類あり、それぞれにモジュールが 1 つあります。モジュールを呼べば作れます。
+
+| 作りたいもの | 宣言する内容 | ページ |
+| --- | --- | --- |
+| 設置できる建築物 | 見た目、グリッドの大きさ、覚えさせるデータ、そして 置いた／使った／壊した／数秒ごと のコード。 | [/docs/api/building](/docs/api/building) |
+| インベントリのアイテム | 名前、カテゴリ、スタック上限、レシピ、そして 拾った／使った のコード。 | [/docs/api/item](/docs/api/item) |
+| 生き物 | モデル、色、持っているスキルの id、そして 出現／被弾／死亡／捕獲 のコード。 | [/docs/api/pal](/docs/api/pal) |
+| アビリティ | アクティブかパッシブか、属性、威力、そして Lua 側で数えるクールダウン。 | [/docs/api/skill](/docs/api/skill) |
+| 時限付きのステータス | 持続時間、発動する間隔、スタックの仕方、終わったときの処理。 | [/docs/api/effect](/docs/api/effect) |
+| サウンドや BGM | 再生できるゲーム内サウンド 1 つ。`Audio.bgm` と `Audio.se` は `kind` を固定してくれます。 | [/docs/api/audio](/docs/api/audio) |
+| モデル | モデルアセットと、その塗り方。パルや建築物が身に着けます。 | [/docs/api/mesh](/docs/api/mesh) |
+| パネルやボタン | Palworld 自身の UI キットで組み立てるウィジェット。`render` と `update` を持ちます。 | [/docs/api/ui](/docs/api/ui) |
+
+`Player` だけは何かを作るためのモジュールではありません。プレイヤーの位置を教えてくれます。
+`Player.character()`、`Player.coordinate()`、`Player.coordinateOffset(dx, dy, dz)` があります —
+[/docs/api/player](/docs/api/player)。
+
+## 定義を書く
+
+どのモジュールも使い方は同じです。呼べば作れて、`get` と `get_all` ですでにあるものを探せます。
 
 ```lua
-local env = require("palforge.env")
-env.dev = false
+local boss = Pal{ id = "example:Boss", name = "Boss" }  -- CALL the module to define
+Pal.get("ChickenPal")                                   -- an existing one, by id
+Pal.get_all()                                           -- every registered one
 ```
 
-最小限の実用的なパックは、定義ひとつです。
+`X{ ... }` は `X({ ... })` を短く書いた Lua の書き方です。波かっこがそのまま引数リストで、Lua で
+名前付き引数に一番近い形になります。返ってくるのは **Handle** で、そのドメインのアクションを
+持っています。`:spawn`、`:give`、`:play`、`:apply` などがそのまま使えます。
+
+もう少し中身のある定義です。
 
 ```lua title="Scripts/content/flint.lua"
 local api = require("palforge.api")
@@ -58,86 +91,12 @@ Item{
 }
 ```
 
-`Flint` はゲームのアイテムテーブルに実在する行です。この定義がその行を作るわけではありません。
-既存の id に対して、名前・カテゴリ・スタック上限、そしてプレイヤーが入手したときに走る
-ハンドラーを与えているだけです。
+`Flint` はもともとゲームにあります。この定義は、その id に名前・カテゴリ・スタック上限と、
+プレイヤーが拾ったときに鳴るサウンドを与えています。
 
-## PalForge ではないもの
-
-PalForge は DataTable の行を追加しません。Lua だけで Palworld のデータテーブルに新しい
-アイテム・生物・建築物の行を追加することはできません。それは PalSchema の役割です。定義が行うのは
-**id に対して挙動とメタデータを結び付けること**、そしてその id を操作するアクションを渡すことです。
-
-id の規則はひとつです。コンテンツパックは `"packid:name"` と書き、
-`core/object_manager.resolve` がそれを DataTable の行 FName である `packid_name` に変換します。
-どちらの部分も英数字かアンダースコアである必要があります。コロンを**含まない** id はゲームの
-リテラル id です。
-
-```lua
-local om = require("palforge.core.object_manager")
-
-om.resolve("example:Potion")   --> "example_Potion"
-om.resolve("Wood")             --> "Wood"        (literal game id, passed through)
-om.resolve("bad pack:Potion")  --> nil, "invalid pack id 'bad pack' (letters/digits/_ only)"
-```
-
-つまり `Item{ id = "example:Potion" }` が意味を持つのは、PalSchema（あるいは別の MOD）が
-`example_Potion` という行を公開している場合だけです。その行がなければ、定義自体は登録されて
-Lua から呼び出せますが、ゲーム内のインベントリはそれを参照しません。
-
-<Callout type="warn">
-PalForge が行わないことがもう 2 つあります。PalForge の `Effect` はゲーム自身の状態異常列挙型
-`EPalStatusEffectType` を切り替えません。状態異常を適用するネイティブ呼び出しは確認できていないため、
-ゲームプレイはあなたのハンドラーの中に置かれます。またスキルにはネイティブソースが存在しません。
-ゲーム側が `Skill` のハンドラーを自動で発火することはないので、自分のコードから呼び出します。
-</Callout>
-
-## レイヤー構成
-
-ディレクトリは 4 つあり、そのうちパックが直接呼ぶのは 2 つだけです。
-
-| レイヤー | 役割 |
-| --- | --- |
-| `api/` | パックが書く対象となる公開サーフェス。1 ドメインにつき 1 モジュール。 |
-| `core/` | エンジン。`registry` が読み込み順を、`event` がチャンネル・ネイティブソース・ディスパッチと建築物ランタイム全体を担当し、Palworld とのブリッジとして `object_manager`、`spawn`、`mesh`、`sound`、`player`、`icons`、`spatial`、`schema` があります。 |
-| `utils/` | パックが直接呼ぶ汎用ツールボックス。`log`、`json`、`file`、`items`。 |
-| `native/` | Palworld 自身のコンテンツをデータカタログ化したものと、いくつかの厳選済み定義。 |
-
-`core/` 内の責務分担は 3 文で言えます。`object_manager` は**何が**存在するかを、`registry` は
-**いつ**読み込まれるかを、`event` は**何が起きるか**を知っています。
-
-```mermaid
-flowchart LR
-  PACK["content pack"] -->|"defines"| API["api"]
-  API -->|"records"| OM["core.object_manager"]
-  GAME["native game event"] --> SRC["core.event SOURCE"]
-  SRC -->|"emit"| CH["channel"]
-  CH --> DIS["core.event DISPATCH"]
-  DIS -->|"resolve"| OM
-  DIS -->|"calls the handler"| PACK
-```
-
-登録は独立した手順ではありません。定義の呼び出しそのものが `object_manager` に書き込むため、
-モジュールを読み込むことが、そのコンテンツを登録することです。走査すべき集約テーブルも、
-忘れずに呼ぶべきクラスごとの `register()` もありません。
-
-## すべてのドメインが共有する形
-
-どのドメインモジュールにも、公開された入口がちょうど 3 つあります。
-
-```lua
-local boss = Pal{ id = "example:Boss", name = "Boss" }  -- CALL the module to define
-Pal.get("ChickenPal")                                   -- an existing one, by id
-Pal.get_all()                                           -- every registered one
-```
-
-`X{ ... }` は `X({ ... })` に対する Lua のテーブル呼び出し糖衣構文です。モジュール自体が
-`__call` メタメソッドによってコンストラクタになっており、`X.define` は存在しません。定義すると
-`core/object_manager` に `(type, id)` をキーとして定義クラスが登録され、そのドメインのアクションを
-持つ **Handle** が返ります。
-
-`palforge.api` を require すると、グローバルが導入され、**かつ**同じテーブルが名前空間付きで
-返ります。したがって次のどちらの書き方も動きます。
+`palforge.api` を require すると、`Pal`、`Item`、`Building`、`Skill`、`Effect`、`Audio`、
+`Mesh`、`UI`、`Player` という名前がそのまま使えるようになり、同じ内容のテーブルも返ります。
+どちらの書き方でも動きます。
 
 <Tabs items={['Globals', 'Namespaced']}>
 <Tab value="Globals">
@@ -162,13 +121,17 @@ api.Item.get("Wood"):give(10)
 </Tab>
 </Tabs>
 
-UE4SS は Lua MOD ごとに独立した state を与えるため、これらのグローバルは MOD ローカルです。
-ゲーム本体や他の MOD と衝突しません。
+これらの名前はあなたの MOD の中だけのものです。ゲーム本体や他の MOD と衝突しません。
+
+モジュールの呼び出しと `get` / `get_all` のほかに、追加のものが 3 つあります。`Audio.bgm` と
+`Audio.se` は `kind` を固定してくれるので自分で書かずに済み、`Effect.activeOn(target)` は対象に
+いまかかっている効果の id をすべて返します。また `Player` を除くどのモジュールも、定義のもとに
+なる基底クラス `X.Class` を公開しています。これはサブクラスを作るときにだけ必要です。
 
 ### 定義は 1 回、操作は何度でも
 
-`X{ ... }` は登録します。`X.get(id)` は登録済みのものに対する handle を返すだけです。ハンドラーは
-イベントのたびに走るので、その中では `get` を使ってください。
+`X{ ... }` は作る側、`X.get(id)` はすでにあるものを引く側です。ハンドラーはイベントのたびに
+走るので、その中では `get` を使ってください。
 
 ```lua
 Pal{
@@ -182,11 +145,12 @@ Pal{
 }
 ```
 
-### ハンドラーの第 1 引数
+### ハンドラーが受け取るもの
 
-第 1 引数は、そのイベントが起きた対象そのものです。パル・アイテム・スキル・効果では
-**その定義の Handle** なので、ドメインのアクションがそのまま使えます。建築物では**ライブ
-インスタンス**であり、`self.actor`、`self.pos`、`self.state`、`self:save()` を持ちます。
+第 1 引数は、そのイベントが起きた対象そのものです。パル・アイテム・スキル・効果ではその Handle
+なので、ドメインのアクションがそのまま使えます。建築物では、プレイヤーが触ったその 1 つの
+構造物です。`self.actor` が設置されたアクター、`self.pos` がその位置、`self.state` があなたの
+テーブルで、`self:save()` がそのテーブルを保存します。
 
 ```lua
 Item{
@@ -211,13 +175,13 @@ Building{
 ```
 
 第 2 引数以降はドメインごとです。`(pal, ctx)`、`(item, ctx)`、`(skill, owner, ctx)`、
-`(effect, target, ctx)`、`(instance, ctx)` になります。
+`(effect, target, ctx)`、`(instance, ctx)` になります。`ctx` はただのテーブルで、中身は
+イベントによって変わります。`ctx.actor`、`ctx.itemId`、`ctx.count` などです。
 
-### 定義のネスト
+### 定義を入れ子にする
 
-ネストされた定義は、それ自体をそのまま渡せます。`Mesh` の Handle のメタテーブルは `__spec` を
-持っており、バリデータがそれを素の宣言に展開するため、インライン形式と名前付き形式はまったく
-同じように検証されます。
+定義を受け取るフィールドには、素のテーブルでも、すでに作った定義でも渡せます。どちらもまったく
+同じように検査されます。
 
 ```lua
 -- inline
@@ -232,13 +196,36 @@ Pal{ id = "example:Boss", mesh = body }
 Pal{ id = "example:Add",  mesh = Mesh.get("example:BossBody") }
 ```
 
-### 検証は厳格です
+### コンテンツに名前を付ける
 
-形は `core/schema` によってデータとして宣言され、呼び出しのたびに強制されます。問題はすべて
-ハードエラーで、呼び出しが中途半端に成功することはありません。未宣言のフィールド（もしかして候補付き）、
-必須フィールドの欠落、型の不一致、宣言された `values` に含まれない値、不正な `arrayOf` や `mapOf` の要素、
-失敗した `check` — いずれもエラーになります。メッセージはすべて `PalForge: ` で始まり、ドメイン名と
-フィールド名を含みます。
+コロンを含む id、たとえば `"example:Potion"` は自分のコンテンツです。PalForge はこれをゲームの
+データ上の行名 `example_Potion` に変換します。コロンを含まない id は、`Wood`、`ChickenPal`、
+`PalBoxV2` のようにゲームにすでにある id です。コロンで区切った id は、どちらの部分も英数字か
+アンダースコアである必要があります。
+
+```lua
+local om = require("palforge.core.object_manager")
+
+om.resolve("example:Potion")   --> "example_Potion"
+om.resolve("Wood")             --> "Wood"        (literal game id, passed through)
+om.resolve("bad pack:Potion")  --> nil, "invalid pack id 'bad pack' (letters/digits/_ only)"
+```
+
+<Callout type="warn">
+ゲームにすでにある id には、新しい挙動とメタデータを与えられます。一方、ゲーム側のテーブルに
+まったく新しい行 — 新しいアイテム、新しい生き物、新しい建築物 — を追加するには別のツールが
+必要です。Lua だけでは行を書けません。ですから `Item{ id = "example:Potion" }` は登録されて
+コードからも使えますが、`example_Potion` という行ができるまでゲーム内のインベントリには
+現れません。それまでは、ゲームにすでにある id の上に作るのが早道です。
+</Callout>
+
+### フィールドを間違えたとき
+
+呼び出しは毎回、そのドメインが受け付ける形に照らして検査されます。問題があればその場で止まり、
+中途半端に成功することはありません。未知のフィールド（もしかして候補付き）、必須フィールドの
+欠落、型の不一致、許可された値以外、`arrayOf` や `mapOf` の要素の不正、`check` の失敗は、
+いずれもエラーになります。メッセージはすべて `PalForge: ` で始まり、ドメイン名とフィールド名を
+含みます。
 
 ```text
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
@@ -247,8 +234,7 @@ PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMes
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
 ```
 
-宣言はモジュール内に閉じています。ドメインは「呼ぶもの」であって「中を見に行く名前空間」では
-ありません。ただし実行時にはスキーマレジストリ経由で読み出せます。
+ドメインが受け付ける内容は、ゲームを離れずに実行時に確認できます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -259,13 +245,62 @@ schema.all()                          -- every declared spec, in declaration ord
 ```
 
 エディタでは同じ情報が `Scripts/palforge/types.lua` から得られます。このファイルは
-`lua5.4 tools/gen-types.lua` によって同じ宣言から生成されます。中身はアノテーションだけで、
-実行時に require するものはありません。`Pal{ ... }` で全フィールドがドキュメント付きで補完される
-ためには、LuaLS がワークスペース内でこのファイルを見えていれば十分です。
+`lua5.4 tools/gen-types.lua` で生成されます。中身はアノテーションだけで、実行時に require する
+ものはありません。`Pal{ ... }` で全フィールドがドキュメント付きで補完されるには、LuaLS が
+ワークスペース内でこのファイルを見えていれば十分です。詳しくは
+[エディタの設定](/docs/concepts/editor-setup) を読んでください。
 
-## 実例
+## ゲームが自動で動かすもの
 
-Mesh、Effect、Skill、Building、Item、Audio、Pal、Player をまとめて扱う 1 ファイルのパックです。
+建築物のハンドラーを自分で呼ぶ必要はありません。構造物を置けば、PalForge がそれに気づいて
+あなたのコードを走らせます。
+
+```mermaid
+flowchart LR
+  DEF["you define a building"] --> REG["PalForge registers it"]
+  PLACE["you place one in game"] --> FIND["PalForge finds it"]
+  FIND --> RUN["your onPlace code runs"]
+```
+
+どこまで自動で動くかはドメインによって違います。
+
+- **Building** — 一番充実しています。`onPlace`、`onLoad`、`onRightClick`、`onRemove`、
+  `onTick`、`onWorldReady`、`onWorldLeft` はすべて、生きている構造物に対して走ります。
+  `onBuild` も建築が完了した瞬間に走りますが、構造物ができる前に届くため、生きた構造物では
+  なく定義そのものが渡されます。あとから読み込まれた構造物は `onWorldReady` を取り逃すので、
+  構造物ごとの初期化処理は `onLoad` に置いてください。
+- **Pal** — 5 つすべて走ります。`onCaptured`、`onDamaged`、`onDeath` は確認済みのゲーム側の
+  呼び出しから来ます。`onSpawned` は候補のフックに乗っており、新規出現なのか再初期化なのかは
+  まだ確定していないので、2 回走っても平気な書き方にしておいてください。`onTick` はワールド内の
+  パルを走査する仕組みが駆動していて、おおよそ 3 秒ごとです。
+- **Item** — `onObtain` と `onUse` が走ります。`ctx.itemId`、`ctx.count`、`ctx.actor` が
+  付いてきます。
+- **Effect** — `onApply`、`onTick`、`onStack`、`onExpire` がすべて走ります。時間の管理は
+  PalForge 自身が 0.5 秒間隔の鼓動で行います。ゲーム本体の状態異常アイコン（毒・炎上・氷結）は
+  切り替えません。対象に何をするかは、あなたのハンドラーが決めます。
+- **Audio / Mesh / UI** — ライフサイクルのイベントはありません。サウンドは自分で鳴らし、メッシュは
+  身に着けさせ、UI 要素はマウント・更新・アンマウントを自分で行います。`Audio.Handle:stop(actor)` は
+  サウンド単位ではなく、そのアクターで鳴っているものをすべて止めます。
+
+<Callout type="warn">
+次のものは宣言できるので書いても壊れませんが、いまは何も動かしません。実際に走る場所に処理を
+置いてください。
+
+- Building の `onLeftClick` と `onBreak` — `onRightClick` と `onRemove` を使ってください。
+- Item の `onCraft` と `onDiscard` — `onObtain` か `onUse` を使ってください。
+- Skill のハンドラー — ゲーム側がスキルを発火することはありません。`:activate(owner)`、
+  `:hit(target)`、`:equip(owner)`、`:unequip(owner)` を自分のコードから呼んでください。パルの
+  ハンドラー、建築物の `onRightClick`、キーバインドなどが呼び出し元になります。クールダウンは
+  Lua が数えていて、冷却中の `:activate` は `false` を返します。
+- `Audio.Handle:setVolume` は `false` を返すだけで何も変わりません。自分で用意した `soundFile` も
+  解決はされますが再生されません。ゲーム内のサウンド id を指定してください。
+- UI 要素を代わりに更新してくれるものはありません。状態が変わったら自分で `:refresh()` を呼ぶか、
+  `:autoRefresh(ms)` で定期的に更新してください。
+</Callout>
+
+## もっと大きな例
+
+メッシュ・ステータス・アビリティ・建築物を作り、それらをつなげる 1 ファイルです。
 
 ```lua title="Scripts/content/supply_bench.lua"
 local api = require("palforge.api")
@@ -349,139 +384,28 @@ Building{
 }
 ```
 
-各パーツが実際に行っていることは次のとおりです。
+各パーツがしていることは次のとおりです。
 
-- `BenchBody` は `("mesh", "example:BenchBody")` として登録され、建築物には値としてネストされます。
-  ここでは `kind` を明示する必要があります。名前付きの `Mesh{ ... }` は単独で `Mesh.Spec` により
-  検証され、その `kind` の既定値である `"skeletal"` が埋まった状態で持ち回されるためです。
-  `"static"` という既定値は `Building.Spec.Mesh` のものなので、建築物の中にインラインで書いた
-  メッシュにしか効きません。
-- `WellFed:apply(target)` はライブな適用を開始します。すぐに `onApply`、`interval` 秒ごとに
-  `onTick`、`duration` 経過後または `:remove()` で `onExpire` が走ります。
-- `Whistle:activate(owner)` は 30 秒のクールダウンに阻まれない限り `onActivate` を即座に実行します。
+- `BenchBody` は `("mesh", "example:BenchBody")` として登録され、建築物には値として入れ子に
+  なります。ここでは `kind` を明示する必要があります。名前付きの `Mesh{ ... }` は単独で
+  `Mesh.Spec` に照らして検査され、その `kind` の既定値 `"skeletal"` が埋まった状態で持ち回される
+  ためです。`"static"` という既定値は `Building.Spec.Mesh` のものなので、建築物の中にインラインで
+  書いたメッシュにしか効きません。
+- `WellFed:apply(target)` は適用を開始します。すぐに `onApply`、`interval` 秒ごとに `onTick`、
+  `duration` 経過後または `:remove()` で `onExpire` が走ります。
+- `Whistle:activate(owner)` は 30 秒のクールダウンに阻まれない限り `onActivate` をすぐ実行します。
   阻まれた場合は `false` を返します。
-- `tickInterval = 20` は 500 ms のハートビートと合わせて、`onTick` が 10 秒ごとに走ることを意味します。
-- `self:save()` はインスタンスの `state` テーブルをワールドごとの状態ファイルに書き出します。
+- `tickInterval = 20` は 0.5 秒の鼓動と合わせて、`onTick` が 10 秒ごとに走ることを意味します。
+- `self:save()` は構造物の `state` テーブルをワールドごとの状態ファイルに書き出します。
 - `onRightClick` の `ctx.player` は操作したキャラクター、`ctx.actor` は建築物のアクターです。
-- `Audio.Handle:stop(actor)` はサウンド単位ではありません。ネイティブの停止経路は、そのアクターで
-  再生中のものをすべて止めます。
+- `Audio.Handle:stop(actor)` はサウンド単位ではありません。そのアクターで鳴っているものを
+  すべて止めます。
 
 <Callout type="info">
 `CampFire`、`Wood`、`Berries`、`ChickenPal` は `Scripts/palforge/native/*.lua` にある実在の id で、
-`AKE_BGM_Title` は `palforge.native.audio` が定義している厳選済みサウンドです。登録は `(type, id)` を
-キーにしているため、ネイティブカタログが既に厳選定義している id を定義すると、その登録を置き換えます。
+`AKE_BGM_Title` は `palforge.native.audio` が定義しているサウンドです。登録は `(type, id)` を
+キーにしているため、PalForge に同梱されている id を定義すると、その登録を置き換えます。
 </Callout>
-
-## ドメイン一覧
-
-| ドメイン | 宣言する内容 | リファレンス |
-| --- | --- | --- |
-| `Pal` | 出現させられる生物。メッシュ、マテリアル、スキル id、そして spawn / damage / death / capture のハンドラー。 | [/docs/api/pal](/docs/api/pal) |
-| `Item` | インベントリのコンテンツ。カテゴリ、スタック上限、レシピ、obtain / use のハンドラー。 | [/docs/api/item](/docs/api/item) |
-| `Building` | 設置できる構造物。構造物ごとのライブインスタンス、永続化される状態、完全なライフサイクルを持つ唯一のドメイン。 | [/docs/api/building](/docs/api/building) |
-| `Skill` | アクティブまたはパッシブのアビリティ。属性、威力、Lua 側で強制されるクールダウンを持ちます。 | [/docs/api/skill](/docs/api/skill) |
-| `Effect` | 対象に付く時限付きステータス。持続時間、間隔、スタック、失効。 | [/docs/api/effect](/docs/api/effect) |
-| `Audio` | 再生可能な Wwise の `AkAudioEvent` ひとつ。アクター上で鳴らします。`Audio.bgm` と `Audio.se` は `kind` を固定します。 | [/docs/api/audio](/docs/api/audio) |
-| `Mesh` | モデルアセットと、その塗り方。パルや建築物が身に着けます。 | [/docs/api/mesh](/docs/api/mesh) |
-| `UI` | Palworld 自身の UMG キットで組み立てる、マウント可能な要素。`render` と `update` を持ちます。 | [/docs/api/ui](/docs/api/ui) |
-| `Player` | ローカルキャラクターとその座標。単なるファサードで、呼び出し可能ではありません。 | [/docs/api/player](/docs/api/player) |
-
-3 つの入口以外の追加要素は 3 つだけで、これがその全部です。`Audio.bgm` と `Audio.se` は `kind` を
-固定し、`Effect.activeOn(target)` は対象に現在かかっている効果の id をすべて返します。`Player` には
-そもそも入口がなく、`character()`、`coordinate()`、`coordinateOffset(dx, dy, dz)` だけです。加えて、
-`Player` を除くどのモジュールも基底の定義クラス `X.Class` を公開しており、サブクラス化と
-`core/event` のオーバーライド検出に使われます。
-
-<Callout type="warn">
-現時点で実際に発火するフックは次のとおりです。
-
-- **Building** — 次のフックがライブです。`onPlace`、`onLoad`、`onRightClick`、`onRemove`、
-  `onTick`、`onWorldLeft`。`onBuild`、`onLeftClick`、`onBreak` は宣言できますが、発行する
-  ネイティブソースがありません。`onWorldReady` はディスパッチされますがインスタンスには
-  届きません。`world.ready` はゲートが開いた瞬間に emit され、インスタンスを作るスキャンは
-  同じゲートを待つためです。処理は `onLoad` に置いてください。
-- **Pal** — `onCaptured`、`onDamaged`、`onDeath` はライブです。`onSpawned` は未確認の候補フックに
-  乗っています。`onTick` は宣言できるだけです。パルにはインスタンススキャンがないため、駆動源が
-  存在しません。
-- **Item** — `onObtain` と `onUse` はライブです。`onCraft` と `onDiscard` は宣言できるだけで、
-  チャンネルとディスパッチはありますが、発行するものがありません。
-- **Effect** — 4 つのフックすべてがライブですが、そのタイミングを持っているのは `api/effect` 自身で、
-  `tick` チャンネルに乗って動きます。ネイティブのゲームイベントではありません。
-- **Skill** — ネイティブソースはまったくありません。`:activate`、`:hit`、`:equip`、`:unequip` が
-  その場でハンドラーを実行します。自分のコードから駆動してください。
-- **Audio / Mesh / UI** — ライフサイクルチャンネルはありません。`Audio.Handle:setVolume` は未実装で
-  `false` を返し、`soundFile` は解決されても何もせず、UI 要素の `refresh()` を代わりに呼ぶものは
-  ありません。
-</Callout>
-
-## `_G.PalForge` が公開するもの
-
-`main.lua` の実行後、同じ Lua state に読み込まれたコンパニオン MOD は、ひとつのテーブルから
-すべてに到達できます。
-
-```lua
-_G.PalForge = {
-    env    = env,                      -- dev / name / version
-    api    = require("palforge.api"),  -- Pal, Item, Building, Skill, Effect, Audio, Mesh, UI, Player
-    utils  = { log, json, file, items },
-    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons },
-    native = require("palforge.native"),
-}
-```
-
-`api` はコンテンツパックが書く対象、`utils` はツールボックスです。`core` と `native` は
-高度な用途、つまり独自のイベントチャンネルやカタログ参照のために公開されています。
-
-```lua title="a companion mod"
-local PalForge = _G.PalForge
-local event    = PalForge.core.event
-local log      = PalForge.utils.log.scope("mymod")
-
--- Subscribe to any channel. Returns a subscription with :unsubscribe().
-local sub = event.on("item.obtain", function(ctx)
-    log.info("obtained " .. tostring(ctx.itemId) .. " x" .. tostring(ctx.count))
-end)
-
--- Run something on the shared heartbeat, quantized to event.TICK_MS (500 ms).
-event.every(5000, function()
-    log.info("live buildings: " .. tostring(#event.instances()))
-end)
-
--- Operator chains, because a channel is a hot Rx Subject.
-event.observable("building.interact")
-    :filter(function(ctx) return ctx.buildId == "PalBoxV2" end)
-    :subscribe(function(ctx) log.info("palbox opened") end)
-
--- Read the catalogs.
-local native = PalForge.native
-native.audio.MainTheme:play()
-native.items.get("Arrow_Fire"):give(20)
-
-sub:unsubscribe()
-```
-
-チャンネルの一覧は `event.CHANNELS` です。すべてのチャンネルは事前に作成されているので、
-最初の emit より先に subscribe しても動きます。
-
-```text
-gameStart
-world.ready   world.left
-building.place  building.load  building.interact  building.remove
-pal.spawned  pal.damaged  pal.death  pal.captured
-item.obtain  item.use  item.craft  item.discard
-tick
-```
-
-`registry.registered()` は、登録済みのクラスをオブジェクト型と id で引けるスナップショットとして
-返します。ツールを書くときに便利です。
-
-```lua
-local registry = _G.PalForge.core.registry
-
-for id in pairs(registry.registered().building) do
-    print(id)
-end
-```
 
 ## 次に読むもの
 
@@ -489,10 +413,30 @@ end
   <Card title="はじめかた" href="/docs/getting-started">
     PalForge を導入し、パックを配置して、定義をゲーム内で動かすまで。
   </Card>
+  <Card title="はじめてのコンテンツパック" href="/docs/guides/first-content-pack">
+    空のフォルダから遊べる状態まで、パックを 1 つ順番に作ります。
+  </Card>
   <Card title="定義" href="/docs/concepts/definitions">
-    スペック、厳格な検証、Handle、ネスト、そして id モデルの詳細。
+    スペック、厳格な検査、Handle、入れ子、そして id モデルの詳細。
   </Card>
   <Card title="ライフサイクル" href="/docs/concepts/lifecycle">
-    チャンネル、ネイティブソース、ディスパッチ、ハートビート、そしてどのフックがライブか。
+    チャンネル、鼓動、そしてどのハンドラーが何で走るのか。
   </Card>
 </Cards>
+
+## まとめ
+
+- コンテンツは Lua ファイル 1 つで追加できます。`Building{ ... }`、`Item{ ... }`、`Pal{ ... }`
+  などはすべて同じ使い方で、どれも必須のフィールドは `id` だけです。
+- コロンを含む id は自分のコンテンツ、含まない id はゲームにすでにあるものです。すでにある id の
+  上に作るのが、ゲーム内で結果を見る一番早い方法です。
+- 走らせたいコードは `events` に書きます。第 1 引数はイベントが起きた対象で、建築物なら生きて
+  いる構造物、それ以外はその定義の Handle です。
+- 建築物は `state` に入れたものを覚えます。`self:save()` を呼んでください。
+- フィールド名を間違えると呼び出しは止まり、`PalForge: ` で始まるメッセージが正しい候補を
+  教えてくれます。
+- スキルは自動では発火しません。Item の `onCraft` / `onDiscard` と Building の `onLeftClick` /
+  `onBreak` も走りません。実際に走るハンドラーに処理を置いてください。
+
+次は [はじめかた](/docs/getting-started) を読んで、PalForge を導入し、書いたファイルを
+読み込ませましょう。

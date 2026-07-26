@@ -1,14 +1,20 @@
 ---
 title: Pal
-description: Define a creature, hook its lifecycle and spawn it
+description: Add a creature that reacts when it spawns, takes damage or is caught
 ---
 
-A pal is a spawnable creature. `Pal{ ... }` gives an existing game `CharacterID` metadata, a
-mesh and lifecycle handlers, and returns a `Pal.Handle` carrying the actions. Defining
-registers the definition under `("pal", id)` in the object registry, which is how
-`core/event` finds it again: when a pal actor is captured, takes damage, dies or finishes
-initializing, dispatch reads the actor's blueprint class name — `BP_ChickenPal_C` becomes
-`ChickenPal` — looks that id up and calls your handler.
+## What you can do after this page
+
+- Make a creature react the moment you catch it, hit it or kill it
+- Hand the player an item, or play a sound, when a pal dies
+- Give a pal a different body, a different colour and a different size
+- Drop a pal into the world where you are standing, at the level you pick
+- Run your own code on every one of your pals, over and over, while the game is playing
+
+## Make a pal
+
+A pal is a creature you can spawn. Write `Pal{ ... }` with the game's own name for that
+creature, and you get back an object you can spawn, look up later and hang behaviour on.
 
 ```lua title="content/pals.lua"
 local pal = Pal{
@@ -25,7 +31,10 @@ local pal = Pal{
 pal:spawn(Player.coordinate())
 ```
 
-The module has the same three entry points as every other api module:
+Catch a Chicken Pal in your game and the victory jingle plays. That is the whole loop:
+say which creature you mean, say what should happen to it, and PalForge does the rest.
+
+There are three ways in:
 
 ```lua
 Pal{ id = "ChickenPal" }    -- define + register, returns a Pal.Handle
@@ -33,9 +42,9 @@ Pal.get("SheepBall")        -- a handle for an existing id; never nil
 Pal.get_all()               -- every PalForge-registered pal, as handles
 ```
 
-`Pal.get` never returns nil: an id nobody defined gets a thin definition, which is enough to
-`:spawn` it but carries no handlers. Only `Pal{ ... }` registers, and only a registered id
-receives lifecycle dispatch.
+`Pal.get` never returns nil. An id nobody defined gets a thin definition — enough to
+`:spawn` it, but with no handlers on it. Only `Pal{ ... }` registers a pal, and only a
+registered pal ever gets its handlers called.
 
 Palworld's own creature list lives in `native/pals`:
 
@@ -48,13 +57,15 @@ pals.Chicken               -- the curated ChickenPal demo definition
 pals.SheepBall             -- the curated SheepBall demo definition
 ```
 
-`pals.get(id)` defines and caches a bare `Pal{ id = id }` on first use, so asking for a
-catalog id also registers it — from then on dispatch resolves that id, with inert handlers.
+`pals.get(id)` defines and caches a bare `Pal{ id = id }` the first time you ask for it.
+Asking for a catalog id therefore registers it too, so events start reaching that id — with
+empty handlers until you give it some.
 
 ## Fields
 
-`id` is the only required field. Anything not listed here is a hard error at define time,
-with a did-you-mean suggestion. The same list is readable at runtime with
+`id` is the only field you have to fill in. Anything not on this list is an error the moment
+you call `Pal{ ... }`, with a did-you-mean suggestion, so a typo shows up straight away
+instead of being quietly ignored. The same list is readable while the game runs, with
 `require("palforge.core.schema").help("Pal.Spec")`.
 
 <TypeTable
@@ -107,17 +118,18 @@ with a did-you-mean suggestion. The same list is readable at runtime with
   }}
 />
 
-No field has a default. Two fields fall back at read time: `:name()` returns the id when
-`name` is absent, and `:skillsOf()` returns an empty table when `skills` is absent.
+No field has a default. Two of them fall back when you read them: `:name()` gives you the id
+when you left `name` out, and `:skillsOf()` gives you an empty table when you left `skills`
+out.
 
-An id containing a colon is a pack id: `"example:Boss"` resolves to the DataTable row FName
-`example_Boss`. An id without a colon is a literal game id.
+An id with a colon in it is your own: `"example:Boss"` matches the game data row named
+`example_Boss`. An id without a colon is one of the game's own, such as `ChickenPal`.
 
 ### mesh
 
-`mesh` is `Mesh.Spec` itself, not a copy of it, so an inline table and a defined
-[`Mesh{ ... }`](/docs/api/mesh) handle validate identically and reach the renderer the same
-way.
+A mesh is the 3D model a creature wears. Write it inline, or define it once with
+[`Mesh{ ... }`](/docs/api/mesh) and pass that. Both forms are checked the same way and reach
+the renderer the same way, so pick whichever suits the file.
 
 <Tabs items={['Inline', 'Named']}>
 <Tab value="Inline">
@@ -153,10 +165,11 @@ Pal{ id = "ChickenPal", mesh = Mesh.get("example:sheep_body") }
 
 The mesh fields are `kind` (`procedural`, `static`, `skeletal` or `obj`; defaults to
 `skeletal`), `model` (required), `animClass` (skeletal only), `scale`, `offset`, `texture`,
-`color`, `material` and `params`. `obj` is an alias for the procedural backend.
+`color`, `material` and `params`. `obj` is another name for the procedural backend.
 
-Declaring a mesh attaches nothing on its own. Pals have no instance scan, so you attach it
-yourself with `:renderOn(actor)` — normally from `onSpawned`:
+Declaring a mesh does not put it on anything. You attach it yourself with
+`:renderOn(actor)`, normally from `onSpawned` — the handler that runs once a pal has finished
+appearing in the world:
 
 ```lua
 Pal{
@@ -170,7 +183,8 @@ Pal{
 
 ### material, color and texture
 
-`material` is the full override; `color` and `texture` are shorthands for two of its fields.
+`material` is the full override. `color` and `texture` are short spellings for two of its
+fields, for when that is all you need.
 
 <TypeTable
   type={{
@@ -181,10 +195,11 @@ Pal{
   }}
 />
 
-The two spellings are not merged. When `material` is present it is used whole and the
-top-level `color` / `texture` are ignored; only when `material` is absent are the shorthands
-assembled into a material descriptor. Inside `:renderOn`, whatever that descriptor carries
-overrides the same field on the mesh, and a field it leaves out keeps the mesh's own value.
+The two spellings are not mixed together. When you give `material`, it is used whole and the
+top-level `color` and `texture` are ignored. Only when `material` is absent are the short
+spellings assembled into a material description. Inside `:renderOn`, whatever that
+description carries wins over the same field on the mesh, and a field it leaves out keeps
+the mesh's own value.
 
 ```lua
 -- shorthand: tint the declared mesh red
@@ -207,14 +222,22 @@ Pal{
 }
 ```
 
-`Pal.Spec` has no top-level shorthand for `params` or for a base material path — those exist
-only inside `material`.
+There is no top-level short spelling for `params` or for a base material path. Those live
+inside `material` only.
+
+<Callout type="warn">
+Those four fields only paint on the procedural and `obj` backends. `kind = "skeletal"` — the
+default for a pal's mesh — swaps the creature's model and reads nothing else, and `static`
+paints nothing either. A `color` or `texture` next to a skeletal mesh is carried down to
+`core.mesh` and does nothing there. On that backend a `true` from `:renderOn` means the model
+was swapped, not that it was painted. The backend table is on [Mesh](/docs/api/mesh).
+</Callout>
 
 ### skills
 
-`skills` is a list of ids and nothing more: the framework does not equip them, and there is
-no native skill source that fires them. Read the list back with `:skillsOf()` and drive each
-skill yourself through [`Skill`](/docs/api/skill).
+`skills` is a list of ids and nothing more. PalForge does not equip them, and nothing in the
+game fires them. Read the list back with `:skillsOf()` and run each skill yourself through
+[`Skill`](/docs/api/skill).
 
 ```lua
 local boss = Pal{
@@ -231,10 +254,12 @@ end
 
 ### icon
 
-`:iconOf()` looks the id up in `/Game/Pal/DataTable/Character/DT_PalCharacterIconDataTable`,
-probing the `IconName`, `Icon` and `Texture` columns in that order, and returns the declared
-`icon` on any miss — a missing table, a missing row or a missing column. The lookup uses the
-raw id, so a namespaced `"example:Boss"` never matches a row and always falls back.
+`:iconOf()` looks the id up in the game's own pal icon tables —
+`DT_PalCharacterIconDataTable`, then `DT_PalCharacterIconDataTable_Common` — and reads the
+first of the `SoftIcon`, `IconName`, `IconTexture`, `Icon` and `Texture` columns that holds
+something. On any miss, whether the table, the row or the column is what is missing, you get
+the `icon` you declared. The lookup uses the raw id, so a namespaced `"example:Boss"` never
+matches a row and always falls back.
 
 ```lua
 local pal = Pal{ id = "example:Boss", icon = "/Game/.../T_icon_example_boss" }
@@ -243,8 +268,8 @@ pal:iconOf()   -- the declared icon, since the DataTable has no "example:Boss" r
 
 ### data
 
-`data` is copied onto the definition untouched; nothing in the framework reads it. The handle
-exposes no accessor for it, so keep the table in a Lua local if you need it inside a handler.
+`data` is copied onto the definition untouched, and nothing in PalForge reads it. The handle
+has no accessor for it, so keep the table in a Lua local if you want it inside a handler.
 
 ```lua
 local config = { reward = "Wood", amount = 5 }
@@ -262,12 +287,14 @@ local pal = Pal{
 
 ## Events
 
-Handlers are grouped under `events`. Each one is `function(pal, ctx)` where `pal` is **this
-definition's handle** — the same object the `Pal{ ... }` call returned, so `:spawn`,
-`:renderOn` and the queries are right there — and `ctx` is the channel payload. An event name
-the list below does not contain is a hard error, not a silent no-op.
+This is where a pal gets its behaviour. Put your handlers under `events`. Each one is
+`function(pal, ctx)`, where `pal` is **this definition's handle** — the same object
+`Pal{ ... }` returned, so `:spawn`, `:renderOn` and the queries are right there — and `ctx`
+is a table describing what just happened. An event name that is not in the list below is an
+error at define time, not a silent no-op.
 
-The path from the game to your handler:
+PalForge listens to the game, puts each event on a named channel, then finds the pal it
+happened to and calls your handler:
 
 ```text
 native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal:onX(ctx)
@@ -275,16 +302,16 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 
 | Hook | Channel | Native source | ctx | State |
 | --- | --- | --- | --- | --- |
-| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE, candidate hook |
+| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE, unconfirmed hook, armed after the world loads |
 | `onDamaged` | `pal.damaged` | `PalCharacter:OnDamageReaction` | `ctx.actor` | LIVE |
 | `onDeath` | `pal.death` | `PalCharacter:OnDeadCharacter` | `ctx.actor` | LIVE |
 | `onCaptured` | `pal.captured` | `PalCharacterParameterComponent:SetIsCapturedProcessing` with `started == true` | `ctx.actor`, `ctx.comp` | LIVE |
-| `onTick` | none | none | none | declarable; never fires |
+| `onTick` | `tick` | no game event: `core/event` walks the live pals itself | `ctx.actor`, `ctx.count`, `ctx.now` | LIVE, once per live pal every `core.event.PAL_SCAN_MS` — 3 s by default |
 
-`ctx.actor` is the pal pawn the event happened to. For `pal.captured` the native hook fires
-on the parameter component, so the actor is that component's owner and `ctx.comp` is the
-component itself. `onDamaged` fires on the pal that **took** damage, not on the attacker —
-the source hook carries no attacker.
+`ctx.actor` is the creature in the world that the event happened to. For `pal.captured` the
+game fires on the pal's parameter component, so the actor is that component's owner and
+`ctx.comp` is the component itself. `onDamaged` fires on the pal that **took** the damage,
+never on the attacker — the game's own hook does not say who attacked.
 
 A handler that reacts to a capture and gives the player something back:
 
@@ -303,7 +330,7 @@ Pal{
 }
 ```
 
-A handler that reads live state off the actor before deciding:
+A handler that checks the creature is still valid before touching it:
 
 ```lua
 Pal{
@@ -318,7 +345,30 @@ Pal{
 }
 ```
 
-Handlers combine freely; each is optional:
+`onTick` runs on its own, roughly every three seconds, once for every live pal of that id.
+`ctx.count` counts the 500 ms heartbeats since the mod loaded, so it is an easy way to do
+something only now and then:
+
+```lua
+local log = require("palforge.utils.log").scope("example")
+
+Pal{
+    id = "ChickenPal",
+    events = {
+        onTick = function(pal, ctx)
+            -- ctx.actor is one live Chicken Pal; this runs once per pal, per sweep
+            if ctx.count % 12 == 0 then
+                log.info("chicken still here: " .. tostring(ctx.actor))
+            end
+        end,
+    },
+}
+
+-- slow the sweep down, or switch it off with 0
+require("palforge.core.event").PAL_SCAN_MS = 5000
+```
+
+Handlers combine freely, and each one is optional:
 
 ```lua
 local log = require("palforge.utils.log").scope("example")
@@ -336,30 +386,33 @@ Pal{
 }
 ```
 
-The two curated demo definitions in `native/pals.lua` (`ChickenPal` and `SheepBall`) are the
-same shape with three of these handlers — `onCaptured`, `onDamaged` and `onDeath` — and exist
-to prove the chain end to end: catch or kill a wild one and the log lines appear.
+PalForge ships two ready-made pals in `native/pals.lua` — `ChickenPal` and `SheepBall` — with
+`onCaptured`, `onDamaged` and `onDeath` already wired to log lines. Catch or kill a wild one
+and those lines appear, which is the quickest way to check the chain works in your game.
 
-### Dispatch rules
+### What decides whether your handler runs
 
-Four things decide whether your handler runs.
+Four things.
 
-1. **Resolution is by blueprint class name.** Dispatch matches `BP_<Id>_C` on the actor's
-   class, then looks that id up in the registry. A namespaced definition also matches when
-   its resolved FName equals the blueprint id, so `Pal{ id = "example:Boss" }` catches
+1. **A pal is identified by its blueprint class name.** Every creature in the game has a
+   generated class called `BP_<Id>_C`. PalForge reads that name off the creature, turns
+   `BP_ChickenPal_C` into `ChickenPal`, and looks that id up. A namespaced definition matches
+   too when its resolved name equals the blueprint id, so `Pal{ id = "example:Boss" }` catches
    `BP_example_Boss_C`.
-2. **Only registered ids get dispatch.** `Pal{ ... }` registers; `Pal.get(id)` does not. A
-   vanilla pal with no PalForge definition resolves to nothing and the dispatch no-ops.
-3. **Everything is gated on world-ready.** The source hooks return immediately until the
-   world has loaded — five consecutive one-second polls that find a valid
-   `PalPlayerCharacter`.
-4. **Handlers run inside `pcall`.** An error in your handler is swallowed: no crash, and no
-   message either. Log inside the handler when you need to see failures.
+2. **Only registered ids get events.** `Pal{ ... }` registers; `Pal.get(id)` does not. A
+   vanilla pal you never defined resolves to nothing and the event is dropped.
+3. **Nothing runs until the world is ready.** The game hooks return immediately until five
+   one-second polls in a row have found a valid `PalPlayerCharacter`. The `onTick` sweep waits
+   for the same gate.
+4. **Handlers run inside `pcall`, and a failure is logged.** An error in your handler neither
+   crashes the game nor stops the channel. PalForge catches it and writes the channel, the
+   hook and the message to the log — `pal.death -> onDeath handler failed: ...`. Everything
+   after the failing line in that handler is still skipped.
 
-### Subscribing to the channel directly
+### Listening to every pal, not just your own
 
-Dispatch is one subscriber on a public channel. Subscribe yourself when you want every pal,
-including the vanilla ones your pack has not defined:
+Your handlers only run for pals you defined. To hear about every pal in the world, including
+the vanilla ones, subscribe to the channel yourself:
 
 ```lua
 local event = require("palforge.core.event")
@@ -373,11 +426,12 @@ end)
 sub:unsubscribe()
 ```
 
-`event.observable(name)` returns the same subject for Rx operator chains, and
-`event.emit("pal.spawned", { actor = someActor })` pushes a synthetic event through the whole
-chain. Dispatch still resolves the definition from `ctx.actor`'s blueprint class name, so a
-hand-made ctx reaches your own subscribers but reaches a definition's handler only when the
-actor is a real pal pawn. To run a handler on its own, use the event forwarders below.
+`event.observable(name)` gives you the same channel as an Rx observable, for operator chains.
+`event.emit("pal.spawned", { actor = someActor })` pushes an event you made yourself through
+the whole chain. PalForge still works out the definition from `ctx.actor`'s blueprint class
+name, so a hand-made ctx reaches your own subscribers, but reaches a definition's handler only
+when the actor really is a pal in the world. To run a handler on its own, use the event
+forwarders below.
 
 ## Handle
 
@@ -388,11 +442,11 @@ actions, five event forwarders and five queries.
 
 ```lua
 ---@param arg Coord|table|nil
----@return boolean ok
+---@return boolean accepted
 pal:spawn(arg)
 ```
 
-The argument is normalized before anything happens: a table carrying `.x` or `[1]` is a
+The argument is sorted out before anything happens: a table with `.x` or `[1]` in it is a
 coordinate, any other table is an options table, and no argument at all means default
 placement.
 
@@ -408,9 +462,9 @@ pal:spawn{ toPlayer = true, num = 3, level = 20 }   -- three, owned by the playe
 pal:spawn{ level = 45 }                             -- wild, near the player, level 45
 ```
 
-The options table accepts `at` (a coordinate), `level` (defaults to 1), `toPlayer` (any
-truthy value routes to the player-owned spawn) and `num` (defaults to 1, read only on the
-`toPlayer` route).
+The options table takes `at` (a coordinate), `level` (defaults to 1), `toPlayer` (anything
+truthy sends the pal to the player instead of the world) and `num` (defaults to 1, and is only
+read on the `toPlayer` route).
 
 ```mermaid
 flowchart TD
@@ -424,12 +478,44 @@ flowchart TD
   F --> H["teleport the new actor - palAt only"]
 ```
 
-Every route goes through `UPalCheatManager`, the server-verified admin API. The return value
-is `true` when the native call executed, which is not the same as "the pal is where you asked
-for it": on the coordinate route the game drops the pal near the player and ignores the
-requested location, so PalForge snapshots the pal actors first, then relocates the single new
-actor nearest the player's position — retried every 400 ms, up to six times, because the
-actor materializes a few frames later.
+Every route goes through `UPalCheatManager`, the game's server-checked admin API. `true` means
+the spawn call was **accepted**, not that a pal is standing anywhere: the creature appears a
+few frames later, and the coordinate route then moves it in a pass that finishes long after
+`:spawn` has returned. That pass reports to the log, never to your caller. `false` is
+definite — nothing was attempted, because the id was empty, a coordinate was not a number, or
+no cheat manager could be reached.
+
+On the coordinate route the game drops the pal near the player and ignores the position you
+asked for. So PalForge takes a snapshot of the pals first, then moves the single new one
+nearest the player — retried every 400 ms, up to six times, because the creature takes a few
+frames to appear.
+
+#### The cheat manager
+
+`SpawnMonster` and `SpawnMonsterForPlayer` live on `UPalCheatManager`. On a client, the
+CheatManagerEnabler mod creates that object from `PlayerController:ClientRestart`; on a
+dedicated server that hook never fires, so nothing else creates one. `core/spawn` builds it
+itself when the session has none: it constructs the `PalPlayerController`'s own `CheatClass`
+with `StaticConstructObject` — falling back to `/Script/Pal.PalCheatManager` and then
+`/Script/Engine.CheatManager` when that class is null — and attaches the result to the
+controller. The object stays there, so this happens once per session rather than once per
+spawn, and the log records the one time it runs. That is what makes `:spawn` work on a
+dedicated server.
+
+What is left to fail is having no player controller at all: no world loaded, or not connected
+yet. Every route then returns `false` and warns that no cheat manager was found and none could
+be built. Spawning from `world.ready` avoids that window:
+
+```lua
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("example")
+
+event.on("world.ready", function()
+    if not Pal.get("ChickenPal"):spawn{ level = 10 } then
+        log.warn("spawn not attempted - no player controller yet")
+    end
+end)
+```
 
 ### renderOn
 
@@ -439,10 +525,10 @@ actor materializes a few frames later.
 pal:renderOn(actor)
 ```
 
-Attaches this pal's declared mesh to a live pawn, once — the renderer guards against
-re-stacking, so calling it twice on the same actor is harmless. It returns `false` and does
-nothing when the actor is not valid, when the definition declares no mesh, or when that mesh
-has no `model`.
+Attaches this pal's declared mesh to a live creature, once. The renderer guards against
+stacking it twice, so calling it again on the same actor is harmless. It returns `false` and
+does nothing when the actor is not valid, when the definition declares no mesh, or when that
+mesh has no `model`.
 
 ```lua
 Pal{
@@ -457,6 +543,32 @@ Pal{
     },
 }
 ```
+
+The whole declaration is handed to the renderer: `kind`, `model`, `animClass`, `scale` and
+`offset` come from the mesh, and the definition's material description then overwrites the
+`color`, `texture`, `params` and `material` it carries. `animClass` reaches the skeletal
+backend, which switches to animation-blueprint mode and binds that blueprint right after the
+swap. A swapped skeleton with nothing driving it does not animate and can vanish from view, so
+declare the `ABP_*_C` that belongs to the model you swapped in — not the one the creature was
+born with.
+
+```lua
+-- a chicken wearing a sheepball body: the anim blueprint travels with the model
+Pal{
+    id   = "ChickenPal",
+    mesh = {
+        kind      = "skeletal",
+        model     = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall",
+        animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/SheepBall/ABP_SheepBall.ABP_SheepBall_C",
+    },
+    events = {
+        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+    },
+}
+```
+
+A `true` says the backend's setter ran — for the skeletal backend, that the model was set on
+the creature's own component. What it ends up drawing is not something the call can report.
 
 ### Queries
 
@@ -481,8 +593,9 @@ end
 ### Event forwarders
 
 `:onSpawned(ctx)`, `:onDamaged(ctx)`, `:onDeath(ctx)`, `:onCaptured(ctx)` and `:onTick(ctx)`
-call the definition's handler immediately with the ctx you pass. Dispatch does not go through
-them — they are for driving a handler yourself, from a test or from another handler.
+call the definition's handler straight away, with the ctx you pass. The game never goes
+through them — they are there so you can run a handler yourself, from a test or from another
+handler.
 
 ```lua
 -- run the death handler now, with a hand-made ctx
@@ -526,9 +639,9 @@ local Chicken = Pal{
 Chicken:spawn(Player.coordinateOffset(300, 0, 0))
 ```
 
-The sound is defined once at file scope and played from the handler. Defining inside a
-handler would re-register the sound on every single spawn; when you have no local at hand,
-use `Audio.get("AKE_CampLevelUp"):play(ctx.actor)` instead.
+Define the sound once, at the top of the file, and only play it from the handler. Defining
+inside a handler would register the sound again on every single spawn. When you have no local
+to hand, use `Audio.get("AKE_CampLevelUp"):play(ctx.actor)` instead.
 
 ### A pal that drops loot on death
 
@@ -553,8 +666,9 @@ Pal{
 ```
 
 `Item.get(...):give(n)` adds to the local player's inventory through the game's own
-`AddItem_ServerInternal` path. PalForge has no world-drop call, so this is a reward, not a
-corpse you walk over. See [Item](/docs/api/item) for the full surface.
+`AddItem_ServerInternal` path. PalForge has no call for dropping something on the ground, so
+this is a reward the player receives, not a bag you walk over. See
+[Item](/docs/api/item) for everything else you can do with items.
 
 ### A pal that catches fire when it is hit
 
@@ -593,10 +707,10 @@ Pal{
 }
 ```
 
-The effect runtime is driven by the shared 500 ms heartbeat, so `onTick` fires roughly every
-`interval` seconds until `duration` runs out. `ctx.elapsed`, `ctx.stacks` and (on expiry)
-`ctx.reason` come from that runtime; anything else in the table is what you passed to
-`:apply`. See [Effect](/docs/api/effect).
+An effect runs on the shared 500 ms heartbeat, so its `onTick` fires roughly every `interval`
+seconds until `duration` runs out. `ctx.elapsed`, `ctx.stacks` and, on expiry, `ctx.reason`
+come from that runtime; anything else in the table is what you passed to `:apply`. See
+[Effect](/docs/api/effect).
 
 ### A recolored squad you can summon on demand
 
@@ -641,42 +755,78 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
 Every member spawns through its own `SpawnMonster` call, and each one's `onSpawned` attaches
-the mesh to its own actor.
+the mesh to its own creature.
 
 ## Limits
 
 <Callout type="warn">
 
-- **Lua cannot publish a new `CharacterID`.** `Pal{ id = ... }` attaches behaviour, visuals
-  and metadata to a row and blueprint the game already has; creating the DataTable row is
-  PalSchema's job. An id with no matching `BP_<Id>_C` in the game never receives dispatch,
-  and `:spawn` has nothing to spawn.
-- **`onTick` never fires.** Buildings have a ~500 ms scan that produces live instances; pals
-  have no equivalent, so nothing drives a per-pal heartbeat. The field is declarable so the
-  shape is uniform, and that is all. Use the heartbeat directly —
-  `require("palforge.core.event").every(2000, fn)`, quantized to the 500 ms tick — or an
+- **Lua cannot add a brand-new creature.** `Pal{ id = ... }` gives behaviour, visuals and
+  metadata to a creature the game already has; creating the data row itself is PalSchema's
+  job. An id with no matching `BP_<Id>_C` in the game never gets its handlers called, and
+  `:spawn` has nothing to spawn.
+- **`onTick` is a sweep, not a game event.** `core/event` walks the live pals every
+  `core.event.PAL_SCAN_MS` — 3000 ms by default — and calls `onTick` once per live creature.
+  Set `require("palforge.core.event").PAL_SCAN_MS = 5000` to slow it down, or `0` to switch it
+  off. It is deliberately slower than the 500 ms heartbeat, because the walk touches every
+  object in the game. When you need a faster or more exact timer, use
+  `require("palforge.core.event").every(2000, fn)` — quantized to the 500 ms tick — or an
   Effect's `interval`.
-- **`onSpawned` rides an unconfirmed candidate hook.**
-  `PalCharacter:BroadcastOnCompleteInitializeParameter` has not been verified by the in-game
-  event probe the way capture, damage and death were. Treat it as best-effort and keep the
-  handler idempotent; `:renderOn` is attach-once, so calling it again is safe.
-- **Nothing dispatches before the world is ready.** All four source hooks return immediately
-  until five consecutive one-second polls have found a valid `PalPlayerCharacter`.
-- **Handler errors are swallowed.** Dispatch calls your hook inside `pcall`, so a bug neither
-  crashes the game nor reports itself. Log inside the handler.
-- **`:spawn` needs `PalCheatManager`** — the CheatManagerEnabler mod. Without it every route
-  returns `false` and writes a warning to the log.
-- **Coordinate placement is a relocation, not a spawn location.** The native call ignores the
-  requested location, so PalForge teleports the newly-spawned actor afterwards, retrying
-  every 400 ms up to six times. `:spawn` returns `true` for the spawn call itself; if no new
-  actor ever appears, the placement logs a warning and gives up.
+- **`onTick` has no per-creature memory.** `pal` is this definition's handle, and there is one
+  handle for every creature of that id, so keep anything per-creature in a table of your own
+  keyed by `ctx.actor`.
+- **A broken `onTick` gets switched off.** Five failures in a row and PalForge logs it and
+  stops calling that definition's `onTick` for the rest of the session — for every creature of
+  that id, not just the one that failed.
+- **`onSpawned` rides a hook that has not been confirmed.**
+  `PalCharacter:BroadcastOnCompleteInitializeParameter` has not been verified in-game the way
+  capture, damage and death have, and it is armed only once the world has loaded, because
+  arming it earlier jams the shared hook dispatch during the world-load storm. Treat it as
+  best-effort and write a handler that is safe to run more than once; `:renderOn` attaches
+  once, so calling it again is safe.
+- **Nothing runs before the world is ready.** All four game hooks return immediately until
+  five one-second polls in a row have found a valid `PalPlayerCharacter`, and the `onTick`
+  sweep waits for the same gate.
+- **A handler error ends that handler.** PalForge calls your hook inside `pcall` and logs the
+  failure with its channel and hook name, so the bug is visible in the log — but the rest of
+  the handler does not run, and neither the channel nor the game notices.
+- **`:spawn` needs a player controller.** It needs `PalCheatManager` too, but nothing else has
+  to create that first: when the session has none, `core/spawn` builds one from the
+  controller's `CheatClass` and attaches it, which is what makes `:spawn` work on a dedicated
+  server, where CheatManagerEnabler's `ClientRestart` hook never runs. With no
+  `PalPlayerController` to build it on, every route returns `false` and warns.
+- **A coordinate is a move after the spawn, not a spawn location.** The game's own call ignores
+  the position you asked for, so PalForge teleports the newly-spawned creature afterwards,
+  retrying every 400 ms up to six times. `:spawn` returns `true` for the spawn call itself; the
+  move only ever reports to the log — a warning when no new creature appears, and another when
+  one was found but every move call failed and it stays where it spawned. Without `LoopAsync`
+  and `ExecuteInGameThread` there is no deferred pass at all, and the pal simply stays next to
+  the player.
 - **A mesh is never attached for you.** Call `:renderOn(actor)` from a handler.
-  `core.mesh.ENABLED` is a global kill switch that turns every attach into a no-op.
+  `core.mesh.ENABLED` is a global kill switch that turns every attach into a no-op, and the
+  material fields reach a backend that paints only when `kind` is `procedural` or `obj`.
 - **`Pal.get` does not register.** Only `Pal{ ... }` puts a definition in the registry, so a
   handle from `Pal.get` can act but can never receive an event. Defining the same id twice
   replaces the earlier definition.
 
 </Callout>
+
+## Summary
+
+- `Pal{ id = "ChickenPal", ... }` gives one of the game's creatures new behaviour. `id` is
+  the only field you have to fill in.
+- What happens to a pal goes under `events`: `onSpawned`, `onDamaged`, `onDeath`,
+  `onCaptured` and `onTick`. Every one of them is live.
+- `pal:spawn()` puts a pal in the world. Pass a coordinate for a place, or
+  `{ toPlayer = true, num = 3 }` to send them straight to the player.
+- A `mesh` changes what a pal looks like, but you attach it yourself with
+  `pal:renderOn(ctx.actor)` from `onSpawned`.
+- Only ids you defined with `Pal{ ... }` get their handlers called; `Pal.get` gives you the
+  actions without the events.
+- `onTick` runs about every three seconds per live pal, and has no memory of its own — key
+  anything per-creature by `ctx.actor`.
+
+Next, read [Mesh](/docs/api/mesh) to give your pal a body of its own.
 
 <Cards>
   <Card title="Mesh" href="/docs/api/mesh">The visual a pal wears, and the backends behind it</Card>

@@ -14,18 +14,45 @@
 --     attaches the mesh on a later scan (deferred — attaching the frame it is placed
 --     crashes the game),
 --   * an OnBeginInteractBuilding hook drives the interact channel,
+--   * an OnCompleteBuild_ServerInternal hook drives onBuild — armed only once the world
+--     is ready, and dispatched to the DEFINITION rather than to an instance (see below),
 --   * the shared heartbeat drives onTick (per-instance tickInterval + circuit breaker).
 -- This is the one domain where a placed structure really does get its own stateful
 -- instance with save/load, and where onPlace / onLoad / onRightClick / onRemove / onTick /
--- onWorldLeft all fire for real.
+-- onWorldReady / onWorldLeft all fire for real.
+--
+--   WIRED (live — see core/event installBuildingSource + installDispatch):
+--     onPlace      <- the scan, matched to a RequestBuild intent  (ctx.actor, ctx.pos, ctx.player)
+--     onLoad       <- the scan, every newly tracked structure     (ctx.reconstructed)
+--     onRightClick <- PalBuildObject:OnBeginInteractBuilding      (ctx.actor, ctx.player)
+--     onRemove     <- the scan's miss sweep                       (ctx.reason)
+--     onTick       <- the shared heartbeat                        (ctx.count; see tickInterval)
+--     onWorldReady / onWorldLeft <- the world-load watch, fired on every live instance
+--     onBuild      <- PalPlayerRecordData:OnCompleteBuild_ServerInternal (ctx.buildId,
+--                     ctx.model) — DEFINITION-dispatched and armed late; see the next paragraph
+--   NOT WIRED: onLeftClick / onBreak. No native candidate has ever been found for either
+--     (the only proven click hook in the tree is a UMG widget button, and destruction is
+--     covered by the scan's miss sweep -> onRemove), so nothing emits them. They stay
+--     declarable so a pack's code is future-proof; they never fire.
 --
 -- The lifecycle receives the live INSTANCE as `self` (not the class): self.actor is the
 -- placed actor, self.pos its world position, self.state your persisted table, and
--- self:save() writes it. onBuild / onLeftClick / onBreak are declarable but have no
--- native source yet (no channel emits them); onPlace + onRemove cover place/destroy.
--- onWorldReady is dispatched but unreachable: core/event emits world.ready at the moment
--- it opens the worldReady gate, and the scan that creates instances is gated on that same
--- flag, so the registry is still empty when the hook runs. Do the work in onLoad instead.
+-- self:save() writes it. onBuild is the ONE exception, and it has to be: it fires at
+-- build-COMPLETE, up to one scan (~500 ms) before the instance exists, and the game hands
+-- it a UPalMapObjectModel rather than the actor — so core/event dispatches it to the
+-- DEFINITION class instead (self.id and self:iconOf() are there; self.actor / self.pos /
+-- self.state / self:save() are NOT), matched by the game build id the definition claims.
+-- Its native hook also fires for every pre-existing structure during the world-load storm,
+-- where reading that model once produced a native access violation, so core/event arms it
+-- only after world.ready and never at mod load — which means it also stays silent in a
+-- session where the world never finishes loading. onPlace remains the safe placement hook;
+-- onBuild is the extra one, worth trying in a throwaway world first.
+--
+-- onWorldReady fires on the live instances: the ready-watch opens core/event's worldReady
+-- gate, but world.ready is emitted by the FIRST reconstruction scan that completes after
+-- it, so the structures around the player are already tracked when the hook runs. It is a
+-- ONE-SHOT world-load moment, not a per-structure one — anything that streams in on a
+-- later scan misses it, so per-instance startup work belongs in onLoad.
 --
 --   Building{
 --       id = "example:Bench", name = "Modded Bench", gridCm = 100,
@@ -76,7 +103,8 @@ local Material = schema.define("Building.Spec.Material", {
 })
 
 ---The lifecycle handlers a building can respond to. All optional. Each receives the LIVE
----INSTANCE as `self` (self.actor / self.pos / self.state) and the event context `ctx`.
+---INSTANCE as `self` (self.actor / self.pos / self.state) and the event context `ctx` —
+---except onBuild, which fires before any instance exists and so gets the DEFINITION.
 local Events = schema.define("Building.Spec.Events", {
     { "onPlace",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
                       doc = "LIVE - committed into the world" },
@@ -89,11 +117,11 @@ local Events = schema.define("Building.Spec.Events", {
     { "onTick",       type = "function", sig = "fun(self: Building.Instance, ctx: table)",
                       doc = "LIVE - heartbeat (see tickInterval)" },
     { "onWorldReady", type = "function", sig = "fun(self: Building.Instance, ctx: table)",
-                      doc = "declarable; world.ready is emitted before the first scan, so no instance is live yet" },
+                      doc = "LIVE - world loaded; emitted after the first scan, so only structures already tracked get it" },
     { "onWorldLeft",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
                       doc = "LIVE - the world was unloaded (emitted while instances are still live)" },
-    { "onBuild",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
-                      doc = "declarable; no native source exists yet" },
+    { "onBuild",      type = "function", sig = "fun(self: Building.Definition, ctx: table)",
+                      doc = "LIVE - build completed; nothing is placed yet, so `self` is the DEFINITION (ctx.buildId, ctx.model)" },
     { "onLeftClick",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
                       doc = "declarable; no native source exists yet" },
     { "onBreak",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
@@ -131,6 +159,17 @@ local Spec = schema.define("Building.Spec", {
 ---@field buildId string  # the game build id this instance matched
 ---@field key     string  # the instance's stable registry key
 
+---The registered DEFINITION — what a CLASS-dispatched hook gets as `self`. It is the table
+---Building{ ... } registered (its declared fields plus the class methods below), not a live
+---structure: there is no .actor / .pos / .state / :save() on it, and one definition stands
+---for every structure of that id. Only onBuild is dispatched this way, because it fires
+---before any instance exists.
+---@class Building.Definition
+---@field id          string   # the definition's build id
+---@field name        string   # display name (defaults to id)
+---@field description string?  # the declared one-liner, if any
+---@field data        table?   # your free-form payload from the spec
+
 --=============================================================================
 -- the registered building DEFINITION class (what core/event instantiates + dispatches to)
 -- A placed structure IS an instance of this class: core/event calls cls:new(spec), so
@@ -150,6 +189,8 @@ function Class.new(cls, spec)
 end
 
 -- ---- placement & interaction lifecycle (defaults inert; override via events) ----
+-- All of these are called on the live INSTANCE except onBuild, which core/event calls on
+-- the definition class itself (nothing is placed yet when it fires).
 function Class:onBuild(ctx) end
 function Class:onPlace(ctx) end
 function Class:onRightClick(ctx) end
@@ -192,7 +233,7 @@ function Class:render()
     local m = self:mesh()
     if not (type(m) == "table" and m.model) then return false end
     local def = {
-        kind = m.kind,  -- nil -> procedural, the default backend
+        kind = m.kind,  -- Building.Spec.Mesh fills this in; it defaults to "static"
         model = m.model, scale = m.scale, offset = m.offset,
         color = m.color, texture = m.texture, params = m.params, material = m.material,
     }
@@ -322,29 +363,38 @@ function Handle:instances()
 end
 
 ---Attach the mesh to every live structure of this building (normally automatic — the
----scan does it). Returns how many attached.
+---scan does it). Returns how many actually attached: the count is Class:render()'s own
+---return value, so a backend that declined (no mesh, unresolved asset, a kind whose
+---backend is a stub) is NOT counted. 0 with live instances means nothing attached.
 ---@return integer
 function Handle:render()
     local n = 0
     for _, inst in ipairs(self:instances()) do
-        if pcall(function() return inst:render() end) then n = n + 1 end
+        local ok, attached = pcall(function() return inst:render() end)
+        if ok and attached then n = n + 1 end
     end
     return n
 end
 
----Re-tint every live structure of this building from its currentColor().
+---Re-tint every live structure of this building from its currentColor(). Returns how many
+---were actually re-tinted (Class:update()'s return value — an instance with no colour or
+---no live material instance is not counted).
 ---@return integer
 function Handle:update()
     local n = 0
     for _, inst in ipairs(self:instances()) do
-        if pcall(function() return inst:update() end) then n = n + 1 end
+        local ok, tinted = pcall(function() return inst:update() end)
+        if ok and tinted then n = n + 1 end
     end
     return n
 end
 
--- ---- lifecycle events (fired by core.event on the live INSTANCE; forward for manual use) ----
+-- ---- lifecycle events (fired by core.event on the live INSTANCE; forward for manual use).
+-- These forwarders call the hook on the definition CLASS, so `self` inside the handler has
+-- no .actor / .state / :save(). That is exactly what the real dispatch does for onBuild and
+-- ONLY for onBuild; for the other seven it is a test harness, not the real event. ----
 
----@param ctx table
+---@param ctx table  # ctx.buildId, ctx.model (the UPalMapObjectModel)
 function Handle:onBuild(ctx) if self._cls.onBuild then return self._cls:onBuild(ctx) end end
 ---@param ctx table  # ctx.actor, ctx.pos, ctx.player
 function Handle:onPlace(ctx) if self._cls.onPlace then return self._cls:onPlace(ctx) end end

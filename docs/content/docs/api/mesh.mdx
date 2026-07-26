@@ -1,11 +1,18 @@
 ---
 title: Mesh
-description: The visual a definition wears - a model asset plus how to paint it
+description: Give a pal or a building a different model, and reuse that model by name
 ---
 
-A mesh is the visual a definition wears: a model asset plus how to paint it. It is its own
-domain so that a mesh can be declared once, named, and worn by a pal, by a building, or by
-any actor you hand it.
+## What you can do after this page
+
+- Give a pal a different body, so a vanilla chicken walks around as a sheep
+- Put a model of your own on a structure you place in the world
+- Name one model once and use it on as many pals and buildings as you like
+- Change a model's colour while you are playing, and take the model off again
+
+A mesh is the model something wears in the game, plus how to paint it. Write one with
+`Mesh{ ... }`, give it an id, and you can hand the same model to a pal, to a building, or
+to any actor you have in front of you.
 
 ```lua title="content/meshes.lua"
 local body = Mesh{
@@ -21,7 +28,7 @@ body:attachTo(actor)                             -- or attach it yourself
 
 ## Defining a mesh
 
-The module has the same three entry points as every other domain.
+Three calls do everything: make one, fetch one you made earlier, list them all.
 
 ```lua
 local body = Mesh{ id = "example:body", model = "/Game/.../SK_X.SK_X" }  -- define, returns a Mesh.Handle
@@ -29,14 +36,14 @@ Mesh.get("example:body")                                                 -- an e
 Mesh.get_all()                                                           -- every registered mesh, as handles
 ```
 
-Calling the module validates the table against `Mesh.Spec`, registers the definition in
-`core/object_manager` under `("mesh", id)`, and returns a `Mesh.Handle`. The id is stored
-raw, so `Mesh.get` takes exactly the string you defined with. Registering a second mesh
-under an id that is already taken replaces the previous registration.
+`Mesh{ ... }` checks the table you wrote, stores it under the id, and gives you back a
+`Mesh.Handle` - the object you attach with. The id is kept exactly as you typed it, so pass
+`Mesh.get` the same string. Defining a second mesh under an id that is already taken
+replaces the first one.
 
 `id` is required when you call `Mesh` directly, and only then. A mesh written inline inside
-another definition has nothing to name; a mesh defined directly could never be looked up
-again without one.
+a pal or a building has nothing to name, but a mesh you define on its own could never be
+found again without one.
 
 ```lua
 Mesh{ model = "/Game/Pal/Model/Other/PalBox/SM_PalBox.SM_PalBox" }
@@ -46,9 +53,8 @@ Mesh{ model = "/Game/Pal/Model/Other/PalBox/SM_PalBox.SM_PalBox" }
 PalForge: Mesh: field "id" is required (an unnamed mesh cannot be looked up again - write it inline as mesh = { ... } instead)
 ```
 
-`Mesh.get` errors on a miss. `Pal.get` and `Item.get` fall back to a thin definition over a
-game id, but a mesh has no such fallback: a mesh with no model would silently render
-nothing.
+`Mesh.get` raises an error when nothing is registered under that id. A typo stops you right
+there, instead of leaving a pal with nothing to show.
 
 ```lua
 local body = Mesh.get("example:no_such_mesh")
@@ -58,10 +64,15 @@ local body = Mesh.get("example:no_such_mesh")
 PalForge: Mesh.get("example:no_such_mesh"): no mesh is defined under that id
 ```
 
-`Mesh.Class` is the base definition class. Its only method is `source()`, which returns the
-definition itself; subclass it when a mesh has to be computed rather than declared.
+`Mesh.Class` is the class a mesh definition is built on. Its only method is `source()`,
+which returns the definition itself. Subclass it when you want to work a mesh out in code
+instead of writing it down.
 
 ## Mesh.Spec
+
+Everything you can write inside `Mesh{ ... }`. Most meshes need two fields: `model`, which
+says which model to use, and `kind`, which says how to put it on. The rest are for painting
+and for placing.
 
 <TypeTable
   type={{
@@ -84,11 +95,11 @@ definition itself; subclass it when a mesh has to be computed rather than declar
       type: 'string',
     },
     scale: {
-      description: 'Uniform scale applied to the attached mesh. Read by the procedural backend only.',
+      description: 'Uniform scale applied to the attached mesh. Read by the procedural and static backends.',
       type: 'number',
     },
     offset: {
-      description: 'Offset from the actor origin, as x, y and z keys. Read by the procedural backend only.',
+      description: 'Offset from the actor origin, as x, y and z keys. Read by the procedural and static backends.',
       type: 'table',
     },
     texture: {
@@ -119,8 +130,8 @@ print(schema.help("Building.Spec.Mesh"))   -- the same shape with kind defaultin
 schema.get("Mesh.Spec").fields             -- the same as a table, for tooling
 ```
 
-Validation is strict. An undeclared field is a hard error with a did-you-mean, and the call
-never half-succeeds.
+A field name PalForge does not know is an error, with a guess at what you meant. The call
+either works completely or not at all.
 
 ```lua
 Mesh{ id = "example:body", modelPath = "/Game/.../SK_X.SK_X" }
@@ -130,10 +141,12 @@ Mesh{ id = "example:body", modelPath = "/Game/.../SK_X.SK_X" }
 PalForge: Mesh: unknown field "modelPath" (did you mean "model"?). Valid fields: id, kind, model, animClass, scale, offset, texture, color, material, params
 ```
 
-## From declaration to actor
+## From your table to something you can see
 
-A declaration becomes pixels in three steps: validation fills the defaults, something
-lowers the declaration onto an actor, and `core.mesh` picks the backend from `kind`.
+Three things happen between the table you write and a model on screen. Your table is
+checked and the missing defaults are filled in. Something hands it to an actor - a live
+thing in the world, like a pal's body or a placed structure. Then `core.mesh` picks how to
+attach it, from `kind`.
 
 ```mermaid
 flowchart TD
@@ -145,56 +158,61 @@ flowchart TD
   E -->|"static"| S["backend static"]
   E -->|"skeletal"| K["backend skeletal"]
   P --> PZ["ProceduralMeshComponent - CreateMeshSection"]
-  S --> SZ["returns false - TODO stub"]
+  S --> SZ["StaticMeshComponent - SetStaticMesh"]
   K --> KZ["actor.Mesh - SetSkinnedAssetAndUpdate"]
 ```
 
-Who calls the middle step depends on the domain:
+Who does the middle step depends on what wears the mesh:
 
-- **Mesh** — you call `meshHandle:attachTo(actor)` yourself.
-- **Pal** — you call `pal:renderOn(ctx.actor)`, normally from `onSpawned`. Pals have no
-  instance scan, so nothing attaches a pal mesh for you.
-- **Building** — the reconstruction scan in `core/event` calls the live instance's
-  `render()` for you, deliberately one scan after the actor first appears. Attaching to an
-  actor that is still mid-init crashes the game.
+- **Mesh** - you call `meshHandle:attachTo(actor)` yourself.
+- **Pal** - you call `pal:renderOn(ctx.actor)`, normally from `onSpawned`. Nothing attaches
+  a pal's mesh for you, so a pal that never gets that call keeps its original body.
+- **Building** - PalForge attaches it for you. A scan finds the structure you placed and
+  calls its `render()`, deliberately one scan after the actor first appears. Attaching to
+  an actor that is still starting up crashes the game.
 
 Every route ends in `core.mesh.attachOnce`, which returns `false` when the actor or the
-spec is missing, and is gated by a global kill switch:
+spec is missing. One switch turns all runtime meshes off:
 
 ```lua
 require("palforge.core.mesh").ENABLED = false   -- stop attaching runtime meshes entirely
 ```
 
 <Callout type="info">
-The once-guard in the procedural backend is keyed on the **actor**, not on the mesh. A
-second procedural mesh attached to an actor that already carries one is a no-op that still
-returns `true`. The skeletal backend has no guard: the swap is idempotent, and attaching a
-second skeletal mesh replaces the first.
+The procedural and static backends remember which **actor** they dressed, not which mesh
+they used. Attaching a second mesh of the same kind to an actor that already carries one
+does nothing and still returns `true`. Each backend keeps its own list, so one actor can
+carry a procedural and a static mesh at the same time - but `core.mesh` remembers only the
+last backend that dressed it, and that is the one `setColor` and `detach` reach. The
+skeletal backend keeps no such list: swapping the same mesh in again is harmless, and
+attaching a second skeletal mesh replaces the first.
 </Callout>
 
 ## The four kinds, three backends
 
-`kind` selects the backend. `obj` is an alias for `procedural` - the same table is
-registered under both names.
+`kind` decides how the model is put on the actor. `obj` is another name for `procedural` -
+both names run the same code.
 
 | kind | state | what it does |
 | --- | --- | --- |
 | `procedural` | implemented | parses a Wavefront OBJ from disk and builds a `ProceduralMeshComponent` |
 | `obj` | implemented | alias for `procedural` |
 | `skeletal` | implemented | swaps the pawn's `USkeletalMesh` and, optionally, its anim blueprint |
-| `static` | TODO stub | returns `false` and attaches nothing |
+| `static` | implemented | adds a `UStaticMeshComponent` and hangs a `UStaticMesh` asset on it |
 
 ### procedural and obj
 
-`model` is a filesystem path to a `.obj` file, read with `io.open` and cached by path.
-Faces with more than three vertices are fan-triangulated, and both windings are emitted so
-the mesh is visible regardless of face orientation. UVs are best-effort: the first `vt`
-seen for a position index wins.
+Use this one for a model of your own. `model` is a path to a `.obj` file on your disk, read
+with `io.open` and remembered per path, so the same file is only read once.
+
+Faces with more than three corners are split into triangles. Both facings are written out,
+so the model shows no matter which way its faces point. Texture coordinates are
+best-effort: the first `vt` seen for a position wins.
 
 The component is added with `AddComponentByClass`, filled with `CreateMeshSection`, then
-scaled with `SetWorldScale3D` and placed with `K2_SetRelativeLocation`. Collision is
-disabled: a decorative mesh that collides both hitches and intercepts the build placement
-raycast.
+scaled with `SetWorldScale3D` and placed with `K2_SetRelativeLocation`. It never collides
+with anything. A decorative model that collides both slows the game down and steals the
+raycast the build menu uses to place structures.
 
 ```lua
 local marker = Mesh{
@@ -207,21 +225,30 @@ local marker = Mesh{
 }
 ```
 
-`scale` and `offset` are read here and nowhere else. The declared `color` is also baked
-into the section as per-vertex colors, so a tint can show even when no material parameter
-takes.
+`scale` and `offset` are read here and by the static backend, and nowhere else. The `color`
+you declare is also baked into the model as per-vertex colours, so a tint can show even
+when no material parameter takes.
 
 ### skeletal
 
-The real path for creatures. The backend resolves the pawn's component as `actor.Mesh`
-with a `GetMesh()` fallback, clears the pal-side `SetDisableChangeMesh` guard, and swaps
-the asset with `SetSkinnedAssetAndUpdate(mesh, true)`, falling back to
-`SetSkeletalMeshAsset` where that is absent. The asset is loaded with `LoadAsset` and,
-failing that, `StaticFindObject`, then cached by path.
+Use this one for creatures. PalForge finds the pawn's body component as `actor.Mesh`, with
+`GetMesh()` as a fallback, clears the pal-side `SetDisableChangeMesh` guard that blocks mesh
+changes, and swaps the model with `SetSkinnedAssetAndUpdate(mesh, true)`, falling back to
+`SetSkeletalMeshAsset` where that is absent. The model is loaded with `LoadAsset` and,
+failing that, `StaticFindObject`, then remembered per path.
 
-`animClass` is optional. When present, the backend forces animation-blueprint mode and
-binds the class, so the new skeleton is actually driven - an undriven skinned mesh can cull
-to nothing.
+`attach` returns `true` only when one of those two setters actually ran. A component that
+carries neither counts as a failure, not a quiet success.
+
+<Callout type="warn">
+This route is not confirmed in-game yet. A `true` means a setter ran, not that the new model
+is visibly on screen. If a swap does not show, try adding `animClass`, and check the log
+line that names which setter was used.
+</Callout>
+
+`animClass` is optional. When you give it, PalForge switches the component to
+animation-blueprint mode and binds the class, so the new skeleton actually moves. A skinned
+model that nothing moves can disappear from view.
 
 ```lua
 local sheep = Mesh{
@@ -232,24 +259,58 @@ local sheep = Mesh{
 }
 ```
 
-This works cleanly on a single-mesh creature. A multi-mesh pawn - the player is body plus
-outfit - only gets its base component swapped.
+This works cleanly on a creature made of one mesh. A pawn made of several - the player is
+body plus outfit - only gets its base component swapped.
 
 ### static
 
+Use this one for a model that ships with the game, on a structure. `model` is the asset's
+object path. It is loaded with `LoadAsset` and, failing that, `StaticFindObject`, then
+remembered per path, and hung on a `UStaticMeshComponent` PalForge creates while the game
+runs.
+
+The steps are `AddComponentByClass`, then `SetStaticMesh`, then `SetWorldScale3D` and
+`K2_SetRelativeLocation`. The scale call is not optional: the empty transform handed to
+`AddComponentByClass` starts the component at zero scale, so a component nobody scales is
+invisible. Collision is off here for the same reason as procedural.
+
+```lua
+local palbox = Mesh{
+    id     = "example:palbox_body",
+    kind   = "static",
+    model  = "/Game/Pal/Model/Other/PalBox/SM_PalBox.SM_PalBox",
+    scale  = 1.0,
+    offset = { x = 0, y = 0, z = 0 },
+}
+
+Building{
+    id     = "PalBoxV2",
+    name   = "Pal Box",
+    gridCm = 100,
+    mesh   = palbox,
+}
+```
+
+`scale` and `offset` are read exactly as the procedural backend reads them. The painting
+fields are not: `texture`, `color`, `material` and `params` belong to procedural, so a
+static mesh shows with the material its asset ships with, and `setColor` on an actor dressed
+this way returns `false`.
+
 <Callout type="warn">
-The static backend is a TODO stub. `attach` returns `false` and nothing is added to the
-actor. It is registered so that `kind = "static"` validates and so the extension seam is
-visible, but a static mesh does not render today. Since `static` is also the default kind
-for a building, an inline building mesh attaches nothing until you set
-`kind = "procedural"` and point `model` at an OBJ file.
+`UStaticMeshComponent:SetStaticMesh` is not confirmed in this build of the game, so `attach`
+does not trust the call. It reads the asset back off the component - `GetStaticMesh()`
+first, then the `StaticMesh` property - and reports success only when the model it reads
+back is really there. On any failure the component it added is destroyed again, so you get
+`false` and no leftover component, rather than a claim that a model rendered when it did
+not.
 </Callout>
 
 ## The default kind follows the wearer
 
-A structure is a static mesh where a pal is a skeletal one, so the default differs by
-wearer. The shape does not: `api/building` derives its mesh shape from `Mesh.Spec` and
-replaces the one thing that is the consumer's policy.
+A structure wears a static model where a pal wears a skeletal one, so the default `kind`
+depends on who wears it. The fields are the same either way. A mesh written inside a
+building is checked against `Building.Spec.Mesh`, which is `Mesh.Spec` with `kind`
+defaulting to `"static"`:
 
 ```lua title="Scripts/palforge/api/building.lua"
 local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
@@ -259,12 +320,10 @@ local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
 })
 ```
 
-Deriving keeps the two in step: a field added to `Mesh.Spec` reaches buildings without
-anyone remembering to copy it. `api/pal` reuses `Mesh.Spec` itself, so a pal mesh keeps the
+A mesh written inside a pal is checked against `Mesh.Spec` itself, so it keeps the
 `skeletal` default.
 
-A default only applies when the field is absent, which produces one result worth
-remembering:
+A default only fills a field you left out. That leads to one result worth remembering:
 
 ```mermaid
 flowchart TD
@@ -276,9 +335,9 @@ flowchart TD
   D --> G["Mesh.Spec skeletal - already filled at define time"]
 ```
 
-`Mesh{ ... }` validates against `Mesh.Spec` at define time, so the handle it returns
-already carries `kind = "skeletal"` as a real value. Nesting that handle into a building
-does not turn it static - the field is present, so the building's default never fires.
+`Mesh{ ... }` is checked against `Mesh.Spec` when you define it, so the handle you get back
+already carries `kind = "skeletal"` as a real value. Putting that handle inside a building
+does not turn it static: the field is already there, so the building's default never fires.
 
 ```lua
 local shared = Mesh{ id = "example:shared", model = "C:/mods/example/box.obj" }
@@ -293,17 +352,15 @@ Building{                                        -- inline: the static default a
 ```
 
 <Callout type="warn">
-Write `kind` explicitly on any mesh you intend to share between a pal and a building. It is
+Write `kind` explicitly on any mesh you plan to share between a pal and a building. It is
 the only spelling that means the same thing in both places.
 </Callout>
 
 ## Nesting: inline, named, or shared by id
 
-All three spellings reach `core.mesh` the same way. A handle can be passed straight into
-another definition because its metatable carries `__spec`, which `core/schema` unwraps to
-the plain declaration before validating it against the nested shape. Validation then
-copies, so the nested definition stays private - the pal cannot reach the mesh definition
-through the copy it holds.
+Three ways to give a mesh to a pal or a building. All three end up in the same place. When
+you pass a handle into another definition, PalForge checks it again and keeps a copy, so
+what the pal or the building holds is its own table.
 
 <Tabs items={['Inline', 'Named', 'By id']}>
 <Tab value="Inline">
@@ -354,17 +411,16 @@ Pal{ id = "ChickenPal", mesh = Mesh.get("example:chicken_body") }
 
 ## Material: texture, color, material, params
 
-Four fields describe how the mesh is painted, and all four are consumed by the procedural
-backend only.
+Four fields describe how the model is painted, and only the procedural backend reads them.
 
-- `texture` - an absolute path to a png. It is imported at runtime with
+- `texture` - an absolute path to a png. It is imported while the game runs with
   `UKismetRenderingLibrary:ImportFileAsTexture2D` and written to several candidate texture
   parameter names.
 - `color` - a tint as `{ r, g, b, a }` or `{ [1], [2], [3], [4] }` in 0..1, written to
-  several candidate vector parameter names and also baked into the section as vertex
-  colors.
-- `material` - the base material asset path to instance the dynamic material from.
-- `params` - explicit parameter passthrough, grouped by type.
+  several candidate vector parameter names and also baked into the model as vertex
+  colours.
+- `material` - the asset path of the material to build the paint job from.
+- `params` - extra parameters passed straight through, grouped by type.
 
 ```lua
 local painted = Mesh{
@@ -383,20 +439,25 @@ local painted = Mesh{
 ```
 
 <Callout type="warn">
-No custom base material ships with PalForge. The backend resolves a base material with
-`StaticFindObject`, which only finds objects that are **already loaded**, and tries a short
-list of engine materials starting with `BasicShapeMaterial`. When none of them is loaded,
-no dynamic material instance is created and the color, texture and params silently do not
-apply. The mesh itself still attaches - the material layer is fail-soft throughout, and
-misses are logged rather than raised. A miss is not cached, so the next attach retries.
+Painting needs a base material, and PalForge does not ship one. It looks for your
+`material` path first, then a short list of engine materials starting with
+`BasicShapeMaterial`. The lookup is `StaticFindObject`, which only finds materials the game
+has **already loaded**, so even an explicit `material` has to be loaded to be found. When
+none of them is, no paint job is created and `color`, `texture` and `params` quietly do
+nothing. The model itself still attaches, and the miss is written to the log rather than
+raised. A miss is not remembered, so the next attach tries again.
+
+Two things that still work without a base material: the `color` you declare is baked into
+the model as vertex colours, and `require("palforge.core.mesh").probeMaterials()` logs which
+candidates are loaded right now.
 </Callout>
 
 ### How the wearer's override interacts
 
 A pal and a building each have their own `material` table plus `color` and `texture`
-shorthands. When `renderOn` or an instance `render()` lowers the mesh, it starts from the
-mesh's own fields and lets the definition's material descriptor overwrite them field by
-field.
+shorthands. When `renderOn` or a building's `render()` hands the mesh over, it starts from
+the mesh's own fields and lets the definition's material table overwrite them one field at a
+time.
 
 ```lua
 Pal{
@@ -407,7 +468,7 @@ Pal{
 }
 ```
 
-The precedence, in the order the code applies it:
+The order the code applies it in:
 
 1. The mesh's own `texture`, `color`, `material` and `params`.
 2. If the definition declares a `material` table, each field **it sets** overwrites the
@@ -428,13 +489,14 @@ Pal{
 ```
 </Callout>
 
-`Mesh.Handle:attachTo` skips all of this. It attaches the mesh's own declaration, so the
-pal or building material override does not apply to it.
+`Mesh.Handle:attachTo` skips all of this. It attaches the mesh's own declaration, so the pal
+or building material override does not apply to it.
 
 ## Mesh.Handle
 
-A mesh has no lifecycle of its own - it is worn by something else - so the handle carries
-actions plus the declaration it stands for.
+`Mesh{ ... }`, `Mesh.get` and `Mesh.get_all` all give you a `Mesh.Handle`. It carries three
+actions - put the mesh on, re-tint it, take it off - plus three questions you can ask about
+what it stands for.
 
 ### attachTo
 
@@ -444,9 +506,9 @@ actions plus the declaration it stands for.
 meshHandle:attachTo(actor)
 ```
 
-Attaches this mesh to a live actor, once. Returns `false` immediately when the actor is nil
-or not valid, otherwise it hands `source()` to `core.mesh.attachOnce` and returns what the
-backend reports.
+Puts this mesh on a live actor, once. Returns `false` straight away when the actor is nil or
+gone, otherwise it hands `source()` to `core.mesh.attachOnce` and returns what the backend
+reports.
 
 ```lua
 Pal{
@@ -460,10 +522,10 @@ Pal{
 ```
 
 <Callout type="warn">
-`Pal.Handle:renderOn` and `Building.Instance:render()` copy `kind`, `model`, `scale`,
-`offset` and the four material fields onto the spec they lower - they do **not** copy
-`animClass`. A skeletal mesh that needs its animation blueprint has to be attached with
-`meshHandle:attachTo(ctx.actor)`, which passes the whole declaration through.
+`Pal.Handle:renderOn` passes on `kind`, `model`, `animClass`, `scale`, `offset` and the four
+painting fields. `Building.Instance:render()` passes the same list **without** `animClass`.
+A building wearing a skeletal mesh that needs its animation blueprint has to be attached
+with `meshHandle:attachTo(self.actor)`, which passes the whole declaration through.
 </Callout>
 
 ### setColor
@@ -475,17 +537,58 @@ Pal{
 meshHandle:setColor(actor, color)
 ```
 
-Re-tints an already-attached mesh. The color table carries no `kind`, so this always
-reaches the procedural backend, which looks up the dynamic material instance it recorded
-for that actor at attach time and writes the color and emissive parameter names. It returns
-`false` when the actor is invalid, when no dynamic material instance exists for it, or when
-the color is not a table.
+Re-tints a mesh that is already on an actor. A successful attach records which backend
+dressed that actor, and the re-tint follows that record; this mesh's own `kind` is passed as
+a hint, used only when the actor was never dressed through PalForge at all. Only the
+procedural backend can re-tint: it looks up the paint job it recorded for that actor at
+attach time and writes the colour and emissive parameter names. It returns `false` when the
+actor is gone, when the actor was dressed by the static or skeletal backend, when no paint
+job exists for it, or when the colour is not a table.
 
 <Callout type="info">
-`setColor` is keyed on the **actor**, not on this mesh - any mesh handle re-tints whatever
-procedural material that actor is carrying. A dynamic material instance only exists if the
-attach declared at least one of `color`, `texture`, `material` or `params`, so a mesh
-attached with none of them can never be re-tinted.
+`setColor` follows the **actor**, not this mesh - any mesh handle re-tints whatever material
+that actor is carrying. The procedural backend creates its paint job on every attach,
+declared colour or not, so a mesh attached with none of `color`, `texture`, `material` or
+`params` can still be re-tinted afterwards. What it does need is a base material: when none
+of the candidates is loaded, none is created and the re-tint returns `false`.
+</Callout>
+
+### detach
+
+```lua
+---@param actor any
+---@return boolean ok
+meshHandle:detach(actor)
+```
+
+Takes off what an attach put on `actor`, so it can be dressed again. It follows the same
+record as `setColor`: `core.mesh` asks the backend that dressed the actor to take its own
+work back off. The procedural and static backends destroy the component they created with
+`K2_DestroyComponent` and forget both the component and their once-per-actor record, so a
+later `attachTo` dresses the actor again.
+
+```lua
+Pal{
+    id     = "ChickenPal",
+    events = {
+        onSpawned = function(pal, ctx)
+            Mesh.get("example:marker"):attachTo(ctx.actor)
+        end,
+        onDeath = function(pal, ctx)
+            Mesh.get("example:marker"):detach(ctx.actor)
+        end,
+    },
+}
+```
+
+<Callout type="warn">
+`detach` follows the **actor**, so any handle removes whatever PalForge last attached there.
+It returns `false` in three situations that mean different things: PalForge never dressed
+this actor, the backend that dressed it has nothing of its own to remove (a skeletal swap
+writes to the pawn's own component, so there is nothing to destroy), or the
+`K2_DestroyComponent` call did not run. In that last case the record is kept on purpose,
+because the component is still on the actor and that record is the only thing stopping a
+second one from landing on top of it.
 </Callout>
 
 ### source, model, kind
@@ -496,8 +599,8 @@ meshHandle:model()    -- the declared model path
 meshHandle:kind()     -- the backend name, "skeletal" when the definition carries none
 ```
 
-`source()` returns the definition, not a copy. Nesting the handle in another definition
-re-validates and copies, so what a pal or building holds is its own table.
+`source()` returns the definition, not a copy. Putting the handle in another definition
+checks it again and copies, so what a pal or building holds is its own table.
 
 ## Recipes
 
@@ -550,8 +653,9 @@ Pal{ id = "example:Third", mesh = Mesh.get("example:marker") }
 
 ### A building that changes colour when you use it
 
-The building runtime attaches the mesh for you on a scan after placement. Declare a color
-so that a dynamic material instance exists, then re-tint from a handler.
+PalForge attaches the mesh for you on a scan after you place the structure. The procedural
+backend creates the paint job the re-tint writes to on every attach, so the colour you
+declare is only the starting tint.
 
 ```lua title="content/bench.lua"
 local glow = Mesh{
@@ -560,7 +664,7 @@ local glow = Mesh{
     model  = "C:/mods/example/bench.obj",
     scale  = 1.0,
     offset = { x = 0, y = 0, z = 60 },
-    color  = { 0.3, 0.3, 0.3, 1.0 },       -- creates the MID the re-tint needs
+    color  = { 0.3, 0.3, 0.3, 1.0 },       -- the starting tint
 }
 
 Building{
@@ -583,6 +687,52 @@ Building{
     },
 }
 ```
+
+### Swap a structure's static mesh while it is live
+
+`detach` frees the actor so a second `attachTo` can dress it again. Both meshes below are
+the same `UStaticMesh` at a different scale and offset, so the structure visibly lifts while
+it is in use.
+
+```lua title="content/bench_lift.lua"
+local BENCH = "/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBenchPrimitive.SM_WorkBenchPrimitive"
+
+local resting = Mesh{
+    id     = "example:bench_resting",
+    kind   = "static",
+    model  = BENCH,
+    scale  = 1.0,
+    offset = { x = 0, y = 0, z = 0 },
+}
+
+local raised = Mesh{
+    id     = "example:bench_raised",
+    kind   = "static",
+    model  = BENCH,
+    scale  = 1.1,
+    offset = { x = 0, y = 0, z = 40 },
+}
+
+Building{
+    id     = "WorkBench",
+    name   = "Workbench",
+    gridCm = 100,
+    mesh   = resting,
+    state  = { lifted = false },
+    events = {
+        onRightClick = function(self, ctx)
+            self.state.lifted = not self.state.lifted
+            self:save()
+            local want = self.state.lifted and raised or resting
+            -- detach dispatches on the actor, so any handle takes off what is on it
+            if resting:detach(self.actor) then want:attachTo(self.actor) end
+        end,
+    },
+}
+```
+
+Attaching only after `detach` reports `true` is what keeps a second component from being
+stacked: a `false` there means the old one is still on the actor.
 
 ### Painting with an explicit base material
 
@@ -607,14 +757,15 @@ Building{
 }
 ```
 
-If nothing appears tinted, check the log for the material status line before changing the
+If nothing appears tinted, read the material status line in the log before changing the
 declaration: the attach reports which base material it found, whether the texture imported,
-and whether UVs and vertex colors were present.
+and whether texture coordinates and vertex colours were present.
 
 ## Errors
 
-Every failure below is prefixed `PalForge: ` and names the domain. The first three are
-raised at define time and name the field; the last one is raised by `Mesh.get`, at lookup.
+Every failure below starts with `PalForge: ` and names the domain. The first three happen
+when you define the mesh and name the field; the last one happens when `Mesh.get` cannot
+find anything.
 
 ```text
 PalForge: Mesh: field "model" is required (USkeletalMesh / UStaticMesh asset path)
@@ -623,15 +774,34 @@ PalForge: Mesh: unknown field "modelPath" (did you mean "model"?). Valid fields:
 PalForge: Mesh.get("example:body"): no mesh is defined under that id
 ```
 
-Nested declarations name the outer field and the shape being validated, so you know which
-spec to go and read:
+A mesh written inside another definition names the outer field and the shape it was checked
+against, so you know which spec to go and read:
 
 ```text
 PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
 PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
 ```
 
-Runtime failures are not errors. `attachTo`, `setColor` and the lowering done by
-[Pal](/docs/api/pal) and [Building](/docs/api/building) are fail-soft throughout: a missing
-actor, a missing component, an unreadable OBJ file or an absent base material returns
-`false` and logs, rather than throwing into your handler.
+Failures while the game runs are not errors. `attachTo`, `setColor`, `detach` and the work
+done for you by [Pal](/docs/api/pal) and [Building](/docs/api/building) never throw into
+your handler: a missing actor, a missing component, an unreadable OBJ file, a static mesh
+asset that cannot be found or a missing base material all return `false` and write to the
+log.
+
+## Summary
+
+- `Mesh{ id = ..., model = ... }` names a model you can reuse; `model` is always required
+  and `id` is required when you call `Mesh` directly.
+- `kind` decides how it goes on: `skeletal` for a pal's body, `static` for a game model on a
+  structure, `procedural` or `obj` for an OBJ file of your own.
+- Hand it over with `mesh = ...` inside a pal or a building, or put it on an actor yourself
+  with `meshHandle:attachTo(actor)`.
+- A pal only wears its mesh when you call `pal:renderOn(ctx.actor)`, usually from
+  `onSpawned`. A structure is dressed for you shortly after you place it.
+- `setColor` and `detach` follow the actor, and only work on a mesh the procedural or static
+  backend put there.
+- Nothing throws while the game runs: `attachTo`, `setColor` and `detach` return `false` and
+  write to the log.
+
+Next, read [Pal](/docs/api/pal) to spawn a creature that wears your mesh, or
+[Building](/docs/api/building) to place a structure that wears it.

@@ -8,46 +8,46 @@ export function generateStaticParams() {
 
 const copy = {
   en: {
-    tagline: 'A content framework for Palworld',
-    lead: 'Declare pals, items, buildings, skills, effects, sounds, meshes and UI in Lua. Every domain has the same three-member surface, every field is validated, and every lifecycle hook says plainly whether it fires yet.',
+    tagline: 'Add your own content to Palworld',
+    lead: 'PalForge is a base mod that lets anyone add their own buildings, music, effects, pals, items, player behaviour, skills and menus to Palworld — or build entirely new content of their own — and see it in the game straight away. You describe what you want in a short text file, and PalForge puts it in the world.',
     start: 'Get started',
     reference: 'API reference',
     github: 'View on GitHub',
     exampleTitle: 'One definition, start to finish',
     features: [
       {
-        title: 'One shape per domain',
-        body: 'Call the module to define, `get(id)` for an existing one, `get_all()` for every registered one. Pal, Item, Building, Skill, Effect, Audio, Mesh and UI all work the same way.',
+        title: 'Eight things you can make',
+        body: 'Buildings, items, pals, skills, effects, sounds, models and menus. Each one is written the same way, so once you have made one you can make any of them.',
       },
       {
-        title: 'Typos are errors, not silence',
-        body: 'Every field is declared as data and checked on every call. An unknown field fails immediately with a did-you-mean suggestion, and the editor completes the same field list.',
+        title: 'Mistakes are caught as you type',
+        body: 'Your editor completes every field and explains what it does. Misspell one and you get an error that tells you the name you meant, instead of something silently not working.',
       },
       {
-        title: 'An honest lifecycle',
-        body: 'Each hook is marked LIVE or declarable. If no native game event drives a hook yet, the docs say so instead of letting you write code that never runs.',
+        title: 'You are told what works',
+        body: 'Every place your code can run is marked with whether the game actually triggers it yet. You will not spend an evening on a handler that was never going to fire.',
       },
     ],
   },
   ja: {
-    tagline: 'Palworld 向けコンテンツフレームワーク',
-    lead: 'パル・アイテム・建築物・スキル・効果・サウンド・メッシュ・UI を Lua で宣言します。すべてのドメインが同じ 3 つの入口を持ち、すべてのフィールドが検証され、ライフサイクルフックは実際に発火するかどうかを明示します。',
+    tagline: 'パルワールドに自分のコンテンツを追加する',
+    lead: 'PalForge は、だれでも建物・音楽・エフェクト・パル・アイテム・プレイヤーの挙動・スキル・UI を自由に追加できる（あるいはまったく新しいコンテンツを作れる）、パルワールドの基幹 MOD です。短いテキストファイルに「こうしたい」と書くだけで、それがゲームの中に現れます。',
     start: 'はじめる',
     reference: 'API リファレンス',
     github: 'GitHub で見る',
     exampleTitle: '定義から実行まで',
     features: [
       {
-        title: 'ドメインごとに同じ形',
-        body: 'モジュールを呼べば定義、`get(id)` で既存のものを取得、`get_all()` で登録済みの一覧。Pal / Item / Building / Skill / Effect / Audio / Mesh / UI がすべて同じ形です。',
+        title: '作れるもの 8 種類',
+        body: '建物・アイテム・パル・スキル・効果・サウンド・モデル・メニュー。どれも同じ書き方なので、ひとつ作れれば残りも作れます。',
       },
       {
-        title: 'タイポは黙って無視されない',
-        body: 'すべてのフィールドがデータとして宣言され、呼び出しごとに検証されます。未知のフィールドは「もしかして」付きで即エラーになり、エディタ補完も同じ一覧から生成されます。',
+        title: '書きながら間違いに気づける',
+        body: 'エディタが項目名と意味を補完します。名前を間違えると「もしかして」付きでその場でエラーになるので、黙って動かないということがありません。',
       },
       {
-        title: '正直なライフサイクル',
-        body: '各フックには LIVE か declarable かが明記されています。ネイティブイベントがまだ存在しないフックはその旨を書いてあるので、動かないコードを書かずに済みます。',
+        title: '動くかどうかが書いてある',
+        body: '処理を差し込める場所ごとに、ゲームが実際にそこを呼ぶかどうかが明記されています。呼ばれないと分かっている場所に一晩かけずに済みます。',
       },
     ],
   },

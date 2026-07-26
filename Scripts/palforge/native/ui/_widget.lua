@@ -4,6 +4,10 @@
 -- their widget trees. The element LIFECYCLE lives in palforge.api.ui; this module
 -- only builds/wires widgets — it holds no lifecycle or watch loop.
 --
+-- Two ways to get a host for those widgets: inject into a panel the game already
+-- has (title_menu does that), or make one of your own with M.screen() — the
+-- UserWidget + WidgetTree + AddToViewport sequence verified in poc/V6-ui-native.
+--
 -- Ported self-contained (no PalForge module deps) so core/native do not depend on
 -- the deprecated layer. Includes the shared CLICK ROUTER: one RegisterHook on
 -- CommonButtonBase dispatches to whichever callback registered the clicked button;
@@ -13,6 +17,26 @@ local M = {}
 
 local function log(msg) pcall(print, "[PalForge.ui] " .. tostring(msg)) end
 local function err(msg) pcall(print, "[PalForge.ui] ERR " .. tostring(msg)) end
+
+-- Is this a widget we can still talk to? Everything here goes through pcall: the
+-- engine globals may be absent (no game) and a widget the game already destroyed
+-- can throw on IsValid itself.
+function M.alive(w)
+    local ok, v = pcall(function() return w and w:IsValid() end)
+    return ok and v == true
+end
+local alive = M.alive
+
+-- FindFirstOf that cannot throw, not even when UE4SS is not there at all.
+-- Returns the object only if it is alive; nil otherwise.
+function M.findFirst(class)
+    local ok, o = pcall(function()
+        local x = FindFirstOf(class)
+        if x and x:IsValid() then return x end
+        return nil
+    end)
+    return (ok and o) or nil
+end
 
 -- Known Palworld UI asset/class paths (from the title menu).
 M.PATHS = {
@@ -59,14 +83,17 @@ function M.installClicks()
 end
 
 -- Register a CommonButtonBase widget (the WBP_PalInvisibleButton inside a menu
--- button) so clicking it runs fn. Lazily installs the dispatch hook. Returns true.
+-- button) so clicking it runs fn. Lazily installs the dispatch hook. Returns the
+-- router key for this button (its fullName, a truthy string) so the caller can
+-- hand it back to releaseClicks when the widget goes away — a destroyed widget can
+-- no longer be asked for its own name. Returns false if it could not register.
 function M.registerClick(invButton, fn)
-    if not (invButton and invButton:IsValid()) then return false end
+    if not alive(invButton) then return false end
     M.installClicks()
     local name = fullName(invButton)
     if not name then return false end
     handlers[name] = fn
-    return true
+    return name
 end
 
 -- Drop all handlers whose key isn't in keepSet (a table of fullNames to keep).
@@ -74,6 +101,19 @@ function M.retainClicks(keepSet)
     for name in pairs(handlers) do
         if not keepSet[name] then handlers[name] = nil end
     end
+end
+
+-- Drop the handlers for `names` (router keys from registerClick) and leave every
+-- other element's alone — what an element calls from its destroy() so the router
+-- does not keep one dead entry per button forever. Returns how many were dropped.
+function M.releaseClicks(names)
+    local keep, dropped = {}, 0
+    for name in pairs(handlers) do keep[name] = true end
+    for _, name in ipairs(names or {}) do
+        if name and handlers[name] then keep[name] = nil; dropped = dropped + 1 end
+    end
+    M.retainClicks(keep)
+    return dropped
 end
 
 -- ---- low-level construction ----
@@ -159,10 +199,19 @@ function M.border(tree, rgba)
     return b
 end
 
+-- A SizeBox with optional fixed dimensions. Each override is written TWICE, as the
+-- slot helpers below are: the property (with its bOverride_ flag, which the engine
+-- ignores the value without) and the setter, because UE4SS setters sometimes no-op.
 function M.sizeBox(tree, w, h)
     local s = M.construct("/Script/UMG.SizeBox", tree)
-    if w then pcall(function() s:SetWidthOverride(w) end) end
-    if h then pcall(function() s:SetHeightOverride(h) end) end
+    if w then
+        pcall(function() s.WidthOverride = w; s.bOverride_WidthOverride = true end)
+        pcall(function() s:SetWidthOverride(w) end)
+    end
+    if h then
+        pcall(function() s.HeightOverride = h; s.bOverride_HeightOverride = true end)
+        pcall(function() s:SetHeightOverride(h) end)
+    end
     return s
 end
 
@@ -172,6 +221,110 @@ function M.text(tree, str, size, rgba)
     pcall(function() t:SetColorAndOpacity({ SpecifiedColor = color(rgba or { 0.95, 0.93, 0.86, 1 }), ColorUseRule = 0 }) end)
     pcall(function() local f = t.Font; f.Size = size or 16; t.Font = f end)
     return t
+end
+
+-- ---- screen root: a widget of OUR OWN to build those primitives in ----
+--
+-- Every primitive above takes a WidgetTree as its construct outer, and a bare
+-- UUserWidget has NONE — the engine normally builds one from the widget's generated
+-- Blueprint class. Constructing a WidgetTree by hand and assigning it is the step
+-- that makes cook-free, Lua-only UMG work; poc/V6-ui-native recorded it as verified
+-- in-game on 2026-07-17 (all five stages OK, the panel really drew), and every
+-- PalForge panel that shipped afterwards used the same sequence:
+--
+--   pc -> UserWidget(outer = pc) -> WidgetTree(outer = w) -> w.WidgetTree = tree
+--      -> root panel -> tree.RootWidget -> AddToViewport(z)
+
+-- Something that can own our widgets: the player controller when there is one
+-- (WidgetBlueprintLibrary needs a controller), else the GameInstance. nil with no game.
+function M.owner()
+    return M.findFirst("PalPlayerController") or M.findFirst("PlayerController")
+        or M.findFirst("GameInstance")
+end
+
+-- Put a screen (or a bare UserWidget) on the viewport. Returns true only when the
+-- widget reports itself in the viewport afterwards — or, on a build without
+-- IsInViewport, when the AddToViewport call itself did not error.
+function M.show(screen, zOrder)
+    local w = screen and (screen.widget or screen)
+    if not w then return false end
+    if not pcall(function() w:AddToViewport(zOrder or 1000) end) then return false end
+    local shown
+    if pcall(function() shown = w:IsInViewport() end) and shown ~= nil then
+        return shown == true
+    end
+    return true
+end
+
+-- Take a screen back off the viewport. Returns true if it is no longer shown.
+function M.hide(screen)
+    local w = screen and (screen.widget or screen)
+    if not w then return false end
+    if not pcall(function() w:RemoveFromParent() end) then return false end
+    local shown
+    if pcall(function() shown = w:IsInViewport() end) and shown ~= nil then
+        return shown ~= true
+    end
+    return true
+end
+
+-- Build a screen: our own UUserWidget with a live WidgetTree and a root panel, ready
+-- for the primitives above — pass `screen.tree` to vbox/text/clickableRow, `screen.pc`
+-- to the clickable ones, and add your widgets under `screen.root`. Shown on the
+-- viewport immediately unless opts.show == false (then call M.show yourself).
+--
+--   opts = { zOrder = 1000, show = true,
+--            dim     = {r,g,b,a} | false,  -- false: bare VerticalBox root, no frame
+--            panel   = {r,g,b,a},          -- the inset panel behind your widgets
+--            padding = { Left =, Top =, Right =, Bottom = } }
+--
+-- Fail-soft: never throws. Returns the screen table, or nil + a reason when there is
+-- no game to own it, a UMG class is missing, or it could not be shown.
+function M.screen(pc, opts)
+    opts = opts or {}
+    pc = pc or M.owner()
+    if not pc then return nil, "no owner (no PlayerController / GameInstance)" end
+
+    local w, tree, root
+    local ok, e = pcall(function()
+        w = M.construct("/Script/UMG.UserWidget", pc)
+        pcall(function() w:SetPlayerContext(pc) end)
+        -- THE CRUX: a bare UUserWidget's WidgetTree is null, so construct one.
+        tree = w.WidgetTree
+        if not alive(tree) then
+            tree = M.construct("/Script/UMG.WidgetTree", w)
+            w.WidgetTree = tree
+        end
+        if not alive(tree) then error("WidgetTree still invalid after construct") end
+        pcall(function() w:SetVisibility(0) end)   -- ESlateVisibility Visible
+
+        -- Fullscreen dim + inset panel + vertical stack: the frame every shipped
+        -- PalForge panel used. `dim = false` gives a bare VerticalBox root instead.
+        local content = M.vbox(tree)
+        if opts.dim == false then
+            tree.RootWidget = content
+        else
+            local dim = M.border(tree, opts.dim or { 0.02, 0.02, 0.03, 0.86 })
+            tree.RootWidget = dim
+            local pnl = M.border(tree, opts.panel or { 0.10, 0.09, 0.08, 0.98 })
+            pcall(function()
+                pnl:SetPadding(opts.padding or { Left = 90, Top = 54, Right = 90, Bottom = 54 })
+            end)
+            pcall(function() dim:SetContent(pnl) end)
+            pcall(function() pnl:SetContent(content) end)
+        end
+        root = content
+    end)
+    if not (ok and alive(w) and alive(tree) and root) then
+        return nil, "screen build failed: " .. tostring(e)
+    end
+
+    local screen = { widget = w, tree = tree, root = root, pc = pc }
+    if opts.show ~= false and not M.show(screen, opts.zOrder) then
+        pcall(function() w:RemoveFromParent() end)
+        return nil, "AddToViewport failed"
+    end
+    return screen
 end
 
 -- ---- Palworld game widgets ----
@@ -188,24 +341,30 @@ local function leftAlignButtonContent(btn)
     end)
 end
 
--- Clone the game's title menu button as a clickable row. Returns (button, invBtn).
--- `onClick` is routed through the shared click router.
+-- Clone the game's title menu button as a clickable row. Returns (button, invBtn,
+-- clickName). `onClick` is routed through the shared click router; clickName is that
+-- registration's key — keep it and pass it to releaseClicks when you drop the button.
 function M.menuButton(tree, pc, label, onClick)
     local btn, e = M.create(pc, M.PATHS.menuButton)
     if not btn then return nil, e end
     local lbl = M.findByName(btn, M.PATHS.menuButtonLabel)
-    if lbl and lbl:IsValid() then pcall(function() lbl:SetText(FText(label)) end) end
+    if alive(lbl) then pcall(function() lbl:SetText(FText(label)) end) end
     leftAlignButtonContent(btn)
     local inv = M.findByName(btn, M.PATHS.menuButtonClick)
-    if inv and onClick then M.registerClick(inv, onClick) end
-    return btn, inv
+    local clickName
+    if inv and onClick then
+        local key = M.registerClick(inv, onClick)
+        if key then clickName = key end
+    end
+    return btn, inv, clickName
 end
 
--- A clickable, LEFT-ALIGNED row that still looks native. Returns (rowWidget, invBtn).
+-- A clickable, LEFT-ALIGNED row that still looks native.
+-- Returns (rowWidget, invBtn, clickName).
 function M.clickableRow(tree, pc, label, onClick, opts)
     opts = opts or {}
     local overlay = M.overlay(tree)
-    local btn, inv = M.menuButton(tree, pc, "", onClick)
+    local btn, inv, clickName = M.menuButton(tree, pc, "", onClick)
     if btn then
         local bs = overlay:AddChildToOverlay(btn)
         pcall(function() bs:SetHorizontalAlignment(M.HALIGN.FILL) end)
@@ -218,7 +377,7 @@ function M.clickableRow(tree, pc, label, onClick, opts)
     pcall(function() ts:SetHorizontalAlignment(M.HALIGN.LEFT) end)
     pcall(function() ts:SetVerticalAlignment(M.VALIGN.CENTER) end)
     pcall(function() ts:SetPadding({ Left = opts.indent or 28, Top = 0, Right = 12, Bottom = 0 }) end)
-    return overlay, inv
+    return overlay, inv, clickName
 end
 
 -- Generic: clone any Palworld BP widget, optionally set a label child's text and

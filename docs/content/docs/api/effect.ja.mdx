@@ -1,13 +1,19 @@
 ---
 title: Effect
-description: 継続時間・周期tick・スタック・失効を備えたステータス効果。共有ハートビートで駆動されます
+description: キャラクターに付けるステータス。継続回復、継続ダメージ、時間で切れるバフを作れます
 ---
 
-エフェクトは、対象に付与するステータスです。バフ、デバフ、継続ダメージ、シールドなどが
-これにあたります。エフェクトを駆動するネイティブのゲームイベントはなく、タイミング処理は
-`api/effect` 自身が持っています。`tick` チャンネルを購読し、生きているアプリケーションを
-ハートビートで進めるため、`duration`、`interval`、スタック、失効はいずれも実際に動く挙動で
-あり、ネイティブフックを待っている宣言ではありません。
+## このページでできるようになること
+
+- キャラクターを少しずつ、好きな長さだけ回復する
+- 毒や炎で、1 秒ごとにダメージを与える
+- 時間がたつと自然に切れる一時的なバフを付ける
+- 同じステータスを重ねがけして、かかり直すたびに時間をリセットする
+- ステータスを途中で消したり、残り時間を調べたりする
+
+エフェクトは、キャラクター（プレイヤーやパル）に付けるステータスです。バフ、デバフ、
+継続ダメージ、シールドなどがこれにあたります。どれだけ続くか、どれくらいの間隔で何かを
+するかを書けば、時間の管理は PalForge が行います。
 
 ```lua title="content/regen.lua"
 local Regen = Effect{
@@ -25,21 +31,21 @@ local Regen = Effect{
 Regen:apply(Player.character())
 ```
 
-10 秒後、`onTick` を 10 回発火したうえでアプリケーションは消えます。
+10 秒後、`onTick` を 10 回実行したうえでプレイヤーから外れます。
 
 <Callout type="warn">
-PalForge のエフェクトは、ゲーム本体のステータスアイコンを**切り替えません**。Palworld の
-状態異常はネイティブの `EPalStatusEffectType` 列挙型であり、それを適用するネイティブ呼び出しは
-未確認のため、このモジュールはその仕組みに一切到達しません。`nativeStatus` フィールドは定義に
-保持されるだけで、誰も読みません。エフェクトが実際に*何をするか*はハンドラの中に書く必要が
-あります。回復・ダメージ・バフ・ログ出力は、手持ちの呼び出しを使って `onApply` / `onTick` /
-`onExpire` で行ってください。その周囲のスケジュールは動きますが、状態異常の切り替えは存在しません。
+自分で書いたエフェクトは、ゲーム本体のステータスアイコン（体力バーの横に出る毒や炎のマーク）を
+**点灯させません**。あれはゲーム側のリスト（`EPalStatusEffectType`）にあるもので、Lua から
+点灯させる方法はまだ確認できていません。`nativeStatus` フィールドは定義に保持されますが、
+読み返す仕組みはありません。エフェクトが実際に*何をするか*はハンドラに書いてください。
+回復・ダメージ・バフ・ログ出力は `onApply` / `onTick` / `onExpire` の中で行います。
+その周りの時間管理は今のまま動きます。
 </Callout>
 
 ## エフェクトを定義する
 
-モジュールそのものがコンストラクタです。`Effect{ ... }` を呼ぶとテーブルが検証され、定義が
-`core/object_manager` に `("effect", id)` として登録され、`Effect.Handle` が返ります。
+`Effect{ ... }` と書けば 1 つ作れます。返ってくるのはハンドルで、`:apply`、`:remove` と
+各種の問い合わせがそのまま生えたオブジェクトです。
 
 ```lua
 local Effect = require("palforge.api.effect")   -- or the installed global
@@ -47,11 +53,11 @@ local Effect = require("palforge.api.effect")   -- or the installed global
 local Chill = Effect{ id = "example:Chill" }    -- id is the only required field
 ```
 
-`id` は任意の名前で構いません。`Pal` や `Item` と違い、エフェクト id の背後にゲームの
-DataTable はないため、`"example:Chill"` と `"Chill"` はどちらも有効です。名前空間付きの形式は、
-他のパックとの衝突を避けるためだけのものです。
+`id` は好きな名前で構いません。エフェクトの id はゲーム側のデータと結びついていないので、
+`"example:Chill"` でも `"Chill"` でも動きます。`pack:name` の形式は、他のパックと id が
+ぶつからないようにするためのものです。
 
-検証は厳格で、問題はすべて呼び出しを中断するハードエラーになります。
+書き方を間違えると呼び出しはエラーで止まります。中途半端に登録されることはありません。
 
 ```lua
 Effect{ id = "example:Chill", durationSec = 10 }
@@ -67,7 +73,7 @@ PalForge: Effect: field "events" (Effect.Spec.Events): unknown field "onRemove".
 PalForge: Effect: field "stackable" expects boolean, got string
 ```
 
-シェイプはデータとして宣言されているため、実行時に読み出せます。
+すべてのフィールドと、その型と意味は、ゲームの実行中に表示できます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -79,13 +85,16 @@ schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
 
 ## Spec のフィールド
 
+たいていのエフェクトに必要なのは 3 つです。`id`、`duration`、そして繰り返し何かをするなら
+`interval`。渡せるものは以下がすべてです。
+
 <TypeTable
   type={{
     id: { description: 'エフェクト id。名前、または pack:name 形式。唯一の必須フィールドです', type: 'string', required: true },
     name: { description: 'ステータスバーに表示される名前。省略時は id', type: 'string' },
     description: { description: 'UI とツール向けの 1 行説明', type: 'string' },
-    duration: { description: '総寿命 (秒)。省略すると :remove を呼ぶまで続きます', type: 'number' },
-    interval: { description: 'onTick の間隔 (秒)。省略すると周期 tick は起きません', type: 'number' },
+    duration: { description: '続く長さ (秒)。省略すると :remove を呼ぶまで続きます', type: 'number' },
+    interval: { description: 'onTick の間隔 (秒)。省略すると onTick は実行されません', type: 'number' },
     stackable: { description: '1 つの対象に複数を重ねられるかどうか', type: 'boolean', default: 'false' },
     maxStacks: { description: 'stackable が true のときのスタック上限', type: 'number', default: '1' },
     icon: { description: 'ステータスバー用アイコン。定義に保持され :iconOf が返します', type: 'any' },
@@ -95,13 +104,18 @@ schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
   }}
 />
 
-`duration` と `interval` の単位は**秒**で、浮動小数点数です。`data` はアプリケーションではなく
-定義に載ります。[アプリケーションごとの状態](#アプリケーションごとの状態)を参照してください。
+`duration` と `interval` の単位は**秒**で、小数点も使えます。`data` は定義に 1 つだけ
+置かれるため、すべての対象で同じテーブルを共有します。対象ごとに覚えておきたいものは
+[対象ごとのデータを自分で持つ](#対象ごとのデータを自分で持つ)を参照してください。
 
-## タイミングランタイム
+## タイミングの仕組み
 
-エフェクトを駆動するネイティブの仕組みはありません。`api/effect` が生きているアプリケーションの
-テーブルを保持し、`core/event` の `tick` チャンネルから自分で進めます。
+PalForge には 500 ms ごとに動くハートビートが 1 つあり、動作中のエフェクトはすべて
+それに合わせて進みます。
+
+1 つの対象で動いている 1 つのエフェクトを**アプリケーション**と呼びます。経過時間、
+残り時間、スタック数を持っています。`:apply` で始まり、残り時間が尽きたとき、取り除いた
+とき、対象がいなくなったとき、ワールドが破棄されたときに終わります。
 
 ```mermaid
 flowchart LR
@@ -109,22 +123,26 @@ flowchart LR
   B --> C["effect step"]
   C --> D["onTick"]
   C --> E["onExpire"]
+  F["ready-watch"] --> G["world.left channel"]
+  G --> H["release all"]
+  H --> E
 ```
 
-購読はプロセス全体で**最初**の `:apply` のときに遅延インストールされます。モジュールを require
-するだけではコストはかからず、tick の購読者も増えません。その時点で `core/event` の require が
-失敗した場合、`:apply` は `false` を返し、アプリケーションは作られません。それ以外の呼び出しは
-`true` を返します。
+ハートビートへの接続は、どこかで最初に `:apply` が呼ばれたときに行われます。モジュールを
+require するだけならコストはかからず、購読者も増えません。接続は 2 つ同時です。すべての
+アプリケーションを進める `tick` と、ワールドが消えるときに解放する `world.left` です。
+その時点で接続に失敗した場合、`:apply` は `false` を返してアプリケーションは作られません。
+それ以外の呼び出しは `true` を返します。
 
-1 回のハートビートは、生きているアプリケーションそれぞれに対して次の順で処理を行います。
+1 回のハートビートは、動作中のアプリケーションそれぞれに対して次の順で処理を行います。
 
 1. 対象がすでに有効でなければ、`reason = "target_gone"` で `onExpire` を発火して破棄する
 2. そうでなければ `elapsed` に `0.5` を加算する
 3. interval のアキュムレータに `0.5` を加算し、`interval` に達している間 `onTick` を発火する
 4. 残り時間から `0.5` を引き、0 に達したら `reason = "duration"` で `onExpire` を発火する
 
-`event.TICK_MS` は `500` なので、ランタイムは 1 ステップあたり正確に **0.5 秒**進みます。
-つまり指定した秒数はこのグリッドに量子化されます。
+`event.TICK_MS` は `500` なので、1 ステップで進むのは正確に **0.5 秒**です。指定した秒数は
+このグリッドに丸められます。
 
 | 宣言 | 実際に起きること |
 | --- | --- |
@@ -134,12 +152,12 @@ flowchart LR
 | `interval = 0.75` | `elapsed` 1.0, 1.5, 2.5, 3.0, 4.0 で `onTick` |
 | `interval = 0.1` | 1 回のハートビートの中で `onTick` が連続 5 回 |
 
-アキュムレータは余りを持ち越すため、0.5 の倍数でない interval でも長期的な発火レートは正しく
-保たれます。グリッドに丸められるのは、各 tick が着地する瞬間だけです。0.5 未満の interval は
-遅くなるのではなく、同じフレーム内でまとめて複数回発火します。
+アキュムレータは余りを持ち越すため、0.5 の倍数でない interval でも長い目で見た発火の
+ペースは正しく保たれます。グリッドに丸められるのは、各 tick が着地する瞬間だけです。
+0.5 未満の interval は遅くなるのではなく、同じフレーム内で何度も発火します。
 
-`onTick` は残り時間のチェックより先に処理されるため、`duration` が `interval` の倍数である
-エフェクトでは、最後の tick が `onExpire` と同じハートビートに着地します。
+`onTick` は残り時間のチェックより先に処理されます。そのため `duration` が `interval` の
+倍数のときは、最後の tick が `onExpire` と同じハートビートに着地します。
 
 ```lua
 Effect{ id = "example:Two", duration = 2.0, interval = 1.0, events = {
@@ -165,23 +183,24 @@ stateDiagram-v2
     Active --> Ended: duration reached zero
     Active --> Ended: remove called
     Active --> Ended: target no longer valid
+    Active --> Ended: world unloaded
     Ended --> [*]: onExpire
 ```
 
-`onApply` は次のハートビートではなく、`:apply` の呼び出しの中で**同期的に**発火します。
+`onApply` は次のハートビートではなく、`:apply` の呼び出しの中ですぐ実行されます。
 それ以降はすべてグリッド上で進みます。
 
-### 対象と、生存しているかの判定
+### 対象と、生きているかどうかの判定
 
-アプリケーションは対象とエフェクト id の組をキーにして保持されます。対象テーブルは
-**弱参照キー**です。アプリケーションがポーンを生かし続けることはなく、ガベージコレクトされた
-対象は自分のアプリケーションも一緒に連れていきます。
+1 つの対象には、エフェクト id ごとに 1 つのアプリケーションが乗ります。それを保持している
+テーブルは**弱参照キー**です。アプリケーションがポーンを生かし続けることはなく、Lua に
+回収された対象は自分のアプリケーションも一緒に連れていきます。
 
-対象が生存しているとみなされるのは、素の Lua テーブルである場合か、エンジンの userdata で
+対象が生きているとみなされるのは、素の Lua テーブルである場合か、エンジンのデータで
 `IsValid()` がまだ true を返す場合です。ポーンが無効になると、次のハートビートで
-`reason = "target_gone"` として失効します。
+`reason = "target_gone"` として終了します。
 
-対象なしの `:apply()` も正当です。対象が `nil` のアプリケーションは 1 つのワールド全体用の
+対象なしの `:apply()` も使えます。対象が `nil` のアプリケーションは 1 つのワールド全体用の
 バケットに入り、ハンドラは `target = nil` を受け取ります。
 
 ```lua
@@ -195,31 +214,87 @@ Effect.activeOn()                   -- { "example:Curse" }
 <Callout type="warn">
 このバケットは、対象が*欠けている*ときの行き先でもあります。`Player.character()` はワールドを
 読み込む前は `nil` を返すため、タイトル画面で `MyEffect:apply(Player.character())` を呼ぶと、
-エフェクトは黙ってグローバルに適用され、成功が報告されます。渡す前に対象をチェックしてください。
+エフェクトは黙ってワールド全体に適用され、成功が報告されます。渡す前に対象を確認してください。
 </Callout>
 
 <Callout type="info">
-このランタイムは永続化されず、ワールドの切り替えでもリセットされません。`api/effect` が購読して
-いるのは `tick` だけで、`world.left` でアプリケーションを片付ける処理はありません。ポーンに
-付いたアプリケーションはそのポーンが無効になった時点で自然に終わりますが、グローバルな
-アプリケーションや素のテーブルをキーにしたものは、`:remove` を呼ぶまでワールドの再読み込みを
-またいで生き残ります。
+アプリケーションはメモリ上に保持されるだけで、保存されません。1 つのワールドの中では、ポーンに
+付いたアプリケーションはそのポーンが無効になった時点で自然に終わり、ワールド全体のものや素の
+テーブルをキーにしたものは `duration` が尽きるか `:remove` を呼ぶまで残ります。ワールドの破棄は
+それらを一度にすべて終わらせます。[ワールドが破棄されるとき](#ワールドが破棄されるとき)を参照して
+ください。
 </Callout>
+
+### ワールドが破棄されるとき
+
+`core/event` はプレイヤーポーンを見張っていて、有効でなくなった瞬間に `world.left` を emit
+します。すべての対象のすべてのアプリケーションが、ワールド全体のバケットの分も含めて
+`reason = "world_left"` で `onExpire` を発火し、破棄されます。その後 `Effect.activeOn` は
+空を返し、以降のハートビートには進めるものが残りません。
+
+`"world_left"` は専用の reason なので、ハンドラはワールドの破棄を、`duration` による終了・
+`:remove`・対象のデスポーンと区別できます。通常の終了時に走らせる処理は行わず、自分で
+記録していたものだけを片付けたいときに使ってください。
+
+```lua title="content/hunger.lua"
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("hunger")
+
+local drained = setmetatable({}, { __mode = "k" })   -- target -> your own bookkeeping
+
+local Hunger = Effect{
+    id          = "example:Hunger",
+    name        = "Hunger",
+    description = "Drains while the player is out in the world.",
+    duration    = 120.0,
+    interval    = 10.0,
+    events = {
+        onApply = function(effect, target, ctx)
+            drained[target] = 0
+        end,
+        onTick = function(effect, target, ctx)
+            drained[target] = (drained[target] or 0) + 1
+        end,
+        onExpire = function(effect, target, ctx)
+            local total = drained[target] or 0
+            drained[target] = nil
+            if ctx.reason == "world_left" then
+                log.info("world unloaded, hunger released at " .. total)
+                return                       -- no payout: the world is going away
+            end
+            log.info(string.format("hunger ended (%s) after %d ticks", ctx.reason, total))
+        end,
+    },
+}
+
+-- Nothing is restored for you. The next world starts empty, so apply again on world.ready.
+event.on("world.ready", function()
+    local me = Player.character()
+    if me then Hunger:apply(me, { source = "world.ready" }) end
+end)
+
+return Hunger
+```
+
+アプリケーションはメモリ上にしかありません。ディスクには何も書かれず、次のワールドへ
+持ち越すキューもありません。ワールドをまたいでエフェクトを戻したいときは、上のように
+自分のトリガーから掛け直してください。
 
 ## イベント
 
-4 つのハンドラはすべて LIVE です。いずれも `handler(effect, target, ctx)` の形で呼ばれます。
+4 つのハンドラはすべて実際に発火します。いずれも `handler(effect, target, ctx)` の形で
+呼ばれます。
 
 - `effect` — この定義の**ハンドル**。`:remove`、`:stacksOn`、`:timeLeft` がそのまま使えます
-- `target` — `:apply` に渡した値。グローバルなアプリケーションでは `nil`
+- `target` — `:apply` に渡した値。ワールド全体のアプリケーションでは `nil`
 - `ctx` — 素のテーブル。中身はイベントごとに異なります
 
 <TypeTable
   type={{
-    onApply: { description: 'LIVE。対象にこのエフェクトのアプリケーションがまだ無いとき、:apply の中で同期的に発火します', type: 'fun(self, target, ctx)' },
-    onTick: { description: 'LIVE。アプリケーションが生きている間、interval 秒ごとに発火します。interval を省略すると発火しません', type: 'fun(self, target, ctx)' },
-    onStack: { description: 'LIVE。すでにこのエフェクトを持つ対象へ :apply したとき、onApply の代わりに発火します', type: 'fun(self, target, ctx)' },
-    onExpire: { description: 'LIVE。duration の経過、:remove の呼び出し、対象の無効化のいずれかで 1 度だけ発火します', type: 'fun(self, target, ctx)' },
+    onApply: { description: '対象にこのエフェクトがまだ付いていないとき、:apply の中で実行されます', type: 'fun(self, target, ctx)' },
+    onTick: { description: 'エフェクトが対象に付いている間、interval 秒ごとに実行されます。interval を省略すると実行されません', type: 'fun(self, target, ctx)' },
+    onStack: { description: 'すでにこのエフェクトを持つ対象へ :apply したとき、onApply の代わりに実行されます', type: 'fun(self, target, ctx)' },
+    onExpire: { description: 'duration の経過、:remove の呼び出し、対象の無効化、ワールドの破棄のいずれかで 1 度だけ実行されます', type: 'fun(self, target, ctx)' },
   }}
 />
 
@@ -232,13 +307,14 @@ Effect.activeOn()                   -- { "example:Curse" }
 | `onStack` | エフェクト id | 加算後のスタック数 | — | — | 見える |
 | `onExpire` | エフェクト id | 終了時点のスタック数 | apply からの秒数 | 下記参照 | 見えない |
 
-`onExpire` の `ctx.reason` は次の 3 つの文字列のいずれかです。
+`onExpire` の `ctx.reason` は次の 4 つの文字列のいずれかです。
 
 | `reason` | 原因 |
 | --- | --- |
 | `"duration"` | 宣言した `duration` が尽きた |
 | `"removed"` | `:remove(target)` が呼ばれた |
 | `"target_gone"` | 対象が有効でなくなった |
+| `"world_left"` | ワールドが破棄され、動作中のアプリケーションがすべて解放された |
 
 以下のスニペットでの `log` は `require("palforge.utils.log").scope("example")` です。
 
@@ -266,9 +342,9 @@ local Shield = Effect{
 
 ### 独自のコンテキストを渡す
 
-`:apply` の第 2 引数は `onApply` と `onStack` に渡されます。コピーはされません。これらの
-ハンドラが受け取る `ctx` は、`effect` と `stacks` を持つ小さなテーブルであり、渡したテーブルは
-その `__index` メタテーブルの先にあります。
+`:apply` の第 2 引数は `onApply` と `onStack` に届きます。コピーはされません。これらの
+ハンドラが受け取る `ctx` は `effect` と `stacks` を持つ小さなテーブルで、その後ろに渡した
+テーブルが控えています。そのため `ctx.source` はこちらのテーブルまで読みにいきます。
 
 ```lua
 local Mark = Effect{
@@ -285,15 +361,15 @@ local Mark = Effect{
 Mark:apply(pawn, { source = "trap", power = 3 })
 ```
 
-したがって、キーは名前で引いてください。`pairs` による走査では見えませんし、`onTick` と
-`onExpire` からも見えません。この 2 つは独自のコンテキストを組み立てるため、渡したテーブルを
-一切参照しません。
+したがって、キーは名前で引いてください。`pairs` で走査しても見えません。`onTick` と
+`onExpire` からも見えません。この 2 つは独自のコンテキストを組み立てるため、渡した
+テーブルを一切参照しません。
 
-### ハンドラのエラーは握りつぶされます
+### ハンドラの中でエラーが起きたとき
 
-ランタイムが行うハンドラ呼び出しはすべて `pcall` で包まれています。例外を投げるハンドラが
-あってもハートビートは止まらず、他のアプリケーションにも影響せず、そのハンドラが無効化される
-こともありません。ただしエラーはログにも出さずに捨てられます。中身を見たい場合は自分で包んで
+ハンドラの呼び出しはすべて `pcall` で包まれています。エラーを投げるハンドラがあっても
+ハートビートは止まらず、他のエフェクトにも影響せず、そのハンドラが止められることも
+ありません。ただしエラーはログにも出さずに捨てられます。中身を見たい場合は自分で包んで
 ください。
 
 ```lua
@@ -305,13 +381,13 @@ end,
 
 ## スタック
 
-すでにその対象で生きているエフェクトを再度 `:apply` しても、2 つ目のアプリケーションは決して
+すでにそのエフェクトが付いている対象に再度 `:apply` しても、2 つ目のアプリケーションは
 作られません。必ず次の 2 つが起き、`stackable` が効くのは 1 つ目だけです。
 
 1. `stackable` が true で**かつ**現在のスタック数が `maxStacks` 未満なら、スタックを 1 増やす
 2. 残り時間を、宣言した `duration` の満量にリセットする
 
-そのうえで、`onApply` の代わりに `onStack` が発火します。
+そのうえで、`onApply` の代わりに `onStack` が実行されます。
 
 ```lua
 local Rage = Effect{
@@ -332,7 +408,7 @@ Rage:apply(pawn)          -- onStack, stacks = 3
 Rage:stacksOn(pawn)       --> 3
 ```
 
-上限に達したあとも、`:apply` は `onStack` を発火し、残り時間もリセットします。止まるのは
+上限に達したあとも、`:apply` は `onStack` を実行し、残り時間もリセットします。止まるのは
 カウントだけです。
 
 ```lua
@@ -341,13 +417,13 @@ Rage:stacksOn(pawn)       --> 5, and onStack fired 19 times
 ```
 
 <Callout type="warn">
-`maxStacks` の既定値は `1` です。`maxStacks` を指定せずに `stackable = true` だけを書くと、
-`onStack` が発火して残り時間もリセットされるのに、カウントは `1` から動かないエフェクトになります。
-両方を指定してください。
+`maxStacks` の既定値は `1` です。`stackable = true` だけを書くと、`onStack` は実行されて
+残り時間もリセットされるのに、カウントは `1` から動かないエフェクトになります。両方を
+指定してください。
 </Callout>
 
-スタックしないエフェクトも、カウンタがないだけで挙動は同じです。再 `:apply` は残り時間を
-リセットする手段になります。
+スタックしないエフェクトも、カウンタがないだけで挙動は同じです。もう一度 `:apply` すれば
+残り時間をリセットできます。
 
 ```lua
 local Wet = Effect{
@@ -361,28 +437,28 @@ local Wet = Effect{
 }
 ```
 
-カウントは対象とエフェクト id の組につき 1 つで、自然減衰はしません。`onExpire` は 1 回で、
-保持しているスタック数に関係なくアプリケーション全体を終わらせます。1 スタックずつ落としたい
-場合は[下のレシピ](#スタックするバフ)を参照してください。
+カウントは対象とエフェクト id の組につき 1 つで、自然には減りません。`onExpire` は 1 回で、
+保持しているスタック数に関係なく全体を終わらせます。1 スタックずつ落としたい場合は
+[下のレシピ](#スタックするバフ)を参照してください。
 
 ## ハンドル
 
 `Effect{ ... }`、`Effect.get(id)`、`Effect.get_all()` はいずれも `Effect.Handle` を返します。
-生きているアプリケーションを操作するメソッドは対象を引数に取り、`nil` はグローバルバケットを
+動作中のエフェクトを操作するメソッドは対象を引数に取り、`nil` はワールド全体のバケットを
 意味します。宣言を読むだけのメソッドは引数を取りません。
 
 | メソッド | 戻り値 | 備考 |
 | --- | --- | --- |
-| `:apply(target, ctx)` | `boolean` | アプリケーションの開始または再スタック。`false` になるのは tick ドライバを設置できなかったときだけ |
+| `:apply(target, ctx)` | `boolean` | アプリケーションの開始または再スタック。`false` になるのはハートビートに接続できなかったときだけ |
 | `:remove(target)` | `boolean` | 終了させたら `true`、対象に無ければ `false` |
-| `:isActive(target)` | `boolean` | いまアプリケーションが生きているか |
-| `:stacksOn(target)` | `integer` | 現在のスタック数。非アクティブなら `0` |
-| `:timeLeft(target)` | `number?` | 残り秒数。`duration` が無ければ `nil`、非アクティブなら `0` |
+| `:isActive(target)` | `boolean` | いま動作中かどうか |
+| `:stacksOn(target)` | `integer` | 現在のスタック数。動作していなければ `0` |
+| `:timeLeft(target)` | `number?` | 残り秒数。`duration` が無ければ `nil`、動作していなければ `0` |
 | `:name()` | `string` | 宣言した `name`、無ければ id |
 | `:description()` | `string?` | 宣言した `description` |
 | `:duration()` | `number?` | 宣言した `duration` |
 | `:interval()` | `number?` | 宣言した `interval` |
-| `:iconOf()` | `any?` | 宣言した `icon`。エフェクトに DataTable 検索はありません |
+| `:iconOf()` | `any?` | 宣言した `icon`。エフェクトはゲームのデータテーブルを参照しません |
 
 ```lua
 local Poisoned = Effect.get("Poison")
@@ -398,14 +474,14 @@ Poisoned:remove(pawn)            --> false, nothing left to remove
 ```
 
 <Callout type="info">
-`:timeLeft` の `nil` と `0` は別の状況を表します。`nil` は*終わりの無いアクティブ状態*、つまり
-`duration` を宣言していないエフェクトです。`0` は*非アクティブ*です。区別が必要なときは
-`:isActive` で判定してください。
+`:timeLeft` の `nil` と `0` は別の状況を表します。`nil` は*終わりの無い動作中*、つまり
+`duration` を宣言していないエフェクトです。`0` は*動作していない*状態です。区別が必要な
+ときは `:isActive` で判定してください。
 </Callout>
 
-4 つの `on*` メソッドもハンドルにあります。呼び出すと宣言したハンドラが即座に実行されますが、
-アプリケーションの状態には一切触れません。タイマーは始まらず、スタックも数えられず、失効も
-しません。エフェクトを駆動するためではなく、ハンドラの中身を再利用するために使ってください。
+4 つの `on*` メソッドはハンドルにもあります。呼び出すと宣言したハンドラがその場で実行され
+ますが、それ以外には何も触りません。タイマーは始まらず、スタックも数えられず、終了処理も
+起きません。エフェクトを動かすためではなく、ハンドラの中身を再利用するために使ってください。
 
 ```lua
 Regen:onTick(pawn, { effect = Regen.id, elapsed = 0, stacks = 1 })  -- just calls the body
@@ -421,17 +497,17 @@ Effect.activeOn(target)     -- the ids currently live on target, sorted
 Effect.Class                -- the base definition class, for subclassing
 ```
 
-`Effect.get` が `nil` を返すことはありません。誰も定義していない id に対しては、クエリが空の
-ハンドルが返ります。`:duration()` は `nil`、`:name()` は id です。その `:apply` は、ハンドラを
-持たず永久に続くアプリケーションを開始します。これは `:isActive` で確認するマーカーとしてしか
+`Effect.get` が `nil` を返すことはありません。誰も定義していない id に対しては、問い合わせが
+空のハンドルが返ります。`:duration()` は `nil`、`:name()` は id です。その `:apply` は、
+ハンドラを持たず永久に続くものを開始します。これは `:isActive` で確認するマーカーとしてしか
 役に立ちません。
 
-同じ id を 2 回定義すると登録が置き換わります。最後の呼び出しが勝ち、`Effect.get` は最新の定義を
-返します。先に取得したハンドルは、それが作られたときの定義を指し続けるため、そのハンドル経由で
-開始したアプリケーションでは古いタイミングと古いハンドラがそのまま生きます。
+同じ id を 2 回定義すると登録が置き換わります。最後の呼び出しが勝ち、`Effect.get` は最新の
+定義を返します。先に取得したハンドルは、それが作られたときの定義を指し続けるため、その
+ハンドル経由で開始したものには古いタイミングと古いハンドラがそのまま使われます。
 
-対象に付いているステータスを列挙する方法は `Effect.activeOn(target)` だけです。ソート済みの id
-配列が返るので、それを `Effect.get` で開き直します。
+対象にいま何が付いているかを並べるには `Effect.activeOn(target)` を使います。ソート済みの
+id 配列が返るので、それを `Effect.get` で開き直します。
 
 ```lua
 for _, id in ipairs(Effect.activeOn(pawn)) do
@@ -456,10 +532,10 @@ local function cleanse(target)
 end
 ```
 
-## ネイティブの状態異常
+## 用意済みの 3 つの状態異常
 
-`native/effects.lua` は 3 つのキュレート済み定義を持ち、`registry.initialize` の読み込み時に
-登録されます。モジュール経由でも `Effect.get` 経由でも到達でき、どちらも同じ定義を返します。
+`native/effects.lua` には 3 つの定義が入っていて、読み込み時に `registry.initialize` が
+登録します。モジュール経由でも `Effect.get` 経由でも到達でき、どちらも同じ定義を返します。
 
 ```lua
 local effects = require("palforge.native.effects")
@@ -482,32 +558,31 @@ effects.Burn:apply(pawn)
 effects.Burn:timeLeft(pawn)   --> 5.0
 ```
 
-この 3 つが動かすスケジュールは本物です。`Poison` を適用すれば、ハートビートに量子化された
-10 秒間アプリケーションが生き、1 秒ごとに発火します。欠けているのは中身のほうです。
-`native/effects.lua` の `onApply` と `onExpire` の本体は、ネイティブのステータス呼び出しが入る
-はずの `-- TODO:` マーカーであり、`onTick` はありません。現状 `Burn` を適用してもゲーム内では
-何も変わりません。適切なタイミングが宣言済みの 3 つの id だと考えて、ゲームプレイは自分の定義に
-書くか、自分のハンドラからこれらを駆動する形で足してください。
+この 3 つが動かすスケジュールは本物です。`Poison` を適用すれば、ハートビートに丸められた
+10 秒間動き続け、1 秒ごとに発火します。欠けているのは中身のほうです。`native/effects.lua` の
+`onApply` と `onExpire` の本体は、ネイティブのステータス呼び出しが入るはずの `-- TODO:`
+マーカーであり、`onTick` はありません。現状 `Burn` を適用してもゲーム内では何も変わりません。
+適切なタイミングが宣言済みの 3 つの id だと考えて、ゲームプレイは自分の定義に書くか、
+自分のハンドラからこれらを動かす形で足してください。
 
 <Callout type="warn">
-読み取れる状態異常の DataTable はありません。Palworld の状態異常は列挙型
-(`EPalStatusEffectType`) であり、その完全な列挙はリフレクションダンプに含まれていなかったため、
-`CATALOG` は抽出された行リストではなく手で保守している 3 つの名前です。`effects.get` はそれ以外に
-対して `nil` を返します。`Effect.get("Sleep")` は動きますが、返るのはネイティブの状態異常では
-なく、まっさらな空の定義です。
+`effects.get` が知っているのは `Poison`、`Burn`、`Freeze` の 3 つだけで、それ以外には `nil` を
+返します。`Effect.get("Sleep")` は動きますが、返るのはゲームの状態異常ではなく、まっさらな
+空の定義です。この 3 つ以外の名前が必要なときは、自分でエフェクトを定義してください。
 </Callout>
 
-## アプリケーションごとの状態
+## 対象ごとのデータを自分で持つ
 
-アプリケーションが保持しているのは、ランタイムが必要とするものだけです。経過時間、残り時間、
-スタック数の 3 つです。アプリケーションごとの作業用テーブルはありません。ハンドラに渡される状態は
-`ctx.elapsed` と `ctx.stacks` がすべてで、それ以外は自分で用意することになります。
+アプリケーションが持っているのは、時間管理に必要なものだけです。経過時間、残り時間、
+スタック数の 3 つです。ハンドラに渡される状態は `ctx.elapsed` と `ctx.stacks` がすべてで、
+それ以外は自分で用意することになります。
 
-`data` はその置き場所ではありません。これは**定義**に保持されるため、そのエフェクトを適用した
-すべての対象で 1 つのテーブルが共有されます。しかも `Effect.Handle` にアクセサはないので、
-ハンドラの中から公開 API で読み返す手段はありません。
+`data` はその置き場所ではありません。これは**定義**に保持されるため、そのエフェクトを
+適用したすべての対象で 1 つのテーブルが共有されますし、`Effect.Handle` に読み返すための
+メソッドもありません。
 
-対象をキーにした弱参照テーブルを自分で持ち、`onExpire` でエントリを消してください。
+代わりに、対象をキーにした弱参照テーブルを自分で持ち、`onExpire` でエントリを消して
+ください。
 
 ```lua
 local state = setmetatable({}, { __mode = "k" })   -- target -> your table
@@ -534,10 +609,10 @@ local Bleed = Effect{
 }
 ```
 
-ここで弱参照キーが重要なのは、ランタイムがそうしているのと同じ理由です。自分のテーブルからの
-強参照は、デスポーンしたポーンを生かし続けてしまいます。グローバルなアプリケーションは `nil` を
-キーにしますが、Lua のテーブルは `nil` をキーにできないため、その場合の状態が必要なら独自の
-番兵オブジェクトを使ってください。
+ここで弱参照キーが重要なのは、ランタイムがそうしているのと同じ理由です。自分のテーブルから
+普通に参照すると、デスポーンしたポーンを生かし続けてしまいます。ワールド全体の
+アプリケーションは `nil` をキーにしますが、Lua のテーブルは `nil` をキーにできないため、
+その場合の状態が必要なら独自の目印オブジェクトを使ってください。
 
 ## レシピ
 
@@ -583,14 +658,14 @@ end)
 return Regen
 ```
 
-`event.every` はエフェクトランタイムと同じ 500 ms のハートビートに量子化されているため、両者が
-ずれることはありません。
+`event.every` もエフェクトと同じ 500 ms のハートビートに丸められるため、両者がずれることは
+ありません。
 
 ### 継続ダメージ
 
 `Poison` はタイミング（10 秒・1 秒間隔）をすでに宣言していますが、`onTick` を持っていません。
-その隣に自分のエフェクトを定義して tick に中身を与え、両方を適用しておけば、後日ネイティブの
-状態異常が埋まったときにもパックはそのまま動きます。
+その隣に自分のエフェクトを定義して tick に中身を与え、両方を適用しておけば、後日ゲーム側の
+状態異常が繋がったときにもパックはそのまま動きます。
 
 ```lua title="content/poison_bite.lua"
 local effects = require("palforge.native.effects")
@@ -649,9 +724,9 @@ Pal{
 return { effect = Venom, poison = poison }
 ```
 
-`onDamaged` のたびに再適用されるため、毒は 10 秒にリセットされ、最大 3 スタックまで深くなります。
-チキンが最終的にデスポーンすると、次のハートビートで両方のアプリケーションが
-`reason = "target_gone"` で失効し、蓄積値もクリアされます。
+`onDamaged` のたびに掛け直されるため、毒は 10 秒に戻り、最大 3 スタックまで深くなります。
+チキンが最終的にデスポーンすると、次のハートビートで両方が `reason = "target_gone"` で
+終了し、累計値もクリアされます。
 
 ### スタックするバフ
 
@@ -700,21 +775,22 @@ end)
 return Rage
 ```
 
-`onExpire` が*しない*ことに注意してください。スタックは 1 つずつ落ちません。アプリケーションは
-そのとき保持していたカウントのまま、まるごと終了します。
+`onExpire` が*しない*ことに注意してください。スタックは 1 つずつ落ちません。そのとき
+保持していたカウントのまま、まるごと終了します。
 
 <Callout type="warn">
-`onTick` や `onExpire` の中から*新しい*アプリケーションを開始しないでください。これらのハンドラは、
-ランタイムがアプリケーションのテーブルを `pairs` で走査している最中に実行されます。走査中の
-テーブルにキーを追加する `:apply` は、Lua では挙動が未定義です。まだアプリケーションを持たない
-対象への適用、同じ対象への別エフェクトの適用、そして直前にランタイムがキーを消している
-`onExpire` からの同じエフェクトの再適用がこれにあたります。同じエフェクトを自分の `onTick` から
-再適用する場合は、すでにあるアプリケーションのフィールドを書き換えるだけであり、`:remove` も
-フィールドを消すだけなので、どちらも安全です。
+`onTick` や `onExpire` の中から*新しい*アプリケーションを開始しないでください。これらの
+ハンドラは、ランタイムがアプリケーションのテーブルを `pairs` で走査している最中に実行され
+ます。走査中のテーブルにキーを追加する `:apply` は、Lua では挙動が未定義です。まだ何も付いて
+いない対象への適用、同じ対象への別エフェクトの適用、そして直前にキーが消された `onExpire` から
+同じエフェクトを掛け直す場合がこれにあたります。同じエフェクトを自分の `onTick` から掛け直す
+のは、すでにあるアプリケーションのフィールドを書き換えるだけであり、`:remove` もフィールドを
+消すだけなので、どちらも安全です。ワールド破棄時の解放も同じテーブルを走査するため、
+`reason = "world_left"` で発火する `onExpire` にも同じ制約が当てはまります。
 </Callout>
 
-減衰は別の `tick` 購読者から駆動してください。自前の購読者はランタイムのステップの外で実行される
-ため、その間はどのアプリケーションテーブルも走査中ではありません。
+減衰は別の `tick` 購読者から動かしてください。自前の購読者はその走査の外で実行されるため、
+その間はどのテーブルも走査中ではありません。
 
 ```lua
 local event = require("palforge.core.event")
@@ -734,10 +810,10 @@ end
 
 ### 対象が死んだら終わるエフェクト
 
-ランタイムは対象が有効でなくなった時点でアプリケーションを失効させますが、これは死亡フックでは
-なくフォールバックです。死んだポーンがしばらく有効なままのこともありますし、判定は次のハート
-ビートまで走りません。死亡の瞬間にエフェクトを消したい場合は、`pal.death` チャンネルに繋いで
-ください。
+対象が有効でなくなればアプリケーションは終わりますが、これは死亡フックではなく
+フォールバックです。死んだポーンがしばらく有効なままのこともありますし、判定は次の
+ハートビートまで走りません。死亡の瞬間にエフェクトを消したい場合は、`pal.death`
+チャンネルに繋いでください。
 
 ```lua title="content/frostbite.lua"
 local effects = require("palforge.native.effects")
@@ -794,17 +870,29 @@ return Frostbite
 
 <Callout type="info">
 `:remove` は常に `reason = "removed"` を報告するため、`onExpire` だけでは死亡と手動の解除を
-区別できません。ランタイムが生成する reason は `"duration"`、`"removed"`、`"target_gone"` の
-3 つだけで、この一覧に追加することはできません。だからこそ上の死亡フックは、先にポーンを弱参照
-テーブルへ記録し、`onExpire` でそれを読み返しています。
+区別できません。得られる reason は `"duration"`、`"removed"`、`"target_gone"`、`"world_left"`
+の 4 つだけで、5 つ目を足すことはできません。だからこそ上の死亡フックは、先にポーンを
+弱参照テーブルへ記録し、`onExpire` でそれを読み返しています。
 </Callout>
 
 短いエフェクトなら、死亡フックを付けないという選択も妥当です。デスポーンでポーンが無効になり、
 1 ハートビート以内に `reason = "target_gone"` で自然に終わります。
 
+## まとめ
+
+- ステータスは `Effect{ ... }` で作ります。必ず書くのは `id` だけです。
+- `duration` が続く長さ、`interval` が `onTick` の間隔です。どちらも秒で、0.5 秒のハートビートに丸められます。
+- `:apply(target)` で開始し、`:remove(target)` で早めに終わらせます。`:isActive`、`:timeLeft`、`:stacksOn` で状態を調べられます。
+- もう一度 `:apply` すると残り時間がリセットされ、`stackable` と `maxStacks` を両方書いていればスタックも 1 増えます。
+- キャラクターに何をするかは、`onApply` / `onTick` / `onExpire` に書く自分のコードです。
+- 対象ごとに覚えておきたいものは、自分の弱参照テーブルに入れて `onExpire` で消します。
+
+次は [Skill](/docs/api/skill) を読むと、自分でアビリティを発動して、当たった相手に
+エフェクトを付けられます。
+
 <Cards>
   <Card title="Pal" href="/docs/api/pal">`onDamaged`、`onDeath`、`onCaptured` の出どころ</Card>
   <Card title="Skill" href="/docs/api/skill">手動での発動、アビリティのもう半分</Card>
   <Card title="Player" href="/docs/api/player">エフェクトを適用する対象の取得</Card>
-  <Card title="Lifecycle" href="/docs/concepts/lifecycle">これらすべてを駆動する `tick` チャンネル</Card>
+  <Card title="Lifecycle" href="/docs/concepts/lifecycle">これらすべてを駆動する `tick` と `world.left` チャンネル</Card>
 </Cards>

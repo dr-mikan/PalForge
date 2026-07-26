@@ -1,10 +1,19 @@
 ---
 title: Skill
-description: アクティブ / パッシブスキルの定義と、それを動かす手動呼び出し
+description: Pal に持たせる攻撃や特性と、それを発動させる自分のコードの 1 行
 ---
 
-スキルは 4 つのハンドラと 5 つのアクションを持つ定義です。`Skill{ ... }` を呼ぶと spec が検証され、
-オブジェクトレジストリの `("skill", id)` に定義が登録され、アクションを持つ `Skill.Handle` が返ります。
+## このページでできるようになること
+
+- 名前・属性・威力・アイコンを決めて、自分の攻撃を追加する
+- Pal がダメージを受けたとき、建物を使われたとき、キーを押したときに発動させる
+- 秒数でクールダウンを決めて、連発できないようにする
+- 持っている間ずっと効き続ける特性を作る
+- Pal が持っているスキルの一覧を読み出す
+
+スキルは攻撃や特性のことです。`Skill{ ... }` で一度書くと、アクションを持ったオブジェクトが返ります。
+ゲームが勝手にスキルを発動させることはないので、発動させる行は自分のコードに書きます。次の例では
+最後の行がそれです。
 
 ```lua title="content/skills.lua"
 local Ember = Skill{
@@ -24,24 +33,21 @@ local Ember = Skill{
 Ember:activate(Player.character())   -- runs onActivate unless it is still cooling down
 ```
 
-## Nothing fires a skill for you
+## スキルは自分のコードで発動させます
 
-`core/event` にスキル用のチャンネルはありません。`event.CHANNELS` にあるのは `gameStart`、
-`world.ready`、`world.left`、4 つの `building.*`、4 つの `pal.*`、4 つの `item.*`、そして `tick` だけです。
-「この Pal がスキル X を使った」と教えてくれるネイティブフックは見つかっていないため、それを emit する
-ソースは存在せず、スキルのハンドラを呼ぶディスパッチもありません。
-
-ライブな他ドメインの流れはこうです。
+PalForge の他の部分は逆向きに動きます。ゲームで何かが起きると、そのために書いた関数を PalForge が
+呼びます。ハンドラとはその関数、つまり呼んでもらうために書く自分のコードのことです。
 
 ```mermaid
 flowchart LR
-  A["native game event"] --> B["core.event source"]
-  B --> C["channel such as pal.damaged"]
-  C --> D["dispatch"]
-  D --> E["your handler"]
+  A["the game does something"] --> B["PalForge notices"]
+  B --> C["a channel such as pal.damaged"]
+  C --> D["your pal handler runs"]
 ```
 
-スキルの流れはこうです。
+PalForge にはワールド・建物・Pal・アイテムのチャンネルがあります。スキルのチャンネルはありません。
+「この Pal がスキル X を使った」と教えてくれるものがゲーム側にないからです。そのためスキルは、自分が
+呼んだその瞬間に動きます。
 
 ```mermaid
 flowchart LR
@@ -52,18 +58,18 @@ flowchart LR
 
 <Callout type="warn">
 パックが `:activate` / `:hit` / `:equip` / `:unequip` を呼ばない限り、スキルのハンドラは一度も実行されません。
-`Pal{ skills = { ... } }` と宣言しても実行されません。スキルは自分のコードから呼び出すものです。Pal のハンドラ、
-Building の `onRightClick`、キーバインド、Effect の tick — どこからでも構いません。
+`Pal{ skills = { ... } }` に並べただけでも実行されません。発動させたい場所に呼び出しを書いてください。Pal の
+ハンドラ、Building の `onRightClick`、キーバインド、Effect の tick — どこでも構いません。このページの下の方の
+レシピで、それぞれの書き方を示します。
 </Callout>
 
-動くのは手動呼び出しの経路で、そちらは完全に機能します。クールダウンは Lua 側で強制され、ハンドラにはハンドル自身と
-渡したコンテキストテーブルが届き、戻り値で実行されたかどうかが分かります。モジュールのヘッダには、ネイティブソースが
-見つかった時点で skill チャンネルが同じハンドラへ流れると書かれています。つまり今 `:activate` に対して書いたパックの
-コードは、その時も変える必要がありません。
+この呼び出しの経路は間に合わせではなく、そのまま使えるものです。クールダウンは Lua 側で数えられ、ハンドラには
+スキル自身のオブジェクトと渡したコンテキストテーブルが届き、戻り値で実行されたかどうかが分かります。
 
-## Defining a skill
+## スキルを定義する
 
-必須フィールドは `id` だけです。それ以外はすべて任意で、spec が宣言していないフィールドは定義時にハードエラーになります。
+必ず指定するフィールドは `id` だけです。他はすべて任意で、PalForge が知らないフィールド名を書くと、
+その場でエラーになり「もしかして」の候補が出ます。
 
 <Tabs items={['Global', 'Namespaced']}>
 <Tab value="Global">
@@ -110,6 +116,8 @@ local Ember = Skill{
 }
 ```
 
+渡せるフィールドと、その型と既定値の一覧です。
+
 <TypeTable
   type={{
     id: { description: 'スキル id。ゲームの行 id、または自作コンテンツ用の "pack:name"。そのままの文字列で登録されます', type: 'string', required: true },
@@ -125,11 +133,11 @@ local Ember = Skill{
   }}
 />
 
-`element` と `power` は定義に保持され、`:element()` / `:power()` で取り出せます。`data` も定義に保持されますが、
-ハンドルにそれを返すクエリはありません。フレームワーク側はこの 3 つをいずれも読みません。ハンドラや UI が数値を
+`element` と `power` は定義に保持され、`:element()` / `:power()` で取り出せます。`data` も保持されますが、
+ハンドルから読むメソッドはありません。PalForge はこの 3 つをどれも見ません。ハンドラや UI が自分の数値を
 置いておくための場所です。
 
-形を覚える代わりに、実行時に問い合わせられます。
+フィールドの一覧は、覚える代わりに Lua から表示させることもできます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -151,7 +159,7 @@ Skill.Spec {
 }
 ```
 
-あとからどこでも取り出せます。
+定義の戻り値を持ち続ける必要はありません。どこからでも取り直せます。
 
 ```lua
 Skill.get("example:Ember")      -- the definition you registered
@@ -159,15 +167,16 @@ Skill.get("Legend")             -- never nil: a thin definition over any id
 Skill.get_all()                 -- every PalForge-registered skill, as handles
 ```
 
-`Skill.get` は nil を返しません。誰も定義していない id を渡すと、素の定義が返ります。`:kind()` は `"active"`、
+`Skill.get` は nil を返しません。誰も定義していない id を渡すと素の定義が返ります。`:kind()` は `"active"`、
 `:name()` は id そのもの、`:description()` / `:element()` / `:power()` は nil、クールダウンはなく、`:activate` は
-何もしないデフォルトハンドラを実行して true を返します。
+空のハンドラを実行して true を返します。
 
-同じ id で 2 回定義すると登録は置き換わります。最後の呼び出しが勝ち、先に取得したハンドルは先の定義を指したままです。
+同じ id で 2 回定義すると登録は置き換わります。最後の呼び出しが勝ち、先に受け取ったものは先の定義を
+指したままです。
 
-## Active and passive
+## アクティブとパッシブ
 
-`kind` の既定値は `"active"` で、指定できるのは `"active"` と `"passive"` だけです。
+`kind` の既定値は `"active"` で、他に指定できるのは `"passive"` だけです。
 
 ```lua
 local Ember = Skill{
@@ -187,21 +196,21 @@ local Ironhide = Skill{
 }
 ```
 
-両者を分けているガードは 1 か所だけです。`kind` が `"passive"` のとき、`:activate` はクールダウンに触れず、
-何も実行せずに即座に `false` を返します。
+違いを作っているのは 1 か所の判定だけです。`kind` が `"passive"` のとき、`:activate` はクールダウンに触れず、
+何も実行せずにすぐ `false` を返します。
 
 ```lua
 Ironhide:activate(owner)   --> false, nothing ran
 ```
 
-これ以外に `kind` を見る場所はありません。`:equip` / `:unequip` / `:hit` は宣言されたハンドラを、アクティブでも
-パッシブでも同じように実行します。したがって「装備している間だけ効く」挙動を、`onEquip` を持つアクティブスキルで
-表現しても構いません。
+これ以外に `kind` を見る場所はありません。`:equip` / `:unequip` / `:hit` は、アクティブでもパッシブでも
+宣言したハンドラをそのまま実行します。ですから「装備している間だけ効く」挙動を、`onEquip` を持つ
+アクティブスキルで表現しても問題ありません。
 
-## Handlers
+## ハンドラ
 
-4 つとも任意です。4 つとも第 1 引数にそのスキル自身の **ハンドル** を受け取ります。spec が宣言していない
-ハンドラ名は、黙って無視されるのではなくハードエラーになります。
+ハンドラは、アクションが呼ばれたときに PalForge が実行する関数です。4 つあり、どれも任意です。第 1 引数には
+スキル自身のハンドルが届きます。この一覧にない名前を書くと、黙って無視されるのではなく定義時にエラーになります。
 
 | ハンドラ | シグネチャ | 実行されるタイミング |
 | --- | --- | --- |
@@ -210,7 +219,7 @@ Ironhide:activate(owner)   --> false, nothing ran
 | `onEquip` | `fun(skill, owner, ctx)` | `:equip(owner, ctx)` を呼んだとき |
 | `onUnequip` | `fun(skill, owner, ctx)` | `:unequip(owner, ctx)` を呼んだとき |
 
-第 1 引数は定義呼び出しが返したハンドルそのものなので、ハンドラの中でアクションもクエリもすぐ使えます。
+ハンドルは定義の呼び出しが返したオブジェクトそのものなので、ハンドラの中でアクションもクエリもすぐ使えます。
 
 ```lua
 local Ember = Skill{
@@ -230,12 +239,13 @@ local Ember = Skill{
 ```
 
 <Callout type="warn">
-アクションはハンドラ呼び出しを `pcall` で包み、エラーメッセージを捨てます。ハンドラが例外を投げても、
-戻り値が `false` になるだけでログには何も出ません。ログはハンドラの中で自分で出すか、危険な処理を自分で
-包んでください。
+アクションはハンドラを `pcall` で包んで実行し、エラーメッセージを捨てます。ハンドラが落ちても、戻り値が
+`false` になるだけでログには何も出ません。ログはハンドラの中で自分で出すか、危険な処理を自分で包んでください。
 </Callout>
 
-## Actions
+## アクション
+
+スキルを使うのはこの 5 つの呼び出しです。どれも自分で呼びます。
 
 ```lua
 skill:activate(owner, ctx)    --> boolean, did the handler run
@@ -245,14 +255,14 @@ skill:unequip(owner, ctx)     --> boolean
 skill:cooldownLeft(owner)     --> number, seconds until ready, 0 when ready
 ```
 
-- `owner` と `target` は渡したものがそのまま届きます。Pal のポーン、プレイヤーキャラクター、ただのテーブルでも
-  構いません。`owner` を見るのはクールダウンの記録だけで、しかも識別子としてしか使いません。
-- `ctx` は自分で用意するテーブルです。フレームワークが中身を入れることはありません。省略も可能で、4 つの
-  アクションはいずれも省略時に空テーブルを補うため、アクション経由で呼ばれたハンドラの中で `ctx` が nil に
-  なることはありません。
-- `:activate` はパッシブなら `false`、クールダウンで弾かれたら `false`、それ以外はハンドラが例外を投げずに
+- `owner` と `target` は渡したものがそのまま届きます。Pal のポーン、プレイヤーキャラクター、ただの
+  テーブルでも構いません。`owner` を見るのはクールダウンの記録だけで、識別子としてしか使いません。
+- `ctx` は自分で用意するコンテキストテーブルです。中身を入れてくれるものはありませんし、省略もできます。
+  4 つのアクションはいずれも省略時に空テーブルを入れるので、アクション経由で呼ばれたハンドラの中で
+  `ctx` が nil になることはありません。
+- `:activate` はパッシブなら `false`、クールダウンで弾かれたら `false`、それ以外はハンドラが落ちずに
   実行できたとき `true` を返します。
-- `:hit` / `:equip` / `:unequip` はクールダウンも `kind` も見ません。ハンドラが例外を投げない限り `true` です。
+- `:hit` / `:equip` / `:unequip` はクールダウンも `kind` も見ません。ハンドラが落ちない限り `true` です。
 
 ```lua
 local Ember  = Skill.get("example:Ember")
@@ -265,13 +275,14 @@ else
 end
 ```
 
-ハンドルには生のフォワーダ `skill:onActivate(owner, ctx)` / `skill:onHit` / `skill:onEquip` /
-`skill:onUnequip` もあり、これらは定義側のフックを直接呼びます。クールダウンもパッシブのガードも通らず、
-`ctx` の空テーブル補完もせず、エラーも握りつぶしません。その挙動が必要なとき以外はアクションを使ってください。
+ハンドルには、各ハンドラを直接呼ぶ形のメソッドもあります。`skill:onActivate(owner, ctx)` /
+`skill:onHit` / `skill:onEquip` / `skill:onUnequip` です。これらはハンドラに直行します。クールダウンも
+パッシブの判定も通らず、`ctx` の空テーブル補完もせず、エラーも握りつぶしません。その動きが必要なとき以外は
+アクションを使ってください。
 
-## Cooldown
+## クールダウン
 
-`cooldown` は秒で宣言し、強制するのは `:activate` だけです。
+`cooldown` は秒数で、これを見るのは `:activate` だけです。
 
 ```mermaid
 flowchart TD
@@ -284,7 +295,7 @@ flowchart TD
   E --> G["return true unless the handler raised"]
 ```
 
-記録は owner ごと、スキル id ごとです。同じスキルを持つ 2 体の Pal は独立してクールダウンします。
+記録は owner ごと、スキル id ごとです。同じスキルを持つ 2 体の Pal は別々にクールダウンします。
 
 ```lua
 local Ember = Skill{
@@ -303,15 +314,15 @@ Ember:cooldownLeft(two)   --> counts down from 5.0, independently
 
 押さえておきたい点です。
 
-- `owner` の省略は許可されており、その場合はタイムスタンプが共有バケットに入ります。つまり owner なしの
-  `:activate()` は、そのスキルについて全体で 1 つのクールダウンになります。
-- owner のテーブルは弱参照キーなので、クールダウンを保持していても消えたポーンを生かし続けることはありません。
-- 時刻は `os.clock()` から取っています。
-- `cooldown` が未指定、または 0 以下ならゲートは存在しません。`:activate` は常に実行され、`:cooldownLeft` は
+- `owner` は省略できます。その場合は時刻が 1 つの共有枠に入るので、owner なしの `:activate()` は
+  そのスキル全体で 1 つのクールダウンになります。
+- owner は弱参照で持つので、クールダウンが消えたポーンを生かし続けることはありません。
+- 時刻は `os.clock()` から取ります。
+- `cooldown` が未指定、または 0 以下ならゲートはありません。`:activate` は常に実行され、`:cooldownLeft` は
   常に `0` を返します。
-- 時刻の記録はハンドラの実行**前**です。ハンドラが例外を投げても、クールダウンは消費されています。
+- 時刻の記録はハンドラの実行**前**です。ハンドラが落ちても、クールダウンは消費されています。
 
-そのまま撃つのではなく、残り時間を UI に出すのが定番の形です。
+そのまま撃つより、残り時間を出す形の方がたいてい親切です。
 
 ```lua
 local left = Ember:cooldownLeft(Player.character())
@@ -322,7 +333,9 @@ else
 end
 ```
 
-## Queries
+## 値を読み出す
+
+宣言した内容はハンドルからすべて読み出せます。
 
 ```lua
 local s = Skill.get("example:Ember")
@@ -336,25 +349,25 @@ s:power()        --> number | nil
 s:iconOf()       --> texture ref | the declared icon | nil
 ```
 
-`:iconOf()` は `core/icons` を通して、実行時に Palworld のパートナースキルアイコン DataTable
-(`/Game/Pal/DataTable/PartnerSkill/DT_partnerSkillIconDataTable`) を id で引きます。すべての段階が
-フェイルソフトで、テーブルが無い / 行が無い / 列が無い場合は nil を返し、いずれかで失敗すると宣言済みの
-`icon` フィールドが代わりに返ります。そのテーブルに行を持たない id — `"pack:name"` 形式の id はすべてそうです —
-では常に自分の `icon` にフォールバックします。
+`:iconOf()` は `core/icons` を通して、ゲーム側のデータテーブル — パートナースキルのアイコンテーブル
+`/Game/Pal/DataTable/PartnerSkill/DT_partnerSkillIconDataTable` — を id で引きます。どの段階も失敗に強く、
+テーブルが無い / 行が無い / 列が無い場合はいずれも nil になり、失敗したときは宣言した `icon` が返ります。
+このテーブルは Pal 単位のキーなので、たいていのスキル id は当たりません。`"pack:name"` の id は必ず外れます。
+アイコンを出したいなら `icon` を宣言してください。
 
 ```lua
 local Ember = Skill{
     id   = "example:Ember",
     icon = "palforge/example/textures/ember.png",
 }
-Ember:iconOf()   --> the declared icon, since "example:Ember" has no DataTable row
+Ember:iconOf()   --> the declared icon, since "example:Ember" has no row in that table
 
-Skill.get("Legend"):iconOf()   --> the texture ref when that row carries one, else nil
+Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall back to
 ```
 
-## Skills on a pal
+## Pal にスキルを持たせる
 
-Pal は自分が持つスキルを id の配列で宣言します。
+Pal は自分が持つスキルを id の配列で並べます。
 
 ```lua
 local Blaze = Pal{
@@ -366,19 +379,17 @@ local Blaze = Pal{
 Blaze:skillsOf()   --> { "example:Ember", "example:Ironhide" }
 ```
 
-配列は要素ごとに検証され、エラーには添字が入ります。
+要素ごとに検証され、エラーには添字が入ります。
 
 ```text
 PalForge: Pal: field "skills[2]" expects string, got number
 ```
 
 <Callout type="warn">
-`skills` はメタデータです。この id を解決する処理も、パッシブを装備する処理も、アクティブを発動する処理も
-ありません。フレームワークはリストを保持して `pal:skillsOf()` で返すだけで、そこから挙動を作るのはハンドラの
-仕事です。
+この配列はただのリストです。PalForge は id を解決しませんし、パッシブを装備することも、アクティブを
+発動することもありません。リストを保持して `pal:skillsOf()` で返すだけです。続きはハンドラで書きます。
+下のループだけで足ります。
 </Callout>
-
-解決はループ 1 つで済みます。
 
 ```lua
 for _, id in ipairs(Blaze:skillsOf()) do
@@ -389,11 +400,11 @@ for _, id in ipairs(Blaze:skillsOf()) do
 end
 ```
 
-## Native skill ids
+## Palworld 既存のスキル id
 
-`native/skills.lua` は Palworld の 2 つのスキルテーブル — `DT_PassiveSkill_Main_Common`（パッシブ特性）と
-`DT_PartnerSkillParameter`（`RAID_` / `GYM_` / `BOSS_` などエンカウント単位のキーを持つパートナースキル）—
-の行 id をひとつのカタログとして保持しています。
+ゲームに元からあるスキルに挙動を足したいときは、`native/skills.lua` が Palworld の 2 つのスキルテーブル —
+`DT_PassiveSkill_Main_Common`（パッシブ特性）と `DT_PartnerSkillParameter`（`RAID_` / `GYM_` / `BOSS_` など
+エンカウント単位のキーを持つパートナースキル）— の行 id を、ひとつのカタログとして持っています。
 
 ```lua
 local skills = require("palforge.native.skills")
@@ -403,8 +414,8 @@ skills.get("Legend")        -- a cached handle for a catalog id, nil for anythin
 skills.get("not_a_row")     -- nil
 ```
 
-`get(id)` は初回に定義してキャッシュするため、起動時に数千の id が登録されることはありません。カタログ自体は
-ただのデータです。このファイルには手書きの定義も 1 つ入っています。
+`get(id)` は最初に聞かれたときに定義し、その結果を覚えます。ですから起動時に数千の id が登録されることは
+ありません。カタログ自体はただのデータです。このファイルには出来合いの定義も 1 つ入っています。
 
 ```lua
 skills.Fireball             -- Skill{ id = "FlameThrower", kind = "active",
@@ -413,18 +424,19 @@ skills.Fireball:activate(owner)
 ```
 
 <Callout type="info">
-`"FlameThrower"` は `DT_PartnerSkillParameter` の `DevName` 列の値であって行 FName ではないため、カタログの
-メンバーではありません。`skills.get("FlameThrower")` が手書きのハンドルを返すよう、キャッシュに事前登録されて
-います。その `onActivate` はプレースホルダで、飛び道具を出すネイティブ呼び出しは確認できていないため、まだ何も
-しません。`element` / `cooldown` / `power` もフレームワーク側のメタデータで、DataTable から読んだ値ではありません。
+`skills.CATALOG` に `"FlameThrower"` は入っていません。この名前は行名ではなく `DT_PartnerSkillParameter` の
+`DevName` 列の値だからです。それでも `skills.get("FlameThrower")` は上のハンドルを返します。その `onActivate` は
+まだ何もしません。飛び道具を Lua から出す方法が確認できていないためです。動かしたい場合は自分の処理を
+ハンドラに書いてください。`element` / `cooldown` / `power` も PalForge 側で決めた数値で、ゲームから読んだ値では
+ありません。
 </Callout>
 
-## Recipes
+## レシピ
 
-### Fire a skill from a pal handler
+### Pal のハンドラからスキルを発動する
 
-`onDamaged` はライブな Pal のフックなので、これは実際にゲーム中で発動するスキルになります。`ctx.actor` は
-ダメージを受けた Pal のポーンで、そのまま owner にするのが自然です。
+`onDamaged` は Pal がダメージを受けたときに自動で実行されます。つまりこれは実際にゲーム中で発動するスキルです。
+`ctx.actor` はダメージを受けた Pal なので、そのまま owner にするのが自然です。
 
 ```lua title="content/retaliate.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -461,14 +473,14 @@ Pal{
 }
 ```
 
-ここで効いているのがクールダウンです。連続ダメージでは `onDamaged` が何度も呼ばれますが、5 秒の窓ごとに
-最初の 1 回だけが通ります。
+ここで効いているのがクールダウンです。連続でダメージを受けると `onDamaged` は何度も呼ばれますが、
+5 秒の窓ごとに最初の 1 回だけが通ります。
 
-### Fire a skill from a building
+### 建物からスキルを発動する
 
-`onRightClick` もライブで、Building のハンドラは第 1 引数にライブインスタンスを受け取るため、建造物側で状態を
-持てます。インタラクトのコンテキストには操作したアクターが `ctx.player` として入っており、クールダウンの
-owner に向いています。
+`onRightClick` も自動で実行されます。プレイヤーが建物を操作したときです。ハンドラの第 1 引数には設置された
+建物自身が `self` として届くので、建物側で状態を持てます。コンテキストには操作したアクターが `ctx.player` と
+して入っており、クールダウンの owner に向いています。
 
 ```lua title="content/brazier.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -509,10 +521,10 @@ Building{
 }
 ```
 
-### Bind a skill to a key
+### キーにスキルを割り当てる
 
-PalForge 自身の開発用キーは `core/keyboard` 経由で登録されており、その中身は UE4SS の `RegisterKeyBind` を
-`ExecuteInGameThread` と `pcall` で包んだものです。パックからも同じ 2 つの呼び出しをそのまま使えます。
+UE4SS には `RegisterKeyBind` があります。中身を `ExecuteInGameThread` で包むと、そこからゲームに触れても
+安全です。この 2 つはパックからそのまま使えます。PalForge 自身の開発用キーも同じ形で登録しています。
 
 ```lua title="content/keybind.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -540,13 +552,12 @@ RegisterKeyBind(Key.F5, function()
 end)
 ```
 
-キーを押しっぱなしにするとバインドは繰り返し呼ばれますが、宣言したクールダウンによって発動は 2 秒に 1 回に
-なります。
+キーを押しっぱなしにするとバインドは何度も呼ばれますが、クールダウンによって発動は 2 秒に 1 回になります。
 
-### A passive that applies an Effect
+### Effect を付けるパッシブ
 
-`Effect` は共有ハートビートで駆動される本物のランタイムを持っています。「装備している間、何かが起き続ける」を
-組み立てるには、パッシブスキルと組み合わせるのが素直です。`onEquip` で適用し、`onUnequip` で解除します。
+`Effect` は自前のタイマーを持っています。「装備している間、何かが起き続ける」を作るには、パッシブスキルと
+組み合わせるのが素直です。`onEquip` で付けて、`onUnequip` で外します。
 
 ```mermaid
 sequenceDiagram
@@ -616,14 +627,16 @@ Pal{
 }
 ```
 
-`onSpawned` と `onDeath` はライブな Pal のフックなので、装備も解除も Pal がワールドに出れば自動で行われます。
-`onDeath` は確認済みのネイティブフックですが、`onSpawned` が乗っている `BroadcastOnCompleteInitializeParameter`
-は未確認の候補フックなので、装備はベストエフォートと考えてください。スキルが受け持つのは宣言と 2 つのハンドラで、
-タイミングを受け持つのは `Effect` です。
+`onSpawned` と `onDeath` はどちらも Pal がワールドに出れば自動で実行されるので、装備も解除も自分で
+呼ばなくて済みます。`onDeath` は確認済みのゲーム側フックに乗っています。`onSpawned` が乗っている
+`BroadcastOnCompleteInitializeParameter` はまだ未確認の候補なので、装備はベストエフォートと考えて、
+確実にしたいなら別の場所でも装備し直してください。スキルが受け持つのは 2 つのハンドラ、タイミングを
+受け持つのは `Effect` です。
 
-## Validation errors
+## 検証エラー
 
-問題はすべて `PalForge: ` で始まるハードエラーになり、呼び出しが中途半端に成功することはありません。
+問題はすべて `PalForge: ` で始まるエラーになり、呼び出しはそこで止まります。定義が中途半端に成功することは
+ありません。
 
 ```text
 PalForge: Skill: field "id" is required (skill id: a game row id or "pack:name")
@@ -633,14 +646,25 @@ PalForge: Skill: field "power" expects number, got string
 PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated" (did you mean "onActivate"?). Valid fields: onActivate, onHit, onEquip, onUnequip
 ```
 
-ハンドラ名を閉じた集合にしているのは意図的です。`onActivated` のような綴り間違いが黙って受け入れられると、
-「誰も呼んでいないスキル」と区別がつかなくなります。このドメインにはその失敗パターンだけで十分です。
+ハンドラ名も同じように検証されます。これは助かるところで、`onActivated` のような綴り間違いがすぐ分かります。
+黙って受け入れられると、いつまでも動かないスキルが手元に残ることになります。
 
-## Related
+## 関連ページ
 
 <Cards>
-  <Card title="Pal" href="/docs/api/pal">Pal へのスキル宣言と、それを駆動できるライブなフック。</Card>
-  <Card title="Effect" href="/docs/api/effect">本物のタイマーを持つドメイン。パッシブが動き続けるための土台。</Card>
-  <Card title="Building" href="/docs/api/building">ライブインスタンスと onRightClick、もう 1 つの自然なトリガー。</Card>
-  <Card title="Lifecycle" href="/docs/concepts/lifecycle">どのチャンネルが存在し、どのフックにネイティブソースが付いているか。</Card>
+  <Card title="Pal" href="/docs/api/pal">Pal へのスキルの並べ方と、それを駆動できるフック。</Card>
+  <Card title="Effect" href="/docs/api/effect">タイマーを持つドメイン。パッシブが動き続けるための土台。</Card>
+  <Card title="Building" href="/docs/api/building">設置された建物と onRightClick、もう 1 つの自然なトリガー。</Card>
+  <Card title="Lifecycle" href="/docs/concepts/lifecycle">どのチャンネルがあり、どのフックにゲーム側の供給があるか。</Card>
 </Cards>
+
+## まとめ
+
+- スキルは `Skill{ ... }` で作ります。必ず指定するのは `id` だけです。
+- 勝手には発動しません。自分のコードで `:activate` / `:hit` / `:equip` / `:unequip` を呼びます。
+- `cooldown` は秒数で、owner ごとに数えられ、見るのは `:activate` だけです。
+- `kind = "passive"` にすると `:activate` は `false` を返します。`:equip` と `:unequip` を使ってください。
+- ハンドラが落ちても戻り値が `false` になるだけでログには出ないので、ログはハンドラの中で出します。
+- `pal:skillsOf()` で Pal が持つ id が読めます。そこから回すのは自分の仕事です。
+
+次は [Effect](/docs/api/effect) を読むと、パッシブが効き続けるためのタイマーが手に入ります。

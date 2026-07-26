@@ -8,15 +8,21 @@
 -- -> SetWorldScale3D. Trap: an empty {} FTransform zero-initializes the relative scale,
 -- so the explicit SetWorldScale3D call is mandatory.
 --
+-- detach removes again what attach added: K2_DestroyComponent on the component we
+-- created (the BlueprintCallable counterpart of the proven AddComponentByClass — not
+-- itself confirmed in-game, so detach reports only whether that call executed).
+--
 -- Material layer native APIs:
 --   UPrimitiveComponent:CreateAndSetMaterialInstanceDynamic(int32 elem) -> MID
 --   UMaterialInstanceDynamic:SetVectorParameterValue(FName, FLinearColor)  -- color
 --   UMaterialInstanceDynamic:SetTextureParameterValue(FName, UTexture*)    -- texture
 --   UMaterialInstanceDynamic:SetScalarParameterValue(FName, float)
 --   UKismetRenderingLibrary:ImportFileAsTexture2D(WorldCtx, FString) -> UTexture2D
--- Because no custom base material ships, element-0 is the engine default (no tint
--- param), so a color/texture may not visibly apply until a base material with those
--- params is supplied. The layer is FULLY fail-soft; the mesh always attaches.
+-- Because no custom base material ships, element-0 ends up on whichever engine material
+-- happens to be loaded (BASE_MATERIAL_CANDIDATES below), so a color/texture may not
+-- visibly apply until a base material carrying those params is supplied. The MID itself
+-- is created on EVERY attach, declared colour or not, so a later setColor always has
+-- something to write to. The layer is FULLY fail-soft; the mesh always attaches.
 
 local Renderer = require("palforge.core.mesh.base.renderer")
 local log      = require("palforge.utils.log").scope("mesh")
@@ -175,6 +181,10 @@ end
 -- Keep the created MID per actor so a marker's colour can be RE-SET at runtime.
 local midByActor = setmetatable({}, { __mode = "k" })
 
+-- Keep the component we created per actor, so detach removes exactly what attach added
+-- (and nothing that was already on the actor). __mode="k" weak table.
+local compByActor = setmetatable({}, { __mode = "k" })
+
 -- Re-tint an already-attached marker. color = {r,g,b,a} 0..1. Also writes emissive
 -- param names so, on a material that supports it, "connected" visibly glows. Safe
 -- no-op if the actor has no MID yet (marker not attached / no base material).
@@ -195,8 +205,11 @@ end
 -- Apply the material layer to a MID on element 0. Fully fail-soft: returns a short
 -- status string describing the outcome (for logging). `def` may carry
 -- color / texture (abs path) / params / material (base material object path). Never throws.
+-- The MID is created even when `def` declares NO material fields at all: setColor writes
+-- through midByActor, so a mesh attached without a colour could otherwise never be tinted
+-- afterwards. Such an attach still reports "none" so it stays silent in the log.
 local function applyMaterial(comp, worldCtx, def)
-    if not (def.color or def.texture or def.params or def.material) then return "none" end
+    local declared = (def.color or def.texture or def.params or def.material) and true or false
     local status = {}
     local mid
     -- prefer a MID parented to a real base material (renders color / vertex color)
@@ -211,11 +224,12 @@ local function applyMaterial(comp, worldCtx, def)
     end
     if not mid then
         status[#status + 1] = "no-MID(no base material loaded)"
-        return table.concat(status, ",")
+        return declared and table.concat(status, ",") or "none"
     end
     -- worldCtx is the owning actor (attach passes it) — remember the MID so its
     -- colour can be updated later. __mode="k" weak table.
     if worldCtx then pcall(function() midByActor[worldCtx] = mid end) end
+    if not declared then return "none" end
 
     -- texture (imported PNG) — try known texture param names
     if def.texture then
@@ -285,6 +299,8 @@ function Procedural:attach(actor, def)
         assert(pmcClass and pmcClass:IsValid(), "ProceduralMeshComponent class not found")
         local comp = actor:AddComponentByClass(pmcClass, false, {}, false)
         assert(comp and comp:IsValid(), "AddComponentByClass failed")
+        -- remember it immediately: even a half-built component is ours to destroy again
+        pcall(function() compByActor[actor] = comp end)
         -- CreateMeshSection(section, verts, tris, normals, UV0, vertexColors, tangents, collision)
         -- collision=false: decorative meshes must never collide (a collider here both
         -- hitches on cook AND intercepts the build placement raycast).
@@ -319,6 +335,34 @@ function Procedural:attachOnce(actor, def)
         return true
     end
     return false
+end
+
+-- Destroy the component this backend added to `actor`, so attach can dress it again.
+-- Returns false when we added nothing, and when the destroy call did not execute — in
+-- that second case the bookkeeping is deliberately LEFT in place, because the component
+-- is still on the actor and the once-guard is the only thing stopping a second one.
+function Procedural:detach(actor)
+    if not actor then return false end
+    local comp = compByActor[actor]
+    if not comp then return false end
+    local live = false
+    pcall(function() live = comp:IsValid() == true end)
+    if not live then
+        -- already gone (the actor was torn down under us): forget it, but nothing was
+        -- removed BY this call, so say so
+        compByActor[actor] = nil
+        dressed[actor]     = nil
+        midByActor[actor]  = nil
+        return false
+    end
+    if not pcall(function() comp:K2_DestroyComponent(comp) end) then
+        log.warn("detach failed (K2_DestroyComponent unavailable)")
+        return false
+    end
+    compByActor[actor] = nil
+    dressed[actor]     = nil
+    midByActor[actor]  = nil
+    return true
 end
 
 return Procedural

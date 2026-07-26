@@ -24,11 +24,11 @@ M.bound = {}
 -- Built-in behaviour files shipped with PalForge (always loaded by load()). New
 -- files dropped into functions/ are also auto-discovered (see load()); this list is
 -- the reliable floor that works even when a directory scan isn't available.
--- NOTE: some of these dev keybinds (like the dump probe) are TEMPORARY diagnostics and
--- should be removed once their purpose is served. f1 currently holds the audio play-
--- mechanism self-test (moved off F8, which Palworld does not deliver) — delete f1.lua +
--- restore its example when audio is confirmed.
-M.BUILTIN = { "f1", "f4_unlock" }
+-- NOTE: F1 is NOT here. palforge.test binds it to the in-game API suite when the kernel
+-- requires that module, which is later than load() — so a file in functions/ that also
+-- claimed F1 would be silently overridden. Bind test runs through palforge.test.bind
+-- instead; everything else belongs here.
+M.BUILTIN = { "f4_unlock" }
 
 -- Register `fn` on `keyName`. Installs the engine keybind once per key; a later
 -- register() on the same key replaces the callback in place. `opts` is stored for

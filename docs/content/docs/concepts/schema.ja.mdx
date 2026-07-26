@@ -1,25 +1,29 @@
 ---
-title: フィールドと検証
-description: core/schema が形をどう宣言し、各ディスクリプタキーが何をして、定義が誤っているときにどのエラーが出るか
+title: 定義に書けるもの
+description: 書けるフィールドと、それぞれの意味と、間違えたときに出るメッセージ
 ---
 
-PalForge のすべての `X{ ... }` 呼び出しは、何かが登録される前に宣言済みの形へ照合されます。
-その仕組みは `Scripts/palforge/core/schema.lua` の一枚だけです。このファイル自身は型定義を
-一切持たず、各 api モジュールが自分の形を宣言し、この仕組みがその宣言を「検証し、デフォルトを
-埋め、自分自身を説明する」ものに変えます。
+## このページでできるようになること
 
-検証は厳格です。問題があれば必ずハードエラーになり、`error(msg, 0)` で送出されるためファイル名と
-行番号の接頭辞は付きません。メッセージはドメイン名・フィールド名・理由を名指しし、UE4SS のログに
-そのままの文面で出ます。define 呼び出しが中途半端に成功することはありません。
+- パル・アイテム・建物の定義を、一発でゲームに受け付けてもらう
+- 定義が間違っているときに出るメッセージを読んで、名指しされた行をそのまま直す
+- ゲームを動かしたまま、パルや建物にどのフィールドが書けるかを調べる
+- 同じモデルを、書き直さずに複数のパルで使い回す
+- 自分のパックの設定も同じ方法で確認して、書き間違いを遊ぶ前に止める
 
-## 形を宣言する
+`Pal{ ... }` や `Item{ ... }`、`Building{ ... }` といった `X{ ... }` の呼び出しは、ゲームに
+何かが届く前に「書いてよいフィールドの一覧」と照合されます。すべて合っていれば定義が返ってきます。
+合わなければ呼び出しはそこで止まり、ドメイン（何を定義しようとしていたか）とフィールド名と理由を
+名指ししたメッセージが出ます。定義が中途半端に成功することはありません。全部登録されるか、何も
+登録されないかのどちらかです。
 
-`schema.define(name, fields, opts)` がスペックを組み立てます。`fields` はマップではなく
-ディスクリプタの**配列**です。宣言順がそのまま保存され、その順序が `:help()` と生成される
-エディタ用型定義を駆動します。
+メッセージの前にファイル名や行番号は付きません。UE4SS のログ（MOD ローダーがゲーム実行中に
+書き出すテキストファイル）に、そのまま検索できる 1 行として出ます。
 
-以下は `Scripts/palforge/api/mesh.lua` にある実際の宣言で、`type` / `values` / `default` /
-`required` / `check` / `doc` が一箇所に出てくる形です。
+## フィールド一覧はこう書かれている
+
+各ドメインは、受け付けるフィールドをただのデータとして一度だけ書き出しています。以下はメッシュ
+（パルや建物に付ける 3D モデル）の実際の一覧です。フィールドに付けられるキーが一箇所に出てきます。
 
 ```lua title="Scripts/palforge/api/mesh.lua"
 local schema = require("palforge.core.schema")
@@ -40,10 +44,12 @@ local Spec = schema.define("Mesh.Spec", {
 }, { handle = "Mesh.Handle" })
 ```
 
-フィールド名はディスクリプタの**第 1 位置要素**です。それ以外はすべて同じテーブル上の名前付き
-キーになります。
+フィールド名は各行の**第 1 要素**です。それ以外はすべて同じ行の名前付きキーになります。
 
-`schema.define` が返すスペックオブジェクトの表面は次のとおりです。
+`fields` はマップではなく配列なので、書いた順がそのまま返ってきます。この順序が `:help()` の出力と
+エディタの補完の並びになります。
+
+`schema.define(name, fields, opts)` が返すスペックオブジェクトの表面は次のとおりです。
 
 ```lua
 Spec:validate(t, context)   -- a validated COPY with defaults filled; raises on any problem
@@ -54,8 +60,7 @@ Spec.name                   -- "Mesh.Spec"
 Spec.handle                 -- "Mesh.Handle", or nil
 ```
 
-api モジュールは define 関数の最初の文で `:validate` を呼び、返ってきたコピーから定義クラスを
-組み立てます。
+`X{ ... }` の呼び出しは、まず自分の一覧を通し、返ってきたコピーから定義を組み立てます。
 
 ```lua title="Scripts/palforge/api/pal.lua"
 local function define(spec)
@@ -65,19 +70,19 @@ local function define(spec)
 end
 ```
 
-第 2 引数は、すべてのエラーメッセージの先頭に付く context 文字列です。`"Pal"` を渡しているから
-こそ `PalForge: Pal.Spec: ...` ではなく `PalForge: Pal: ...` と読めます。省略した場合はスペック
-自身の名前が使われます。
+第 2 引数は、その呼び出しのメッセージの先頭に出る名前です。`"Pal"` を渡しているので
+`PalForge: Pal.Spec: ...` ではなく `PalForge: Pal: ...` と読めます。省略すると、その形自身の名前が
+使われます。
 
 <Callout type="info">
-名前はレジストリ全体で一意です。`"Pal.Spec"` を二度宣言すると
-`PalForge: schema.define: "Pal.Spec" is already declared` が送出されるため、2 つのモジュールが
-同じ形の名前を主張することはできません。
+形の名前は全体で一意です。`"Pal.Spec"` を二度宣言すると
+`PalForge: schema.define: "Pal.Spec" is already declared` が出ます。自分で形を宣言するときは、
+他が使っていない名前を選んでください。
 </Callout>
 
-## フィールドディスクリプタのキー
+## フィールドに書けるもの
 
-ディスクリプタに現れうるのは 11 個です。位置指定の名前と、以下の 10 キー。これ以外はありません。
+1 つのフィールドには、名前に加えて最大 10 個のキーを書けます。書けるのはこれだけです。
 
 <TypeTable
   type={{
@@ -127,7 +132,7 @@ end
 
 ### type
 
-表記はただの文字列です。ユニオンはパイプで書き、いずれか 1 つに一致すれば満たされます。
+表記はただの文字列です。ユニオンはパイプで書き、どれか 1 つに一致すれば通ります。
 
 ```lua
 { "maxStack", type = "number" }                    -- Item.Spec
@@ -135,8 +140,8 @@ end
 { "icon" }                                         -- no type: anything is accepted
 ```
 
-`"function"` が期待される場所では、**呼び出し可能なテーブルが関数の代わりになります**。
-`__call` メタメソッドを持つテーブルはイベントハンドラとして通ります。
+`"function"` が期待される場所では、**呼び出せるテーブルが関数の代わりになります**。`__call`
+メタメソッドを持つテーブルはイベントハンドラとして通ります。
 
 ```lua
 local counter = setmetatable({ n = 0 }, {
@@ -148,21 +153,21 @@ Pal{ id = "example:Boss", events = { onSpawned = counter } }   -- accepted
 
 ### required
 
-判定は値が `nil` のときだけ、しかも `default` を参照する前に行われます。したがって実質的に、
-required と default が同時に効くフィールドは存在しません。
+判定はフィールドを書かなかったときだけ、しかも `default` を見る前に行われます。そのため required と
+default が同時に効くフィールドはありません。
 
 ```lua
 { "model", type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" }
 ```
 
-`id` はすべてのドメインスペックで `required = true` です。`Mesh.Spec` だけが例外で、他の定義の
-中にインラインで書かれたメッシュには名付けるものが無いためです。直接定義されたメッシュについては
-`api/mesh` が検証後に手作業で再チェックするので、結局 id が必要になります。
+`id` はどのドメインでも必須です。唯一 `Mesh.Spec` だけが任意で、パルや建物の中にインラインで書いた
+メッシュには名付けるものが無いからです。`Mesh{ ... }` を単独で書く場合はやはり id が必要で、
+一覧を通した直後に `api/mesh` が別途チェックします。
 
 ### default
 
-デフォルトは欠けているフィールドを埋め、埋まった値は自分で書いた値とまったく同じ type / `values`
-/ `arrayOf`・`mapOf` / `of` / `check` の各段を通ります。
+デフォルトは書かなかったフィールドを埋めます。埋まった値は、自分で書いた値とまったく同じ type /
+`values` / `arrayOf`・`mapOf` / `of` / `check` の各段を通ります。
 
 ```lua
 { "kind",         type = "string", default = "skeletal" }   -- Mesh.Spec
@@ -170,19 +175,18 @@ required と default が同時に効くフィールドは存在しません。
 { "stackable",    type = "boolean", default = false }       -- Effect.Spec
 ```
 
-関数のデフォルトは**呼び出されて**新しい値を作ります。可変なデフォルトを定義間で共有しないための
-書き方です。
+関数のデフォルトは**呼び出される**ので、1 つのテーブルを共有せず、定義ごとに新しい値が作られます。
 
 ```lua
 { "tags", type = "table", default = function() return {} end }
 ```
 
-現時点でツリー内に関数デフォルトを使うスペックはありません。`Spec:help()` もそれを飛ばし、
-関数以外の値のときだけ `default=` を印字します。
+PalForge 自身のフィールド一覧に関数デフォルトを使うものは今のところありませんが、自分の形では
+使えます。`Spec:help()` は素の値のときだけ `default=` を印字し、関数のときはその表示を省きます。
 
 ### values
 
-`==` で各要素と順に比較されます。
+値は列挙のいずれかと等しくなければなりません。`==` で先頭から順に比較されます。
 
 ```lua
 { "kind",     type = "string", values = { "procedural", "static", "skeletal", "obj" } }  -- Mesh.Spec
@@ -194,9 +198,8 @@ required と default が同時に効くフィールドは存在しません。
 
 ### of
 
-値は別のスペックで検証され、**検証済みのコピーが出力側でそれを置き換えます**。エラーの context は
-内側の形の名前まで伸びるので、ネストしたテーブル内のフィールドについての苦情でも、どの形を読みに
-行けばよいかが分かります。
+値は別の形で検証され、**検証済みのコピーが結果側でそれを置き換えます**。メッセージには内側の形の
+名前まで伸びるので、ネストしたテーブル内のフィールドの話でも、どの一覧を読みに行けばよいか分かります。
 
 ```lua
 { "mesh",   type = "table", of = Mesh,   doc = "the mesh attached to a spawned pawn" }
@@ -206,7 +209,7 @@ required と default が同時に効くフィールドは存在しません。
 
 ### arrayOf
 
-**配列部**の全要素が `ipairs` で型検査され、添字が報告されるフィールド名の一部になります。
+**配列部**の全要素が `ipairs` で型検査され、添字がメッセージ中のフィールド名の一部になります。
 
 ```lua
 { "skills",   type = "table", arrayOf = "string" }   -- Pal.Spec
@@ -217,13 +220,13 @@ required と default が同時に効くフィールドは存在しません。
 Pal{ id = "example:Boss", skills = { "example:Fire", "example:Gust" } }   -- fine
 ```
 
-`ipairs` で走査するため、`arrayOf` のテーブル内に置かれた文字列キーは訪問されません。連続した
-配列部だけが検査されます。
+`ipairs` で走査するため、`arrayOf` のテーブルに置かれた文字列キーは見られません。番号の付いた
+連続部分だけが検査されます。
 
 ### mapOf
 
-テーブル内の全ての値が `pairs` で型検査され、キーが報告されるフィールド名の一部になります。配列部も
-訪問されるので、`materials = { "Wood" }` は `materials.1` として報告されます。
+テーブル内の全ての値が `pairs` で型検査され、キーがメッセージ中のフィールド名の一部になります。
+配列部も見られるので、`materials = { "Wood" }` は `materials.1` として報告されます。
 
 ```lua
 { "materials", type = "table", mapOf = "number", required = true,
@@ -239,14 +242,15 @@ Item{
 
 ### doc
 
-1 行の説明で、`Spec:help()` に表示され、生成される `---@field` 注釈の末尾コメントとして出力され
-ます。検証がこれを読むのは 1 箇所だけで、「is required」エラーが括弧内に引用します。`check` の
-失敗が引用するのは check 自身が返した理由であって、`doc` ではありません。
+1 行の説明です。`Spec:help()` に表示され、エディタが読む `---@field` 行の末尾コメントとしても
+出力されます。検証がこれを使うのは 1 箇所だけで、「is required」のメッセージが括弧内に引用します。
+`check` の失敗が引用するのは check 自身が返した理由で、`doc` ではありません。
 
 ### sig
 
-関数フィールドの LuaLS シグネチャです。**検証はこれを完全に無視します**。読むのは
-`tools/gen-types.lua` だけで、`types.lua` により良い型を書き込むためだけに使われます。
+関数フィールドについて LuaLS（エディタの補完を支える Lua 言語サーバ）が表示するシグネチャです。
+**検証はこれを完全に無視します。** 読むのは `tools/gen-types.lua` だけで、`types.lua` により良い型を
+書き込むためだけに使われます。
 
 ```lua
 { "onSpawned", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -255,11 +259,10 @@ Item{
 
 ### check
 
-ネストした `of` の検証も含め、**すべての後に**走る述語です。受理するなら `true`、拒否するなら
-`false` と理由文字列を返し、その理由がエラー文にそのまま引用されます。
+ネストした `of` も含めて、**すべての後に**走る自前の判定です。受理するなら `true`、拒否するなら
+`false` と理由の文字列を返します。その理由がメッセージにそのまま引用されます。
 
-ツリー内で共有されている唯一の check が `schema.nonEmpty` で、全ドメインの `id` フィールドが
-使っています。
+共有されているのは `schema.nonEmpty` で、全ドメインの `id` フィールドが使っています。
 
 ```lua title="Scripts/palforge/core/schema.lua"
 function M.nonEmpty(v)
@@ -268,7 +271,7 @@ function M.nonEmpty(v)
 end
 ```
 
-自作の check も同じ契約に従います。
+自作の check も同じ約束に従います。
 
 ```lua
 { "packId", type = "string", check = function(v)
@@ -277,7 +280,7 @@ end
   end },
 ```
 
-## スペックのオプション
+## もう 1 つのオプション handle
 
 `schema.define` の第 3 引数が受け取るキーは、現時点で 1 つだけです。
 
@@ -294,14 +297,14 @@ end
 }, { handle = "Mesh.Handle" })
 ```
 
-スペック側で一度宣言しておけば、`of` でそのスペックを指すすべてのフィールドが、書き直すことなく
-生成型でユニオンを得ます。`Pal.Spec.mesh` は `Mesh.Spec|Mesh.Handle` になります。派生スペックは
-ベースの `handle` を引き継ぐため、`Building.Spec.Mesh` も `Mesh.Handle` を報告します。
+形の側で一度宣言しておけば、`of` でその形を指すすべてのフィールドが、書き直さなくてもエディタ上で
+ユニオンになります。`Pal.Spec.mesh` は `Mesh.Spec|Mesh.Handle` です。派生した形はベースの
+`handle` を引き継ぐので、`Building.Spec.Mesh` も `Mesh.Handle` を報告します。
 
-## 検証の流れ
+## 定義を呼んだときに起きること
 
-`Spec:validate(t, context)` は `t` を決して変更しません。返すのは**新しいプレーンなテーブル**で、
-下流からは構築された値と手書きの値を区別できません。
+`Spec:validate(t, context)` は渡したテーブルを決して変更しません。返すのは**新しい素のテーブル**で、
+後続からは組み立てられた値と手書きの値を区別できません。
 
 ```mermaid
 flowchart TD
@@ -314,11 +317,11 @@ flowchart TD
   E --> F[return a new plain table]
 ```
 
-入力が `nil` の場合は空テーブルとして扱われるので、必須フィールドは依然として失敗します。どの
-フィールドを調べるより先に全キーが拒否されるため、定義の他の部分も壊れているときでもタイプミスが
-報告されます。文字列でないキーは、宣言済みの名前と照合するより前に、その場で拒否されます。
+入力が `nil` なら空テーブル扱いなので、必須フィールドはやはり失敗します。どのフィールドを調べるより
+先に全キーが検査されるため、定義の他の部分も壊れているときでも書き間違いが報告されます。文字列で
+ないキーは、宣言済みの名前と照合するより前にその場で拒否されます。
 
-宣言された各フィールドは、次の順序でまったく同じパイプラインを通ります。
+宣言された各フィールドは、次の順序でまったく同じ段を通ります。
 
 ```mermaid
 flowchart TD
@@ -338,16 +341,16 @@ flowchart TD
   L --> K
 ```
 
-覚えておく価値のある帰結が 2 つあります。
+この順序から 2 つのことが言えます。
 
-- `of` のための unwrap は type 検査**より前**に走ります。したがって table が宣言された場所に
-  ハンドルを渡した場合、`type` が検査される時点で既にプレーンなテーブルになっています。
-- `check` はネストの**後**の値を見ます。`of` を持つフィールドの check が受け取るのは生の入力では
+- `of` のための unwrap は type 検査**より前**に走ります。table が宣言された場所にハンドルを渡した
+  場合、`type` が検査される時点で既に素のテーブルになっています。
+- `check` はネストの**後**の値を見ます。`of` を持つフィールドの check が受け取るのは、生の入力では
   なく検証済みのコピーです。
 
-コピーは 1 段だけです。ネストした `of` の形は新しいテーブルへ再検証されますが、`data` や `color`
+コピーは 1 段だけです。ネストした `of` の形は新しいテーブルへ検証し直されますが、`data` や `color`
 や `offset` のような素の `table` フィールドは参照のまま持ち越されます。あなたが書いたテーブルが、
-そのまま定義の保持するテーブルです。
+そのまま定義の持つテーブルです。
 
 ```lua
 local payload = { charges = 3 }
@@ -355,9 +358,10 @@ local pal = Pal{ id = "example:Boss", data = payload }
 payload.charges = 5   -- the definition sees 5: `data` is not deep-copied
 ```
 
-## 失敗モード
+## 間違えたときに出るもの
 
-以下のメッセージはすべて、現在のソースが実際に送出する文面そのものです。
+定義から出るメッセージと、それを出すコードと、直し方をすべて並べます。テキストの部分はゲームが
+実際に印字する文面そのままなので、その一部をコピーしてログ検索に使えます。
 
 ### テーブルでない
 
@@ -369,6 +373,8 @@ Pal("example:Boss")
 PalForge: Pal: expected a table, got string. Fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 ```
 
+直し方: テーブルを渡します。丸括弧ではなく波括弧で `Pal{ id = "example:Boss" }` と書きます。
+
 ### 文字列でないキー
 
 ```lua
@@ -378,6 +384,8 @@ Pal{ id = "example:Boss", [1] = "x" }
 ```text
 PalForge: Pal: keys must be strings, got a number key
 ```
+
+直し方: すべての要素に名前を付けます。波括弧の中に値だけを書くと、それは要素 `1` になります。
 
 ### 未知のフィールド、もしかして提案付き
 
@@ -397,6 +405,8 @@ Building{ id = "example:Bench", tickInverval = 4 }
 PalForge: Building: unknown field "tickInverval" (did you mean "tickInterval"?). Valid fields: id, name, description, gridCm, buildIds, tickInterval, mesh, material, color, texture, icon, state, events, data
 ```
 
+直し方: 提案された名前に書き換えます。
+
 ### 未知のフィールド、十分に近い候補が無い
 
 ```lua
@@ -406,6 +416,8 @@ Pal{ id = "example:Boss", zzzzzzzzzz = 1 }
 ```text
 PalForge: Pal: unknown field "zzzzzzzzzz". Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 ```
+
+直し方: 受け付ける名前は `Valid fields:` の後ろに並んでいます。その中から選びます。
 
 ### 必須フィールドの欠落
 
@@ -417,7 +429,9 @@ Pal{ name = "Boss" }
 PalForge: Pal: field "id" is required (pal id: a game CharacterID ("ChickenPal") or "pack:name")
 ```
 
-括弧内はそのフィールドの `doc` です。`doc` が無ければ `type`、それも無ければ `any` が使われます。
+直し方: そのフィールドを足します。括弧内はそのフィールドの `doc` で、何を書けばよいかが分かります。
+ここではゲームの id か `"pack:name"` です。`doc` が無いフィールドでは代わりに `type`、それも
+無ければ `any` が出ます。
 
 ### 型が違う
 
@@ -439,6 +453,9 @@ Building{ id = "example:Bench", state = "uses" }
 PalForge: Building: field "state" expects table|function, got string
 ```
 
+直し方: 表示された型のどれかに合う値を渡します。`state = { uses = 0 }` か
+`state = function() return { uses = 0 } end` です。
+
 ### `values` の外の値
 
 ```lua
@@ -457,9 +474,11 @@ Skill{ id = "example:Fire", kind = "ultimate" }
 PalForge: Skill: field "kind" must be one of { "active", "passive" }, got "ultimate"
 ```
 
+直し方: 波括弧に並んだ値のどれかを使います。受け付けるのはそれだけです。
+
 ### `arrayOf` の要素が不正
 
-添字はフィールド名に畳み込まれるので、経路全体が 1 組の引用符の内側に収まります。
+添字はフィールド名に畳み込まれるので、経路全体が 1 組の引用符に収まります。
 
 ```lua
 Pal{ id = "example:Boss", skills = { "example:Fire", 3 } }
@@ -468,6 +487,8 @@ Pal{ id = "example:Boss", skills = { "example:Fire", 3 } }
 ```text
 PalForge: Pal: field "skills[2]" expects string, got number
 ```
+
+直し方: `skills[2]` はリストの 2 番目の要素です。そこを直します。
 
 ### `mapOf` の値が不正
 
@@ -489,6 +510,8 @@ Item{ id = "example:Torch", recipe = { materials = { "Wood" } } }
 PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials.1" expects number, got string
 ```
 
+直し方: `materials` は `{ <itemId> = <count> }` の形です。`materials = { Wood = 3 }` と書きます。
+
 ### `check` の失敗
 
 ```lua
@@ -499,12 +522,13 @@ Pal{ id = "" }
 PalForge: Pal: field "id" is invalid: must be a non-empty string
 ```
 
-コロンの後ろは check の第 2 戻り値です。check が `false` だけを返した場合、メッセージは
+直し方: コロンの後ろが check の返した理由です。check が `false` だけを返した場合、メッセージは
 `failed check` で終わります。
 
-### ネストしたスペックのエラーは内側の形を名指しする
+### ネストした形のエラーは内側の名前を出す
 
-context は積み上がります。外側のドメイン、外側のフィールド、内側のスペック名、そして内側の苦情の順です。
+メッセージは順に積み上がります。外側のドメイン、外側のフィールド、内側の形の名前、そして内側の
+指摘です。右から読んでください。最後の部分が直す場所です。
 
 ```lua
 Pal{ id = "example:Boss", mesh = { kind = "skeletal" } }
@@ -522,8 +546,8 @@ Building{ id = "example:Bench", mesh = { model = "/Game/X", colour = { 1, 0, 0, 
 PalForge: Building: field "mesh" (Building.Spec.Mesh): unknown field "colour" (did you mean "color"?). Valid fields: id, kind, model, animClass, scale, offset, texture, color, material, params
 ```
 
-`events` グループも他と同じネストしたスペックなので、扱いは同じです。ハンドラ名の綴り間違いは
-エラーであり、黙って無視されることはありません。
+`events` グループも他と同じネストした形なので、ハンドラ名を書き間違えるとエラーになります。黙って
+発火しないハンドラになることはありません。
 
 ```lua
 Pal{ id = "example:Boss", events = { onSpawn = function(pal, ctx) end } }
@@ -541,10 +565,12 @@ Building{ id = "example:Bench", events = { onPlace = "hello" } }
 PalForge: Building: field "events" (Building.Spec.Events): field "onPlace" expects function, got string
 ```
 
-## もしかして提案の仕組み
+直し方: `(...)` の中の名前が `schema.help` で調べられる内側の形で、書ける名前は行末に並んでいます。
 
-黙って無視されるタイプミスこそ、この層が防ぐために存在する失敗です。そのため未知のフィールドは
-必ず、あなたが意図したフィールドを名指ししようとします。
+## 提案はどう選ばれるか
+
+未知のフィールドは必ず、あなたが意図したフィールドを名指ししようとします。書き間違いはパックを
+読み込んだ時点で見つかります。
 
 ```mermaid
 flowchart TD
@@ -558,16 +584,16 @@ flowchart TD
   D --> G
 ```
 
-**包含が編集距離に勝ちます**。この順序こそが要点です。最もよくある間違いは装飾された名前、つまり
-`mesh` に対する `meshSpec`、`icon` に対する `iconPath` で、人間には自明に読めるのに実際の
-フィールドからは編集距離が数手離れています。包含は双方向に判定されるので、接頭辞も接尾辞も複数形も
-一致します。参加するのは 3 文字以上の宣言済み名だけで、`id` のような 2 文字のフィールドが包含に
-よって宣言の半分を飲み込むことはありません。
+**実在のフィールド名を含んでいる名前が、単に綴りが近いだけの名前に勝ちます。** 最も多い間違いは
+飾りの付いた名前、つまり `mesh` に対する `meshSpec`、`icon` に対する `iconPath` です。人間には
+自明に見えても、実際のフィールドからは編集距離が数手離れています。包含は双方向に判定されるので、
+接頭辞も接尾辞も複数形も一致します。参加するのは 3 文字以上の宣言済み名だけなので、`id` のような
+2 文字のフィールドが包含で宣言の半分を飲み込むことはありません。
 
-どちらも他方を含まないときは Levenshtein 距離が決めます。しかも本当に近いものしか受理せず、
-しきい値は `max(2, floor(#name / 3))` です。
+どちらも他方を含まないときは Levenshtein 距離が決めます。2 つの名前が 1 文字ずつの編集で何手離れて
+いるかです。本当に近いものしか受理せず、上限は `max(2, floor(#name / 3))` です。
 
-どちらの段も小文字化して比較するため、大文字小文字の取り違えも拾えます。
+どちらの段も小文字化して比較するので、大文字小文字の取り違えも拾えます。
 
 | 書いたもの | 提案 | 理由 |
 | --- | --- | --- |
@@ -580,17 +606,17 @@ flowchart TD
 | `nam` | `name` | `name` が `nam` を含む（包含は双方向） |
 | `tickInverval` | `tickInterval` | 距離 1 |
 | `sound` | `soundPath` | `sound` を含む |
-| `zzzzzzzzzz` | なし | 距離のしきい値内に何も無い |
+| `zzzzzzzzzz` | なし | 距離の上限内に何も無い |
 
 <Callout type="warn">
-非常に短い未知のキーではしきい値が一律 2 になるため、提案が洞察ではなく偶然になることがあります。
-`Pal{ xy = 1 }` は `"id"` を提案します。2 文字や 3 文字のキーに対する提案は、答えではなくヒントと
-して扱ってください。
+とても短い未知のキーでは上限が一律 2 になるため、提案が洞察ではなく偶然になることがあります。
+`Pal{ xy = 1 }` は `"id"` を提案します。2 文字や 3 文字のキーへの提案は、答えではなくヒントとして
+扱ってください。
 </Callout>
 
-## 定義をネストする
+## 定義を別の定義の中に入れる
 
-ネストした形は、インラインで書くことも、define 呼び出しが返したオブジェクトをそのまま渡すことも
+ネストする形は、インラインで書くことも、define 呼び出しが返したオブジェクトをそのまま渡すことも
 できます。
 
 ```lua
@@ -608,8 +634,8 @@ Pal{ id = "example:Boss", mesh = body }
 Pal{ id = "example:Add",  mesh = Mesh.get("example:body") }
 ```
 
-どちらも同じようにネストしたスペックへ届きます。理由はメタフィールド 1 つです。メタテーブルが
-`__spec` を持つハンドルは、検証の前にそれが表すテーブルへ置き換えられます。
+どちらも同じ経路で内側の形に届きます。メタテーブルに `__spec` を持つハンドルは、検査が始まる前に、
+それが表すテーブルへ差し替えられます。
 
 ```lua title="Scripts/palforge/core/schema.lua"
 local function unwrap(v)
@@ -625,12 +651,11 @@ end
 Handle.__spec = function(self) return self._cls:source() end
 ```
 
-スキーマはハンドルについて何も知らず、知っているのは `__spec` だけです。unwrap は 2 箇所で走ります。
-`validate` の冒頭で入力全体に対して、そして `of` が設定されたフィールドごとに。したがって
-`mesh = someHandle` と同様に `Spec:validate(someHandle)` も動きます。
+差し替えは 2 箇所で走ります。`validate` の冒頭で入力全体に対して、そして `of` が設定された
+フィールドごとに。したがって `mesh = someHandle` と同じく `Spec:validate(someHandle)` も動きます。
 
-ネストした値はその後で再検証されるため、結果は**コピー**です。呼び出し側が、メッシュを身に着けた
-パル経由でメッシュ定義に手を伸ばすことはできません。
+ネストした値はその後で検査し直されるため、外側の定義が持つのは**コピー**です。メッシュを着ている
+パル経由で、そのメッシュ定義に手を伸ばすことはできません。
 
 ```lua
 local body = Mesh{ id = "example:body", model = "/Game/X/SK_X" }
@@ -640,26 +665,25 @@ pal:mesh().scale = 4     -- mutates the pal's copy, not the "example:body" defin
 ```
 
 <Callout type="warn">
-現時点で `__spec` を持つハンドルはツリー中 `Mesh.Handle` だけです。pal / item / building /
-skill / effect / audio / UI のハンドルは持たないため、それらを別の定義に渡すと素のテーブルとして
-検証され、未知のキーで失敗します。
+現時点で `__spec` を持つハンドルは `Mesh.Handle` だけです。pal / item / building / skill /
+effect / audio / UI のハンドルは持たないため、それらを別の定義に渡すと素のテーブルとして検査され、
+未知のキーで失敗します。その場合はネストする部分をインラインで書いてください。
 </Callout>
 
 <Callout type="warn">
-デフォルトが埋めるのは**欠けている**フィールドだけです。`Mesh{ ... }` は既に
-`kind = "skeletal"` を埋めているので、そのハンドルを building にネストしても
-`Building.Spec.Mesh` の `kind` デフォルトが `"static"` であるにもかかわらず `skeletal` のまま
-です。building 側のポリシーが欲しいときは、メッシュに `kind = "static"` を書くか、building の
-mesh をインラインで宣言してください。
+デフォルトが埋めるのは**書かなかった**フィールドだけです。`Mesh{ ... }` は既に
+`kind = "skeletal"` を埋めているので、そのハンドルを建物にネストしても、`Building.Spec.Mesh` の
+`kind` デフォルトが `"static"` であるにもかかわらず `skeletal` のままです。建物側の方針が欲しい
+ときは、メッシュに `kind = "static"` を書くか、建物の mesh をインラインで宣言してください。
 </Callout>
 
-## 形を派生させる
+## デフォルトだけ変えて一覧を使い回す
 
-`schema.derive(name, base, overrides)` は、別のスペックのコピーとしてフィールド単位のポリシーだけ
-差し替えた新しいスペックを宣言します。各ディスクリプタが丸ごとコピーされ、その上に対応する
-override テーブルがマージされます。
+`schema.derive(name, base, overrides)` は、別の形のコピーとしてフィールド単位の方針だけを差し替えた
+新しい形を宣言します。各フィールドが丸ごとコピーされ、その上に対応する override テーブルが
+マージされます。
 
-ツリー内で唯一の利用箇所が building のメッシュです。
+建物はこれをメッシュで使っています。
 
 ```lua title="Scripts/palforge/api/building.lua"
 local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
@@ -669,10 +693,9 @@ local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
 })
 ```
 
-パルが skeletal メッシュであるのに対して建造物は static メッシュです。それは形そのものではなく
-消費側のポリシーなので、変わるのはそこだけです。10 個のフィールド、その型、`model` が required で
-あること、`Mesh.Handle` オプションはすべてそのまま引き継がれ、後から `Mesh.Spec` にフィールドを
-足せば、誰かがコピーを思い出さなくても building に届きます。
+パルが skeletal メッシュなのに対して建物は static メッシュなので、変わるのはそのデフォルトだけです。
+10 個のフィールドも、その型も、`model` が required であることも、`Mesh.Handle` オプションも
+そのまま引き継がれ、後から `Mesh.Spec` にフィールドを足せば建物側にも届きます。
 
 違いは 2 つの help 出力に現れます。
 
@@ -703,17 +726,15 @@ schema.derive(Test.Spec): "kindd" is not a field of Mesh.Spec
 
 <Callout type="info">
 `derive` は `define` を経由するので、新しい名前は未使用でなければなりません。同じ名前を二度取ると
-`PalForge: schema.define: "Test.Spec" is already declared` が、検証の失敗と同じ
-`error(msg, 0)` で送出され、ファイル名も行番号も付きません。残る 2 つの検査はプログラマのエラーで、
-代わりに `assert` を使います。ベースは `schema.define` で作られたスペックであること、override は
-ベースが宣言しているフィールドを指すこと、の 2 つです。この 2 つには `core/schema.lua` 自身の
-ファイル名と行番号が前置されるので、上のテキストはメッセージの末尾部分であって 1 行全体ではありません。
+`PalForge: schema.define: "Test.Spec" is already declared` が、ファイル名も行番号も無しで出ます。
+残る 2 つの検査は `assert` です。ベースは `schema.define` で作られたスペックであること、override は
+ベースが宣言しているフィールドを指すこと。この 2 つには `core/schema.lua` 自身のファイル名と行番号が
+前に付くので、上のテキストはメッセージの末尾部分であって 1 行全体ではありません。
 </Callout>
 
-## スキーマレジストリ
+## 形に何が書けるかをゲームに聞く
 
-すべてのスペックは宣言された時点で記録されます。これがあるからこそ api モジュールは自分の形を
-プライベートに保てます。ツーリングが見つけるためにモジュールテーブルへぶら下げる必要はありません。
+すべての形は宣言された時点でその名前とともに記録され、ゲームを動かしたまま読み出せます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -724,8 +745,7 @@ schema.help("Pal.Spec")         -- the printable field list
 schema.all()                    -- every declared spec, in declaration order
 ```
 
-`schema.help(name)` は宣言済みの名前について `Spec:help()` を返します。「ここに何を渡せるのか」への
-実行時の答えです。
+`schema.help(name)` が「ここに何を渡せるのか」への実行時の答えです。
 
 ```lua
 print(schema.help("Pal.Spec"))
@@ -747,12 +767,12 @@ Pal.Spec {
 }
 ```
 
-括弧内の印は固定の順序で組み立てられます。`required`、次に関数以外のデフォルトについて
-`default=<値>`、次に `one of { ... }`、次にネストしたスペック名、次に `arrayOf` の `<型>[]`、
-最後に `mapOf` の `map of <型>`。印が 1 つも無いフィールドは名前・型・doc だけを印字します。
+括弧内の印は固定の順で並びます。`required`、次に素の値のときの `default=<値>`、次に
+`one of { ... }`、次にネストした形の名前、次に `arrayOf` の `<型>[]`、最後に `mapOf` の
+`map of <型>`。印が 1 つも無いフィールドは、名前と型と doc だけを印字します。
 
-未知の名前を渡しても `schema.help` は送出**しません**。宣言済みの全名称をソートして並べた文字列を
-返します。
+宣言されていない名前を渡しても送出は**されません**。宣言済みの全名称をソートした文字列が返ります。
+正確な綴りを思い出せないときに便利です。
 
 ```lua
 print(schema.help("Pal.Specc"))
@@ -763,8 +783,8 @@ PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Buildi
 ```
 
 `schema.all()` は新しいリストを**宣言順**で返します。ソートはされません。ネストした形は常にそれを
-参照するスペックより先に宣言されており、これが型ジェネレータに「使われる前に各クラスを出力する」
-ことを可能にしています。
+参照する形より先に宣言されており、これが型ジェネレータに「使われる前に各クラスを出力する」ことを
+可能にしています。
 
 ```lua
 for _, spec in ipairs(schema.all()) do
@@ -793,39 +813,22 @@ UI.Spec              nil
 Coord                nil
 ```
 
-ドメイン接頭辞を持たない唯一の形が `Coord` です。`Player.coordinate()` が生み、
-`Pal.Handle:spawn` が消費する世界座標で、型定義と `schema.help("Coord")` のために
-`api/player.lua` で宣言されています。何かを束縛しているわけではありません。
+名前にドメインが付かない唯一の形が `Coord` です。`Player.coordinate()` が返し、
+`Pal.Handle:spawn` が受け取る世界座標で、`schema.help("Coord")` とエディタの両方がフィールドを
+知れるように `api/player.lua` で宣言されています。
 
-## スペックがモジュール private である理由
+## エディタで見るフィールド一覧
 
-api モジュールは自分の形をローカルに保ち、決して公開しません。
-
-```lua title="Scripts/palforge/api/pal.lua"
-local Spec = schema.define("Pal.Spec", { ... })   -- a local, not Pal.Spec
-```
-
-モジュールテーブルに `Pal.Spec` も `Pal.Events` も存在しません。ドメインは**呼ぶ**ものであって、
-のぞいて回る名前空間ではありません。モジュールの表面は `Pal{ ... }` と `Pal.get`、`Pal.get_all`、
-`Pal.Class` がすべてです。宣言が必要なものはレジストリ経由で到達します。パックにとっても、コンソール
-にとっても、型ジェネレータにとっても入口が 1 本に保たれます。
-
-だからこそ `tools/gen-types.lua` は `require("palforge.api")` だけで済みます。api モジュールを
-require することがその形をレジストリに入れる行為であり、ジェネレータが歩くのはそのレジストリです。
-モジュール一覧は `api/init.lua` の一箇所だけにあり、同期を取るべき第 2 のコピーは存在しません。
-
-## sig と handle と生成される型定義
-
-`Scripts/palforge/types.lua` は `tools/gen-types.lua` がレジストリから生成します。
+`Scripts/palforge/types.lua` は、宣言された形から `tools/gen-types.lua` が生成します。
 
 ```bash
 lua5.4 tools/gen-types.lua
 ```
 
-これは注釈のみのファイルで、実行時に require するものはありません。`Pal{ ... }` が各フィールドを
-doc 付きで補完するには、LuaLS がワークスペース内でこのファイルを見えていればそれで十分です。
+これは注釈だけのファイルで、実行時に require するものはありません。`Pal{ ... }` が各フィールドを
+doc 付きで補完するには、LuaLS がワークスペース内でこのファイルを見えていれば十分です。
 
-各ディスクリプタは、最初に当てはまる規則で LuaLS の型に写されます。
+各フィールドは、最初に当てはまる規則でエディタの型に写されます。
 
 | ディスクリプタ | 出力される型 |
 | --- | --- |
@@ -837,7 +840,7 @@ doc 付きで補完するには、LuaLS がワークスペース内でこのフ�
 | `type` 無し | `any` |
 | それ以外 | 書かれたままの `type` 文字列 |
 
-`required` は `?` を付けるかどうかを決め、関数以外の `default` は doc コメントに追記されます。
+`required` は `?` を付けるかどうかを決め、素の `default` は doc コメントに追記されます。
 `Pal.Spec` の結果は次のとおりです。
 
 ```lua title="Scripts/palforge/types.lua"
@@ -856,14 +859,14 @@ doc 付きで補完するには、LuaLS がワークスペース内でこのフ�
 ```
 
 `mesh` フィールドに `|Mesh.Handle` が付くのは `handle` オプションのおかげで、`Mesh.Spec.Kind` は
-そのスペックの `values` 一覧から生成されたエイリアスです。
+その形の `values` 一覧から生成されたエイリアスです。
 
 ```lua title="Scripts/palforge/types.lua"
 ---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
 ```
 
-スペックを変更したらジェネレータを再実行してください。注釈は宣言から導出されるので、define 呼び出しが
-実際に受け付けるものから乖離することはありません。
+形を変えたらジェネレータを再実行してください。エディタが出すものと、定義が実際に受け付けるものが
+同じに保たれます。
 
 ## レシピ
 
@@ -920,11 +923,11 @@ describe("Item.Spec")
 describe("Item.Spec.Recipe")
 ```
 
-### 自分のパックの設定を同じ仕組みで検証する
+### 自分のパックの設定も同じ方法で検証する
 
-`schema.define` は api モジュール専用ではありません。パック自身の形を宣言すれば、同じ厳格さ、同じ
-もしかして提案、同じ `:help()` がそのまま手に入ります。他のスペックが使っていない名前を選んで
-ください。
+`schema.define` は PalForge のドメイン専用ではありません。パック自身の形を宣言すれば、設定の
+書き間違いが同じメッセージと同じもしかして提案で、読み込み時に止まります。他の形が使っていない
+名前を選んでください。
 
 ```lua title="content/config.lua"
 local schema = require("palforge.core.schema")
@@ -957,7 +960,7 @@ end
 setup{ reward = "Wood", rewardCount = 10, biome = "volcano" }
 ```
 
-タイプミスの挙動は `Pal{ ... }` 呼び出しのときとまったく同じです。
+書き間違いの挙動は `Pal{ ... }` 呼び出しのときとまったく同じです。
 
 ```lua
 setup{ reward = "Wood", rewardCounts = 10 }
@@ -967,10 +970,11 @@ setup{ reward = "Wood", rewardCounts = 10 }
 PalForge: ExamplePack: unknown field "rewardCounts" (did you mean "rewardCount"?). Valid fields: reward, rewardCount, biome, spawnAt
 ```
 
-### 実行時に黙って壊れるのではなく、ロード時に大きく失敗させる
+### ゲーム中に黙って壊れるのではなく、読み込み時に大きく失敗させる
 
-define 呼び出しは送出するので、コンテンツファイル全体をトップレベルの `pcall` 1 つで包んでメッセージ
-をログに出します。パックの残りは読み込まれ続け、理由はログに文面のまま残ります。
+定義の失敗は送出なので、そのファイルの読み込みはそこで止まります。コンテンツファイルをトップレベルの
+`pcall` 1 つで包んでメッセージをログに出せば、パックの残りは読み込まれ、理由はログに文面のまま
+残ります。
 
 ```lua title="content/pals.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -994,9 +998,25 @@ end)
 if not ok then log.err(tostring(err)) end
 ```
 
+## まとめ
+
+- `X{ ... }` の呼び出しは、何かが登録される前に検査されます。丸ごと成功するか、送出して何も登録
+  しないかのどちらかです。
+- `id` はどのドメインでも必須です。書かなかったフィールドは、任意かデフォルトで埋まるかのどちらか
+  です。
+- フィールド名の書き間違いはエラーになり、多くの場合メッセージが意図したフィールドを名指しします。
+- メッセージは `PalForge: ` で始まり、ドメイン、フィールド、理由の順に続きます。`(...)` に形の
+  名前が出たら、それが調べるべき内側の一覧です。
+- `print(schema.help("Pal.Spec"))` はゲーム実行中に形の全フィールドを印字します。名前が違っても
+  送出せず、宣言済みの名前一覧を返します。
+- `Mesh{ ... }` のハンドルはパルや建物にネストでき、外側の定義はそのコピーを持ちます。
+
+次は [ライフサイクル](/docs/concepts/lifecycle) を読むと、`events` に書けるハンドラのうち、
+実際にゲームで走るものが分かります。
+
 <Cards>
-  <Card title="Pal" href="/docs/api/pal">パルのドメインとそのスペック</Card>
-  <Card title="Mesh" href="/docs/api/mesh">メッシュと、他の定義にネストできるハンドル</Card>
-  <Card title="Building" href="/docs/api/building">派生したメッシュの形とライブインスタンス</Card>
+  <Card title="Pal" href="/docs/api/pal">パルに書けるフィールド</Card>
+  <Card title="Mesh" href="/docs/api/mesh">モデルと、他の定義にネストできるハンドル</Card>
+  <Card title="Building" href="/docs/api/building">建物のメッシュと、ハンドラが受け取るライブインスタンス</Card>
   <Card title="ライフサイクル" href="/docs/concepts/lifecycle">events グループのどのフックが実際に発火するか</Card>
 </Cards>

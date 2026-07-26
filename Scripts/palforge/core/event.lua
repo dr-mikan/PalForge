@@ -12,10 +12,23 @@
 -- Phase-2 building runtime (tmp/building_runtime_ref.lua ← deprecated/entity.lua +
 -- deprecated/events.lua): a module-local instance registry (scan / instance tracking /
 -- persistence), the RequestBuild + OnBeginInteract native hooks, and the world-ready
--- watch. The runtime no longer calls hooks directly — the scan/hooks EMIT channels and
+-- watch — plus the OnCompleteBuild hook that runtime refused (see building.build).
+-- The runtime no longer calls hooks directly — the scan/hooks EMIT channels and
 -- DISPATCH resolves the live instance and calls the hook (place fires exactly once).
--- The PAL/ITEM sources stay honest `-- TODO(dump):` (no native dump exists yet); their
--- DISPATCH is wired and starts firing the moment a source emits.
+-- The PAL source arms four native hooks plus a slow onTick sweep, and the ITEM source
+-- three; what is still `-- TODO(dump):` is narrower than it once was — item.craft and
+-- item.discard, for which no native call has been found. Their DISPATCH is wired and
+-- starts firing the moment a source emits.
+--
+-- ARMED LATE, ON PURPOSE. Two of those hooks — building.build's
+-- OnCompleteBuild_ServerInternal and pal.spawned's BroadcastOnCompleteInitializeParameter
+-- — also fire for every PRE-EXISTING object during the world-load storm, where the
+-- reference library records one native access violation and one wedged UE4SS callback
+-- layer. Neither is registered at start(): both go through tryHookAfterWorldReady, a
+-- one-shot world.ready subscriber. See each hook for what that does and does not buy.
+--
+-- Not every channel dispatches to a live instance: building.build fires BEFORE the actor
+-- exists, so like pal/item it resolves to the DEFINITION CLASS (see resolve()).
 --
 --   local event = require("palforge.core.event")
 --   event.on("pal.spawned", function(ctx) end)
@@ -33,6 +46,10 @@ local file           = require("palforge.utils.file")
 -- `overrides()` compares a definition against, and `cls:new(spec)` — used by makeInstance
 -- to turn a placed actor into a live instance — resolves through it.
 local BuildingBase   = require("palforge.api.building").Class
+-- The api.pal BASE class, for the same reason: the pal onTick sweep must be able to tell a
+-- definition that really implements onTick from one that inherited the inert default.
+-- (Neither api module requires core.event at load time, so this is not a cycle.)
+local PalBase        = require("palforge.api.pal").Class
 
 local M = { Rx = Rx }   -- expose Rx so consumers can build observables / use operators
 
@@ -41,6 +58,7 @@ M.CHANNELS = {
     "gameStart",                                                       -- registry.initialize
     "world.ready", "world.left",                                       -- world load / unload
     "building.place", "building.load", "building.interact", "building.remove",
+    "building.build",                                                  -- build COMPLETE (class-dispatched)
     "pal.spawned", "pal.damaged", "pal.death", "pal.captured",
     "item.obtain", "item.use", "item.craft", "item.discard",
     "tick",                                                            -- periodic heartbeat
@@ -48,6 +66,14 @@ M.CHANNELS = {
 
 M.TICK_MS = 500   -- central heartbeat interval (the tick SOURCE uses it)
 local SCAN_MS = M.TICK_MS  -- building reconstruction scan cadence (quantized to the heartbeat)
+
+-- Pal onTick sweep cadence. Deliberately NOT the heartbeat: the sweep is a
+-- FindAllOf("PalCharacter"), which walks every UObject and is the known periodic-hitch
+-- source (the old scheduler backed off to 4 s settled / ~15 s idle for exactly that
+-- reason — deprecated/ticker.lua:13-18), and the building scan already runs one such
+-- sweep every SCAN_MS. Public and re-read on every heartbeat, so a pack can retune it at
+-- runtime without touching the loop: `require("palforge.core.event").PAL_SCAN_MS = 5000`.
+M.PAL_SCAN_MS = 3000
 
 -- =====================================================================================
 -- BUS (Rx)
@@ -119,6 +145,11 @@ local INTERACT_DEBOUNCE_SEC = 1.0
 local READY_POLLS           = 5    -- consecutive ~1s polls with a valid player pawn
 
 local worldReady = false  -- world-load gate (set by the ready-watch source below)
+-- world.ready is DEFERRED: the ready-watch opens the gate above and raises this flag,
+-- and the first reconstruction scan that completes afterwards emits the channel. The scan
+-- is what creates the live instances, so emitting at gate-open time would dispatch
+-- onWorldReady over an empty registry (which is exactly what it used to do).
+local pendingWorldReady = false
 local readyCount = 0
 local lastInteract = {}   -- "<actorName>" -> os.clock()
 
@@ -489,9 +520,10 @@ end
 
 -- =====================================================================================
 -- SOURCE world — ready-watch (port of entity/events.startReadyWatch). LoopAsync(1000)
--- polling the player pawn: N stable polls -> emit world.ready; going invalid -> emit
--- world.left (then drop live instances). This gate also guards the building scan/hooks
--- (don't touch objects during the load storm).
+-- polling the player pawn: N stable polls -> OPEN the worldReady gate and arm the
+-- deferred world.ready emit (the scan below fires it, see pendingWorldReady); going
+-- invalid -> emit world.left (then drop live instances). This gate also guards the
+-- building scan/hooks (don't touch objects during the load storm).
 -- =====================================================================================
 local function installWorldSource()
     local ok, e = pcall(function()
@@ -502,13 +534,17 @@ local function installWorldSource()
                 if valid then
                     readyCount = readyCount + 1
                     if readyCount == READY_POLLS then
+                        -- The gate flips HERE (unchanged): every `if not worldReady then
+                        -- return end` guard keeps exactly its old load-storm protection.
+                        -- The CHANNEL is armed instead of emitted — the next scan owns it.
                         worldReady = true
+                        pendingWorldReady = true
                         log.info("world ready - building dispatch enabled")
-                        pcall(function() M.emit("world.ready") end)
                     end
                 else
                     local wasReady = worldReady
                     worldReady = false
+                    pendingWorldReady = false  -- never emit a ready for a world we already left
                     readyCount = 0
                     if wasReady then
                         log.info("world left - building dispatch paused")
@@ -522,7 +558,10 @@ local function installWorldSource()
     end)
     if not ok then
         -- fail OPEN but loudly: dispatch works, at the cost of the load-storm guard.
+        -- (Arm the deferred emit too, so world.ready still lands if a heartbeat exists;
+        --  when LoopAsync is gone there is no scan either, and nothing emits.)
         worldReady = true
+        pendingWorldReady = true
         log.warn("ready-watch unavailable (" .. tostring(e) .. ") - dispatch always on")
     end
 end
@@ -535,6 +574,34 @@ local function get(param) return param:get() end
 local function tryHook(path, fn)
     local ok, e = pcall(RegisterHook, path, fn)
     if not ok then log.warn("hook unavailable (feature disabled): " .. path .. " -> " .. tostring(e)) end
+end
+
+-- Register a native hook only ONCE THE WORLD IS READY, never at mod load. For a hook that
+-- also fires for every pre-existing object during the world-load storm, arming at load is
+-- the pattern the reference library warns about twice: a native EXCEPTION_ACCESS_VIOLATION
+-- from reading half-initialized model memory in that storm (deprecated/events.lua, the NOTE
+-- kept below), and a storm-firing hook that wedged the shared UE4SS hook dispatch
+-- (dump/docs/further_plan.md:61-66). world.ready is itself deferred here — the ready-watch
+-- opens the gate after five stable pawn polls and the FIRST COMPLETED SCAN emits the
+-- channel — so by the time this fires the load storm is over.
+--
+-- WHAT IT DOES NOT BUY, plainly: UE4SS has no unregister. On a SECOND world load in the
+-- same session the hook is still armed and will fire during that storm; the only defence
+-- left is the `if not worldReady then return end` line every handler opens with, which
+-- stops US from touching the object but not the game from calling us. And if LoopAsync is
+-- unavailable there is no scan, so world.ready never lands and the hook never arms at all
+-- (fail-soft: that hook's feature is simply off, like any tryHook miss).
+local function tryHookAfterWorldReady(path, fn)
+    local armed = false
+    M.on("world.ready", function()
+        if armed then return end        -- one-shot: world.ready re-fires on every world load
+        if not worldReady then return end  -- the CHANNEL is public and anyone may emit it (the
+                                           -- test suite does, at the title screen); arm on the
+                                           -- GATE, so a synthetic emit cannot arm us into a
+                                           -- world-load storm.
+        armed = true
+        tryHook(path, fn)
+    end)
 end
 
 local function installBuildingSource()
@@ -582,13 +649,57 @@ local function installBuildingSource()
         if not ok then log.err("building source: interact handler: " .. tostring(e)) end
     end)
 
-    -- reconstruction scan on the shared heartbeat (gated on worldReady inside scanOnce).
-    M.every(SCAN_MS, scanOnce)
+    -- Reconstruction scan on the shared heartbeat (gated on worldReady inside scanOnce),
+    -- and the DEFERRED world.ready emit. The scan is what turns actors into live
+    -- instances, so world.ready is announced by the first scan that completes after the
+    -- gate opened — by then the structures around the player exist and the onWorldReady
+    -- dispatch has something to iterate. Order matters: scan first, then emit. The gate
+    -- flag itself is untouched, so the notification only moves <= SCAN_MS later.
+    -- Buildings that stream in on a LATER scan still miss it; onLoad is the per-instance
+    -- startup hook. (M.every already pcalls this body, so a throwing scan just leaves
+    -- pendingWorldReady raised and the next pass retries the emit.)
+    M.every(SCAN_MS, function()
+        scanOnce()
+        if pendingWorldReady then
+            pendingWorldReady = false
+            pcall(function() M.emit("world.ready") end)
+        end
+    end)
 
-    -- NOTE (from deprecated): no OnCompleteBuild_ServerInternal hook — it fires for every
-    -- building during the world-load storm, and touching half-initialized
-    -- UPalMapObjectModel memory there caused a native EXCEPTION_ACCESS_VIOLATION (pcall
-    -- cannot catch native faults). Placements are reconciled by the deferred scan instead.
+    -- build COMPLETE -> building.build (api/building's declarable `onBuild`).
+    --     /Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal(UPalMapObjectModel*)
+    -- Recorded ✅ in-game (deprecated/poc/V3-place-interact-hooks/README.md + its probe
+    -- main.lua:26-34, 2026-07-16): it fires on build-complete AND for every existing
+    -- building at world load, and the build id reads off param1 as
+    -- `model:get().BuildObjectId:ToString()` — the field is BuildObjectId, NOT MapObjectId.
+    --
+    -- ARMED AFTER world.ready, NEVER AT start(). This is the exact hook whose world-load
+    -- firing storm produced a native EXCEPTION_ACCESS_VIOLATION when the handler read
+    -- half-initialized UPalMapObjectModel memory (deprecated/events.lua, 2026-07-17; pcall
+    -- cannot catch a native fault) — which is why the deprecated runtime refused it
+    -- outright and why the scan below, not this hook, still owns placement reconciliation.
+    -- Deferring the arming keeps us out of the first storm entirely; read
+    -- tryHookAfterWorldReady for what that does NOT cover (a second world load in the same
+    -- session). onPlace remains the safe placement hook; onBuild is the extra one, and it
+    -- is worth testing in a throwaway world first.
+    --
+    -- The emit carries what the hook can actually prove: the build id and the model. There
+    -- is no actor here (the actor may not exist yet, and the scan creates the instance up
+    -- to SCAN_MS later), so DISPATCH resolves the DEFINITION CLASS by build id — an
+    -- instance-level dispatch would silently no-op forever. See resolveBuildingClass.
+    tryHookAfterWorldReady("/Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal",
+        function(self, model)
+            if not worldReady then return end
+            local ok, e = pcall(function()
+                local m = get(model)
+                if not (m and m.IsValid and m:IsValid()) then return end
+                local id
+                pcall(function() id = m.BuildObjectId:ToString() end)
+                if id == nil or id == "" or id == "None" then return end
+                M.emit("building.build", { buildId = id, model = m })
+            end)
+            if not ok then log.err("building source: build-complete handler: " .. tostring(e)) end
+        end)
 end
 
 -- =====================================================================================
@@ -596,11 +707,121 @@ end
 -- lifecycle detection, so there is nothing to port. Do NOT invent native event names;
 -- the DISPATCH below is already wired and starts firing the moment a source emits.
 -- =====================================================================================
+
+-- Defined in the DISPATCH section below. The pal onTick sweep needs the very same
+-- actor -> registered-class resolution the pal channels dispatch through, and two copies
+-- of that rule would drift, so the one definition is shared and forward-declared here.
+local resolvePalClass
+
+-- ---- pal onTick sweep (the SOURCE behind pal.onTick; there is no native hook) ----------
+-- Pals have no instance registry the way buildings do — resolve() hands a pal channel the
+-- definition CLASS, not a live object — so nothing can drive a periodic pal hook except a
+-- sweep. This is the building scan's shape (enumerate -> identify -> call), minus the
+-- registry: FindAllOf("PalCharacter") (the enumeration core/spawn.lua:108-112 already uses),
+-- each actor resolved to a REGISTERED pal class, and cls:onTick({ actor = ... }) — the same
+-- `self` = class, ctx.actor = pawn contract the other four pal channels have.
+--
+-- COST is the reason this is not on the heartbeat; see M.PAL_SCAN_MS. Per sweep a pal with
+-- no PalForge definition costs ONE failed lookup ever: the result (class, or `false` for a
+-- miss) is memoized against the actor in a weak table, so later sweeps are a table read.
+local palClassOf     = setmetatable({}, { __mode = "k" })   -- actor -> cls | false (miss)
+local palTickState   = setmetatable({}, { __mode = "k" })   -- cls -> { fails, broken }
+local palDefCount    = -1                                   -- registered pals at last sweep
+local PAL_TICK_FAILS = 5    -- circuit-breaker threshold, same as the building tickOne
+
+-- Does this pal CLASS implement onTick? api/pal's default is an inert no-op, so without
+-- this test every pal in the world would cost a pcall per sweep to call nothing.
+local function palOverridesTick(cls)
+    return cls.onTick ~= nil and cls.onTick ~= PalBase.onTick
+end
+
+-- Call one pal class's onTick. Port of tickOne's discipline: pcall'd, the error LOGGED with
+-- the id that raised it, and the hook disabled after PAL_TICK_FAILS failures so a broken
+-- handler cannot burn the sweep forever. State lives beside the class, not on it — the
+-- definition table is public and a pack reads its own fields.
+local function palTickOne(cls, ctx)
+    local st = palTickState[cls]
+    if st and st.broken then return end
+    local ok, e = pcall(function() cls:onTick(ctx) end)
+    if ok then
+        if st then st.fails = 0 end
+        return
+    end
+    st = st or { fails = 0 }
+    palTickState[cls] = st
+    st.fails = st.fails + 1
+    log.err(string.format("pal onTick '%s' failed: %s", tostring(cls.id), tostring(e)))
+    if st.fails >= PAL_TICK_FAILS then
+        st.broken = true
+        log.warn("pal onTick '" .. tostring(cls.id) .. "' disabled after "
+            .. PAL_TICK_FAILS .. " failures")
+    end
+end
+
+-- One sweep. Returns how many pals were ticked (0 whenever the gate is shut or the
+-- enumeration is unavailable — never throws).
+local function palScanOnce(ctx)
+    if not worldReady then return 0 end
+
+    -- A definition can be registered at any time (native/pals.lua materializes one lazily on
+    -- first get), so a `false` memoized before that would keep a real pal silent for its
+    -- actor's whole life. Drop the memo whenever the registered set changes size — one
+    -- snapshot walk per sweep, not per actor.
+    local n = 0
+    for _ in pairs(object_manager.all("pal")) do n = n + 1 end
+    if n ~= palDefCount then
+        palDefCount = n
+        palClassOf = setmetatable({}, { __mode = "k" })
+    end
+    if n == 0 then return 0 end   -- nothing defined: skip the FindAllOf entirely
+
+    local okFind, actors = pcall(FindAllOf, "PalCharacter")
+    if not okFind or type(actors) ~= "table" then return 0 end
+
+    local ticked = 0
+    for _, actor in ipairs(actors) do
+        local ok = pcall(function()
+            if not (actor and actor.IsValid and actor:IsValid()) then return end
+            local cls = palClassOf[actor]
+            if cls == nil then
+                cls = resolvePalClass({ actor = actor }) or false
+                palClassOf[actor] = cls
+            end
+            if cls and palOverridesTick(cls) then
+                ticked = ticked + 1
+                palTickOne(cls, {
+                    actor = actor,
+                    count = (type(ctx) == "table" and ctx.count) or 0,
+                    now   = (type(ctx) == "table" and ctx.now) or os.clock(),
+                })
+            end
+        end)
+        if not ok then log.warn("pal scan: actor pass failed") end
+    end
+    return ticked
+end
+
+-- Drive the sweep off the heartbeat, but at its own much slower cadence. Written out rather
+-- than handed to M.every because M.every captures its interval: reading M.PAL_SCAN_MS here,
+-- every heartbeat, is what makes the constant tunable without editing this loop.
+local function installPalTickSource()
+    local acc = 0
+    M.on("tick", function(ctx)
+        local every = tonumber(M.PAL_SCAN_MS)
+        if not every or every <= 0 then return end   -- 0 / nil / garbage = sweep disabled
+        acc = acc + M.TICK_MS
+        if acc < every then return end
+        acc = 0
+        pcall(palScanOnce, ctx)
+    end)
+end
+
 -- Native hooks CONFIRMED by the in-game event probe (dump/06_events.txt):
 --   capture -> PalCharacterParameterComponent:SetIsCapturedProcessing(bool started=true)
 --   damage  -> PalCharacter:OnDamageReaction    death -> PalCharacter:OnDeadCharacter
--- (spawn candidate BroadcastOnCompleteInitializeParameter is UNCONFIRMED — pals pre-existed
---  the probe; kept as a best-effort hook, refine after a spawn probe.)
+-- (spawn candidate BroadcastOnCompleteInitializeParameter is UNCONFIRMED and is armed LATE
+--  — see the hook itself. onTick has no native source at all; it is driven by the sweep
+--  above, which is why that sweep exists.)
 local function installPalSource()
     -- capture: SetIsCapturedProcessing(true) on the pal's param component; the pal actor
     -- is the component's owner. (probe: a1=true, self=BP_ChickenPal_C.CharacterParameterComponent)
@@ -624,20 +845,49 @@ local function installPalSource()
         pcall(function() M.emit("pal.death", { actor = get(self) }) end)
     end)
     -- spawned (UNCONFIRMED candidate): fires when a pal finishes parameter init.
-    tryHook("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter", function(self)
-        if not worldReady then return end
-        pcall(function() M.emit("pal.spawned", { actor = get(self) }) end)
-    end)
+    -- ARMED AFTER world.ready, NEVER AT start() — unlike the three confirmed hooks above.
+    -- The probe recorded this one firing 0 times when it was armed at load and the pals it
+    -- watched pre-existed it (dump/docs/further_plan.md:83-85), and the same note records
+    -- WHY that arming is actively harmful: "BroadcastOnCompleteInitializeParameter fires in
+    -- the world-load pal-init storm and wedged the shared hook dispatch; must be armed only
+    -- AFTER load, or avoided" (:61-64). Wedging the SHARED dispatch takes the three
+    -- confirmed hooks down with it, so late arming protects them, not just this one.
+    -- Still unproven that it signals a FRESH spawn: that needs a post-load spawn probe, so
+    -- keep handlers idempotent and treat the channel as a candidate.
+    tryHookAfterWorldReady("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter",
+        function(self)
+            if not worldReady then return end
+            pcall(function() M.emit("pal.spawned", { actor = get(self) }) end)
+        end)
+
+    installPalTickSource()   -- the onTick sweep (no native hook exists; see above)
 end
 
--- Native hooks — both CONFIRMED by the in-game probe (dump/06_events.txt):
---   use    -> PalItemUseProcessor:UseItemToCharacter_ServerInternal, item id on the
---             UScriptStruct param's .Id  (probe: a2 = { Id = "Berries" }).
---   obtain -> PalPlayerState:AddItemGetLog_ToClient — the game's own "obtained item(s)"
---             log; item id + count on the struct param  (probe: a1 = { StaticItemId =
---             "PalSphere", Num = 3 }). Fires on pickup / loot / reward, so it is the right
---             semantic for onObtain. (Silent internal adds that don't surface a get-log are
---             not covered — acceptable; those aren't "the player obtained an item" events.)
+-- Native hooks:
+--   use    -> PalItemUseProcessor:UseItemToCharacter_ServerInternal. CONFIRMED in-game
+--             (deprecated/poc/V2-itemuse-hook/README.md, 2026-07-16 single player, and
+--             __knowledges/palworld-ue4ss-functions.md): the signature is
+--             (UPalStaticItemDataBase* itemData, FPalInstanceID target) and the item id
+--             is read as `param1:get().ID` — PARAM ONE, field spelled "ID" in caps.
+--   obtain -> TWO sources, deduped through one emitObtain (see below).
+--             1. PalPlayerState:AddItemGetLog_ToClient — the game's own "obtained item(s)"
+--                log; item id + count on the struct param a1 (.StaticItemId + .Num).
+--                Recorded firing in-game with `Wood onObtain: count=15`
+--                (dump/docs/further_plan.md:26, 2026-07-22), and the same note rules the
+--                inventory paths OUT for pickups: AddItem_ServerInternal, OnUpdateSlotContent,
+--                PickupItemDelegate, RequestAddItem_ToServer and RequestObtainLevelObject
+--                all fired 0 times over three probe rounds in single-player.
+--             2. PalPlayerInventoryData:AddItem_ServerInternal(FName StaticItemId, int Count,
+--                bool IsAssignPassive, float LogDelay) — the best-verified SIGNATURE in the
+--                reference library (__knowledges/palworld-ue4ss-functions.md:76-85, "✅完全検証",
+--                the same call utils.items.give makes), and param1 is a bare FName with no
+--                struct dig. Its weakness is the mirror of the get-log's strength: the
+--                signature is certain, the FIRING for a player pickup is not — see 1. Both
+--                are armed because they fail in opposite directions; neither is authoritative
+--                enough to drop.
+--             Silent internal adds that surface no get-log are covered only if they take
+--             route 2; nothing here can distinguish crafting from pickup (item.craft stays
+--             sourceless on purpose rather than being faked from these).
 local function installItemSource()
     -- get a hook param's value; nil on failure.
     local function getv(p) local ok, v = pcall(function() return p:get() end); if ok then return v end end
@@ -651,21 +901,94 @@ local function installItemSource()
         return s
     end
 
-    -- use: scan the params for the .Id-bearing struct (a2 first) so a shifted signature
-    -- still resolves; emit the item id + the target actor (a1).
+    -- read a hook param that IS the value (a bare FName / number), not a struct field.
+    local function pstr(p)
+        local v = getv(p)
+        if v == nil then return nil end
+        local s
+        if type(v) == "userdata" and v.ToString then pcall(function() s = v:ToString() end)
+        else s = tostring(v) end
+        if s == nil or s == "" or s == "None" then return nil end
+        return s
+    end
+
+    -- use: read the id off the item-data param. a1 FIRST and "ID" FIRST — that is the
+    -- only shape ever observed in game (V2 probe, above). "Id"/"StaticId" and the later
+    -- params stay as fallbacks so a shifted signature still resolves and nothing that
+    -- works today stops working. Indexed (not ipairs) so a nil param can't truncate the
+    -- sweep.
+    --
+    -- ctx.actor — WHAT THE PARAMS REALLY ARE. Under the proven signature
+    -- (UPalStaticItemDataBase* itemData, FPalInstanceID target) a1 is the item DATA object
+    -- and a2 is an instance ID struct; NEITHER is a character, so the old
+    -- `actor = getv(a1)` handed every onUse handler an item-data object where the docs
+    -- promised the character. Fixed by moving that value to its true name, ctx.itemData,
+    -- and putting a real character under ctx.actor:
+    --   * ctx.actor    = FindFirstOf("PalPlayerCharacter"), the LOCAL player pawn. This is
+    --     the same value the shipped, in-game-verified predecessor passed for exactly this
+    --     hook (deprecated/events.lua:114-121, where it was spelled ctx.player) — the one
+    --     route with a track record. CAVEAT, because it is not free: it is the local player,
+    --     so it is the character who USED the item, which is the character used ON only for
+    --     self-use (food, potions). Feed a pal and the pal is a2, not this. On a dedicated
+    --     server FindFirstOf returns whichever player pawn comes first, which need not be
+    --     the one who acted. Treat ctx.actor as "a player pawn to act on", not as proof.
+    --   * ctx.targetId = a2 raw, the FPalInstanceID. NOT resolved to an actor: no
+    --     instance-id -> actor lookup is demonstrated anywhere in either tree, and guessing
+    --     one would be a plausible fabrication. Handed over as-is so a pack that learns the
+    --     resolution can use it, and so a later probe has somewhere to land.
     tryHook("/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal", function(self, a1, a2, a3, a4)
         if not worldReady then return end
         pcall(function()
             local id
-            for _, p in ipairs({ a2, a1, a3, a4 }) do
-                local v = getv(p); if v ~= nil then id = fstr(v, "Id"); if id then break end end
+            local params = { a1, a2, a3, a4 }
+            for i = 1, 4 do
+                local v = getv(params[i])
+                if v ~= nil then
+                    id = fstr(v, "ID") or fstr(v, "Id") or fstr(v, "StaticId")
+                    if id then break end
+                end
             end
             if not id then return end
-            M.emit("item.use", { itemId = id, actor = getv(a1), processor = get(self) })
+            local character; pcall(function() character = FindFirstOf("PalPlayerCharacter") end)
+            M.emit("item.use", {
+                itemId   = id,
+                actor    = character,   -- the local player pawn (see the caveat above)
+                player   = character,   -- same value under the name the old runtime used
+                itemData = getv(a1),    -- UPalStaticItemDataBase (what ctx.actor used to be)
+                targetId = getv(a2),    -- FPalInstanceID, unresolved
+                processor = get(self),
+            })
         end)
     end)
 
-    -- obtain: scan the params for the struct carrying StaticItemId (+ Num count).
+    -- Both obtain sources funnel through here. They overlap by design (the get-log and the
+    -- inventory add are two views of ONE pickup), so a repeat of the same id inside
+    -- OBTAIN_DEDUPE_SEC is dropped. The window is per ID, not per (id,count): the two
+    -- sources need not agree on the count (a get-log may aggregate), and matching on it
+    -- would let a mismatch through as a second obtain. The cost is stated plainly — a
+    -- genuine second pickup of the SAME id within the window is lost. Half a second is
+    -- shorter than any human repeat pickup and longer than the gap between two views of one.
+    --
+    -- `emitting` is a separate concern: utils.items.give IS an AddItem_ServerInternal call,
+    -- so an onObtain handler that gives an item would re-enter this hook. Without the guard
+    -- that recurses until the stack dies for any id the dedupe window does not cover.
+    local OBTAIN_DEDUPE_SEC = 0.5
+    local lastObtain, emitting = {}, false
+    local function emitObtain(id, count, via)
+        if emitting then return end
+        local now = os.clock()
+        local prev = lastObtain[id]
+        if prev and (now - prev) < OBTAIN_DEDUPE_SEC then return end
+        lastObtain[id] = now
+        emitting = true
+        local ok, e = pcall(function()
+            M.emit("item.obtain", { itemId = id, count = count, via = via })
+        end)
+        emitting = false
+        if not ok then log.err("item.obtain (" .. tostring(via) .. "): " .. tostring(e)) end
+    end
+
+    -- obtain 1: the get-log. Scan the params for the struct carrying StaticItemId (+ Num).
     tryHook("/Script/Pal.PalPlayerState:AddItemGetLog_ToClient", function(self, a1, a2, a3, a4)
         if not worldReady then return end
         pcall(function()
@@ -678,16 +1001,33 @@ local function installItemSource()
                 end
             end
             if not id then return end
-            M.emit("item.obtain", { itemId = id, count = count })
+            emitObtain(id, tonumber(count), "getlog")
         end)
     end)
+
+    -- obtain 2: the inventory add. a1 is a bare FName, a2 the count — read positionally,
+    -- because that signature is the verified part of this source. A NEGATIVE count is a
+    -- removal (what utils.items.take pushes through this very call), never an obtain, so it
+    -- is skipped rather than reported as one.
+    tryHook("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal", function(self, a1, a2, a3, a4)
+        if not worldReady then return end
+        pcall(function()
+            local id = pstr(a1)
+            if not id then return end
+            local count = tonumber(pstr(a2))
+            if count and count <= 0 then return end
+            emitObtain(id, count, "additem")
+        end)
+    end)
+
     -- TODO(dump): item.craft (crafting used a work-process, not the get-log) / item.discard —
     -- hook these after a craft-complete / discard probe round.
 end
 
 -- =====================================================================================
--- DISPATCH — channel -> the object's lifecycle hook. resolve() maps a ctx to the live
--- instance behind it (buildings: the tracked instance; pal/item: nil for now).
+-- DISPATCH — channel -> the object's lifecycle hook. resolve() maps a ctx to whatever
+-- stands behind it: the tracked INSTANCE for buildings, the definition CLASS for pals,
+-- items, and building.build (which fires before any instance exists).
 -- =====================================================================================
 
 -- Resolve the PalForge Pal CLASS behind a pal ctx. Pals have no per-instance
@@ -695,7 +1035,9 @@ end
 -- (BP_<Id>_C, e.g. BP_ChickenPal_C -> "ChickenPal") and return the class registered
 -- for that id. The class acts as `self` for the hook; the author's hook reads
 -- ctx.actor. A vanilla pal with no PalForge definition -> nil (dispatch no-ops).
-local function resolvePalClass(ctx)
+-- (Forward-declared above the pal SOURCE: the onTick sweep resolves through this too,
+-- so both halves of the 導線 share exactly one pal resolver.)
+function resolvePalClass(ctx)
     if type(ctx) ~= "table" or ctx.actor == nil then return nil end
     local id
     pcall(function()
@@ -721,16 +1063,45 @@ end
 -- catalog build). A vanilla item with no PalForge definition -> nil (dispatch no-ops).
 local function resolveItemClass(ctx)
     if type(ctx) ~= "table" or not ctx.itemId then return nil end
-    return object_manager.get("item", ctx.itemId)
+    -- exact id: native items define under the game id (e.g. Item{ id = "Berries" }).
+    local cls = object_manager.get("item", ctx.itemId)
+    if cls then return cls end
+    -- namespaced items: a registered "pack:name" whose resolved fname == the game id
+    -- (the game emits the PalSchema row name "pack_name", never the colon form). Without
+    -- this every pack-authored item would be silently eventless. Fail-soft over the
+    -- snapshot — same shape as resolvePalClass above.
+    for regId, c in pairs(object_manager.all("item")) do
+        local okR, r = pcall(object_manager.resolve, regId)
+        if okR and r == ctx.itemId then return c end
+    end
+    return nil
+end
+
+-- Resolve the PalForge Building DEFINITION CLASS behind a build id. building.build is the
+-- one building channel that fires BEFORE an instance exists — at build-complete time the
+-- scan has not created it yet (up to SCAN_MS later) and the ctx carries a UPalMapObjectModel
+-- rather than the actor, so the instance resolve() below would return nil and onBuild would
+-- silently never run. Class-level instead, the same shape as resolvePalClass: the class acts
+-- as `self` and the author's hook reads ctx.buildId / ctx.model. Namespaced ids need no
+-- extra pass here — refreshDefs indexes every def under its RESOLVED build ids, so a
+-- definition declared as "pack:Bench" is already keyed under "pack_Bench", the form the
+-- game emits. A vanilla building with no PalForge definition -> nil (dispatch no-ops).
+local function resolveBuildingClass(ctx)
+    if type(ctx) ~= "table" or not ctx.buildId then return nil end
+    refreshDefs()   -- a building defined after start() must be known before we match its id
+    local def = Registry.byBuildId[ctx.buildId]
+    return def and def.cls or nil
 end
 
 -- Resolve the concrete handler for `ctx`. Buildings resolve to the live INSTANCE by
 -- key (channel emits carry it), then by actor (interact carries only the actor), then
 -- a buildId+pos fallback. Pals/items resolve to the defined CLASS by id (BP class name
--- for pals, ctx.itemId for items). Unknown -> nil (dispatch no-ops).
+-- for pals, ctx.itemId for items), and so does the pseudo-type "buildingClass" — the
+-- instance-less route used by building.build. Unknown -> nil (dispatch no-ops).
 local function resolve(otype, ctx) --> instance | class | nil
     if otype == "pal" then return resolvePalClass(ctx) end
     if otype == "item" then return resolveItemClass(ctx) end
+    if otype == "buildingClass" then return resolveBuildingClass(ctx) end
     if otype ~= "building" then return nil end
     if type(ctx) ~= "table" then return nil end
     if ctx.key and Registry.instances[ctx.key] then return Registry.instances[ctx.key] end
@@ -745,40 +1116,61 @@ local function resolve(otype, ctx) --> instance | class | nil
     return nil
 end
 
-local function call(otype, hook, ctx)
+-- Call one object's hook. A handler is pack code, so it stays pcall'd — but the error is
+-- LOGGED with the channel and hook that raised it, not swallowed: a typo in an onUse body
+-- used to be indistinguishable from a hook that never fired.
+local function call(otype, hook, ctx, channel)
     local inst = resolve(otype, ctx)
-    if inst and type(inst[hook]) == "function" then pcall(function() inst[hook](inst, ctx) end) end
+    if inst and type(inst[hook]) == "function" then
+        local ok, e = pcall(function() inst[hook](inst, ctx) end)
+        if not ok then
+            log.err(string.format("%s -> %s handler failed: %s",
+                tostring(channel or otype), hook, tostring(e)))
+        end
+    end
 end
 
 -- Fire a shared world-lifecycle hook on every live building (base defaults are inert).
-local function eachLiveBuilding(hook, ctx)
-    for _, inst in pairs(Registry.instances) do
-        if type(inst[hook]) == "function" then pcall(function() inst[hook](inst, ctx or {}) end) end
+-- Same logging discipline as call(): one broken instance is skipped, not hidden.
+local function eachLiveBuilding(hook, ctx, channel)
+    for key, inst in pairs(Registry.instances) do
+        if type(inst[hook]) == "function" then
+            local ok, e = pcall(function() inst[hook](inst, ctx or {}) end)
+            if not ok then
+                log.err(string.format("%s -> %s handler failed on '%s': %s",
+                    tostring(channel or "world"), hook, tostring(key), tostring(e)))
+            end
+        end
     end
 end
 
 local function installDispatch()
-    -- world -> shared hooks on every live object
-    M.on("world.ready", function(ctx) eachLiveBuilding("onWorldReady", ctx) end)
-    M.on("world.left",  function(ctx) eachLiveBuilding("onWorldLeft", ctx) end)
+    -- world -> shared hooks on every live object. world.ready is emitted by the scan (see
+    -- installBuildingSource), so the instances it iterates really exist by then.
+    M.on("world.ready", function(ctx) eachLiveBuilding("onWorldReady", ctx, "world.ready") end)
+    M.on("world.left",  function(ctx) eachLiveBuilding("onWorldLeft", ctx, "world.left") end)
     -- building (place fires exactly once: the scan emits it only on instance creation)
-    M.on("building.place",    function(ctx) call("building", "onPlace", ctx) end)
-    M.on("building.load",     function(ctx) call("building", "onLoad", ctx) end)
-    M.on("building.interact", function(ctx) call("building", "onRightClick", ctx) end)
-    M.on("building.remove",   function(ctx) call("building", "onRemove", ctx) end)
+    M.on("building.place",    function(ctx) call("building", "onPlace", ctx, "building.place") end)
+    M.on("building.load",     function(ctx) call("building", "onLoad", ctx, "building.load") end)
+    M.on("building.interact", function(ctx) call("building", "onRightClick", ctx, "building.interact") end)
+    M.on("building.remove",   function(ctx) call("building", "onRemove", ctx, "building.remove") end)
+    -- building.build is the exception: it fires before the actor/instance exists, so it
+    -- dispatches to the DEFINITION CLASS (self = the class, like pal/item), not an instance.
+    M.on("building.build",    function(ctx) call("buildingClass", "onBuild", ctx, "building.build") end)
     -- tick -> onTick on every live building (tickList + tickInterval + circuit-breaker)
     M.on("tick", function(ctx) tickAll(ctx) end)
     -- pal (resolve -> the defined Pal CLASS by BP class name; fires for any PalForge
     -- pal, no-op for a vanilla pal). The source hooks emit ctx.actor.
-    M.on("pal.spawned",  function(ctx) call("pal", "onSpawned", ctx) end)
-    M.on("pal.damaged",  function(ctx) call("pal", "onDamaged", ctx) end)
-    M.on("pal.death",    function(ctx) call("pal", "onDeath", ctx) end)
-    M.on("pal.captured", function(ctx) call("pal", "onCaptured", ctx) end)
-    -- item (resolve nil for now -> no-op)
-    M.on("item.obtain",  function(ctx) call("item", "onObtain", ctx) end)
-    M.on("item.use",     function(ctx) call("item", "onUse", ctx) end)
-    M.on("item.craft",   function(ctx) call("item", "onCraft", ctx) end)
-    M.on("item.discard", function(ctx) call("item", "onDiscard", ctx) end)
+    M.on("pal.spawned",  function(ctx) call("pal", "onSpawned", ctx, "pal.spawned") end)
+    M.on("pal.damaged",  function(ctx) call("pal", "onDamaged", ctx, "pal.damaged") end)
+    M.on("pal.death",    function(ctx) call("pal", "onDeath", ctx, "pal.death") end)
+    M.on("pal.captured", function(ctx) call("pal", "onCaptured", ctx, "pal.captured") end)
+    -- item (resolve -> the defined Item CLASS by ctx.itemId, exact or namespaced;
+    -- item.craft / item.discard have no source yet, so they never carry traffic)
+    M.on("item.obtain",  function(ctx) call("item", "onObtain", ctx, "item.obtain") end)
+    M.on("item.use",     function(ctx) call("item", "onUse", ctx, "item.use") end)
+    M.on("item.craft",   function(ctx) call("item", "onCraft", ctx, "item.craft") end)
+    M.on("item.discard", function(ctx) call("item", "onDiscard", ctx, "item.discard") end)
 end
 
 -- =====================================================================================
@@ -821,7 +1213,8 @@ function M.start()
     installPalSource();  installItemSource()
     -- dispatch (channel -> object hook)
     installDispatch()
-    log.info("event wired: bus + sources (tick/world/building live; pal/item TODO(dump)) + dispatch")
+    log.info("event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned "
+        .. "arm at world.ready; craft+discard TODO(dump)) + dispatch")
 end
 
 return M

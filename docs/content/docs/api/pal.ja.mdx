@@ -1,14 +1,21 @@
 ---
 title: Pal
-description: パルを定義し、ライフサイクルにフックし、スポーンさせる
+description: スポーンしたとき・ダメージを受けたとき・捕まえたときに反応するパルを追加する
 ---
 
-パルはスポーン可能なクリーチャーです。`Pal{ ... }` はゲーム側に既存の `CharacterID` に対して
-メタデータ・メッシュ・ライフサイクルハンドラを与え、アクションを持つ `Pal.Handle` を返します。
-定義するとオブジェクトレジストリの `("pal", id)` に登録され、`core/event` はそこから定義を見つけます。
-パルのアクターが捕獲された・ダメージを受けた・死亡した・初期化を終えたとき、ディスパッチはアクターの
-ブループリントクラス名（`BP_ChickenPal_C` なら `ChickenPal`）から id を割り出し、その id で登録された
-定義のハンドラを呼びます。
+## このページでできるようになること
+
+- 捕まえた瞬間、殴った瞬間、倒した瞬間にパルを反応させる
+- パルが死んだらプレイヤーにアイテムを渡す、音を鳴らす
+- パルの体・色・大きさを別のものに変える
+- 自分が立っている場所に、好きなレベルのパルを出す
+- 遊んでいる間ずっと、自分のパル全員に自分のコードを繰り返し走らせる
+
+## パルを作る
+
+パルはスポーンできるクリーチャーです。ゲーム側でそのクリーチャーに付いている名前を使って
+`Pal{ ... }` と書くと、スポーンしたり、あとから取り出したり、動きを付けたりできるオブジェクトが
+返ってきます。
 
 ```lua title="content/pals.lua"
 local pal = Pal{
@@ -25,7 +32,10 @@ local pal = Pal{
 pal:spawn(Player.coordinate())
 ```
 
-エントリポイントは他の api モジュールとまったく同じ 3 つです。
+ゲームの中で Chicken Pal を捕まえると、勝利のジングルが鳴ります。流れはこれだけです。どの
+クリーチャーの話かを書き、何が起きてほしいかを書けば、あとは PalForge がつなぎます。
+
+入口は 3 つあります。
 
 ```lua
 Pal{ id = "ChickenPal" }    -- define + register, returns a Pal.Handle
@@ -33,9 +43,9 @@ Pal.get("SheepBall")        -- a handle for an existing id; never nil
 Pal.get_all()               -- every PalForge-registered pal, as handles
 ```
 
-`Pal.get` は決して nil を返しません。誰も定義していない id には薄い定義が作られ、`:spawn` するには
-十分ですがハンドラは持ちません。登録するのは `Pal{ ... }` だけであり、ライフサイクルのディスパッチを
-受け取れるのも登録済みの id だけです。
+`Pal.get` は決して nil を返しません。誰も定義していない id には薄い定義が作られ、`:spawn` する
+ぶんには十分ですが、ハンドラは載っていません。登録するのは `Pal{ ... }` だけで、ハンドラが
+呼ばれるのも登録済みのパルだけです。
 
 Palworld 自身のクリーチャー一覧は `native/pals` にあります。
 
@@ -48,14 +58,15 @@ pals.Chicken               -- the curated ChickenPal demo definition
 pals.SheepBall             -- the curated SheepBall demo definition
 ```
 
-`pals.get(id)` は初回呼び出し時に素の `Pal{ id = id }` を定義してキャッシュします。つまりカタログ id を
-取得すると同時に登録も行われ、以後その id はディスパッチの対象になります（ハンドラは空のままです）。
+`pals.get(id)` は最初に呼ばれたときに素の `Pal{ id = id }` を定義してキャッシュします。つまり
+カタログの id を取り出すと登録も済み、その id にイベントが届くようになります。ハンドラを書くまでは
+中身が空のままです。
 
 ## Fields
 
-必須フィールドは `id` だけです。ここに載っていないフィールドを渡すと、定義時にサジェスト付きの
-ハードエラーになります。同じ一覧は実行時にも
-`require("palforge.core.schema").help("Pal.Spec")` で読めます。
+必ず書くのは `id` だけです。この一覧に無いフィールドを渡すと、`Pal{ ... }` を呼んだその場で
+サジェスト付きのエラーになります。打ち間違いが黙って無視されることはありません。同じ一覧は
+ゲーム実行中に `require("palforge.core.schema").help("Pal.Spec")` でも読めます。
 
 <TypeTable
   type={{
@@ -107,17 +118,18 @@ pals.SheepBall             -- the curated SheepBall demo definition
   }}
 />
 
-デフォルト値を持つフィールドはありません。読み出し時にフォールバックするのは 2 つで、`name` が無い
-ときは `:name()` が id を返し、`skills` が無いときは `:skillsOf()` が空のテーブルを返します。
+デフォルト値を持つフィールドはありません。読み出すときにだけ補われるものが 2 つあります。
+`name` を書かなかったときは `:name()` が id を返し、`skills` を書かなかったときは
+`:skillsOf()` が空のテーブルを返します。
 
-コロンを含む id はパック id です。`"example:Boss"` は DataTable の行 FName `example_Boss` に解決されます。
-コロンを含まない id はゲームの id そのものです。
+コロンが入った id は自分のものです。`"example:Boss"` はゲームのデータ行 `example_Boss` に
+対応します。コロンの無い id は `ChickenPal` のようなゲーム側の id です。
 
 ### mesh
 
-`mesh` は `Mesh.Spec` のコピーではなく `Mesh.Spec` そのものです。したがってインラインのテーブルと
-定義済みの [`Mesh{ ... }`](/docs/api/mesh) ハンドルはまったく同じように検証され、同じ経路でレンダラーに
-届きます。
+メッシュとは、クリーチャーが身にまとう 3D モデルのことです。その場に直接書いてもよいですし、
+[`Mesh{ ... }`](/docs/api/mesh) で一度定義したものを渡してもかまいません。どちらも同じように
+検証され、同じ経路でレンダラーに届くので、書きやすい方を選んでください。
 
 <Tabs items={['Inline', 'Named']}>
 <Tab value="Inline">
@@ -155,8 +167,8 @@ Pal{ id = "ChickenPal", mesh = Mesh.get("example:sheep_body") }
 `model`（必須）、`animClass`（skeletal のみ）、`scale`、`offset`、`texture`、`color`、`material`、
 `params` です。`obj` は procedural バックエンドの別名です。
 
-メッシュを宣言しただけでは何も装着されません。パルにはインスタンススキャンがないため、装着は
-`:renderOn(actor)` で自分から行います。通常は `onSpawned` の中です。
+メッシュを書いただけでは、どこにも付きません。装着は `:renderOn(actor)` で自分から行います。
+ふつうは `onSpawned` の中です。`onSpawned` は、パルがワールドに出終わったときに走るハンドラです。
 
 ```lua
 Pal{
@@ -170,7 +182,8 @@ Pal{
 
 ### material、color、texture
 
-`material` が完全な上書きで、`color` と `texture` はそのうち 2 フィールドのショートハンドです。
+`material` が完全な上書きです。`color` と `texture` はそのうち 2 フィールドの短い書き方で、
+それだけで足りるときに使います。
 
 <TypeTable
   type={{
@@ -181,10 +194,10 @@ Pal{
   }}
 />
 
-この 2 つの書き方はマージされません。`material` があるときはそれがそのまま使われ、トップレベルの
-`color` / `texture` は無視されます。`material` が無いときにだけ、ショートハンドからマテリアル記述子が
-組み立てられます。`:renderOn` の内部では、その記述子が持つ値が同名のメッシュフィールドを上書きし、
-記述子が持たないフィールドはメッシュ側の値がそのまま残ります。
+この 2 つの書き方は混ざりません。`material` を書いたときはそれがそのまま使われ、トップレベルの
+`color` / `texture` は無視されます。`material` が無いときにだけ、短い書き方からマテリアルの
+記述がまとめられます。`:renderOn` の中では、その記述が持つ値が同じ名前のメッシュのフィールドに
+勝ち、記述が持たないフィールドはメッシュ側の値がそのまま残ります。
 
 ```lua
 -- shorthand: tint the declared mesh red
@@ -207,14 +220,23 @@ Pal{
 }
 ```
 
-`Pal.Spec` には `params` やベースマテリアルパスに対するトップレベルのショートハンドはありません。
-これらは `material` の中にしか存在しません。
+`params` とベースマテリアルのパスには、トップレベルの短い書き方がありません。これらは
+`material` の中にだけあります。
+
+<Callout type="warn">
+この 4 つのフィールドが実際に色を塗るのは、procedural と `obj` のバックエンドだけです。パルの
+メッシュの既定である `kind = "skeletal"` はクリーチャーのモデルを差し替えるだけで、それ以外は
+読みません。`static` も何も塗りません。skeletal のメッシュに添えて書いた `color` や `texture` は
+`core.mesh` まで運ばれますが、そこでは何も起きません。このバックエンドで `:renderOn` が `true` を
+返しても、それはモデルが差し替わったという意味で、塗られたという意味ではありません。
+バックエンドの一覧は [Mesh](/docs/api/mesh) にあります。
+</Callout>
 
 ### skills
 
-`skills` は id のリスト以上のものではありません。フレームワークが装備させることはなく、これを発火
-させるネイティブのスキルソースも存在しません。`:skillsOf()` でリストを読み戻し、各スキルは
-[`Skill`](/docs/api/skill) から自分で駆動してください。
+`skills` は id を並べたリスト以上のものではありません。PalForge が装備させることはなく、ゲーム側に
+これを発火させるものもありません。`:skillsOf()` でリストを読み戻し、各スキルは
+[`Skill`](/docs/api/skill) から自分で動かしてください。
 
 ```lua
 local boss = Pal{
@@ -231,10 +253,11 @@ end
 
 ### icon
 
-`:iconOf()` は `/Game/Pal/DataTable/Character/DT_PalCharacterIconDataTable` を id で引き、
-`IconName`、`Icon`、`Texture` の順に列を探ります。テーブルが無い・行が無い・列が無いなど、外れた
-場合はいずれも宣言済みの `icon` を返します。検索には生の id が使われるため、名前空間付きの
-`"example:Boss"` は行に一致せず、常にフォールバックします。
+`:iconOf()` はゲーム自身のパルアイコンのテーブル（`DT_PalCharacterIconDataTable`、次に
+`DT_PalCharacterIconDataTable_Common`）を id で引き、`SoftIcon`、`IconName`、`IconTexture`、
+`Icon`、`Texture` の順に列を見て、最初に中身があったものを返します。テーブルが無い・行が無い・
+読める列が無いなど、どこで外れても、書いておいた `icon` が返ります。検索には生の id を使うので、
+名前空間付きの `"example:Boss"` は行に一致せず、必ずフォールバックします。
 
 ```lua
 local pal = Pal{ id = "example:Boss", icon = "/Game/.../T_icon_example_boss" }
@@ -243,8 +266,8 @@ pal:iconOf()   -- the declared icon, since the DataTable has no "example:Boss" r
 
 ### data
 
-`data` は手を加えずに定義へコピーされ、フレームワーク側はこれを読みません。ハンドルにアクセサも
-無いため、ハンドラの中で使いたい場合は Lua のローカル変数に保持してください。
+`data` は手を加えずに定義へコピーされ、PalForge 側はこれを読みません。ハンドルにアクセサも
+無いので、ハンドラの中で使いたいときは Lua のローカル変数に持っておいてください。
 
 ```lua
 local config = { reward = "Wood", amount = 5 }
@@ -262,12 +285,13 @@ local pal = Pal{
 
 ## Events
 
-ハンドラは `events` の下にまとめます。いずれも `function(pal, ctx)` の形で、`pal` は **この定義自身の
-ハンドル**（`Pal{ ... }` が返したのと同じオブジェクトなので、`:spawn` や `:renderOn`、各クエリがその場で
-使えます）、`ctx` はチャンネルのペイロードです。下の一覧に無いイベント名は、黙って無視されるのでは
-なくハードエラーになります。
+パルに動きを付けるのはここです。ハンドラは `events` の下にまとめます。どれも
+`function(pal, ctx)` の形で、`pal` は **この定義自身のハンドル**（`Pal{ ... }` が返したのと同じ
+オブジェクトなので、`:spawn`、`:renderOn`、各クエリがその場で使えます）、`ctx` は今何が起きたかを
+表すテーブルです。下の一覧に無いイベント名は、黙って無視されるのではなく定義時のエラーになります。
 
-ゲームからハンドラまでの経路は次のとおりです。
+PalForge はゲームを見張り、起きたことを名前の付いたチャンネルに流し、それが起きたパルを見つけて
+ハンドラを呼びます。
 
 ```text
 native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal:onX(ctx)
@@ -275,16 +299,16 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 
 | フック | チャンネル | ネイティブソース | ctx | 状態 |
 | --- | --- | --- | --- | --- |
-| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE（候補フック） |
+| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE。未確認のフックで、ワールドのロード後に有効化 |
 | `onDamaged` | `pal.damaged` | `PalCharacter:OnDamageReaction` | `ctx.actor` | LIVE |
 | `onDeath` | `pal.death` | `PalCharacter:OnDeadCharacter` | `ctx.actor` | LIVE |
 | `onCaptured` | `pal.captured` | `PalCharacterParameterComponent:SetIsCapturedProcessing`（`started == true` のとき） | `ctx.actor`、`ctx.comp` | LIVE |
-| `onTick` | なし | なし | なし | 宣言はできるが発火しない |
+| `onTick` | `tick` | ゲームのイベントは無し。`core/event` が自分で生きたパルを見て回る | `ctx.actor`、`ctx.count`、`ctx.now` | LIVE。生きたパル 1 体につき `core.event.PAL_SCAN_MS` ごと（既定 3 秒） |
 
-`ctx.actor` はそのイベントが起きたパルのポーンです。`pal.captured` はパラメータコンポーネント側で
-ネイティブフックが発火するため、アクターはそのコンポーネントのオーナー、`ctx.comp` はコンポーネント
-自身になります。`onDamaged` はダメージを**受けた**パルで発火し、攻撃した側では発火しません。ソース
-フックが攻撃者を運んでいないためです。
+`ctx.actor` は、そのイベントが起きたワールド上のクリーチャーです。`pal.captured` はパルの
+パラメータコンポーネント側で発火するため、アクターはそのコンポーネントの持ち主、`ctx.comp` は
+コンポーネント自身になります。`onDamaged` はダメージを**受けた**パルで発火し、攻撃した側では
+発火しません。ゲーム側のフックが誰の攻撃かを持っていないためです。
 
 捕獲に反応してプレイヤーに何かを返すハンドラです。
 
@@ -303,7 +327,7 @@ Pal{
 }
 ```
 
-アクターの状態を確認してから動くハンドラです。
+クリーチャーがまだ有効かを確かめてから触るハンドラです。
 
 ```lua
 Pal{
@@ -316,6 +340,29 @@ Pal{
         end,
     },
 }
+```
+
+`onTick` はゲームの操作とは関係なく、およそ 3 秒ごとに、その id の生きたパル 1 体につき 1 回
+走ります。`ctx.count` は mod をロードしてからの 500 ms ハートビートの回数なので、たまにだけ何かを
+したいときに便利です。
+
+```lua
+local log = require("palforge.utils.log").scope("example")
+
+Pal{
+    id = "ChickenPal",
+    events = {
+        onTick = function(pal, ctx)
+            -- ctx.actor is one live Chicken Pal; this runs once per pal, per sweep
+            if ctx.count % 12 == 0 then
+                log.info("chicken still here: " .. tostring(ctx.actor))
+            end
+        end,
+    },
+}
+
+-- slow the sweep down, or switch it off with 0
+require("palforge.core.event").PAL_SCAN_MS = 5000
 ```
 
 ハンドラは自由に組み合わせられ、それぞれ任意です。
@@ -336,29 +383,33 @@ Pal{
 }
 ```
 
-`native/pals.lua` にあるキュレーション済みデモ定義 2 つ（`ChickenPal` と `SheepBall`）も同じ形で、
-このうち `onCaptured`、`onDamaged`、`onDeath` の 3 つを宣言しています。この 2 つは経路が端から端まで
-通っていることを確かめるために存在します。野生の個体を捕まえるか倒せば、ログ行が出ます。
+PalForge には `native/pals.lua` にすぐ使えるパルが 2 つ入っています（`ChickenPal` と
+`SheepBall`）。`onCaptured`、`onDamaged`、`onDeath` がログ出力につないであるので、野生の個体を
+捕まえるか倒せばログ行が出ます。手元のゲームで経路が通っているか確かめるのに一番早い方法です。
 
-### ディスパッチの規則
+### ハンドラが走るかどうかを決めるもの
 
-ハンドラが実行されるかどうかは、次の 4 点で決まります。
+決め手は 4 つです。
 
-1. **解決はブループリントのクラス名で行われます。** ディスパッチはアクターのクラス名から
-   `BP_<Id>_C` を取り出し、その id をレジストリで引きます。名前空間付きの定義も、解決後の FName が
-   ブループリントの id と一致すればヒットするため、`Pal{ id = "example:Boss" }` は
+1. **パルはブループリントのクラス名で見分けます。** ゲーム内のクリーチャーには
+   `BP_<Id>_C` という生成クラスが付いています。PalForge はそれをクリーチャーから読み、
+   `BP_ChickenPal_C` を `ChickenPal` に直して id を引きます。名前空間付きの定義も、解決後の名前が
+   ブループリントの id と一致すればヒットするので、`Pal{ id = "example:Boss" }` は
    `BP_example_Boss_C` を捕まえます。
-2. **ディスパッチされるのは登録済みの id だけです。** `Pal{ ... }` は登録しますが `Pal.get(id)` は
-   登録しません。PalForge の定義を持たないバニラのパルは解決に失敗し、ディスパッチは何もしません。
-3. **すべてワールド準備完了でゲートされています。** ソースフックは、有効な
-   `PalPlayerCharacter` を 1 秒間隔で 5 回連続して検出するまで即座に return します。
-4. **ハンドラは `pcall` の中で実行されます。** ハンドラ内のエラーは握り潰され、クラッシュもせず
-   メッセージも出ません。失敗を見たいならハンドラ内でログを出してください。
+2. **イベントが届くのは登録済みの id だけです。** `Pal{ ... }` は登録しますが `Pal.get(id)` は
+   登録しません。自分で定義していないバニラのパルはどれにも解決されず、イベントは捨てられます。
+3. **ワールドの準備が整うまで何も走りません。** ゲーム側のフックは、有効な
+   `PalPlayerCharacter` を 1 秒間隔で 5 回連続して見つけるまで即座に return します。`onTick` の
+   巡回も同じゲートを待ちます。
+4. **ハンドラは `pcall` の中で走り、失敗はログに残ります。** ハンドラ内のエラーはゲームを落とさず、
+   チャンネルも止めません。PalForge がそれを捕まえ、チャンネル名・フック名・メッセージをログに
+   書きます（`pal.death -> onDeath handler failed: ...`）。ただし、そのハンドラの残りの処理は
+   実行されません。
 
-### チャンネルを直接購読する
+### 自分のパル以外も拾う
 
-ディスパッチは公開チャンネルの購読者のひとつにすぎません。パックが定義していないバニラのパルも
-含めてすべてを拾いたいときは、自分で購読します。
+ハンドラが走るのは自分が定義したパルだけです。バニラも含めてワールド中のパルを拾いたいときは、
+チャンネルを自分で購読します。
 
 ```lua
 local event = require("palforge.core.event")
@@ -372,11 +423,11 @@ end)
 sub:unsubscribe()
 ```
 
-`event.observable(name)` は Rx のオペレータチェーン用に同じ Subject を返します。
-`event.emit("pal.spawned", { actor = someActor })` は合成したイベントを経路全体に流します。ただし
-ディスパッチは `ctx.actor` のブループリントクラス名から定義を解決するため、手作りの ctx は自分で
-購読した先には届きますが、定義側のハンドラに届くのはアクターが本物のパルのポーンのときだけです。
-ハンドラだけを走らせたいときは、後述のイベントフォワーダを使ってください。
+`event.observable(name)` は同じチャンネルを Rx の observable として返すので、オペレータチェーンに
+つなげます。`event.emit("pal.spawned", { actor = someActor })` は自分で作ったイベントを経路全体に
+流します。ただし PalForge は `ctx.actor` のブループリントクラス名から定義を割り出すため、手作りの
+ctx は自分の購読先には届きますが、定義側のハンドラに届くのはアクターが本物のワールド上のパルの
+ときだけです。ハンドラだけを走らせたいときは、後述のイベントフォワーダを使ってください。
 
 ## Handle
 
@@ -387,11 +438,11 @@ sub:unsubscribe()
 
 ```lua
 ---@param arg Coord|table|nil
----@return boolean ok
+---@return boolean accepted
 pal:spawn(arg)
 ```
 
-引数はまず正規化されます。`.x` か `[1]` を持つテーブルは座標、それ以外のテーブルはオプション
+引数はまず仕分けられます。`.x` か `[1]` を持つテーブルは座標、それ以外のテーブルはオプション
 テーブル、引数なしは既定の配置です。
 
 ```lua
@@ -406,8 +457,8 @@ pal:spawn{ toPlayer = true, num = 3, level = 20 }   -- three, owned by the playe
 pal:spawn{ level = 45 }                             -- wild, near the player, level 45
 ```
 
-オプションテーブルは `at`（座標）、`level`（既定 1）、`toPlayer`（真値ならプレイヤー所有の経路へ）、
-`num`（既定 1。`toPlayer` の経路でのみ読まれます）を受け取ります。
+オプションテーブルは `at`（座標）、`level`（既定 1）、`toPlayer`（真値ならワールドではなく
+プレイヤーへ）、`num`（既定 1。`toPlayer` の経路でだけ読まれます）を受け取ります。
 
 ```mermaid
 flowchart TD
@@ -421,11 +472,42 @@ flowchart TD
   F --> H["teleport the new actor - palAt only"]
 ```
 
-どの経路もサーバー検証済みの管理 API である `UPalCheatManager` を通ります。戻り値はネイティブ呼び出しが
-実行できたかどうかであり、「指定した場所にパルがいる」ことまでは意味しません。座標指定の経路では、
-ゲーム側が要求された位置を無視してプレイヤーの近くにパルを落とすため、PalForge は事前にパルの
-アクターをスナップショットしておき、新しく現れたアクターのうちプレイヤー位置に最も近い 1 体だけを
-移動させます。アクターは数フレーム遅れて生成されるので、400 ms 間隔で最大 6 回まで再試行します。
+どの経路も、ゲームがサーバー側で検証する管理 API `UPalCheatManager` を通ります。`true` は
+スポーンの呼び出しが**受け付けられた**という意味で、どこかにパルが立っていることまでは意味しません。
+クリーチャーは数フレーム遅れて現れ、座標の経路ではそのあと、`:spawn` が返ったずっとあとに終わる
+処理で移動させます。その処理の結果はログにしか出ず、呼び出し元には返りません。`false` の方は
+確定で、id が空だった・座標が数値でなかった・チートマネージャに届かなかったといった理由で、何も
+試みられなかったことを表します。
+
+座標の経路では、ゲームが指定した位置を無視してプレイヤーの近くにパルを落とします。そこで
+PalForge は先にパルのスナップショットを取り、新しく現れたうちプレイヤーに一番近い 1 体だけを
+動かします。クリーチャーが現れるまで数フレームかかるので、400 ms 間隔で最大 6 回まで再試行します。
+
+#### チートマネージャ
+
+`SpawnMonster` と `SpawnMonsterForPlayer` は `UPalCheatManager` のメソッドです。クライアントでは
+CheatManagerEnabler mod が `PlayerController:ClientRestart` からこのオブジェクトを作りますが、
+専用サーバーではそのフックが発火しないため、誰も作りません。そこで `core/spawn` は、セッションに
+ひとつも無ければ自分で作ります。`PalPlayerController` 自身の `CheatClass` を `StaticConstructObject`
+で生成し（そのクラスが null のときは `/Script/Pal.PalCheatManager`、次に
+`/Script/Engine.CheatManager` にフォールバックします）、できたオブジェクトをコントローラに
+取り付けます。オブジェクトはそのまま残るので、これはスポーンのたびではなくセッションに一度だけ
+起こり、その一度はログに記録されます。専用サーバーでも `:spawn` が効くのはこのためです。
+
+残る失敗は、プレイヤーコントローラがそもそも無い場合、つまりワールド未ロードか未接続のときだけ
+です。そのときはどの経路も `false` を返し、チートマネージャが見つからず作成もできなかったと
+警告します。`world.ready` からスポーンすれば、この時間帯を避けられます。
+
+```lua
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("example")
+
+event.on("world.ready", function()
+    if not Pal.get("ChickenPal"):spawn{ level = 10 } then
+        log.warn("spawn not attempted - no player controller yet")
+    end
+end)
+```
 
 ### renderOn
 
@@ -435,9 +517,9 @@ flowchart TD
 pal:renderOn(actor)
 ```
 
-宣言したメッシュを生きているポーンに一度だけ装着します。レンダラー側が重ね掛けを防ぐので、同じ
-アクターに 2 回呼んでも害はありません。アクターが有効でない場合、定義にメッシュが無い場合、その
-メッシュに `model` が無い場合は、何もせず `false` を返します。
+書いておいたメッシュを、生きているクリーチャーに一度だけ付けます。レンダラーが重ね掛けを防ぐので、
+同じアクターにもう一度呼んでも害はありません。アクターが有効でないとき、定義にメッシュが無いとき、
+そのメッシュに `model` が無いときは、何もせず `false` を返します。
 
 ```lua
 Pal{
@@ -452,6 +534,33 @@ Pal{
     },
 }
 ```
+
+書いた内容はまるごとレンダラーに渡されます。`kind`、`model`、`animClass`、`scale`、`offset` は
+メッシュから渡り、そのあと定義側のマテリアル記述が、自分の持つ `color`、`texture`、`params`、
+`material` を上書きします。`animClass` は skeletal バックエンドまで届き、バックエンドは
+アニメーションブループリントモードに切り替えてから、差し替えた直後にそのブループリントを
+バインドします。差し替えたスケルトンを動かすものが無いとアニメーションせず、画面から消えてしまう
+こともあります。ですから、クリーチャーが元から持っていた `ABP_*_C` ではなく、差し替えたモデルに
+対応する `ABP_*_C` を書いてください。
+
+```lua
+-- a chicken wearing a sheepball body: the anim blueprint travels with the model
+Pal{
+    id   = "ChickenPal",
+    mesh = {
+        kind      = "skeletal",
+        model     = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall",
+        animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/SheepBall/ABP_SheepBall.ABP_SheepBall_C",
+    },
+    events = {
+        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+    },
+}
+```
+
+`true` は、バックエンドのセッターが走ったという意味です。skeletal バックエンドなら、クリーチャー
+自身のコンポーネントにモデルが設定された、ということです。その結果何が描画されるかまでは、この
+呼び出しでは分かりません。
 
 ### クエリ
 
@@ -475,9 +584,9 @@ end
 
 ### イベントフォワーダ
 
-`:onSpawned(ctx)`、`:onDamaged(ctx)`、`:onDeath(ctx)`、`:onCaptured(ctx)`、`:onTick(ctx)` は、渡した
-ctx をそのまま使って定義側のハンドラを即座に呼びます。ディスパッチはこれらを経由しません。テストや
-別のハンドラから自分でハンドラを走らせるためのものです。
+`:onSpawned(ctx)`、`:onDamaged(ctx)`、`:onDeath(ctx)`、`:onCaptured(ctx)`、`:onTick(ctx)` は、
+渡した ctx をそのまま使って定義側のハンドラをその場で呼びます。ゲームからの経路はここを通りません。
+テストや別のハンドラから自分でハンドラを走らせたいときに使います。
 
 ```lua
 -- run the death handler now, with a hand-made ctx
@@ -521,8 +630,8 @@ local Chicken = Pal{
 Chicken:spawn(Player.coordinateOffset(300, 0, 0))
 ```
 
-サウンドはファイルスコープで一度だけ定義し、ハンドラからは再生するだけにします。ハンドラの中で
-定義するとスポーンのたびにサウンドを再登録することになります。手元にローカル変数が無い場面では、
+サウンドはファイルの先頭で一度だけ定義し、ハンドラからは再生するだけにします。ハンドラの中で
+定義すると、スポーンのたびにサウンドを登録し直すことになります。手元にローカル変数が無い場面では、
 代わりに `Audio.get("AKE_CampLevelUp"):play(ctx.actor)` を使ってください。
 
 ### 死亡時にドロップするパル
@@ -547,9 +656,10 @@ Pal{
 }
 ```
 
-`Item.get(...):give(n)` はゲーム自身の `AddItem_ServerInternal` 経路でローカルプレイヤーの
-インベントリに追加します。PalForge にワールドへドロップする呼び出しは無いため、これは拾いに行く
-死体ではなく報酬です。詳細は [Item](/docs/api/item) を参照してください。
+`Item.get(...):give(n)` は、ゲーム自身の `AddItem_ServerInternal` の経路でローカルプレイヤーの
+インベントリに追加します。PalForge に地面へ落とす呼び出しは無いので、これは拾いに行く袋ではなく
+プレイヤーが受け取る報酬です。アイテムでできることは
+[Item](/docs/api/item) を参照してください。
 
 ### 殴られると燃え始めるパル
 
@@ -588,8 +698,8 @@ Pal{
 }
 ```
 
-エフェクトのランタイムは共有の 500 ms ハートビートで駆動されるため、`onTick` は `duration` が尽きる
-までおよそ `interval` 秒ごとに発火します。`ctx.elapsed`、`ctx.stacks`、そして期限切れ時の `ctx.reason`
+エフェクトは共有の 500 ms ハートビートで動くので、その `onTick` は `duration` が尽きるまで
+およそ `interval` 秒ごとに発火します。`ctx.elapsed`、`ctx.stacks`、そして期限切れ時の `ctx.reason`
 はそのランタイムが入れる値で、それ以外のキーは `:apply` に渡したものです。詳細は
 [Effect](/docs/api/effect) を参照してください。
 
@@ -635,43 +745,78 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-各個体はそれぞれ独立した `SpawnMonster` 呼び出しでスポーンし、それぞれの `onSpawned` が自分の
-アクターにメッシュを装着します。
+1 体ずつ別々の `SpawnMonster` 呼び出しでスポーンし、それぞれの `onSpawned` が自分のクリーチャーに
+メッシュを付けます。
 
 ## Limits
 
 <Callout type="warn">
 
-- **Lua から新しい `CharacterID` は作れません。** `Pal{ id = ... }` は、ゲームに既に存在する行と
-  ブループリントに対して挙動・見た目・メタデータを付けるものです。DataTable の行そのものを作るのは
-  PalSchema の仕事です。対応する `BP_<Id>_C` が存在しない id はディスパッチを受け取れず、`:spawn` して
-  も出てくるものがありません。
-- **`onTick` は発火しません。** ビルディングには約 500 ms のスキャンがあり、そこから生きた
-  インスタンスが作られます。パルには相当するものが無く、パルごとのハートビートを駆動する仕組みが
-  存在しません。形をそろえるために宣言だけはできる、というのがこのフィールドのすべてです。
-  ハートビートを直接使う（`require("palforge.core.event").every(2000, fn)`。500 ms のティックに量子化
-  されます）か、Effect の `interval` を使ってください。
-- **`onSpawned` は未確認の候補フックに乗っています。**
-  `PalCharacter:BroadcastOnCompleteInitializeParameter` は、捕獲・ダメージ・死亡と違ってゲーム内の
-  イベントプローブで確認できていません。ベストエフォートとして扱い、ハンドラは何度呼ばれても
-  問題ない作りにしてください。`:renderOn` は一度きりの装着なので、再度呼んでも安全です。
-- **ワールドの準備が整うまで何もディスパッチされません。** 4 つのソースフックはいずれも、有効な
-  `PalPlayerCharacter` を 1 秒間隔で 5 回連続して検出するまで即座に return します。
-- **ハンドラのエラーは握り潰されます。** ディスパッチは `pcall` の中でフックを呼ぶため、バグが
-  あってもクラッシュせず、報告もされません。ハンドラ内でログを出してください。
-- **`:spawn` には `PalCheatManager` が必要です**（CheatManagerEnabler mod）。無い場合はどの経路も
-  `false` を返し、ログに警告を書きます。
-- **座標指定はスポーン位置指定ではなく移動です。** ネイティブ呼び出しは要求された位置を無視するため、
-  PalForge は生成後のアクターを 400 ms 間隔で最大 6 回まで再試行しながらテレポートさせます。
-  `:spawn` が返す `true` はスポーン呼び出し自体に対するものです。新しいアクターが現れなければ、
-  配置は警告をログに出して諦めます。
-- **メッシュが自動で装着されることはありません。** ハンドラから `:renderOn(actor)` を呼んでください。
+- **Lua から新しいクリーチャーは作れません。** `Pal{ id = ... }` は、ゲームに既にいる
+  クリーチャーに挙動・見た目・メタデータを付けるものです。データ行そのものを作るのは PalSchema の
+  仕事です。対応する `BP_<Id>_C` がゲームに無い id はハンドラが呼ばれず、`:spawn` しても出てくる
+  ものがありません。
+- **`onTick` はゲームのイベントではなく巡回です。** `core/event` が
+  `core.event.PAL_SCAN_MS`（既定 3000 ms）ごとに生きたパルを見て回り、1 体につき 1 回 `onTick` を
+  呼びます。`require("palforge.core.event").PAL_SCAN_MS = 5000` で遅くでき、`0` で止められます。
+  500 ms のハートビートよりわざと遅くしてあります。この巡回はゲーム内のすべてのオブジェクトに
+  触れるためです。もっと速く、もっと正確なタイマーが必要なら
+  `require("palforge.core.event").every(2000, fn)`（500 ms のティックに量子化されます）か、
+  Effect の `interval` を使ってください。
+- **`onTick` はクリーチャーごとの記憶を持ちません。** `pal` はこの定義のハンドルで、その id の
+  どのクリーチャーにも同じハンドルが渡ります。クリーチャーごとに覚えておきたいものは、
+  `ctx.actor` をキーにした自前のテーブルに入れてください。
+- **壊れた `onTick` は止められます。** 5 回続けて失敗すると、PalForge はそれをログに書き、その
+  セッションの間その定義の `onTick` を呼ばなくなります。失敗した 1 体だけでなく、その id の
+  すべてのクリーチャーが対象です。
+- **`onSpawned` は未確認のフックに乗っています。**
+  `PalCharacter:BroadcastOnCompleteInitializeParameter` は、捕獲・ダメージ・死亡と違ってゲーム内で
+  確認できていません。また、ワールドのロード後にだけ有効化されます。それより早く有効にすると、
+  ロード時の大量発火で共有のフック処理が詰まってしまうためです。ベストエフォートとして扱い、
+  何度呼ばれても問題ないハンドラを書いてください。`:renderOn` は一度きりの装着なので、再度
+  呼んでも安全です。
+- **ワールドの準備が整うまで何も走りません。** 4 つのゲーム側フックはいずれも、有効な
+  `PalPlayerCharacter` を 1 秒間隔で 5 回連続して見つけるまで即座に return します。`onTick` の
+  巡回も同じゲートを待ちます。
+- **ハンドラのエラーは、そのハンドラを終わらせます。** PalForge は `pcall` の中でフックを呼び、
+  失敗をチャンネル名とフック名つきでログに書くので、バグはログから見えます。ただしハンドラの
+  残りは実行されず、チャンネルもゲームもそれに気づきません。
+- **`:spawn` にはプレイヤーコントローラが必要です。** `PalCheatManager` も必要ですが、誰かが先に
+  作っておく必要はありません。セッションにひとつも無ければ、`core/spawn` がコントローラの
+  `CheatClass` からひとつ作って取り付けます。CheatManagerEnabler の `ClientRestart` フックが動かない
+  専用サーバーでも `:spawn` が効くのはこのためです。作る土台となる `PalPlayerController` が無い
+  場合は、どの経路も `false` を返して警告します。
+- **座標指定はスポーン位置の指定ではなく、スポーン後の移動です。** ゲーム側の呼び出しは指定した
+  位置を無視するため、PalForge は現れたクリーチャーを 400 ms 間隔で最大 6 回まで再試行しながら
+  テレポートさせます。`:spawn` が返す `true` はスポーン呼び出し自体に対するものです。移動の結果は
+  ログにしか出ません。新しいクリーチャーが現れなかったときの警告と、見つかったもののどの移動
+  呼び出しも失敗してスポーン地点に留まったときの警告があります。`LoopAsync` と
+  `ExecuteInGameThread` が使えない環境ではこの遅延処理自体が無く、パルはプレイヤーの隣に留まります。
+- **メッシュが自動で付くことはありません。** ハンドラから `:renderOn(actor)` を呼んでください。
   `core.mesh.ENABLED` はグローバルのキルスイッチで、これを切るとすべての装着が no-op になります。
-- **`Pal.get` は登録しません。** レジストリに定義を入れるのは `Pal{ ... }` だけなので、`Pal.get` から
-  得たハンドルは操作はできてもイベントを受け取ることはできません。同じ id を 2 回定義すると、
-  後の定義が前の定義を置き換えます。
+  また、マテリアル関連のフィールドが実際に塗られるのは `kind` が `procedural` か `obj` のときだけです。
+- **`Pal.get` は登録しません。** レジストリに定義を入れるのは `Pal{ ... }` だけなので、`Pal.get` で
+  得たハンドルは操作はできてもイベントを受け取れません。同じ id を 2 回定義すると、後の定義が
+  前の定義を置き換えます。
 
 </Callout>
+
+## まとめ
+
+- `Pal{ id = "ChickenPal", ... }` で、ゲームのクリーチャーに新しい動きを付けます。必ず書くのは
+  `id` だけです。
+- パルに起きたことへの反応は `events` に書きます。`onSpawned`、`onDamaged`、`onDeath`、
+  `onCaptured`、`onTick` の 5 つがあり、どれも動いています。
+- `pal:spawn()` でワールドに出します。場所を決めたいときは座標を、プレイヤーに直接渡したいときは
+  `{ toPlayer = true, num = 3 }` を渡します。
+- `mesh` で見た目を変えられますが、装着は `onSpawned` から `pal:renderOn(ctx.actor)` を呼んで
+  自分で行います。
+- ハンドラが呼ばれるのは `Pal{ ... }` で定義した id だけです。`Pal.get` はアクションだけを返し、
+  イベントは付きません。
+- `onTick` は生きたパル 1 体につき約 3 秒ごとに走り、記憶を持ちません。覚えておきたいものは
+  `ctx.actor` をキーにしてください。
+
+次は [Mesh](/docs/api/mesh) を読むと、パルに自分だけの体を持たせられます。
 
 <Cards>
   <Card title="Mesh" href="/docs/api/mesh">パルが身にまとう見た目と、その背後のバックエンド</Card>

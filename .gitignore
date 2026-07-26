@@ -5,11 +5,12 @@ state/
 logs/
 *.log
 
-# Dev-only trees: scratch references, the in-game test suites, and the legacy
-# PalSmith code kept on disk for reference while porting.
+# Dev-only trees: scratch references and the legacy PalSmith code kept on disk for
+# reference while porting. Scripts/palforge/test/ is NOT here — the in-game API suite
+# is part of the framework and ships with it.
 tmp/
-tests/
-test/
+/tests/
+Scripts/palforge/tests/
 deprecated/
 
 # Editor / OS noise

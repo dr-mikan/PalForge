@@ -1,25 +1,30 @@
 ---
-title: Fields and validation
-description: How core/schema declares a shape, what every descriptor key does, and the exact error you get when a definition is wrong
+title: What goes in a definition
+description: Every field you can write, what each one does, and the exact message you get when something is wrong
 ---
 
-Every `X{ ... }` call in PalForge is checked against a declared shape before anything is
-registered. The mechanism is one file, `Scripts/palforge/core/schema.lua`. It holds no
-type definitions of its own: each api module declares its own shapes, and this file turns
-a declaration into something that validates, fills defaults and documents itself.
+## What you can do after this page
 
-Validation is strict. Any problem is a hard error raised with `error(msg, 0)`, so the
-message carries no file and line prefix — it names the domain, the field and the reason,
-and it appears in the UE4SS log exactly as written. A define call never half-succeeds.
+- Write a pal, an item or a building and have the game accept it the first time
+- Read the message PalForge prints when a definition is wrong, and change the exact line it names
+- Ask the game, while it is running, which fields a pal or a building takes
+- Reuse one model across several pals instead of writing it out again
+- Check your own pack's settings the same way, so a typo stops at load instead of mid-game
 
-## Declaring a shape
+Every `X{ ... }` call — `Pal{ ... }`, `Item{ ... }`, `Building{ ... }` and the rest — is
+checked against a list of allowed fields before anything reaches the game. When everything
+fits, you get your definition back. When it does not, the call stops and raises a message
+that names the domain (the kind of thing you were defining), the field, and the reason.
+A definition never half-succeeds: either all of it is registered or none of it is.
 
-`schema.define(name, fields, opts)` builds a spec. `fields` is an **array** of field
-descriptors, not a map, so declaration order is preserved — that order drives `:help()`
-and the generated editor types.
+The message carries no file name or line number in front of it. It lands in the UE4SS log —
+the text file the mod loader writes while the game runs — as one line you can search for.
 
-This is the real declaration from `Scripts/palforge/api/mesh.lua`, which puts `type`,
-`values`, `default`, `required`, `check` and `doc` in one place:
+## What a field list looks like
+
+Each domain writes down the fields it accepts, once, as plain data. Here is the real list
+for a mesh (the 3D model attached to a pal or a building). It shows every key you can put
+on a field in one place.
 
 ```lua title="Scripts/palforge/api/mesh.lua"
 local schema = require("palforge.core.schema")
@@ -40,10 +45,13 @@ local Spec = schema.define("Mesh.Spec", {
 }, { handle = "Mesh.Handle" })
 ```
 
-The field name is the descriptor's **first positional element**. Everything else is a
-named key on the same table.
+The field name is the **first item** in each row. Everything else is a named key on that
+same row.
 
-`schema.define` returns a spec object with this surface:
+`fields` is an array, not a map, so the order you write is the order you get back — it
+drives `:help()` and the completions your editor shows.
+
+`schema.define(name, fields, opts)` hands back a spec object with this surface:
 
 ```lua
 Spec:validate(t, context)   -- a validated COPY with defaults filled; raises on any problem
@@ -54,8 +62,8 @@ Spec.name                   -- "Mesh.Spec"
 Spec.handle                 -- "Mesh.Handle", or nil
 ```
 
-An api module calls `:validate` as the first statement of its define function, then builds
-its definition class out of the returned copy:
+Every `X{ ... }` call runs its own list first, then builds the definition out of the copy
+it gets back:
 
 ```lua title="Scripts/palforge/api/pal.lua"
 local function define(spec)
@@ -65,20 +73,19 @@ local function define(spec)
 end
 ```
 
-The second argument is the context string prepended to every error message. Passing
-`"Pal"` is why you read `PalForge: Pal: ...` and not `PalForge: Pal.Spec: ...`. When you
-omit it, the spec's own name is used.
+The second argument is the name printed at the front of every message from that call.
+Passing `"Pal"` is why you read `PalForge: Pal: ...` and not `PalForge: Pal.Spec: ...`.
+Leave it out and the shape's own name is used.
 
 <Callout type="info">
-Names are globally unique across the whole registry. Declaring `"Pal.Spec"` twice raises
-`PalForge: schema.define: "Pal.Spec" is already declared`, so two modules can never claim
-the same shape name.
+Shape names are unique across everything declared. Asking for `"Pal.Spec"` a second time
+raises `PalForge: schema.define: "Pal.Spec" is already declared`, so pick a name nothing
+else uses when you declare a shape of your own.
 </Callout>
 
-## Field descriptor keys
+## What you can put on a field
 
-Eleven things can appear in a descriptor: the positional name, plus these ten keys. There
-are no others.
+A field row holds its name plus up to ten keys. These are all of them.
 
 <TypeTable
   type={{
@@ -128,8 +135,8 @@ are no others.
 
 ### type
 
-The notation is a plain string. A union is written with a pipe and is satisfied when the
-value matches any one alternative.
+The notation is a plain string. Write a union with a pipe, and the value passes when it
+matches any one alternative.
 
 ```lua
 { "maxStack", type = "number" }                    -- Item.Spec
@@ -137,7 +144,7 @@ value matches any one alternative.
 { "icon" }                                         -- no type: anything is accepted
 ```
 
-A **callable table stands in for a function** wherever `"function"` is expected, so a
+A **table you can call stands in for a function** wherever `"function"` is expected, so a
 table with a `__call` metamethod passes as an event handler:
 
 ```lua
@@ -150,21 +157,21 @@ Pal{ id = "example:Boss", events = { onSpawned = counter } }   -- accepted
 
 ### required
 
-The check happens only when the value is `nil`, and before `default` is consulted, so a
-field can never be both required and defaulted in practice.
+Checked only when you left the field out, and before `default` is looked at, so a field is
+never both required and defaulted.
 
 ```lua
 { "model", type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" }
 ```
 
-`id` is `required = true` on every domain spec. It is optional on `Mesh.Spec` alone,
-because a mesh written inline inside another definition has nothing to name — and
-`api/mesh` re-checks it by hand after validation, so a directly defined mesh still needs
-one.
+`id` is required on every domain. `Mesh.Spec` is the one place it is optional, because a
+mesh written inline inside a pal or a building has nothing to name. Write `Mesh{ ... }` on
+its own and you still need an id: `api/mesh` checks for it separately, right after the
+field list runs.
 
 ### default
 
-The default fills an absent field, and the filled value then goes through the same type,
+A default fills a field you left out. The filled value then goes through the same type,
 `values`, `arrayOf`/`mapOf`, `of` and `check` steps as a value you wrote yourself.
 
 ```lua
@@ -173,19 +180,19 @@ The default fills an absent field, and the filled value then goes through the sa
 { "stackable",    type = "boolean", default = false }       -- Effect.Spec
 ```
 
-A function default is **called** to build a fresh value, which is how a mutable default
-would avoid being shared between definitions:
+A function default is **called**, so each definition gets a fresh value of its own instead
+of sharing one table:
 
 ```lua
 { "tags", type = "table", default = function() return {} end }
 ```
 
-No spec in the tree uses a function default today. `Spec:help()` also skips them — it
-prints `default=` only for a non-function value.
+None of PalForge's own field lists use a function default today, but yours can.
+`Spec:help()` prints `default=` only for a plain value, and skips the line for a function.
 
 ### values
 
-Membership is tested with `==` against each entry, in order.
+The value has to equal one of the entries. They are compared with `==`, in order.
 
 ```lua
 { "kind",     type = "string", values = { "procedural", "static", "skeletal", "obj" } }  -- Mesh.Spec
@@ -197,9 +204,9 @@ Membership is tested with `==` against each entry, in order.
 
 ### of
 
-The value is validated against another spec, and the **validated copy replaces it** in the
-output. The error context grows to name the inner shape, so a complaint about a field
-inside a nested table tells you which shape to go and read.
+The value is checked against another shape, and the **checked copy replaces it** in the
+result. The message grows to name the inner shape, so a complaint about a field inside a
+nested table tells you which list to go and read.
 
 ```lua
 { "mesh",   type = "table", of = Mesh,   doc = "the mesh attached to a spawned pawn" }
@@ -210,7 +217,7 @@ inside a nested table tells you which shape to go and read.
 ### arrayOf
 
 Every element of the **array part** is type-checked with `ipairs`, and the index becomes
-part of the reported field name.
+part of the field name in the message.
 
 ```lua
 { "skills",   type = "table", arrayOf = "string" }   -- Pal.Spec
@@ -221,14 +228,14 @@ part of the reported field name.
 Pal{ id = "example:Boss", skills = { "example:Fire", "example:Gust" } }   -- fine
 ```
 
-Because it walks `ipairs`, a string key sitting inside an `arrayOf` table is not visited.
-Only the contiguous array part is checked.
+Because it walks `ipairs`, a string key sitting inside an `arrayOf` table is never visited.
+Only the run of numbered entries is checked.
 
 ### mapOf
 
 Every value in the table is type-checked with `pairs`, and the key becomes part of the
-reported field name. The array part is visited too, so `materials = { "Wood" }` reports
-`materials.1`.
+field name in the message. The array part is visited too, so `materials = { "Wood" }`
+reports `materials.1`.
 
 ```lua
 { "materials", type = "table", mapOf = "number", required = true,
@@ -244,15 +251,16 @@ Item{
 
 ### doc
 
-One line, shown by `Spec:help()` and emitted as the trailing comment on the generated
-`---@field` annotation. Validation reads it in exactly one place: the "is required"
-error quotes it in parentheses. A failing `check` quotes the check's own reason instead,
-never the doc.
+One line, shown by `Spec:help()` and written as the trailing comment on the generated
+`---@field` line your editor reads. Validation uses it in exactly one place: the "is
+required" message quotes it in parentheses. A failing `check` quotes the check's own
+reason instead, never the doc.
 
 ### sig
 
-The LuaLS signature of a function field. **Validation ignores it completely** — only
-`tools/gen-types.lua` reads it, and only to write a better type into `types.lua`.
+The signature LuaLS — the Lua language server behind editor completion — shows for a
+function field. **Validation ignores it completely.** Only `tools/gen-types.lua` reads it,
+and only to write a better type into `types.lua`.
 
 ```lua
 { "onSpawned", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -261,12 +269,11 @@ The LuaLS signature of a function field. **Validation ignores it completely** �
 
 ### check
 
-A predicate that runs **after** everything else, including nested `of` validation. Return
-`true` to accept; return `false` plus a reason string to reject, and the reason is quoted
-back in the error.
+A test of your own that runs **after** everything else, including nested `of`. Return
+`true` to accept. Return `false` plus a reason string to reject, and that reason is quoted
+back in the message.
 
-`schema.nonEmpty` is the one shared check in the tree, used by the `id` field of every
-domain:
+`schema.nonEmpty` is the shared one, used by the `id` field of every domain:
 
 ```lua title="Scripts/palforge/core/schema.lua"
 function M.nonEmpty(v)
@@ -284,9 +291,9 @@ Your own check follows the same contract:
   end },
 ```
 
-## Spec options
+## One more option: handle
 
-The third argument to `schema.define` takes exactly one key today.
+The third argument to `schema.define` takes one key today.
 
 <TypeTable
   type={{
@@ -301,15 +308,15 @@ The third argument to `schema.define` takes exactly one key today.
 }, { handle = "Mesh.Handle" })
 ```
 
-Declaring it once at the spec means every field that points at that spec through `of`
-gets the union in the generated types without restating it — `Pal.Spec.mesh` becomes
-`Mesh.Spec|Mesh.Handle`. A derived spec inherits the base's `handle`, so
-`Building.Spec.Mesh` also reports `Mesh.Handle`.
+Declare it once on the shape and every field pointing at that shape through `of` shows the
+union in your editor without restating it — `Pal.Spec.mesh` becomes
+`Mesh.Spec|Mesh.Handle`. A derived shape inherits the base's `handle`, so
+`Building.Spec.Mesh` reports `Mesh.Handle` too.
 
-## How validation runs
+## What happens when you call a definition
 
-`Spec:validate(t, context)` never mutates `t`. It returns a **new plain table**, so
-nothing downstream can tell a constructed value from a hand-written one.
+`Spec:validate(t, context)` never changes the table you passed in. It returns a **new plain
+table**, so nothing downstream can tell a built value from a hand-written one.
 
 ```mermaid
 flowchart TD
@@ -322,12 +329,12 @@ flowchart TD
   E --> F[return a new plain table]
 ```
 
-A `nil` input is treated as an empty table, so required fields still fail. Every key is
-rejected before any field is examined, which is why a typo is reported even when the rest
-of the definition is also broken. A non-string key is rejected on sight, before the walk
+A `nil` input counts as an empty table, so required fields still fail. Every key is checked
+before any field is examined, which is why a typo is reported even when the rest of the
+definition is broken too. A key that is not a string is rejected on sight, before the walk
 tries to match it against a declared name.
 
-Each declared field then runs the same pipeline, in this exact order:
+Each declared field then runs the same steps, in this exact order:
 
 ```mermaid
 flowchart TD
@@ -347,14 +354,14 @@ flowchart TD
   L --> K
 ```
 
-Two consequences worth holding on to:
+Two things follow from that order:
 
 - The unwrap for `of` happens **before** the type check, so a handle passed where a table
   is declared is already a plain table by the time `type` is tested.
 - `check` sees the value **after** nesting, so a check on a field with `of` receives the
   validated copy, not the raw input.
 
-The copy is one level deep. A nested `of` shape is re-validated into a fresh table, but a
+The copy is one level deep. A nested `of` shape is re-checked into a fresh table, but a
 plain `table` field such as `data`, `color` or `offset` is carried across by reference —
 the table you wrote is the table the definition holds.
 
@@ -364,9 +371,11 @@ local pal = Pal{ id = "example:Boss", data = payload }
 payload.charges = 5   -- the definition sees 5: `data` is not deep-copied
 ```
 
-## Failure modes
+## What you will see when you get it wrong
 
-Every message below is the literal text raised by the current source.
+Here is every message a definition can raise, the code that causes it, and what to change.
+Each block of plain text is exactly what the game prints, so you can copy a phrase out of it
+straight into a log search.
 
 ### Not a table
 
@@ -378,6 +387,8 @@ Pal("example:Boss")
 PalForge: Pal: expected a table, got string. Fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 ```
 
+Fix: pass a table. Write `Pal{ id = "example:Boss" }` with braces, not parentheses.
+
 ### A non-string key
 
 ```lua
@@ -387,6 +398,8 @@ Pal{ id = "example:Boss", [1] = "x" }
 ```text
 PalForge: Pal: keys must be strings, got a number key
 ```
+
+Fix: give every entry a name. A bare value inside the braces becomes entry `1`.
 
 ### Unknown field, with a did-you-mean
 
@@ -406,6 +419,8 @@ Building{ id = "example:Bench", tickInverval = 4 }
 PalForge: Building: unknown field "tickInverval" (did you mean "tickInterval"?). Valid fields: id, name, description, gridCm, buildIds, tickInterval, mesh, material, color, texture, icon, state, events, data
 ```
 
+Fix: rename the field to the suggestion.
+
 ### Unknown field, no candidate close enough
 
 ```lua
@@ -415,6 +430,8 @@ Pal{ id = "example:Boss", zzzzzzzzzz = 1 }
 ```text
 PalForge: Pal: unknown field "zzzzzzzzzz". Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 ```
+
+Fix: the accepted names are listed after `Valid fields:`. Pick the one you meant.
 
 ### Missing required field
 
@@ -426,8 +443,9 @@ Pal{ name = "Boss" }
 PalForge: Pal: field "id" is required (pal id: a game CharacterID ("ChickenPal") or "pack:name")
 ```
 
-The parenthesised text is the field's `doc`, falling back to its `type` and then to
-`any` when there is none.
+Fix: add the field. The text in parentheses is that field's `doc`, and it tells you what
+belongs there — here, either a game id or `"pack:name"`. When a field has no `doc`, its
+`type` is printed instead, then `any`.
 
 ### Wrong type
 
@@ -449,6 +467,9 @@ Building{ id = "example:Bench", state = "uses" }
 PalForge: Building: field "state" expects table|function, got string
 ```
 
+Fix: give the field a value of a type it lists. `state = { uses = 0 }` or
+`state = function() return { uses = 0 } end`.
+
 ### Value outside `values`
 
 ```lua
@@ -467,6 +488,8 @@ Skill{ id = "example:Fire", kind = "ultimate" }
 PalForge: Skill: field "kind" must be one of { "active", "passive" }, got "ultimate"
 ```
 
+Fix: use one of the values in the braces. They are the only ones accepted.
+
 ### Bad `arrayOf` element
 
 The index is folded into the field name, so the whole path sits inside one pair of quotes.
@@ -478,6 +501,8 @@ Pal{ id = "example:Boss", skills = { "example:Fire", 3 } }
 ```text
 PalForge: Pal: field "skills[2]" expects string, got number
 ```
+
+Fix: `skills[2]` is the second entry in the list. Correct that entry.
 
 ### Bad `mapOf` value
 
@@ -499,6 +524,8 @@ Item{ id = "example:Torch", recipe = { materials = { "Wood" } } }
 PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials.1" expects number, got string
 ```
 
+Fix: `materials` is `{ <itemId> = <count> }`, so write `materials = { Wood = 3 }`.
+
 ### Failing `check`
 
 ```lua
@@ -509,13 +536,13 @@ Pal{ id = "" }
 PalForge: Pal: field "id" is invalid: must be a non-empty string
 ```
 
-The text after the colon is the second return value of the check. When a check returns
-`false` alone, the message ends in `failed check`.
+Fix: the text after the colon is the reason the check returned. When a check returns
+`false` on its own, the message ends in `failed check` instead.
 
 ### Nested spec errors name the inner shape
 
-The context accumulates: the outer domain, the outer field, the inner spec's name, then
-the inner complaint.
+The message builds up in order: the outer domain, the outer field, the inner shape's name,
+then the inner complaint. Read it from the right — the last part is what to change.
 
 ```lua
 Pal{ id = "example:Boss", mesh = { kind = "skeletal" } }
@@ -533,8 +560,8 @@ Building{ id = "example:Bench", mesh = { model = "/Game/X", colour = { 1, 0, 0, 
 PalForge: Building: field "mesh" (Building.Spec.Mesh): unknown field "colour" (did you mean "color"?). Valid fields: id, kind, model, animClass, scale, offset, texture, color, material, params
 ```
 
-The same applies to the `events` group, which is a nested spec like any other — a
-misspelled hook is an error, never a silent no-op:
+The `events` group is a nested shape like any other, so a misspelled handler name is an
+error rather than a handler that silently never runs:
 
 ```lua
 Pal{ id = "example:Boss", events = { onSpawn = function(pal, ctx) end } }
@@ -552,10 +579,13 @@ Building{ id = "example:Bench", events = { onPlace = "hello" } }
 PalForge: Building: field "events" (Building.Spec.Events): field "onPlace" expects function, got string
 ```
 
-## The did-you-mean suggester
+Fix: the name in `(...)` is the shape to look up with `schema.help`, and the valid names
+are listed at the end of the line.
 
-A silently ignored typo is the exact failure this layer exists to prevent, so an unknown
-field always tries to name the field you meant.
+## How the suggestion is picked
+
+An unknown field always tries to name the field you meant, so a misspelling is caught the
+moment you load the pack.
 
 ```mermaid
 flowchart TD
@@ -569,17 +599,18 @@ flowchart TD
   D --> G
 ```
 
-**Containment beats edit distance**, and that ordering is the whole point. The most common
-mistake is a decorated name — `meshSpec` for `mesh`, `iconPath` for `icon` — which reads
-as obvious to a human but is several edits away from the real field. Containment is tested
-in both directions, so a prefix, a suffix and a plural all match. Only declared names of
-three characters or more take part, so a two-letter field like `id` cannot swallow half
-the declaration through containment.
+**A name that contains a real field name wins over one that is merely spelled close.** The
+most common slip is a decorated name — `meshSpec` for `mesh`, `iconPath` for `icon` —
+which reads as obvious to you but is several edits away from the real field. Containment is
+tested in both directions, so a prefix, a suffix and a plural all match. Only declared
+names of three characters or more take part, so a two-letter field like `id` cannot swallow
+half the declaration.
 
-When nothing contains anything, the Levenshtein distance decides, and it only accepts a
-genuinely close match: the threshold is `max(2, floor(#name / 3))`.
+When nothing contains anything, the Levenshtein distance decides — how many single-letter
+edits apart the two names are. Only a genuinely close match is accepted: the limit is
+`max(2, floor(#name / 3))`.
 
-Both stages compare lowercased, so a capitalisation slip is caught too.
+Both stages compare in lowercase, so a capitalisation slip is caught too.
 
 | You wrote | Suggested | Why |
 | --- | --- | --- |
@@ -595,12 +626,12 @@ Both stages compare lowercased, so a capitalisation slip is caught too.
 | `zzzzzzzzzz` | none | nothing within the distance threshold |
 
 <Callout type="warn">
-For a very short unknown key the threshold is a flat 2, so the suggestion can be a
-coincidence rather than an insight — `Pal{ xy = 1 }` suggests `"id"`. Treat a suggestion
-on a two- or three-character key as a hint, not an answer.
+For a very short unknown key the limit is a flat 2, so the suggestion can be a coincidence
+rather than an insight — `Pal{ xy = 1 }` suggests `"id"`. Treat a suggestion on a two- or
+three-character key as a hint, not an answer.
 </Callout>
 
-## Nesting a definition
+## Putting one definition inside another
 
 A nested shape can be written inline, or passed as the object a define call returned:
 
@@ -619,8 +650,8 @@ Pal{ id = "example:Boss", mesh = body }
 Pal{ id = "example:Add",  mesh = Mesh.get("example:body") }
 ```
 
-Both reach the nested spec identically, because of one metafield. A handle whose metatable
-carries `__spec` is replaced by the table it stands for before validation:
+Both reach the nested shape the same way. A handle whose metatable carries `__spec` is
+swapped for the table it stands for before anything is checked:
 
 ```lua title="Scripts/palforge/core/schema.lua"
 local function unwrap(v)
@@ -636,12 +667,11 @@ end
 Handle.__spec = function(self) return self._cls:source() end
 ```
 
-The schema knows nothing about handles; it only knows about `__spec`. Unwrapping runs at
-two points — on the whole input at the top of `validate`, and per field whenever `of` is
-set — so `Spec:validate(someHandle)` works as well as `mesh = someHandle`.
+The swap happens at two points — on the whole input at the top of `validate`, and per field
+whenever `of` is set — so `Spec:validate(someHandle)` works as well as `mesh = someHandle`.
 
-Because the nested value is then re-validated, the result is a **copy**. The caller cannot
-reach the mesh definition through the pal that wears it:
+Because the nested value is then checked again, what the outer definition holds is a
+**copy**. You cannot reach the mesh definition through the pal wearing it:
 
 ```lua
 local body = Mesh{ id = "example:body", model = "/Game/X/SK_X" }
@@ -651,25 +681,25 @@ pal:mesh().scale = 4     -- mutates the pal's copy, not the "example:body" defin
 ```
 
 <Callout type="warn">
-`Mesh.Handle` is the only handle in the tree that carries `__spec` today. Pals, items,
-buildings, skills, effects, audio and UI handles do not, so passing one of those into
-another definition would be validated as a raw table and fail on its unknown keys.
+`Mesh.Handle` is the only handle that carries `__spec` today. Pal, item, building, skill,
+effect, audio and UI handles do not, so passing one of those into another definition is
+checked as a raw table and fails on its unknown keys. Write the nested part inline instead.
 </Callout>
 
 <Callout type="warn">
 A default only fills an **absent** field. `Mesh{ ... }` has already filled
 `kind = "skeletal"`, so nesting that handle into a building keeps `skeletal` even though
-`Building.Spec.Mesh` defaults `kind` to `"static"`. Write `kind = "static"` on the mesh,
-or declare the building's mesh inline, when you want the building policy.
+`Building.Spec.Mesh` defaults `kind` to `"static"`. Write `kind = "static"` on the mesh, or
+declare the building's mesh inline, when you want the building policy.
 </Callout>
 
-## Deriving a shape
+## Reusing a field list with different defaults
 
-`schema.derive(name, base, overrides)` declares a new spec as a copy of another with
-per-field policy replaced. Each descriptor is copied whole, then the matching override
-table is merged over it.
+`schema.derive(name, base, overrides)` declares a new shape as a copy of another with
+per-field policy replaced. Each field is copied whole, then the matching override table is
+merged over it.
 
-The one use in the tree is the building mesh:
+Buildings do this with the mesh:
 
 ```lua title="Scripts/palforge/api/building.lua"
 local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
@@ -679,13 +709,11 @@ local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
 })
 ```
 
-A structure is a static mesh where a pal is a skeletal one — that is the consumer's
-policy, not the shape's, so it is the only thing that changes. The ten fields, their
-types, `model` being required and the `Mesh.Handle` option all come across untouched, and
-a field added to `Mesh.Spec` later reaches buildings without anyone remembering to copy
-it.
+A building is a static mesh where a pal is a skeletal one, so only that default changes.
+The ten fields, their types, `model` being required and the `Mesh.Handle` option all come
+across untouched, and a field added to `Mesh.Spec` later reaches buildings as well.
 
-The difference is visible in the two help dumps:
+The difference shows in the two help dumps:
 
 ```text
 Mesh.Spec {
@@ -701,9 +729,8 @@ Building.Spec.Mesh {
 }
 ```
 
-Any descriptor key can be overridden, not only `default` — the merge copies whatever keys
-the override table holds. An override naming a field the base does not declare is caught
-immediately:
+Any key can be overridden, not only `default` — the merge copies whatever keys the override
+table holds. An override naming a field the base does not declare is caught immediately:
 
 ```lua
 schema.derive("Test.Spec", schema.get("Mesh.Spec"), { kindd = { default = "x" } })
@@ -715,18 +742,17 @@ schema.derive(Test.Spec): "kindd" is not a field of Mesh.Spec
 
 <Callout type="info">
 `derive` goes through `define`, so the new name must still be free — taking one twice
-raises `PalForge: schema.define: "Test.Spec" is already declared` through the same
-`error(msg, 0)` as a validation failure, with no file and line. The other two checks are
-programmer errors and use `assert` instead: the base must be a spec built by
-`schema.define`, and an override must name a field the base declares. Those two arrive
-prefixed with `core/schema.lua`'s own file and line, so the text above is the tail of the
-message, not the whole line.
+raises `PalForge: schema.define: "Test.Spec" is already declared` with no file and line.
+Two other checks use `assert`: the base must be a spec built by `schema.define`, and an
+override must name a field the base declares. Those two arrive prefixed with
+`core/schema.lua`'s own file and line, so the text above is the tail of the message, not
+the whole line.
 </Callout>
 
-## The schema registry
+## Asking the game what a shape takes
 
-Every spec is recorded as it is declared, which is what lets an api module keep its shapes
-private. Nothing has to be hung off a module table for tooling to find it.
+Every shape is recorded under its name as it is declared, and you can read it back while
+the game is running.
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -737,8 +763,7 @@ schema.help("Pal.Spec")         -- the printable field list
 schema.all()                    -- every declared spec, in declaration order
 ```
 
-`schema.help(name)` returns `Spec:help()` for a declared name. It is the runtime answer to
-"what can I pass here?":
+`schema.help(name)` is the runtime answer to "what can I pass here?":
 
 ```lua
 print(schema.help("Pal.Spec"))
@@ -760,13 +785,13 @@ Pal.Spec {
 }
 ```
 
-The parenthesised marks are assembled in a fixed order: `required`, then
-`default=<value>` for a non-function default, then `one of { ... }`, then the nested
-spec's name, then `<type>[]` for `arrayOf`, then `map of <type>` for `mapOf`. A field with
-no marks prints just its name, type and doc.
+The marks in parentheses come in a fixed order: `required`, then `default=<value>` for a
+plain default, then `one of { ... }`, then the nested shape's name, then `<type>[]` for
+`arrayOf`, then `map of <type>` for `mapOf`. A field with no marks prints just its name,
+type and doc.
 
-`schema.help` on an unknown name does **not** raise. It returns a string listing every
-declared name, sorted:
+A name that is not declared does **not** raise. You get back a string listing every
+declared name, sorted — useful when you cannot remember the exact spelling:
 
 ```lua
 print(schema.help("Pal.Specc"))
@@ -777,7 +802,7 @@ PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Buildi
 ```
 
 `schema.all()` returns a fresh list in **declaration order**, not sorted. A nested shape is
-always declared before the spec that references it, which is what lets the type generator
+always declared before the shape that references it, which is what lets the type generator
 emit each class before it is used:
 
 ```lua
@@ -807,33 +832,13 @@ UI.Spec              nil
 Coord                nil
 ```
 
-`Coord` is the one shape with no domain prefix — it is the world coordinate
-`Player.coordinate()` produces and `Pal.Handle:spawn` consumes, declared in
-`api/player.lua` for the type definitions and for `schema.help("Coord")`. Nothing binds
-it.
+`Coord` is the one shape with no domain in front of its name. It is the world coordinate
+`Player.coordinate()` gives you and `Pal.Handle:spawn` takes, declared in `api/player.lua`
+so that `schema.help("Coord")` and your editor both know its fields.
 
-## Why specs are private
+## Field lists in your editor
 
-An api module keeps its shape as a local and never publishes it:
-
-```lua title="Scripts/palforge/api/pal.lua"
-local Spec = schema.define("Pal.Spec", { ... })   -- a local, not Pal.Spec
-```
-
-There is no `Pal.Spec` and no `Pal.Events` on the module table. A domain is a thing you
-**call**, not a namespace to browse — the module's whole surface is `Pal{ ... }`,
-`Pal.get`, `Pal.get_all` and `Pal.Class`. Everything that needs the declarations reaches
-them through the registry instead, which keeps one path in for packs, for the console and
-for the type generator.
-
-That is why `tools/gen-types.lua` only needs to `require("palforge.api")`: requiring the
-api modules is what puts their shapes into the registry, and the registry is what the
-generator walks. The module list lives in `api/init.lua` alone, with no second copy to
-keep in step.
-
-## sig, handle and the generated types
-
-`Scripts/palforge/types.lua` is generated from the registry by `tools/gen-types.lua`:
+`Scripts/palforge/types.lua` is generated from the declared shapes by `tools/gen-types.lua`:
 
 ```bash
 lua5.4 tools/gen-types.lua
@@ -842,7 +847,7 @@ lua5.4 tools/gen-types.lua
 It is annotations only — nothing requires it at runtime. LuaLS just has to see it in the
 workspace for `Pal{ ... }` to complete every field with its doc.
 
-Each descriptor maps to a LuaLS type by the first rule that applies:
+Each field maps to an editor type by the first rule that applies:
 
 | Descriptor | Emitted type |
 | --- | --- |
@@ -854,8 +859,8 @@ Each descriptor maps to a LuaLS type by the first rule that applies:
 | no `type` | `any` |
 | otherwise | the `type` string as written |
 
-`required` decides whether the field gets a `?`, and a non-function `default` is appended
-to the doc comment. The result for `Pal.Spec`:
+`required` decides whether the field gets a `?`, and a plain `default` is appended to the
+doc comment. The result for `Pal.Spec`:
 
 ```lua title="Scripts/palforge/types.lua"
 ---@class Pal.Spec
@@ -873,14 +878,14 @@ to the doc comment. The result for `Pal.Spec`:
 ```
 
 The `handle` option is what puts `|Mesh.Handle` on the `mesh` field, and `Mesh.Spec.Kind`
-is the alias generated from that spec's `values` list:
+is the alias generated from that shape's `values` list:
 
 ```lua title="Scripts/palforge/types.lua"
 ---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
 ```
 
-Re-run the generator whenever a spec changes. The annotations are derived from the
-declarations, so they cannot drift from what a define call actually accepts.
+Re-run the generator whenever a shape changes, and what your editor offers stays the same
+as what a definition actually accepts.
 
 ## Recipes
 
@@ -937,11 +942,11 @@ describe("Item.Spec")
 describe("Item.Spec.Recipe")
 ```
 
-### Validate your own pack's config with the same mechanism
+### Validate your own pack's config the same way
 
-`schema.define` is not reserved for api modules. Declare your pack's own shape and get the
-same strictness, the same did-you-mean and the same `:help()` for free. Pick a name no
-other spec uses.
+`schema.define` is not reserved for PalForge's own domains. Declare your pack's own shape
+and a typo in your settings stops at load, with the same message and the same
+did-you-mean. Pick a name no other shape uses.
 
 ```lua title="content/config.lua"
 local schema = require("palforge.core.schema")
@@ -974,7 +979,7 @@ end
 setup{ reward = "Wood", rewardCount = 10, biome = "volcano" }
 ```
 
-A typo now behaves exactly like a typo in a `Pal{ ... }` call:
+A typo then behaves exactly like a typo in a `Pal{ ... }` call:
 
 ```lua
 setup{ reward = "Wood", rewardCounts = 10 }
@@ -984,11 +989,11 @@ setup{ reward = "Wood", rewardCounts = 10 }
 PalForge: ExamplePack: unknown field "rewardCounts" (did you mean "rewardCount"?). Valid fields: reward, rewardCount, biome, spawnAt
 ```
 
-### Fail loudly at load, not silently at runtime
+### Fail loudly at load, not silently in game
 
-Because a define call raises, wrap a whole content file in one `pcall` at the top level
-and log the message. The rest of the pack then still loads, and the reason is in the log
-verbatim:
+A bad definition raises, which stops the file it is in. Wrap a content file in one `pcall`
+at the top level and log the message: the rest of your pack still loads, and the reason is
+in the log word for word.
 
 ```lua title="content/pals.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -1012,9 +1017,26 @@ end)
 if not ok then log.err(tostring(err)) end
 ```
 
+## Summary
+
+- Every `X{ ... }` call is checked before anything is registered. It either succeeds whole
+  or raises and registers nothing.
+- `id` is required on every domain. A field you leave out is either optional or filled by
+  its default.
+- A misspelled field name is an error, and the message usually names the field you meant.
+- Every message starts with `PalForge: `, then the domain, then the field, then the reason.
+  When a shape name appears in `(...)`, that is the inner list to look up.
+- `print(schema.help("Pal.Spec"))` prints every field of a shape while the game runs, and a
+  wrong name prints the list of names instead of raising.
+- A `Mesh{ ... }` handle can be nested into a pal or a building, and the outer definition
+  keeps a copy of it.
+
+Next, [Lifecycle](/docs/concepts/lifecycle) shows which of the handlers you can write in
+`events` actually run in the game.
+
 <Cards>
-  <Card title="Pal" href="/docs/api/pal">The pal domain and its spec</Card>
-  <Card title="Mesh" href="/docs/api/mesh">Meshes, and the handle that nests into other definitions</Card>
-  <Card title="Building" href="/docs/api/building">The derived mesh shape and the live instance</Card>
-  <Card title="Lifecycle" href="/docs/concepts/lifecycle">Which hooks the events group actually fires</Card>
+  <Card title="Pal" href="/docs/api/pal">Every field a pal takes</Card>
+  <Card title="Mesh" href="/docs/api/mesh">Models, and the handle you can nest into other definitions</Card>
+  <Card title="Building" href="/docs/api/building">The building mesh, and the live instance your handlers get</Card>
+  <Card title="Lifecycle" href="/docs/concepts/lifecycle">Which hooks in the events group actually fire</Card>
 </Cards>

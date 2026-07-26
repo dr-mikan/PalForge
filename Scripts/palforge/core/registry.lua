@@ -82,10 +82,16 @@ function M.initialize()
     if env.dev then
         pcall(function() require("palforge.core.keyboard.base.registory").load() end)
         installDevCatalogCommand()
+        -- the headless unit bundle runs NOW (it touches nothing but Lua tables)
         pcall(function()
             local tests = require("palforge.tests")
             if tests and type(tests.run) == "function" then tests.run() end
         end)
+        -- the in-game API suite is only LOADED here — requiring it registers every case
+        -- and binds F1. It spawns pals and hands out items, so it runs when you press the
+        -- key, never at startup. See palforge/test/init.lua for how to bind your own.
+        local okTest, testErr = pcall(require, "palforge.test")
+        if not okTest then log.err("test suite load error: " .. tostring(testErr)) end
     end
 
     -- ⑤ fire the gameStart channel — subscribers (runtime wiring, tools) react

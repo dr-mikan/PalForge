@@ -16,8 +16,11 @@
 --     onCraft / onDiscard — nothing emits item.craft / item.discard, so these never fire.
 --     They stay declarable so a pack's code is future-proof.
 --
--- ACTIONS are real: :give / :take move the count through the game's own server path
--- (AddItem_ServerInternal, via utils.items) and :iconOf reads the live icon DataTable.
+-- ACTIONS: :give moves the count through the game's own server path (AddItem_ServerInternal,
+-- via utils.items) and is the best-proven call in the tree. :take is NOT its equal — no
+-- removal call has ever been confirmed on this build, so it pushes a negative delta through
+-- that same add call and then re-reads the inventory count, returning whether anything
+-- actually left (see utils.items.take). :iconOf reads the live icon DataTable.
 -- Publishing a BRAND-NEW item row into the game's data tables is NOT possible from Lua
 -- alone (that is PalSchema's job) — defining gives an existing id behaviour, it does not
 -- create inventory content.
@@ -192,9 +195,13 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 ---@return boolean ok
 function Handle:give(count) return items.give(self.id, count or 1) end
 
----Remove `count` of this item from the local player's inventory (default 1).
+---TRY to remove `count` of this item from the local player's inventory (default 1).
+---Removal is UNCONFIRMED: no removal call is known on this build, so this pushes a
+---negative delta through the same AddItem_ServerInternal that :give uses and then reads
+---the inventory count back. `ok` is true only when that count was seen to fall — false
+---means nothing observably left the inventory (see utils.items.take).
 ---@param count integer?
----@return boolean ok
+---@return boolean ok  # true only when the inventory count actually dropped
 function Handle:take(count) return items.take(self.id, count or 1) end
 
 -- ---- lifecycle events (fired by core.event on the definition; forward for manual use) ----

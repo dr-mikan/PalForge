@@ -1,20 +1,28 @@
 ---
 title: Building
-description: 設置物と、そのライブなインスタンス状態、そしてそれらを追跡するランタイム
+description: 設置物に、自分の振る舞い・保存データ・自分のモデルを与える
 ---
 
-building は設置可能な構造物です。作業台、コンテナ、機械、装飾など、ビルドメニューから選んで
-ワールドに置くものすべてが対象になります。PalForge のなかで唯一、インスタンス単位のランタイムを
-持つドメインでもあります。設置された構造物はそれぞれ **インスタンス** になり、自分自身の actor、
-ワールド座標、そして永続化される state を持ちます。宣言したライフサイクルハンドラは、その
-インスタンス上で実行されます。
+## このページでできるようになること
+
+- 作業台やコンテナ、機械に自分の振る舞いを持たせる
+- 設置したとき、使ったとき、壊れたときに自分のコードを走らせる
+- 設置物ごとに数値を保存して、次に遊ぶときも残す
+- 置いた設置物に自分の 3D モデルと色を付ける
+- 遊んでいる間、設置物にタイマーで仕事をさせる
+
+## building を定義する
+
+building とは、ビルドメニューから選んでワールドに置くもの全部です。作業台、コンテナ、機械、
+装飾などが当てはまります。ワールドに置かれると、PalForge はそれ 1 つずつに専用のオブジェクトを
+用意します。自分の座標、自分の保存データ、そしてあなたが書いたハンドラを持ちます。
 
 ```lua
 local api      = require("palforge.api")   -- also installs the bare globals
 local Building = api.Building
 ```
 
-エントリポイントは他のモジュールと同じ 3 つです。
+`Building` でやることは 3 つです。
 
 ```lua
 local bench = Building{ id = "example:Bench", name = "Modded Bench" }   -- define
@@ -22,20 +30,17 @@ local box   = Building.get("PalBoxV2")                                 -- look o
 local all   = Building.get_all()                                       -- every registered one
 ```
 
-## building を定義する
-
 必須フィールドは `id` だけです。
 
 ```lua
 Building{ id = "WorkBench" }
 ```
 
-この 1 回の呼び出しが、ランタイムにその id を認識させます。`Building{ ... }` は定義クラスを
-`core/object_manager` の `("building", id)` に登録し、再構築スキャンは登録済み定義に解決できる
-build id だけを追跡します。誰も定義していない id に対する `Building.get(id)` は使える handle を
-返しますが、登録は行わないため、その handle の `:instances()` は常に空のままです。
+この 1 回の呼び出しで、その id が PalForge の監視対象に入ります。ワールドの設置物を探すスキャンが
+追跡するのは、定義済みの build id だけです。誰も定義していない id に `Building.get(id)` を使っても
+メソッドを呼べる handle は返りますが、監視対象には入らないため、その `:instances()` は空のままです。
 
-完全な定義は 1 つのデータとして読めます。
+完全な定義は 1 つのテーブルとして読めます。
 
 ```lua title="content/buildings/bench.lua"
 local bench = Building{
@@ -61,8 +66,8 @@ local bench = Building{
 }
 ```
 
-mesh はインラインで書くことも、名前付きの `Mesh{ ... }` 定義を再利用することもできます。handle の
-メタテーブルが `__spec` を持ち、バリデータがそれを展開するため、どちらも同じ検証を通ります。
+mesh とは、置かれた設置物が身に着ける 3D モデルのことです。インラインで書いても、名前付きの
+`Mesh{ ... }` 定義を再利用しても構いません。どちらも同じ検査を通ります。
 
 <Tabs items={['Inline', 'Named']}>
 <Tab value="Inline">
@@ -77,7 +82,7 @@ Building{
 }
 ```
 
-`kind` を省略したインラインテーブルには、`Building.Spec.Mesh` の既定値である `"static"` が入ります。
+`kind` を書かないインラインテーブルには、`Building.Spec.Mesh` の既定値である `"static"` が入ります。
 
 </Tab>
 <Tab value="Named">
@@ -93,9 +98,9 @@ Building{ id = "example:Bench", mesh = benchMesh }
 Building{ id = "example:Bench2", mesh = Mesh.get("example:bench_body") }
 ```
 
-名前付き mesh は先に `Mesh.Spec` で検証され、その時点で `kind` に `"skeletal"` が埋められます。
-building 側の既定値はもう適用されないため、名前付き mesh を building に入れる場合は `kind` を
-自分で書いてください。
+名前付き mesh は先に `Mesh.Spec` で検査され、その時点で `kind` に `"skeletal"` が入ります。
+building 側の既定値はもう効かないので、名前付き mesh を building に入れるときは `kind` を自分で
+書いてください。
 
 </Tab>
 </Tabs>
@@ -103,23 +108,24 @@ building 側の既定値はもう適用されないため、名前付き mesh �
 ### id について
 
 コロンを含まない id は、そのままゲームの `BuildObjectId` です。`"WorkBench"`、`"PalBoxV2"`、
-`"ItemChest"` などが該当します。`"pack:name"` 形式の id は DataTable の行 FName である
-`pack_name` に解決され、これが `:unlock()` の対象であり、ランタイムが照合する値でもあります。
+`"ItemChest"` などが該当します。`"pack:name"` の形の id は、ゲームのデータテーブルの行名
+`pack_name` になります。この解決後の名前が `:unlock()` の対象であり、置かれた設置物を照合する
+ときに使われる値でもあります。
 
 <Callout type="warn">
-定義してもビルドメニューに新しい項目は増えません。Lua だけで DataTable の行を追加することは
-できず、それは PalSchema の役目です。定義がするのは、すでに存在する id に振る舞い、state、
-mesh、メタデータを与えることです。
+定義してもビルドメニューに新しい項目は増えません。Lua だけでゲームのデータテーブルに行を追加する
+ことはできず、それは PalSchema の役目です。定義がするのは、すでに存在する id に振る舞い、保存
+データ、モデル、メタデータを与えることです。
 </Callout>
 
-同じ id を 2 回定義すると、後の登録が前の登録を置き換えます。native カタログはパックのコードより
-先に読み込まれるため、`WorkBench` を定義するパックは mesh を含めて
-`native.buildings.WorkBench` を置き換えます。必要なものは書き直してください。
+同じ id を 2 回定義すると、後のほうが前を置き換えます。Palworld 側のカタログはパックのコードより
+先に読み込まれるため、`WorkBench` を定義するパックは mesh も含めて `native.buildings.WorkBench`
+を置き換えます。必要なものは書き直してください。
 
 ### native カタログ
 
 `native/buildings.lua` は `DT_BuildObjectDataTable_Common` の行 id をすべて素のデータとして持ち、
-加えて 2 つのキュレーション済み定義を持ちます。
+加えて 2 つの用意済み定義を持ちます。
 
 ```lua
 local buildings = require("palforge.native.buildings")
@@ -130,10 +136,13 @@ buildings.get("ItemChest")   -- defines + registers on first use, then cached; n
 buildings.CATALOG            -- the id list, as data
 ```
 
-モジュールを require しただけで登録されるのは、キュレーション済みの 2 つだけです。カタログ id を
-実体化するのは `get(id)` なので、起動時に数百件が登録されることはありません。
+require しただけで登録されるのはこの 2 つだけです。カタログの id を実際の定義に変えるのは
+`get(id)` なので、起動時に数百件が登録されることはありません。
 
 ## Spec のフィールド
+
+`Building{ ... }` に渡せるものの一覧です。たいていの building は `id` だけで足り、動きを付けたく
+なったら `state` と `events` を足します。
 
 <TypeTable
   type={{
@@ -148,13 +157,14 @@ buildings.CATALOG            -- the id list, as data
     color: { description: '基本の色味 r, g, b, a を 0..1 で。material.color の短縮形', type: 'table' },
     texture: { description: 'mesh に適用する png の絶対パス。material.texture の短縮形', type: 'string' },
     icon: { description: 'DataTable 検索が外れたときのフォールバックアイコン', type: 'any' },
-    state: { description: '新規インスタンスの既定 state。テーブル、またはテーブルを返すファクトリ', type: 'table | fun(): table' },
+    state: { description: '新しい設置物が最初に持つ保存データ。テーブル、またはテーブルを返すファクトリ', type: 'table | fun(): table' },
     events: { description: 'ライフサイクルハンドラ (グループ)', type: 'Building.Spec.Events' },
     data: { description: '定義に載せて運ぶ自由形式のペイロード', type: 'table' },
   }}
 />
 
-検証は厳格で、問題はすべてハードエラーになります。呼び出しが中途半端に成功することはありません。
+問題はすべてハードエラーになるので、呼び出しが中途半端に成功することはありません。フィールド名を
+間違えると、期待していた名前を教えてくれます。
 
 ```lua
 Building{ id = "example:Bench", grid = 100 }
@@ -169,7 +179,7 @@ PalForge: Building: field "id" is required (build id: a game BuildObjectId ("Pal
 PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
 ```
 
-フィールドを覚える代わりに、実行時に読み出せます。
+一覧を覚える代わりに、ゲームを動かしながら表示できます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -181,8 +191,9 @@ schema.get("Building.Spec").fields   -- the same, as a table, for tooling
 
 ### state — テーブルかファクトリか
 
-`state` は **新規** インスタンスが最初に持つ既定 state です。保存レコードが存在しないインスタンスを
-スキャンが初めて作るときに、1 度だけ読まれます。
+`state` は **新しい** 設置物が最初に持つデータです。PalForge が代わりにディスクへ書き、次に遊ぶ
+ときに返してくれます。読まれるのは 1 度だけで、保存レコードのない設置物をスキャンが初めて作る
+ときです。
 
 ```lua
 state = { uses = 0 }                       -- a table
@@ -190,17 +201,17 @@ state = function() return { uses = 0 } end -- a factory, called per new instance
 ```
 
 ファクトリには定義クラスが引数として渡されるため、`state = function(cls) ... end` とも書けます。
-例外を投げた場合やテーブル以外を返した場合、インスタンスは空のテーブルで始まります。
+例外を投げた場合やテーブル以外を返した場合、その設置物は空のテーブルで始まります。
 
 <Callout type="warn">
-ファクトリを推奨します。素のテーブルは定義側に保持され、新規インスタンスへ参照のまま渡されます。
-同じ定義から 2 つ設置すると 1 つの state テーブルを共有し、両方の永続化レコードがそれを指します。
-ファクトリならインスタンスごとに新しいテーブルが作られます。
+ファクトリを推奨します。素のテーブルは定義側に置かれ、新しい設置物へ参照のまま渡されます。同じ
+定義から 2 つ置くと 1 つの state テーブルを共有し、両方の保存レコードがそれを指してしまいます。
+ファクトリなら設置物ごとに新しいテーブルが作られます。
 </Callout>
 
-state は JSON として永続化されるため、文字列、数値、真偽値、そしてそれらのネストしたテーブルに
-とどめてください。復元されたインスタンスには保存されたレコードがそのまま入り、既定 state が
-マージされることはありません。あとから増やしたフィールドにはガードが必要です。
+state は JSON として保存されるので、文字列、数値、true/false、そしてそれらのネストしたテーブルに
+とどめてください。復元された設置物には保存されたレコードがそのまま入り、既定の state が
+マージされることはありません。あとのバージョンで増やしたフィールドにはガードが必要です。
 
 ```lua
 onLoad = function(self, ctx)
@@ -209,28 +220,29 @@ onLoad = function(self, ctx)
 end,
 ```
 
-### gridCm — 設置座標の量子化
+### gridCm — 設置物を再び見つける仕組み
 
-設置された構造物には制御可能な安定した個体 id がないため、ランタイムは量子化したワールド座標で
-インスタンスを識別します。`core/spatial` は各軸を `math.floor(v / gridCm + 0.5)` で最も近いセルに
-丸め、キーを `buildId@qx,qy,qz` の形式にします。
+置かれた設置物は自分専用の安定した id を持ちません。そこで PalForge は、ワールド座標をグリッドの
+セルに丸めて 1 つ 1 つを識別します。`core/spatial` が各軸を `math.floor(v / gridCm + 0.5)` で丸め、
+結果を `buildId@qx,qy,qz` の形で書きます。
 
 ```text
 WorkBench@1234,-56,78
 ```
 
-`gridCm` の既定値は `core.spatial.GRID_CM` の `100`、つまり 1 メートルです。このキーは永続化
-レコードの識別子そのものなので、次回のセッションで再発見された構造物に保存済み state を
-結び付けるのもこのキーです。量子化幅を小さくすると近接して並ぶ構造物を区別しやすくなり、
-大きくするとセッション間の座標のずれに強くなります。同じセルに落ちた 2 つの構造物はキーが
-衝突し、スキャンは最初の有効な actor に紐づいたインスタンスを保持して 2 つ目を無視します。
+`gridCm` の既定値は `core.spatial.GRID_CM` の `100`、つまり 1 メートルです。このキーが保存レコード
+の名前になるので、次のセッションで見つけ直した設置物に保存データを結び直すのもこのキーです。セルを
+小さくすると近くに並ぶ設置物を区別しやすくなり、大きくするとセッション間の座標のずれに強く
+なります。同じセルに落ちた 2 つの設置物はキーが衝突し、スキャンは最初の有効な actor に紐づいた
+ほうを保持して 2 つ目を無視します。
 
-セッション中の同一性はキーではなく actor そのものです。設置済み building の報告座標はスキャンの
-たびに 1 セル以上ぶれるため、そこを基準にすると同じ actor から無限にインスタンスが作られてしまいます。
+遊んでいる間、設置物はこのキーではなく actor、つまりゲームがワールドに置いたオブジェクトで
+追跡されます。置かれた設置物の報告座標はスキャンのたびに 1 セル以上ぶれるため、actor で追う
+ことで 1 つの設置物が次々に別物として増えるのを防いでいます。
 
 ### buildIds — 複数のゲーム id を担当する
 
-`buildIds` はこの定義が照合するゲーム build id の一覧です。既定値の `{ id }` を **置き換える** ため、
+`buildIds` はこの定義が担当するゲーム build id の一覧です。既定値の `{ id }` を **置き換える** ため、
 id 自身も照合したい場合は一覧に含めてください。
 
 ```lua
@@ -247,42 +259,64 @@ Building{
 ```
 
 各エントリは `object_manager.resolve` を通り (`"pack:name"` は `pack_name` になります)、この定義に
-索引されます。インスタンスは一致した id を `self.buildId` に記録し、`self.id` は定義 id のままです。
+索引されます。置かれた設置物は一致した id を `self.buildId` に記録し、`self.id` は定義 id のまま
+です。
 
-照合は 3 段階です。actor のクラス名 `BP_BuildObject_<Id>_C`、次に
-`MapObjectModel.BuildObjectId`、最後に保存レコードとの座標一致です。第 1 段階で当たるのは
-ブループリント側の綴りと一致するエントリだけで、DataTable の行が `Workbench` である一方で
-キュレーション済み定義が `"WorkBench"` を使っているのはそのためです。
+照合は 3 通りを順に試します。actor のクラス名 `BP_BuildObject_<Id>_C`、次に
+`MapObjectModel.BuildObjectId`、最後に保存レコードとの座標一致です。1 番目で当たるのは
+ブループリント側の綴りと一致する id だけで、データテーブルの行が `Workbench` である一方で
+用意済み定義が `"WorkBench"` を使っているのはそのためです。
 
 ### mesh と material
 
-`Building.Spec.Mesh` は `Mesh.Spec` から派生したもので、`kind` の既定値だけが `"skeletal"` から
-`"static"` に変わります。そのため `Mesh.Spec` に追加されたフィールドは自動的に building にも届きます。
-`material`、`color`、`texture` は mesh の宣言に重ねられます。`Class:material()` は宣言された
-`material` テーブルを返すか、短縮形を使った場合は `color` と `texture` から組み立て、
-`Class:render()` がフィールド単位で material 側を優先します。
+`Building.Spec.Mesh` は [Mesh](/docs/api/mesh) で説明している形と同じで、違いは 1 つだけ、`kind` の
+既定値が `"skeletal"` ではなく `"static"` になっている点です。`material`、`color`、`texture` は
+mesh の宣言に重ねられます。`Class:material()` は宣言された `material` テーブルを返すか、短縮形を
+使った場合は `color` と `texture` から組み立て、`Class:render()` がフィールド単位で material 側を
+優先します。
 
-<Callout type="warn">
-`kind` の 3 つのバックエンドのうち、設置物に対して実装されているのは `procedural` (別名 `obj`) だけ
-です。これは `model` のパスからディスク上の OBJ ファイルを解析し、コリジョンを無効にした
-ProceduralMeshComponent を追加します。`static` は `false` を返すスタブで、`skeletal` はキャラクタの
-`Mesh` コンポーネントを操作しますが build object はそれを持ちません。したがってキュレーション済みの
-`WorkBench` と `PalBoxV2` が宣言している mesh は、現時点では何も取り付けません。
-</Callout>
+`kind` の 3 つのバックエンドのうち、置かれた設置物に実際に取り付けられるのは 2 つです。ここでの
+既定値である `static` は `UStaticMeshComponent` を追加し、`model` を `LoadAsset` で探して (失敗時は
+`StaticFindObject`)、アセットを設定し、そのうえでコンポーネントから読み戻して確認できたときだけ
+成功を返します。setter が存在しないゲームビルドでは正直に `false` が返り、中途半端なコンポーネント
+も残りません。`procedural` (`obj` とも書けます) は `model` のパスからディスク上の Wavefront OBJ
+ファイルを読み、ProceduralMeshComponent を追加します。どちらもコリジョンは無効にします。装飾用の
+コライダはゲームが設置に使うレイキャストを遮ってしまうためです。またどちらもワールドスケールを
+明示的に設定します。`AddComponentByClass` に渡す空のトランスフォームはスケールが 0 から始まる
+ためです。
 
 ```lua
+-- a UE-authored asset, the Building.Spec.Mesh default kind
+mesh = {
+    kind  = "static",
+    model = "/Game/Pal/Model/Other/PalBox/SM_PalBox.SM_PalBox",
+    scale = 1.0,
+    offset = { x = 0, y = 0, z = 50 },
+},
+
+-- an OBJ file, parsed from disk when the mesh attaches
 mesh = {
     kind  = "procedural",
-    model = "C:/mods/example/models/bench.obj",   -- parsed from disk when the mesh attaches
+    model = "C:/mods/example/models/bench.obj",
     scale = 1.0,
     offset = { x = 0, y = 0, z = 50 },
 },
 ```
 
+用意済みの `WorkBench` と `PalBoxV2` は `static` の mesh を宣言しているため、actor を最初に見つけた
+次のスキャンで取り付けられます。
+
+<Callout type="warn">
+`skeletal` はポーン自身の `Mesh` コンポーネント上でアセットを差し替えます。build object はそれを
+持たないため、`kind = "skeletal"` を宣言した設置物には何も取り付けられず、`render()` は `false` を
+返します。このバックエンド自体もゲーム内では未確認で、どの setter が実行されたかを報告するだけで、
+描画されたことまでは示しません。
+</Callout>
+
 ## ライブインスタンス
 
-定義しただけでは何も生きていません。実際の actor がランタイムに見つかって初めて動き出します。
-この経路は `core/event` がすべて持っています。
+定義しただけでは何も動きません。実際の設置物がワールドに立って初めて動き出します。設置したときに
+起きることは次のとおりです。
 
 ```mermaid
 sequenceDiagram
@@ -301,9 +335,10 @@ sequenceDiagram
   SC-->>IN: render on a LATER scan
 ```
 
-mesh の取り付けは意図的に遅延されています。初期化中の actor つまり設置されたそのフレームに
-コンポーネントを追加すると、無効なネイティブオブジェクトに触れてゲームがクラッシュしうるため、
-インスタンスは保留マークを付けられ、同じ actor をもう一度見つけた次のスキャンで描画されます。
+モデルが出るのは、設置物が現れたその瞬間ではなく 1 スキャンあとです。まだ初期化中の actor、つまり
+置かれたそのフレームにコンポーネントを追加すると、無効なゲームオブジェクトに触れてゲームが落ちる
+ことがあるためです。そこで設置物は保留マークを付けられ、同じ actor をもう一度見つけた次の
+スキャンでモデルが付きます。
 
 スキャンが対象を判別する流れは次のとおりです。
 
@@ -320,11 +355,10 @@ flowchart TD
   H --> I
 ```
 
-`building.place` が emit されるのは、新しいインスタンスが同じ build id の設置意図に 300 cm 以内で
-一致したときだけです。スキャンが新しく追跡したインスタンスは、直前に `building.place` を emit した
-ものも含めてすべて `building.load` を emit し、保存レコード由来かどうかは `ctx.reconstructed` が
-示します。インスタンス生成の分岐はキーごとに 1 度しか走らないため、`onPlace` は 1 回の設置につき
-ちょうど 1 回発火します。
+`building.place` が emit されるのは、新しい設置物が同じ build id の設置要求に 300 cm 以内で一致した
+ときだけです。スキャンが新しく追跡した設置物は、直前に `building.place` を emit したものも含めて
+すべて `building.load` を emit し、保存レコード由来かどうかは `ctx.reconstructed` が示します。
+設置物が作られるのはキーごとに 1 度だけなので、`onPlace` は 1 回の設置につきちょうど 1 回発火します。
 
 ### インスタンスのフィールド
 
@@ -336,13 +370,13 @@ flowchart TD
     actor: { description: '設置された APalBuildObject', type: 'any' },
     pos: { description: 'ワールド座標 x, y, z を cm で。スキャンごとに更新', type: 'table' },
     cell: { description: 'キーの元になった量子化セル qx, qy, qz', type: 'table' },
-    state: { description: '永続化されるテーブル。その場で書き換えて save', type: 'table' },
+    state: { description: '保存されるテーブル。その場で書き換えて save', type: 'table' },
     def: { description: '内部の def。解決済み buildIds, gridCm, tickInterval, hooks', type: 'table' },
   }}
 />
 
-定義で宣言した内容はクラスのメタテーブル経由で参照できるため、`self.name`、`self.data`、
-`self.gridCm` などもインスタンス上で解決されます。
+定義で宣言した内容はクラス経由で参照できるため、`self.name`、`self.data`、`self.gridCm` なども
+置かれた設置物の上で解決されます。
 
 ### インスタンスのメソッド
 
@@ -357,8 +391,8 @@ self:material()    -- the declared material, or one built from color / texture
 self:iconOf()      -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
 ```
 
-`currentColor()` は `self.color` を返し、既定では定義側の色味に解決されます。見た目を state に
-追随させたいときは、インスタンス側にフィールドを立ててから反映します。
+`currentColor()` は `self.color` を返し、既定では定義側の色味になります。見た目を state に
+追随させたいときは、設置物側にフィールドを立ててから反映します。
 
 ```lua
 onTick = function(self, ctx)
@@ -370,11 +404,13 @@ end,
 ```
 
 <Callout type="info">
-`update()` は、procedural バックエンドが mesh 取り付け時に作ったマテリアルインスタンスを塗り直します。
-procedural で取り付けられた mesh がなければ塗る対象がないため `false` を返します。
+`update()` は `core/mesh` を経由します。`core/mesh` は各 actor をどのバックエンドが着せたかを覚えて
+いて、塗り直しも同じバックエンドへ送ります。実装しているのは `procedural` だけで、取り付け時に
+作ったマテリアルインスタンスに書き込みます。`static` の mesh は取り付けはされますが塗り直しは
+持たないため、そこでは `update()` は `false` を返します。
 </Callout>
 
-### 永続化
+### state を保存する
 
 state はワールドごとに 1 つの JSON ファイルへ、`utils/file` がモッドの `state` ディレクトリに
 書き出します。
@@ -384,8 +420,9 @@ state はワールドごとに 1 つの JSON ファイルへ、`utils/file` が�
 ```
 
 `saveId` は `core/spatial` が決めます。ゲームインスタンスの `WorldGuid`、`WorldSaveName`、
-`SaveName` のいずれかを英数字以外を `_` に置換したうえで `w_` を前置し、どれも読めなければ
-単に `world` になります。ファイルにはインスタンスキーごとのレコードが入ります。
+`SaveName` のいずれかについて、英数字とアンダースコア以外を `_` に置き換え、先頭に `w_` を付けた
+ものです。どれも読めなければ単に `world` になります。ファイルには設置物のキーごとにレコードが
+入ります。
 
 ```json
 {
@@ -401,19 +438,19 @@ state はワールドごとに 1 つの JSON ファイルへ、`utils/file` が�
 }
 ```
 
-レコードの `state` は `inst.state` と同一のテーブルなので、その場で書き換えるだけで書き出される
-内容が変わります。ただし何も自動では書きません。
+レコードの `state` は `inst.state` と同じテーブルなので、その場で書き換えるだけで書き出される内容が
+変わります。ただし自動では何も書きません。
 
 - `self:setDirty()` はワールドキャッシュに dirty を立てるだけです。軽い操作です。
-- `self:save()` は dirty を立てたうえで即座にファイルへ flush します。
-- ワールド離脱時に 1 度 flush し、そのあとライブインスタンスを破棄してレコードは残します。
+- `self:save()` は dirty を立てたうえで、すぐにファイルへ書きます。
+- ワールドを離れるときに 1 度書き、そのあとライブな設置物を破棄してレコードは残します。
 
-重要な変更では `save()`、毎 tick のような高頻度な場所では `setDirty()` を使ってください。tick ごとの
+大事な変更では `save()`、毎 tick のような高頻度の場所では `setDirty()` を使ってください。tick ごとの
 `save()` はハートビートのたびにファイルを書きます。
 
-レコードが削除されるのは本当に撤去されたときだけです。スキャンが 6 回連続で見つけられなかった
-インスタンス、つまり 500 ms 間隔でおよそ 3 秒間見えなかったインスタンスは `building.remove` を
-emit し、レコードごと破棄されます。
+レコードが消えるのは本当に撤去されたときだけです。スキャンが 6 回連続で見つけられなかった設置物、
+つまり 500 ms 間隔でおよそ 3 秒間見えなかった設置物は `building.remove` を emit し、レコードごと
+破棄されます。
 
 ```mermaid
 stateDiagram-v2
@@ -426,7 +463,8 @@ stateDiagram-v2
   Dropped --> [*]
 ```
 
-`Removed` は永続化レコードを削除します。`Dropped` は残すため、次回のロードで state ごと復帰します。
+`Removed` は保存レコードを削除します。`Dropped` は残すので、次のロードで設置物はデータごと
+戻ってきます。
 
 ### インスタンスへ到達する
 
@@ -440,13 +478,14 @@ event.instanceOfActor(ctx.actor)           -- the instance bound to an actor, or
 event.isWorldReady()                       -- has the world finished loading
 ```
 
-`:instances()` はスキャンが走るまで空で、スキャンにはロード済みのワールドが必要です。ready 監視は
-1 秒ごとに有効な `PalPlayerCharacter` を探し、5 回連続で成功して初めてゲートを開きます。
+`:instances()` はスキャンが走るまで空で、スキャンにはロード済みのワールドが必要です。監視が
+1 秒ごとに有効な `PalPlayerCharacter` を探し、5 回連続で成功して初めてゲートが開きます。
 
 ## ライフサイクルイベント
 
-ハンドラは `events` の下に宣言し、そのまま定義クラスへ取り付けられます。第 1 引数は
-イベントが起きた **ライブインスタンス** です。
+ハンドラは `events` の下に書きます。第 1 引数はイベントが起きた設置物そのものなので、
+`self.state`、`self.pos`、`self.actor` がそのまま使えます。例外は `onBuild` の 1 つだけで、これは
+まだワールドに何も立っていない時点で発火します。
 
 ```lua
 events = {
@@ -463,22 +502,21 @@ events = {
 | `onRightClick` | `building.interact` | LIVE | `actor`, `player`, `buildId` |
 | `onRemove` | `building.remove` | LIVE | `key`, `buildId`, `actor`, `reason` |
 | `onTick` | `tick` | LIVE | `count`, `now` |
-| `onWorldReady` | `world.ready` | dispatch はされます。下記参照 | 空テーブル |
+| `onBuild` | `building.build` | LIVE (ワールドのロード後) | `buildId`, `model` |
+| `onWorldReady` | `world.ready` | LIVE | 空テーブル |
 | `onWorldLeft` | `world.left` | LIVE | 空テーブル |
-| `onBuild` | — | 発火しません | — |
 | `onLeftClick` | — | 発火しません | — |
 | `onBreak` | — | 発火しません | — |
 
 <Callout type="warn">
-`onBuild`、`onLeftClick`、`onBreak` はパックのコードを将来に備えて書けるよう宣言可能ですが、
-これらを emit するチャンネルもネイティブソースもまだありません。実行されることはありません。
-設置には `onPlace`、消失には `onRemove` を使ってください。
+`onLeftClick` と `onBreak` は書けますが、ゲーム側からこれらを emit するものがないため実行されません。
+インタラクトには `onRightClick`、設置物が消えたときには `onRemove` を使ってください。
 </Callout>
 
 ### onPlace
 
-新しい actor を発見したスキャンが、`RequestBuild_ToServer` フックの記録した設置意図と一致させた
-ときに 1 度だけ発火します。`ctx.player` は設置意図を記録した時点でフックが見つけた
+新しい actor を見つけたスキャンが、`RequestBuild_ToServer` フックの記録した設置要求と一致させた
+ときに 1 度だけ発火します。`ctx.player` は設置要求を記録した時点でフックが見つけた
 `PalPlayerCharacter`、`ctx.firstSeen` は常に `true`、`ctx.pos` は要求座標ではなく actor の実座標です。
 
 ```lua
@@ -490,9 +528,9 @@ end,
 
 ### onLoad
 
-スキャンが追跡を開始したすべてのインスタンスで発火します。直前に `onPlace` を発火させた
-インスタンスも含みます。`ctx.reconstructed` は、state が保存レコード由来なら `true`、新規
-インスタンスなら `false` です。
+スキャンが追跡を始めたすべての設置物で発火します。直前に `onPlace` を発火させたものも含みます。
+`ctx.reconstructed` は、state が保存レコード由来なら `true`、新しい設置物なら `false` です。
+設置物ごとの初期化はここに書きます。
 
 ```lua
 onLoad = function(self, ctx)
@@ -505,9 +543,9 @@ end,
 
 ### onRightClick
 
-`PalBuildObject:OnBeginInteractBuilding` が駆動します。操作者は `PalCharacter` のサブクラスに
-絞られるため building 同士のインタラクトは届かず、同じ actor への連続操作は 1 秒デバウンス
-されます。dispatch は `ctx.actor` からインスタンスを解決します。
+`PalBuildObject:OnBeginInteractBuilding` が駆動します。操作した側として数えるのは `PalCharacter` の
+サブクラスだけなので building 同士のインタラクトは届かず、同じ actor への連続操作は 1 秒のあいだ
+無視されます。設置物は `ctx.actor` から特定されます。
 
 ```lua
 onRightClick = function(self, ctx)
@@ -518,9 +556,8 @@ end,
 
 ### onRemove
 
-`ctx.reason` は `"missing"` で、現在ランタイムが emit する唯一の理由です。ハンドラの実行中は
-まだインスタンスが追跡されているので `self.state` や `self.pos` を読めます。レコードはその直後に
-削除されます。
+`ctx.reason` は `"missing"` で、いまランタイムが出す唯一の理由です。ハンドラの実行中はまだ設置物が
+追跡されているので `self.state` や `self.pos` を読めます。レコードはその直後に削除されます。
 
 ```lua
 onRemove = function(self, ctx)
@@ -531,11 +568,10 @@ end,
 ### onTick
 
 ハートビートは `LoopAsync(500)` で、`tick` チャンネルに流れます。`ctx.count` はハートビートの
-通し番号です。tick リストに載るのは `onTick` を実際に上書きしている定義のインスタンスだけなので、
-宣言しなければコストはかかりません。
+通し番号です。tick の対象になるのは `onTick` を実際に書いている定義の設置物だけなので、書かなければ
+コストはかかりません。
 
-`tickInterval` はそのカウントに対する除数です。`ctx.count % tickInterval == 0` のときに
-ハンドラが走ります。
+`tickInterval` はそのカウントの除数です。`ctx.count % tickInterval == 0` のときにハンドラが走ります。
 
 ```lua
 Building{
@@ -550,33 +586,85 @@ Building{
 }
 ```
 
-整数でない `tickInterval` や 1 未満の値は、定義を展開する時点で `1` に丸められます。
+整数でない `tickInterval` や 1 未満の値は `1` に戻されます。
 
 <Callout type="warn">
-`onTick` にはサーキットブレーカがあります。失敗はすべてログに残り、カウントされます。5 回失敗すると
-そのインスタンスは壊れた扱いになり、以後 tick しなくなります。撤去されて再発見されない限り、
-そのセッションの残りずっと止まったままです。1 回成功すればカウンタはリセットされます。
+`onTick` にはサーキットブレーカがあります。失敗はすべてログに残り、回数が数えられます。5 回失敗
+するとその設置物は壊れた扱いになり、以後 tick しなくなります。撤去されて見つけ直されない限り、
+そのセッションの残りはずっと止まったままです。1 回成功すればカウンタはリセットされます。
 `self.actor` に触れる前に `self:isValid()` を確認するなど、ハンドラは防御的に書いてください。
+</Callout>
+
+### onBuild
+
+この定義が担当する build id の設置物を、ゲームが建て終えたときに発火します。実際の設置物ができる
+最大 1 スキャン前に届き、ゲームが渡してくるのは actor ではなく `UPalMapObjectModel` です。そのため
+ここでの `self` は置かれた設置物ではなく **定義** です。`self.id`、`self.name`、`self.data`、
+`self:iconOf()` は使えますが、`self.actor`、`self.pos`、`self.state`、`self:save()` はありません。
+
+```lua
+Building{
+    id = "example:Bench",
+    events = {
+        onBuild = function(self, ctx)
+            log.info(self.id .. " completed as " .. tostring(ctx.buildId))
+        end,
+    },
+}
+```
+
+<Callout type="warn">
+`onBuild` が待ち受けを始めるのは、ワールドのロードが終わったあとです。ネイティブフックの
+`PalPlayerRecordData:OnCompleteBuild_ServerInternal` はワールドロード中に既存の設置物すべてに対しても
+発火し、そこで作りかけの `UPalMapObjectModel` を読むと Lua では捕捉できない形で落ちるためです。
+ここから 2 つのことが言えます。ワールドのロードが最後まで終わらないセッションでは `onBuild` は
+一度も走りません。そして同じセッション中の 2 回目のワールドロードではすでに待ち受けているので、
+その集中処理のなかでも呼ばれます。設置の検知には `onPlace` が安全です。`onBuild` はまず捨ててよい
+ワールドで試してください。
 </Callout>
 
 ### onWorldReady と onWorldLeft
 
-どちらもワールドのゲートが切り替わったときに、すべてのライブインスタンスへ dispatch されます。
+どちらもすべてのライブな設置物へ届き、どちらも設置物ごとではなくワールドロード単位の出来事です。
 
-`onWorldLeft` はインスタンスがまだ生きている、破棄される前の時点で走ります。state に触れる最後の
-機会ですが、直後にワールドキャッシュは自動で flush されます。
+`world.ready` が届くのは、ワールドが開いた瞬間ではなく、actor をライブな設置物に変えるスキャンから
+です。そのためハンドラが走る時点でプレイヤー周辺の設置物はすでに追跡済みで、同じパスのなかで
+`onLoad` も済んでいます。待ち時間はワールドが開いてから最大でもスキャン 1 回分、500 ms です。
+
+```lua title="content/buildings/sessions.lua"
+Building{
+    id     = "WorkBench",
+    name   = "Workbench",
+    state  = function() return { uses = 0, sessions = 0 } end,
+    events = {
+        onLoad = function(self, ctx)
+            self.state.uses = self.state.uses or 0        -- per-instance startup
+        end,
+        onWorldReady = function(self, ctx)
+            self.state.sessions = (self.state.sessions or 0) + 1
+            self:save()
+            log.info(string.format("%s present at load %d, %d use(s)",
+                self.key, self.state.sessions, self.state.uses))
+        end,
+    },
+}
+```
 
 <Callout type="warn">
-`onWorldReady` は配線されていますが、インスタンスを作るスキャンも同じ `worldReady` フラグで
-ゲートされており、`world.ready` が emit される時点ではまだ走っていません。そのためインスタンス
-レジストリは空で、実際にはどのインスタンスにも届きません。スキャンが追跡したすべての
-インスタンスで発火する `onLoad` を使うか、`event.on("world.ready", fn)` でチャンネルを直接
-購読してください。
+`onWorldReady` はワールドロードにつき 1 度だけ、最初のスキャンが見つけた設置物に対して発火します。
+あとのスキャンで流れ込んできた設置物には届かず、セッション中に置いたものにも届きません。設置物
+ごとの初期化は、スキャンが追跡したすべての設置物で発火する `onLoad` の担当です。最初のスキャンが
+終わる前にワールドを離れると通知は取り消されるので、通り過ぎただけのワールドが ready を知らせる
+ことはありません。
 </Callout>
+
+`onWorldLeft` は設置物がまだ生きている、破棄される前の時点で走ります。state に触れる最後の機会
+ですが、直後にワールドキャッシュは自動で書き出されます。
 
 ### チャンネルを直接購読する
 
-dispatch は各チャンネルの購読者の 1 つにすぎません。横断的な処理は自分で購読してください。
+PalForge はこれらのチャンネルを購読してあなたのハンドラを呼んでいます。同じように自分で購読も
+できます。複数の building をまたぐ処理に向いています。
 
 ```lua
 local event = require("palforge.core.event")
@@ -593,12 +681,12 @@ local sub = event.every(5000, function() log.info("five seconds") end)
 sub:unsubscribe()
 ```
 
-`event.every(ms, fn)` はスキャンと同じく 500 ms のハートビートに量子化されます。
+`event.every(ms, fn)` はスキャンと同じく 500 ms のハートビートに丸められます。
 
 ## Handle のアクションとクエリ
 
 `Building{ ... }`、`Building.get`、`Building.get_all` はいずれも `Building.Handle` を返します。これは
-定義レベルのビューです。構造物ごとのビューはインスタンスであり、そこへ到達する手段が handle です。
+定義を表すもので、宣言した内容を読んだり、その定義から置かれた設置物へ到達したりするのに使います。
 
 ```lua
 local box = Building.get("PalBoxV2")
@@ -616,7 +704,7 @@ box:iconOf()        --> a texture ref from DT_BuildObjectIconDataTable, else the
 Building.get("example:Bench"):unlock()
 ```
 
-解決済み id (`example_Bench`) の名前を持つテクノロジ行を `PalCheatManager:UnlockOneTechnology`
+解決後の id (`example_Bench`) の名前を持つテクノロジ行を `PalCheatManager:UnlockOneTechnology`
 経由で解放します。PalSchema が注入した building のテクノロジをビルドメニューに出すのがこの
 呼び出しです。チートマネージャが使えない場合は `false` を返してログに残します。
 
@@ -626,30 +714,37 @@ Building.get("example:Bench"):unlock()
 local kiln = Building.get("example:Kiln")
 
 #kiln:instances()   --> how many are placed in this world
-kiln:render()       --> attach the mesh to every live instance; returns how many calls came back clean
-kiln:update()       --> re-tint every live instance from its currentColor
+kiln:render()       --> attach the mesh to every live instance; returns how many attached
+kiln:update()       --> re-tint every live instance; returns how many were re-tinted
 ```
 
+どちらの件数も、呼び出しが例外なく終わったかどうかではなく、設置物ごとのメソッドの戻り値そのもの
+です。バックエンドが処理を見送った設置物は数えられません。mesh に `model` がない、アセットが
+解決できない、build object を着せられない `kind` である、塗る色がない、書き込む先のマテリアル
+インスタンスがない、といった場合です。したがって `:instances()` が空でないのに `render()` が `0` を
+返したときは、例外が出なかったのではなく何も取り付けられなかったという意味です。
+
 `render()` は通常は不要です。スキャンが actor を最初に見つけた次のパスで mesh を取り付けます。
-実行時に `mesh()` の返す内容を変えたときに使ってください。
+ゲームを動かしながら `mesh()` の返す内容を変えたときに使ってください。
 
 ### イベントのフォワーダ
 
-handle は手動呼び出し用に `:onPlace(ctx)`、`:onLoad(ctx)`、`:onRightClick(ctx)`、
-`:onLeftClick(ctx)`、`:onBuild(ctx)`、`:onBreak(ctx)`、`:onRemove(ctx)`、`:onTick(ctx)` も持っています。
+handle は `:onPlace(ctx)`、`:onLoad(ctx)`、`:onRightClick(ctx)`、`:onLeftClick(ctx)`、
+`:onBuild(ctx)`、`:onBreak(ctx)`、`:onRemove(ctx)`、`:onTick(ctx)` も持っていて、ハンドラを自分で
+実行できます。
 
 <Callout type="warn">
-フォワーダはライブインスタンスではなく定義 **クラス** を `self` としてハンドラを呼びます。そこには
-`self.state`、`self.actor`、`self.key`、`self:save()` はありません。ハンドラ単体の動作確認には
-使えますが、それ以外では実際のイベント、あるいは `:instances()` から取ったインスタンスを
-使ってください。
+フォワーダは置かれた設置物ではなく定義 **クラス** を `self` としてハンドラを呼びます。そこには
+`self.state`、`self.actor`、`self.key`、`self:save()` はありません。これが本物のイベントと一致する
+のは `onBuild` だけなので、フォワーダはハンドラ単体の動作確認に使い、それ以外では実際のイベントか
+`:instances()` から取った設置物を使ってください。
 </Callout>
 
 ## レシピ
 
 ### セッションをまたいで保持されるカウンタ
 
-作業台を設置して何度か使い、ゲームを終了して戻ってきても、カウントは残ります。
+作業台を置いて何度か使い、ゲームを終了して戻ってきても、カウントは残ります。
 
 ```lua title="content/buildings/counter.lua"
 local api = require("palforge.api")
@@ -682,7 +777,7 @@ return Building{
 ```
 
 カウントが残るのは `onRightClick` が `save()` を呼んでいるからです。呼ばなければ変更はメモリ上には
-反映され、次に何かがワールドファイルを flush したときに書かれますが、それは頼れる保証ではありません。
+反映され、次に何かがワールドファイルを書き出したときに保存されますが、それは頼れる保証ではありません。
 
 ### タイマーでアイテムを消費する機械
 
@@ -741,7 +836,7 @@ return Building{
 `state` 側で管理してください。
 </Callout>
 
-### インタラクトで pal を出す構造物
+### インタラクトで pal を出す設置物
 
 ```lua title="content/buildings/summon_post.lua"
 local api = require("palforge.api")
@@ -783,7 +878,21 @@ return Building{
 }
 ```
 
-`PalBoxV2` を定義し直すと `native/buildings.lua` のキュレーション済み定義を置き換えるため、
-mesh をここで書き直しています。バニラのパルボックス UI はそのまま開きます。インタラクトフックは
-呼び出しを観測するだけで、消費はしません。`:spawn` が受け取れる引数は [Pal](/docs/api/pal)、
-`:give` と `:take` は [Item](/docs/api/item) を参照してください。
+`PalBoxV2` を定義し直すと `native/buildings.lua` の用意済み定義を置き換えるため、mesh をここで
+書き直しています。バニラのパルボックス UI はそのまま開きます。インタラクトフックは呼び出しを
+見ているだけで、飲み込みはしません。
+
+## まとめ
+
+- building は `Building{ ... }` で定義します。必須は `id` だけで、ゲームにすでにある id を指定します。
+- 残したいデータは `state` に入れ、その場で書き換えてから `self:save()` を呼びます。
+- 処理は `events` に書きます。第 1 引数は置かれた設置物なので、`self.state`、`self.pos`、
+  `self.actor` がそのまま使えます。
+- `onPlace`、`onLoad`、`onRightClick`、`onRemove`、`onTick`、`onBuild`、`onWorldReady`、
+  `onWorldLeft` は動きます。`onLeftClick` と `onBreak` は動きません。
+- 設置物は丸めたワールド座標で見つけ直されるので、`gridCm` が「どれだけ近くに並べられるか」を
+  決めます。
+- `Building.get(id):instances()` で、いまワールドに立っているその定義の設置物をすべて取得できます。
+
+次は [Item](/docs/api/item) を読むと、`:give` と `:take` で building からプレイヤーに物を渡せる
+ようになります。

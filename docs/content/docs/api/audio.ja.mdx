@@ -1,15 +1,21 @@
 ---
 title: Audio
-description: 再生可能なサウンドを定義し、Palworld 自身の Wwise 経路でアクター上に再生する
+description: ゲームが持っている BGM や効果音を、自分のコードから鳴らす
 ---
 
-`Audio` は再生可能なサウンド 1 つを表します。BGM でも単発の効果音でもかまいません。形は他の
-API モジュールとまったく同じで、呼び出して定義し、`get` / `get_all` があり、そのドメインの
-アクションを持つ Handle が返ります。
+## このページでできるようになること
 
-Audio には**ライフサイクルイベントがありません**。`Audio.Spec` に `events` フィールドはなく、
-バス上に audio 用のチャンネルもなく、購読する対象も存在しません。サウンドは反応するものでは
-なく再生するものなので、Handle が持つのはアクションとクエリだけです。
+- ゲームに入っている BGM や効果音を、好きなタイミングで鳴らす
+- アイテムを拾ったときにジングルを鳴らす
+- 設置した建物を調べたときに音を鳴らす
+- ワールドの読み込みが終わった瞬間にテーマ曲を流す
+- サウンドに名前を付けて、パックのあちこちから使い回す
+
+## サウンドを鳴らす
+
+Palworld には最初から 2000 近いサウンドが入っています。足音、爆発、メニューのクリック音、
+ボス戦の曲などです。`Audio` は、その 1 つに名前を付けて自分の Lua コードから鳴らすための
+仕組みです。
 
 ```lua
 local Theme = Audio.bgm{
@@ -22,10 +28,19 @@ Theme:play()          -- on the local player pawn
 Theme:stop()
 ```
 
-## Define a sound
+サウンドは必ずワールドにある何かの*上*で鳴ります。キャラクター、パル、設置した建物などです。
+この「ワールドにある何か」を**アクター**と呼びます。アクターを渡さなかった場合は、プレイヤーが
+操作しているキャラクターの上で鳴ります。
 
-モジュールを呼び出すことが定義です。呼び出しごとに spec が検証され、定義は `core/object_manager`
-の `("audio", id)` に登録され、`Audio.Handle` が返ります。
+「サウンドが鳴った」とゲーム側が教えてくれることはないので、鳴らす瞬間は自分で決めます。
+アイテムのハンドラー、建物のハンドラー、ワールドのイベントなどから `:play()` を呼びます。
+このページの残りは、サウンドに名前を付ける方法と、再生がうまくいかないときの原因の話です。
+
+## サウンドを定義する
+
+`Audio{ ... }` と書くとサウンドを定義できます。渡したテーブルはフィールドごとに検証され、
+サウンドは `id` をキーに登録され、`Audio.Handle` が返ります。これは `:play()` と `:stop()` を
+持つ小さなオブジェクトです。
 
 <Tabs items={['Audio', 'Audio.bgm', 'Audio.se']}>
 <Tab value="Audio">
@@ -67,19 +82,19 @@ local Pickup = Audio.se{
 </Tab>
 </Tabs>
 
-`Audio.bgm` と `Audio.se` は `kind` を固定するだけで、それ以外は `Audio{ ... }` と同じ処理を
-行います。渡したテーブルは変更されずコピーされ、そのテーブル内の `kind` がコンストラクタと
-矛盾する場合は、黙って上書きするのではなくハードエラーになります。
+`Audio.bgm` と `Audio.se` がやることは `Audio{ ... }` と同じで、`kind` だけが先に入っています。
+渡したテーブルは書き換えずコピーされ、そのテーブルの `kind` が指定と食い違う場合は、黙って
+上書きせずエラーで止まります。
 
 ```lua
 Audio.bgm{ id = "example:Theme", kind = "se" }
 -- PalForge: Audio.bgm: kind is fixed to "bgm" here, but got "se" - use Audio{ ... } to set it
 ```
 
-## The spec
+## 指定できるフィールド
 
-`Audio.Spec` は `core/schema` で宣言され、モジュール内の local のままです。実行時にはレジストリ
-経由で読み出します。
+ほとんどのサウンドで必要なのは 2 つだけです。名前を決める `id` と、音声アセットを指す
+`soundPath` です。ほかは任意です。同じ一覧はゲーム内からいつでも表示できます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -108,19 +123,19 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
       default: 'se',
     },
     soundId: {
-      description: 'ネイティブの AkAudioEvent 名。SoundID フォールバック経路であり、同時に core.sound がソースを解決するために必須の値でもあります。',
+      description: 'ネイティブの AkAudioEvent 名。SoundID フォールバック経路で、アセットパスがロードできなかったときにだけ使われます。このフィールドだけの定義でも解決されます。',
       type: 'string',
     },
     soundPath: {
-      description: 'ネイティブの AkAudioEvent アセットパス。実際に音を鳴らすのはこちらの経路です。',
+      description: 'ネイティブの AkAudioEvent アセットパス。実際に音を鳴らすのはこちらの経路で、このフィールドだけの定義でも解決されて再生まで進みます。',
       type: 'string',
     },
     soundFile: {
-      description: 'カスタム音声ファイルのパス。未接続部分で、解決はされますが何もしません。後述の Seams を参照。',
+      description: 'カスタム音声ファイルのパス。解決はされますが何もしません。後述の「まだ動かないこと」を参照。',
       type: 'string',
     },
     source: {
-      description: '既定の変換処理を置き換え、core.sound に渡すソース spec を自分で返すオーバーライド。',
+      description: '上のフィールドの代わりに、再生時にサウンドを選ぶ関数。',
       type: 'function',
     },
     data: {
@@ -130,15 +145,14 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
   }}
 />
 
-検証は厳密です。宣言されていないフィールドは定義時点でエラーになり、候補の提示が付くため、
-タイプミスが黙って無視されることはありません。
+宣言していないフィールドを書くと、定義した時点でエラーになります。メッセージには「もしかして
+このフィールドでは」という候補が付くので、タイプミスが黙って無視されることはありません。
 
-## How a sound actually plays
+## サウンドがゲームに届くまで
 
-宣言は `core/sound` が解決するソース spec へと*降ろされ*ます。`soundFile` はネイティブの各
-フィールドより優先され、サウンドを何も指定していない定義は `nil` に降ります。ただし宣言が
-この分岐に到達することはほとんどありません。`Audio{ ... }` が先に `id` から `soundId` を
-埋めるためで、その挙動は後述の The id fallback で扱います。
+`AkAudioEvent` は、Palworld で再生できるサウンド 1 つを指す名前です。それぞれに**名前**
+（`AKE_GrabItem` など）と**アセットパス**（その名前が入っているファイル）があります。宣言は
+どちらを指定したかを表す小さなテーブルに変換され、そのテーブルが経路を決めます。
 
 ```mermaid
 flowchart TD
@@ -149,12 +163,14 @@ flowchart TD
   C --> F["core.sound.file"]
   D --> G["core.sound.native"]
   F --> H["no-op, returns false"]
-  G --> I["the confirmed play route"]
+  G --> I["the native play route"]
 ```
 
-ネイティブ経路はゲーム内で確認済みです。カタログの 1 エントリは Wwise の **AkAudioEvent 名**と
-既知の**アセットパス**の組であり、動作する呼び出し経路は `LoadAsset(path)` に続けて
-`PalSoundUtility:PlayAkEventSoundByActor(actor, asset)` を呼ぶものです。
+`soundFile` はほかの 2 つより優先されます。サウンドを何も指定していない定義は `nil` で
+終わりますが、ここに到達する宣言はほとんどありません。`Audio{ ... }` が先に `id` から
+`soundId` を埋めるためです。後述の「サウンド指定を省いた場合」を参照してください。
+
+名前とパスの両方がある場合は、アセットをロードしてからアクター上で再生するよう依頼します。
 
 ```mermaid
 flowchart LR
@@ -165,42 +181,53 @@ flowchart LR
   E --> F["PlayAkEventSoundByActor"]
 ```
 
-`LoadAsset` の結果はパスをキーにキャッシュされるため、ロードのコストを払うのは初回再生だけで、
-以降は再利用されます。`LoadAsset` が利用できない、または有効な値を返さない場合、ローダーは
-`StaticFindObject(path)` で再試行します。
+`PlayAkEventSoundByActor` は製品版のゲームに実在する関数なので、呼び出し自体はエンジンに
+届きます。ただしこのツリーの実行ログに、それが実際に音を鳴らした記録はありません。経路は
+妥当だが結果は未検証、と考えてください。`:play()` が報告するのが「呼び出しを発行したか
+どうか」だけなのは、そのためです。
 
-### Why you pass both soundId and soundPath
+ロード済みのアセットはパスごとに保持されるので、ロードのコストを払うのは初回だけで、以降は
+使い回されます。ローダーがアセットを取得できなかった場合は、`StaticFindObject(path)` で
+もう一度試します。
 
-この 2 つのフィールドは択一ではありません。それぞれ別の段階で使われます。
+### soundId と soundPath を両方渡す理由
+
+この 2 つは択一ではありません。同じ呼び出しの別々の段階で使われ、**どちらか一方だけでも
+完全な定義になります**。空でない `soundId` か、空でない `soundPath` があれば解決されます。
 
 ```mermaid
 flowchart TD
   A["NativeSource:play"] --> B["asset loaded from soundPath"]
   B -->|yes| C["PlayAkEventSoundByActor"]
   B -->|no| D["PlaySoundByActor with FName soundId"]
-  C --> E["audible"]
+  C --> E["the route that plays"]
   D --> F["silent for AkAudioEvent names"]
 ```
 
-- 音を鳴らすのは `soundPath` です。ロード可能なアセットがないと処理は
-  `PlaySoundByActor(actor, { Key = FName(id) }, ...)` に落ちますが、これは SoundID の DataTable 行を
-  参照するもので、AkAudioEvent 名とは別の名前空間です。AkAudioEvent 名に対しては無音になります。
-- ソースを**解決**させるのは `soundId` です。`core.sound.resolve` は spec が空でない `id` を
-  持つときにだけ `NativeSource` を構築します。`soundPath` だけで `soundId` がない定義は `nil`
-  に解決され、`core.sound.play` は `nil` のソースを「再生するものがない」として扱い、`true` を
-  返したまま無音になります。
+- 音を鳴らすのは `soundPath` です。再生処理はこちらを優先し、アセットをロードしてサウンドを
+  送出したらそこで終わります。`soundPath` だけの定義はこの分岐に入ります。
+- フォールバックが `soundId` です。ロードできるアセットがないと、処理は
+  `PlaySoundByActor(actor, { Key = FName(id) }, ...)` に落ちます。これは名前を別のサウンド表
+  から引くもので、その表に AkAudioEvent 名は入っていないため無音になります。`soundId` だけの
+  定義も動きますが、行き着く先はこの分岐です。
+- 両方渡すと、音を鳴らすパスに加えて、アセットをロードできなかったときの名前も手に入ります。
+  `native/audio.lua` のカタログは全エントリで両方を渡しています。
 
 <Callout type="warn">
-`soundPath` だけを渡す組み合わせは、正しそうに見えて何も起きない唯一のパターンです。解決先が
-ないソースはエラーではなくフェイルソフト扱いなので、`:play()` は `true` すら返します。必ず
-`soundId` も渡してください。`native/audio.lua` のカタログは全エントリで両方を渡しています。
+`:play()` が返す `true` は、ネイティブ呼び出しを**発行した**という意味であって、音が聞こえたと
+いう意味ではありません。いまも引っかかりやすいのは、パスのない名前だけの定義です。解決され、
+`PlaySoundByActor` まで到達し、何も鳴らないまま `true` を返します。無音のときはまず
+`:source().path` を確認してください。
 </Callout>
 
 ```lua
--- silent, and :play() still returns true
+-- plays: the asset path is a complete definition on its own
 Audio.se{ id = "example:Quiet", soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem" }
 
--- correct
+-- resolves, reaches the engine, stays silent -- a name with no path
+Audio.se{ id = "example:NameOnly", soundId = "AKE_GrabItem" }
+
+-- preferred: the path plays, the id is there if the asset cannot be loaded
 Audio.se{
     id        = "example:Loud",
     soundId   = "AKE_GrabItem",
@@ -208,32 +235,32 @@ Audio.se{
 }
 ```
 
-## The id fallback
+## サウンド指定を省いた場合
 
-サウンドを**まったく**指定していない定義、つまり `soundId`、`soundPath`、`soundFile`、`source`
-のいずれもない定義は、自身の `id` を AkAudioEvent 名として使います。短縮形が動くのはこの仕組みの
-おかげです。
+サウンドを**まったく**指定していない定義、つまり `soundId`、`soundPath`、`soundFile`、
+`source` のいずれもない定義は、自分の `id` をサウンド名として使います。1 行の書き方が動くのは
+このためです。
 
 ```lua
 local Theme = Audio.bgm{ id = "AKE_BGM_Title" }
 Theme:source()   --> { kind = "native", id = "AKE_BGM_Title", path = nil }
 ```
 
-このフォールバックは解決可能なソースを与えるので、`:play()` はネイティブ層まで到達します。
-ただしアセットパスは得られないため、実際に走るのは `PlaySoundByActor` のフォールバック、つまり
-AkAudioEvent 名に対しては無音になる方の経路です。短縮形は名前を*登録*する手段であって、音を
-鳴らすための手段ではないと考えてください。
+これで解決はされるので、`:play()` はゲームまで到達し、有効なアクターがあれば `true` を返します。
+ただしアセットパスは手に入らないため、実際に走るのは `PlaySoundByActor` のフォールバック、
+つまりこの種の名前では無音になる分岐で、その `true` は呼び出しを出したことしか意味しません。
+1 行の書き方は名前を*登録*するために使い、実際に鳴らしたいときは `soundPath` を足してください。
 
 <Callout type="info">
-フォールバックが働くのは、サウンド指定用の 4 フィールドがすべて無い場合だけです。`source` を
-含めどれか 1 つでも設定すると無効になります。
+id がサウンド名として使われるのは、サウンド指定用の 4 フィールドがすべて無いときだけです。
+`source` を含めどれか 1 つでも設定すると無効になります。
 </Callout>
 
-## kind is descriptive only
+## bgm と se
 
-`kind` は `"se"` か `"bgm"` で、既定値は `"se"`、再生挙動には一切影響しません。BGM も効果音も
-同じ `PlayAkEventSoundByActor` 呼び出しを通ります。存在意義は、自分のコードやツールが両者を
-区別できるようにすることです。
+`kind` は `"se"` か `"bgm"` で、既定値は `"se"`、再生の挙動には一切影響しません。BGM も効果音も
+同じ `PlayAkEventSoundByActor` 呼び出しを通ります。これは自分のコードやツールが両者を区別
+できるようにするためのものです。
 
 ```lua
 for _, sound in ipairs(Audio.get_all()) do
@@ -243,15 +270,14 @@ for _, sound in ipairs(Audio.get_all()) do
 end
 ```
 
-`kind` はルーティングではなくメタデータなので、同じ id を BGM としても効果音としても定義すると、
-後に実行された方だけが残ります。`native/audio.lua` は自身の `bgm(name)` / `se(name)` ヘルパーに
-ついてこの点を明示しています。
+`kind` は経路ではなくラベルなので、同じ id を BGM としても効果音としても定義すると、後に実行
+された方だけが残ります。`native/audio.lua` の `bgm(name)` / `se(name)` ヘルパーでも同じです。
 
-## The Handle
+## ハンドル
 
 `Audio{ ... }`、`Audio.bgm`、`Audio.se`、`Audio.get` はいずれも `Audio.Handle` を返します。
 
-### Actions
+### アクション
 
 ```lua
 Handle:play(actor)        --> boolean
@@ -259,9 +285,9 @@ Handle:stop(actor)        --> boolean
 Handle:setVolume(volume)  --> false, always
 ```
 
-`actor` は省略可能です。省略した場合、`play` も `stop` も `FindFirstOf("PalPlayerCharacter")`
-で取得したローカルプレイヤーのポーンにフォールバックします。ワールドが読み込まれていなければ
-ポーンは存在せず、どちらもネイティブのサウンド呼び出しに到達しないまま `false` を返します。
+`actor` は省略できます。省略した場合、`play` も `stop` も、`FindFirstOf("PalPlayerCharacter")`
+で取得したプレイヤー操作中のキャラクターを使います。ワールドが読み込まれていなければその
+キャラクターは存在せず、どちらもサウンド呼び出しに到達しないまま `false` を返します。
 
 ```lua
 local Blast = Audio.get("AKE_General_Explosion")
@@ -271,19 +297,45 @@ Blast:play(somePalActor)           -- on any actor you already hold
 Blast:stop(somePalActor)           -- stops EVERYTHING on that actor
 ```
 
+戻り値の真偽値が示すのは*呼び出し*についてであって、音そのものではありません。`play` と `stop`
+が `true` を返すのは、ネイティブ呼び出しを実際に発行できたときだけです。無効なアクター、
+`PalSoundUtility` が見つからない場合、呼び出し内で例外が飛んだ場合、そして解決先のない定義は、
+いずれも `false` になります。`false` は「そもそも何も試みられなかった」という意味なので、
+対処する価値のある情報です。
+
+```lua title="content/boot_sound.lua"
+local log = require("palforge.utils.log").scope("audio")
+
+-- a path-only definition: core.sound.resolve accepts it, so this reaches the engine
+local Theme = Audio.bgm{
+    id        = "example:BootTheme",
+    soundPath = "/Game/Pal/Sound/Events/SE/UI/BGM_Title/AKE_BGM_Title.AKE_BGM_Title",
+}
+
+if not Theme:play() then
+    log.warn("no player pawn yet, or the definition resolved to nothing")
+end
+```
+
 <Callout type="warn">
 `:stop` はサウンド単位ではありません。呼び出しているのは
 `PalSoundUtility:StopSoundByActor(actor)` で、そのアクター上で再生中のすべてのサウンドを止めます。
-プレイヤーのポーンで BGM を止めると、足音やボイスも一緒に止まります。
+プレイヤーのキャラクターで BGM を止めると、そのキャラクターの足音やボイスも一緒に止まります。
+1 つだけ止めて他を鳴らし続けるには、サウンド側が保持していない Wwise の `PlayingID` が必要です。
 </Callout>
 
 <Callout type="warn">
-`:setVolume` は**未実装**です。中身は TODO 付きの `return false` で、AkAudio の RTPC や
-コンポーネントゲインの経路はまだ確認されていません。呼び出し側が「何もしなかった」と判別できる
-よう、`true` ではなく `false` を返します。現時点の PalForge にサウンド単位の音量調整はありません。
+`:setVolume` は**未実装**です。何もしなかったと呼び出し側が判別できるよう `false` を返します。
+現時点の PalForge にサウンド単位の音量調整はありません。より静かなイベントを選ぶか、音量は
+プレイヤー自身の設定に任せてください。経路自体は製品版のゲームに存在します。
+`UPalSoundUtility::SetRTPCValueByActor`、`UAkGameplayStatics::SetRTPCValue`、そしてアクターの
+エミッターに対する `UAkComponent::SetOutputBusVolume` です。ただしどれもサウンド単位ではなく、
+引数リストもまだ判明しておらず、Palworld が宣言している RTPC は `Field_Time` と `Sliding_Speed`
+だけで、音量用の名前は分かっていません。実装するとシグネチャは `setVolume(volume, actor)` に
+変わるか、バス単位の呼び出しに移る可能性が高いです。
 </Callout>
 
-### Queries
+### クエリ
 
 ```lua
 Handle:source()       --> { kind = "native"|"file", ... } | nil
@@ -293,7 +345,7 @@ Handle:description()  --> string | nil
 Handle.id             --> the sound's id
 ```
 
-定義がネイティブ層まで到達するかを確認する最短手段が `:source()` です。`core.sound` が受け取る
+定義がそもそもゲームまで届くかを確認する一番早い方法が `:source()` です。再生処理が受け取る
 テーブルそのものを返します。
 
 ```lua
@@ -301,20 +353,20 @@ local s = Audio.get("AKE_BGM_Title"):source()
 print(s.kind, s.id, s.path)
 ```
 
-## Look up an existing sound
+## 自分で定義していないサウンドを取得する
 
 ```lua
 Audio.get(id)     --> Audio.Handle, never nil
 Audio.get_all()   --> Audio.Handle[]
 ```
 
-`Audio.get` は、すでに定義済みのサウンドがあればそれを返します。無い場合は、その id をキーに
-した薄いネイティブ定義 `{ id = id, soundId = id }` をその場で作るので、どの AkAudioEvent 名でも
-少なくとも指し示すことはできます。ただしその定義には**アセットパスがない**ため、上記の id
-フォールバックとまったく同じく無音のフォールバック経路に乗ります。
+`Audio.get` は、すでに定義したサウンドがあればそれを返します。無い場合はその場で薄い定義
+`{ id = id, soundId = id }` を作るので、どのサウンド名でも少なくとも掴むことはできます。ただし
+その定義には**アセットパスがない**ため、上の 1 行の書き方とまったく同じく無音のフォールバック
+経路に乗ります。
 
-起動時に `core/registry` が `palforge.native.audio` をロードし、6 つのキュレート済みサウンドが
-定義されます。`Audio.get` がパス付きで見つけられるのはこれらの id です。
+起動時に PalForge は `palforge.native.audio` を読み込み、6 つの既製サウンドを定義します。
+`Audio.get` がパス付きで見つけられるのはこれらの id です。
 
 | ヘルパー | ID |
 | --- | --- |
@@ -332,12 +384,12 @@ audio.MainTheme:play()
 audio.Explosion:play()
 ```
 
-### Any name in the catalog
+### カタログにある任意の名前
 
-`native/audio.lua` は `M.CATALOG` も持っています。これは UE の AssetRegistry から列挙した
-AkAudioEvent の全集合を `name -> asset path` の形で保持したものです。`bgm(name)` / `se(name)` は
-カタログのエントリを初回使用時に実際の定義へ実体化し、名前とパスの両方を持たせてキャッシュします。
-`get(name)` は `se(name)` と同じです。カタログに無い名前に対しては 3 つとも `nil` を返します。
+`native/audio.lua` は `M.CATALOG` も持っています。ゲーム内のサウンド名とアセットパスをすべて
+対にしたものです。`bgm(name)` / `se(name)` は、初めて要求されたときにカタログのエントリを実際の
+定義へ変換し、名前とパスの両方を持たせたうえで次回のために保持します。`get(name)` は
+`se(name)` と同じです。カタログに無い名前に対しては 3 つとも `nil` を返します。
 
 ```lua
 local audio = require("palforge.native.audio")
@@ -350,15 +402,16 @@ audio.CATALOG["AKE_CampLevelUp"]
 ```
 
 <Callout type="info">
-自分で定義していないバニラのサウンドを扱うときは、`Audio.get(name)` より
+自分で定義していないゲーム標準のサウンドには、`Audio.get(name)` より
 `native.audio.se(name)` / `native.audio.bgm(name)` を使ってください。`Audio.get` はアセットパスを
 知りようがありませんが、`native.audio` はカタログから引いてきます。
 </Callout>
 
-## Define once, play many
+## 定義は 1 回、再生は何度でも
 
-`Audio{ ... }` は宣言です。`Audio.get(id)` と保持しておいた handle は参照です。ハンドラーは
-イベントのたびに実行されるので、定義はロード時に置き、ハンドラーには再生だけを置きます。
+`Audio{ ... }` はサウンドを作ります。`Audio.get(id)` や変数に持っておいたハンドルは、それを
+引くだけです。ハンドラーはイベントのたびに実行されるので、定義はロード時に置き、ハンドラーには
+再生だけを置きます。
 
 ```lua title="content/sounds.lua"
 -- module scope: runs once when the pack loads
@@ -386,8 +439,8 @@ Item{
 
 <Callout type="warn">
 ハンドラーの中で `Audio.bgm{ ... }` や `Audio.se{ ... }` を呼んではいけません。呼び出しのたびに
-spec を再検証し、新しい定義クラスを作り、同じ `("audio", id)` キーのレジストリエントリを上書き
-します。それがイベントごとに毎回起きます。handle は上位値として保持するか、ハンドラー内では
+テーブルを検証し直し、新しい定義を作り、同じ id で登録されている内容を置き換えます。それが
+イベントごとに毎回起きます。ハンドルはハンドラーの外の local に持つか、ハンドラー内では
 `Audio.get(id)` を呼んでください。
 </Callout>
 
@@ -403,35 +456,36 @@ onObtain = function(item, ctx)
 end
 ```
 
-## Seams
+## まだ動かないこと
 
-このドメインには未完成の部分が 3 つあります。いずれもフェイルソフトなので、踏んでも派手に
-落ちるのではなく静かに何も起きません。
+ここには期待どおりには働かないものが 3 つあります。2 つは未完成で、1 つは頼んだ以上のものを
+止めます。いずれもエラーにならず静かに終わるので、無音のサウンドに一晩溶かす前に読んで
+おいてください。
 
 <Callout type="warn">
-**カスタム音声ファイルは再生されません。** `soundFile` の宣言は
-`{ kind = "file", path = ... }` に降り、`core.sound` はそれを `FileSource` に解決しますが、
-`FileSource:play` は何もせずに `false` を返します。Palworld 側で確認できた `USoundWave` /
-`USoundBase` のローダーが存在しないため、実装したふりをするのではなく、意図的な no-op として
-残されています。自前の音声アセットを PalForge 経由で再生することは現時点ではできません。
-代わりにカタログの AkAudioEvent を使ってください。
+**カスタム音声ファイルは再生されません。** `soundFile` の宣言は受け付けられ、ファイル用の
+ソースに解決されますが、そのソースは何もせずに `false` を返し、`:play()` はその `false` を
+そのまま返します。Palworld 側に確認できたカスタム音声のローダーが無いため、実装したふりを
+せず、意図的な no-op として残されています。自前の音声アセットを PalForge から再生することは
+現時点ではできません。カタログの中から近いサウンドを選んでください。
 </Callout>
 
 <Callout type="warn">
-**`:stop` はそのアクター上のすべてを止めます。** `StopSoundByActor` はアクターだけを受け取り、
-SoundID 単位ではありません。`core.sound.stop` はどのサウンドから呼ばれたかすら見ておらず、
-ファサードはすべての停止を 1 つの共有ソースインスタンス経由でルーティングします。1 つだけ止めて
-他を鳴らし続ける手段はありません。
+**`:stop` はそのアクター上のすべてを止めます。** `StopSoundByActor` はアクターだけを受け取る
+ので、どのサウンドから呼んでも、そのアクターは完全に無音になります。片方を鳴らし続けたい
+場合は、別のアクターで鳴らしてください。たとえば BGM は設置した建物で、効果音はプレイヤーで
+鳴らす、といった具合です。
 </Callout>
 
-3 つ目の欠落は `:setVolume` で、上で述べたとおり `false` を返して何もしません。
+3 つ目の欠落は上で触れた `:setVolume` です。`false` を返して何もしないので、まだこれを土台に
+音量スライダーを作らないでください。
 
-## Recipes
+## レシピ
 
-### A jingle when an item is picked up
+### アイテムを拾ったときにジングルを鳴らす
 
-`item.obtain` は LIVE です。`ctx` は `ctx.itemId` と `ctx.count` を運び、ハンドラーの第 1 引数は
-そのアイテム自身の Handle です。
+`item.obtain` は実際に発火します。`ctx` は `ctx.itemId` と `ctx.count` を運び、ハンドラーの
+第 1 引数はそのアイテム自身のハンドルです。
 
 ```lua title="content/pickup_jingle.lua"
 local api = require("palforge.api")
@@ -453,14 +507,14 @@ api.Item{
 }
 ```
 
-`ctx.count` はネイティブのペイロードからベストエフォートで読み取るため `nil` になり得ます。
-必ずガードしてください。
+`ctx.count` はゲーム側のメッセージから読める範囲で読み取るため `nil` になり得ます。必ず
+ガードしてください。
 
-### BGM when the world is ready
+### ワールドの準備ができたら音楽を流す
 
-audio 用のチャンネルは存在しないので、音楽はライフサイクルバスから駆動します。`world.ready` は
-プレイヤーのポーンが複数回のポーリングで安定した時点で 1 度発火し、それは `:play()` の既定値と
-なるポーンが存在するタイミングでもあります。
+音楽を始めるタイミングは自分で決めます。`world.ready` は、プレイヤーのキャラクターが数回続けて
+確認できた時点で発火します。これは `:play()` が既定で使うキャラクターが存在する最初の瞬間でも
+あります。
 
 ```lua title="content/theme.lua"
 local event = require("palforge.core.event")
@@ -471,7 +525,7 @@ event.on("world.ready", function(ctx)
 end)
 ```
 
-キュレート済みヘルパーを使わず自分で定義する場合は、両方のフィールドを渡します。
+既製のヘルパーを使わず自分で定義する場合は、両方のフィールドを渡します。
 
 ```lua title="content/theme.lua"
 local event = require("palforge.core.event")
@@ -493,10 +547,11 @@ event.on("world.left", function(ctx)
 end)
 ```
 
-### A sound from a building interaction
+### 建物を調べたときに音を鳴らす
 
-建築物では `onRightClick` が LIVE です。第 1 引数は**ライブインスタンス**なので、`self.actor` は
-設置された構造物そのものです。そこで再生すれば、音はプレイヤーではなく建築物から出ます。
+建物では `onRightClick` が実際に発火します。第 1 引数は設置された建物そのものなので、
+`self.actor` はワールドに立っている構造物です。そこで鳴らせば、音はプレイヤーではなく建物から
+出ます。
 
 ```lua title="content/palbox_sound.lua"
 local api = require("palforge.api")
@@ -520,14 +575,14 @@ api.Building{
 }
 ```
 
-`building.interact` の `ctx` は `ctx.actor`（建築物）、`ctx.player`（操作したキャラクター）、
-`ctx.buildId` を運びます。`ctx.player` で再生すれば、音はキーを押した本人に付きます。
+`building.interact` の `ctx` は `ctx.actor`（建物）、`ctx.player`（操作したキャラクター）、
+`ctx.buildId` を運びます。`ctx.player` で鳴らせば、音はキーを押した本人に付きます。
 
-### A source override
+### 再生時にサウンドを選ぶ
 
-`source` は既定の変換処理を丸ごと置き換えます。この関数は定義に対するメソッドとして呼ばれる
-ので、`self` は宣言したフィールドを保持しており、返すのは `core.sound` が解決するソース spec、
-または無音にしたい場合は `nil` です。
+`source` を使うと、フィールドで固定する代わりに、鳴らす瞬間にサウンドを決められます。この関数は
+定義に対して呼ばれるので、`self` は宣言したフィールドを持っており、返すのは再生処理が使う
+テーブル、または無音にしたい場合は `nil` です。
 
 ```lua title="content/dynamic_sound.lua"
 local audio = require("palforge.native.audio")
@@ -544,14 +599,14 @@ local Footstep = Audio.se{
 Footstep:play()
 ```
 
-spec の形は守ってください。`{ kind = "native", id = <AkAudioEvent name>, path = <asset path> }`
-か `{ kind = "file", path = ... }` です。それ以外に対して `core.sound.resolve` は `nil` を返し、
-`nil` のソースは何も再生しません。
+形は守ってください。`{ kind = "native", id = <AkAudioEvent name>, path = <asset path> }`
+（片方が空でない文字列であれば、もう片方は省略できます）か `{ kind = "file", path = ... }` です。
+それ以外は `nil` に解決され、`nil` のソースは何も鳴らさず、`:play()` は `false` を返します。
 
-## Errors
+## エラー
 
-検証の失敗はすべて `PalForge: ` で始まるハードエラーで、呼び出しが中途半端に成功することは
-ありません。
+検証に失敗すると、`PalForge: ` で始まるエラーで呼び出しが止まります。中途半端に成功することは
+ないので、半分だけできたサウンドが残ることもありません。
 
 ```text
 PalForge: Audio: field "id" is required (audio id: the AkAudioEvent name, or "pack:name")
@@ -561,16 +616,15 @@ PalForge: Audio: field "kind" must be one of { "se", "bgm" }, got "music"
 PalForge: Audio.bgm: kind is fixed to "bgm" here, but got "se" - use Audio{ ... } to set it
 ```
 
-`Audio.get` は素の文字列を受け取るため、assert になります。
+`Audio.get` は素の文字列を受け取るため、出るメッセージが少し違います。
 
 ```text
 Audio.get: id (string) is required
 ```
 
-登録自体はベストエフォートです。`om.register` は `pcall` で包まれているため、レジストリ側の
-問題があっても定義の生成と返却は止まりません。
+サウンドの登録はベストエフォートです。その処理が失敗しても、使えるハンドルは返ってきます。
 
-## See also
+## 関連ページ
 
 <Cards>
   <Card title="Item" href="/docs/api/item">ピックアップのレシピで使う `item.obtain` と `item.use` のフック。</Card>
@@ -578,3 +632,15 @@ Audio.get: id (string) is required
   <Card title="ライフサイクル" href="/docs/concepts/lifecycle">チャンネル、`world.ready`、そして実際に発火するフック。</Card>
   <Card title="スキーマ" href="/docs/concepts/schema">spec の宣言・検証・読み出しの仕組み。</Card>
 </Cards>
+
+## まとめ
+
+- サウンドは `Audio{ ... }`、`Audio.bgm{ ... }`、`Audio.se{ ... }` で定義します。必須は `id` だけです。
+- `soundId` だけでなく `soundPath` も渡します。聞こえるのはパスの方で、名前だけでは無音です。
+- 再生は `handle:play(actor)` です。`actor` を省くとプレイヤーのキャラクターで鳴ります。
+- `:play()` の `true` は呼び出しが出たという意味で、聞こえた保証ではありません。無音のときは
+  `:source().path` を確認します。
+- `:stop(actor)` はそのアクター上のすべてを止め、`:setVolume` はまだ何もしません。
+- サウンドの定義はパックのロード時に 1 回だけ行い、ハンドラーでは `:play()` だけを呼びます。
+
+次は [Item](/docs/api/item) を読むと、プレイヤーが拾ったり使ったりしたものに音を付けられます。

@@ -1,12 +1,41 @@
 ---
 title: ライフサイクルとイベント
-description: ネイティブのゲームイベントが定義のフック呼び出しになるまでの経路と、実際に発火するフック
+description: ゲームで何かが起きたときに自分のコードを動かす方法と、実際に発火するフック
 ---
 
-Palworld のネイティブイベントからハンドラまでの経路は、1 つのファイルが所有しています。
-`Scripts/palforge/core/event.lua` です。チャンネル、それを供給するネイティブフック、チャンネル
-をオブジェクトのメソッド呼び出しに変えるディスパッチ、そして建築物のインスタンスランタイムが、
-すべてここに入っています。
+## このページでできるようになること
+
+- 建物が置かれた瞬間、アイテムが使われた瞬間、パルが倒された瞬間に自分のコードを動かす
+- 遊んでいる間ずっと動き続け、ワールドを再ロードしても数値を覚えている建物を作る
+- 20 秒ごとにベリーが実る茂みのように、タイマーで何かを起こす
+- ゲームが実際に知らせてくれる瞬間を把握して、来ないイベントを待たずに済ませる
+- ハンドラが動かなかった理由をログから突き止める
+
+## いつ動かすかを指定する
+
+定義はテーブルです。その `events` テーブルに関数を入れておくと、対応することがゲームで起きた
+ときに PalForge がその関数を呼びます。
+
+```lua title="content/berries.lua"
+Item{
+    id = "Berries",
+    events = {
+        onUse = function(item, ctx)
+            Item.get("Wood"):give(1)      -- eat a berry, get a log
+        end,
+    },
+}
+```
+
+ゲーム内でベリーを食べると、木材が 1 つインベントリに入ります。「いつ」を指定しているのはキーの
+名前です。`onUse` は「プレイヤーがこのアイテムを使ったとき」という意味です。
+
+名前の一覧はドメインごとに違います。建築物には `onPlace`、`onRightClick`、`onTick` などがあり、
+パルには `onDamaged`、`onDeath`、`onCaptured`、アイテムには `onObtain` と `onUse` があります。
+ドメインごとの全リストと、そのうち今のゲームが本当に発火させるものは、このページの後半にあります。
+
+定義を使わずに待ち受けることもできます。`event.on` は **チャンネル**（`pal.spawned` のような、
+名前の付いた瞬間）を購読し、そこに何かが流れてくるたびに関数を実行します。
 
 ```lua
 local event = require("palforge.core.event")
@@ -15,12 +44,13 @@ event.on("pal.spawned", function(ctx) print(ctx.actor) end)
 event.emit("example:custom", { note = "channels are created on demand" })
 ```
 
-このモジュールを直接 require する場面はほとんどありません。定義に `events = { ... }` を書くのが
-通常の入り口で、ディスパッチがそのハンドラを呼び出します。
+ほとんどのパックではこれは不要です。定義に `events = { ... }` を書くのが通常の入り口で、
+届く経路は同じチャンネルです。
 
-## 3 つの部分
+## イベントがコードに届くまで
 
-`core/event.lua` は 3 層に分かれており、あらゆるライフサイクルの瞬間はこの順に 3 層を通過します。
+ゲーム内の瞬間とハンドラの間には 3 つの段階があり、あらゆる瞬間がこの順に 3 つとも通ります。
+自分で呼ぶことはありません。名前を知っておくと、ログを読むときに役立ちます。
 
 | 層 | 内容 |
 | --- | --- |
@@ -39,14 +69,14 @@ flowchart LR
     C --> U["your own event.on subscriber"]
 ```
 
-共有点はバスだけです。SOURCE がフックを直接呼ぶことはなく、フックがどのネイティブ呼び出しから
-来たかを知ることもありません。まだ SOURCE を持たないチャンネル（`item.craft`）でもディスパッチが
-動作しているのはこのためで、何かが emit するようになった日から、既存のパックはコードを変えずに
-受け取り始めます。
+後ろ 2 段階はあるのに、まだ何も流し込まれないチャンネルもあります。`item.craft` がそれで、
+`onCraft` ハンドラは受理されますが実行されません。その処理は、実際に動く場所に書いてください。
+作ったアイテムがインベントリに入った時点で `onObtain` が発火します。
 
 ### 起動時の配線順序
 
-`registry.initialize()` が、Mod ロード時に `main.lua` が呼ぶ唯一の入り口です。
+`registry.initialize()` は、Mod ロード時に `main.lua` が呼ぶものです。パックが最初のイベントを
+受け取る前に、すべてを配置します。
 
 ```mermaid
 flowchart TD
@@ -59,14 +89,15 @@ flowchart TD
     F --> G
 ```
 
-`event.start()` は `started` フラグで保護されているため、二度目以降の呼び出しは何もしません。
-`event.CHANNELS` のすべてのチャンネルは、どの SOURCE よりも先に生成されます。emit より前に
-subscribe しても安全なのはこのためです。
+`event.start()` が実際に走るのは一度だけで、二度目以降の呼び出しは何もしません。
+`event.CHANNELS` のすべてのチャンネルは最初のゲームイベントより先に存在するので、パックの
+ロード中に購読しても取りこぼしはありません。
 
-### オブジェクトの解決
+### イベントが起きたオブジェクトを特定する
 
-DISPATCH は推測をしません。`resolve(otype, ctx)` がコンテキストテーブルを具体的なオブジェクトに
-対応付け、呼ぶ相手がいなければ `nil` を返します。そのときディスパッチは何もしません。
+フックを呼ぶ前に、ディスパッチはそのイベントがどの定義のものかを判定します。
+`resolve(otype, ctx)` がコンテキストテーブルを具体的なオブジェクトに対応付け、呼ぶ相手がいなければ
+`nil` を返します。そのときは何も呼ばれません。
 
 ```mermaid
 flowchart TD
@@ -77,21 +108,27 @@ flowchart TD
     B2 -->|hit| BI
     B3 -->|hit| BI
     P["pal ctx"] --> P1["actor BP class name to a pal id"]
-    P1 --> PC["the registered Pal class"]
-    I["item ctx"] --> I1["ctx.itemId to an item id"]
-    I1 --> IC["the registered Item class"]
+    P1 --> PX["exact id or a walk for a namespaced match"]
+    PX --> PC["the registered Pal class"]
+    I["item ctx"] --> I1["ctx.itemId"]
+    I1 --> IX["exact id or a walk for a namespaced match"]
+    IX --> IC["the registered Item class"]
 ```
 
-建築物は **ライブインスタンス** に解決されます。パルとアイテムにはインスタンス追跡がないため、
-登録済みの **クラス** に解決され、ハンドラは `ctx` からアクターを読み取ります。PalForge の定義を
-持たないバニラのパルやアイテムは `nil` に解決され、ディスパッチは何もしません。アイテムの ctx の
-コストはテーブル参照 1 回の空振りだけです。パルの ctx はそれに加えて登録済みパル ID の走査が入り
-ます。これが、名前空間付きの `pack:name` なパルを実際にスポーンした `BP_<resolved>_C` クラスと
-突き合わせる仕組みです。
+建築物は **ライブインスタンス**、つまりイベントが起きたその 1 棟に解決されます。パルとアイテムは
+1 体ずつ・1 個ずつ追跡されていないので、登録済みの **クラス** に解決され、ハンドラは `ctx` から
+アクターを読み取ります。定義していないバニラのパルやアイテムは何にも解決されず、フックは
+呼ばれません。
+
+パルとアイテムの照合は 2 段階です。まず ID の完全一致をテーブル参照 1 回で試し、外れたらその
+ドメインの登録済み ID を走査して、各 ID を解決した DataTable 行名とゲームが報告した ID を
+突き合わせます。名前空間付きの ID にもイベントが届くのはこのためです。ゲームがスポーンさせるのは
+`BP_example_Boss_C`、報告されるアイテム行は `example_Ration` で、コロン形式が現れることは
+ありません。
 
 ## チャンネル
 
-`event.CHANNELS` が全リストで、宣言順に並んでいます。
+チャンネルは、名前の付いた 1 つの瞬間です。`event.CHANNELS` が全リストで、宣言順に並んでいます。
 
 ```lua
 event.CHANNELS   --> {
@@ -104,10 +141,12 @@ event.CHANNELS   --> {
 -- }
 ```
 
+それぞれを送っているもの、`ctx` に入れる内容、最終的に呼ばれるフックは次の通りです。
+
 | チャンネル | emit するもの | `ctx` の内容 | ディスパッチ先 |
 | --- | --- | --- | --- |
 | `gameStart` | `registry.initialize`、`event.start()` の後 | ペイロードなし | なし。直接の購読者のみ |
-| `world.ready` | ready ウォッチ。`LoopAsync(1000)` が `PalPlayerCharacter` をポーリングし、5 回連続で有効だったとき | ペイロードなし | 全ライブ建築物インスタンスの `onWorldReady`。ただしこの時点で追跡中のインスタンスは 1 つもありません |
+| `world.ready` | ゲートが開いた後に最初に完走した再構築スキャン。ゲート自体は ready ウォッチで、`LoopAsync(1000)` が `PalPlayerCharacter` をポーリングし、5 回連続で有効だったときに開きます | ペイロードなし | 全ライブ建築物インスタンスの `onWorldReady`。その最初のスキャンが追跡を済ませています |
 | `world.left` | 同じウォッチ。ポーンが無効になったとき | ペイロードなし | 全ライブ建築物インスタンスの `onWorldLeft`。その後ライブインスタンスは破棄されます |
 | `building.place` | 再構築スキャン。新しいインスタンスが作られ、保留中の設置意図と一致したとき | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
 | `building.load` | 再構築スキャン。新しく追跡対象になったすべてのインスタンス | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
@@ -133,11 +172,13 @@ event.CHANNELS   --> {
 ハートビート以外のネイティブフックは、ワールドが準備できていない間はすべて即座に return します。
 建築物スキャン、interact フック、設置意図フック、パルの 4 フックとアイテムの 2 フックは、いずれも
 先に `worldReady` を確認します。ready ウォッチ自体をインストールできなかった場合、ゲートは開いた
-ままの状態でフォールバックし、ディスパッチは最初から動作します。
+ままの状態でフォールバックし、ディスパッチは最初から動作します。このフォールバックでは
+`world.ready` も予約されますが、emit するものはありません。`LoopAsync` がない以上ハートビートも
+なく、告知役のスキャンも走らないためです。
 </Callout>
 
-チャンネル名はバスのレベルでは閉じた集合ではありません。`event.emit` と `event.on` は必要に応じて
-Subject を生成するので、独自の名前も使えます。
+チャンネル名は自分で作れます。`event.emit` と `event.on` は初めて名前を書いた時点でチャンネルを
+生成するので、パック内での連絡にも、別のパックとの連絡にも使えます。
 
 ```lua
 local event = require("palforge.core.event")
@@ -149,13 +190,14 @@ end)
 event.emit("mypack:quest.completed", { reward = 25 })
 ```
 
-SOURCE と DISPATCH が背後にあるのは `event.CHANNELS` の名前だけです。独自の名前は素の pub/sub
-チャンネルになります。
+ゲームが背後にあるのは `event.CHANNELS` の名前だけです。独自の名前は、自分で送って自分で受け取る
+だけのメッセージになります。
 
 ## ハートビート
 
-`event.TICK_MS = 500` です。1 本の `LoopAsync(500)` が `ExecuteInGameThread` の内側から `tick` を
-emit するので、すべての購読者はゲームスレッド上で動きます。
+PalForge は 500 ms ごとに動くタイマーを 1 本だけ持ちます（`event.TICK_MS = 500`）。これが
+`ExecuteInGameThread` の内側から `tick` を emit するので、すべての購読者はゲームスレッド上で
+動きます。
 
 ```lua
 event.on("tick", function(ctx)
@@ -164,13 +206,14 @@ event.on("tick", function(ctx)
 end)
 ```
 
-PalForge の周期処理はすべて、この 1 本のループに乗っています。例外は ready ウォッチだけで、
+周期処理はすべてこの 1 本のループに乗っています。もう 1 本あるのは ready ウォッチだけで、
 こちらは独自の `LoopAsync(1000)` でポーリングします。
 
 ```mermaid
 flowchart LR
     L["LoopAsync 500 ms"] --> T["emit tick with count and now"]
     T --> S["scanOnce - building reconstruction"]
+    S --> W["emit world.ready - once on the first scan after the gate opens"]
     T --> B["tickAll - building onTick"]
     T --> E["effect step - advance live applications"]
     T --> U["event.every callbacks"]
@@ -178,8 +221,8 @@ flowchart LR
 
 ### event.every
 
-`event.every(ms, fn)` はハートビートごとに `TICK_MS` を積算し、累積が `ms` に達したら発火して
-リセットします。したがって実際の周期は、`ms` を 500 の倍数に切り上げた値になります。
+`event.every(ms, fn)` はハートビートごとに `TICK_MS` を足し、合計が `ms` に達したら発火して
+0 から数え直します。実際の周期は、`ms` を 500 の倍数に切り上げた値です。
 
 ```lua
 local event = require("palforge.core.event")
@@ -204,19 +247,20 @@ sub:unsubscribe()   -- stop it
 
 ### 建築物スキャンも同じ周期に乗る
 
-再構築スキャンは同じ定数を使って `event.every(500, scanOnce)` として登録されています。スキャン用の
-2 本目のタイマーはありません。おかげで考えるべき数値が 1 つで済みます。設置した建築物はおよそ
-1 ハートビートでライブインスタンスになり、そのメッシュはさらに 1 ハートビート後に現れ、消えた
-建築物は 6 回連続で見失った時点、およそ 3 秒で破棄されます。
+設置した構造物を見つけるスキャンは、同じ定数を使った 1 本の `event.every(500, ...)` コールバック
+から走ります。このコールバックは `scanOnce()` を呼び、その後で遅延された `world.ready` の emit を
+担当します。順序はこの通りです。おかげでランタイム全体を 1 つの数値で把握できます。設置した
+建築物はおよそ 1 ハートビートでライブインスタンスになり、そのメッシュはさらに 1 ハートビート後に
+現れ、消えた建築物は 6 回連続で見失った時点、およそ 3 秒で破棄されます。
 
-## 実際に発火するもの
+## 実際に動くフック
 
-フックが宣言できることは、何かがそれを emit する保証ではありません。ドメインごとに見ていきます。
+フックを書けることは、何かがそれを発火させる保証ではありません。ドメインごとに、配線されていない
+場合の代わりも添えて見ていきます。
 
 ### Building
 
-`onWorldReady` を除き、SOURCE を持つフックはすべて LIVE です。構造物ごとの状態を持つのはこの
-ドメインだけです。
+SOURCE を持つフックはすべて LIVE です。構造物ごとの状態を持つのはこのドメインだけです。
 
 | フック | 状態 | SOURCE |
 | --- | --- | --- |
@@ -225,26 +269,72 @@ sub:unsubscribe()   -- stop it
 | `onRightClick` | LIVE | `OnBeginInteractBuilding` |
 | `onRemove` | LIVE | スキャンの削除スイープ |
 | `onTick` | LIVE | ハートビート。`tickInterval` で間引かれます |
-| `onWorldReady` | 到達しません | ready ウォッチ。最初のスキャンより前に emit されます |
+| `onWorldReady` | LIVE | ready ゲートが開いた後、最初に完走したスキャン |
 | `onWorldLeft` | LIVE | ready ウォッチ |
 | `onBuild` | 宣言のみ | ネイティブ SOURCE がまだありません |
 | `onLeftClick` | 宣言のみ | ネイティブ SOURCE がまだありません |
 | `onBreak` | 宣言のみ | ネイティブ SOURCE がまだありません |
 
-設置と破壊は `onPlace` と `onRemove` でカバーされます。`onBuild`、`onLeftClick`、`onBreak` は
-スペックとしては受理されますが、呼ばれることはありません。
+`onBuild`、`onLeftClick`、`onBreak` はスペックとしては受理されますが、呼ばれることはありません。
+`onBuild` の代わりに `onPlace`、`onBreak` の代わりに `onRemove` を使い、プレイヤーの操作には
+`onRightClick` を使ってください。
 
 `onRightClick` は SOURCE の側でフィルタとデバウンスがかかります。操作した相手が
 `PalCharacter` のときだけ通り、同じ構造物への 2 回目の操作は 1 秒以内なら捨てられます。
 
-<Callout type="warn">
-`onWorldReady` はディスパッチされますが、受け取る相手がいません。ready ウォッチはゲートを立てる
-のと同じ手順で `world.ready` を emit し、インスタンスを生成するスキャンはそのゲートで止まって
-いるため、ディスパッチがライブインスタンスを走査する時点ではまだ 1 つも存在しません。ワールドを
-出るとライブインスタンスはすべて破棄されるので、2 回目のロードでも同じです。代わりに `onLoad` を
-使ってください。最初のスキャンが追跡したすべてのインスタンスで発火し、`ctx.reconstructed` が
-セーブ由来かどうかを教えてくれます。`onWorldReady` に届かせる方法は、自分で `world.ready` を
-emit することだけです。
+`onWorldReady` はライブインスタンスに届きます。ready ウォッチが行うのはゲートを開けることだけで、
+チャンネルを emit するのはその後に最初に完走した再構築スキャンです。アクターを追跡対象の
+インスタンスに変えるのはスキャンなので、ディスパッチがライブ集合を走査する時点で、プレイヤーの
+周囲の構造物はすでにその中にいます。通知が遅れるのは最大でも 1 ハートビート、500 ms です。
+
+```mermaid
+flowchart TD
+    R1["ready watch - 5 valid polls"] --> R2["worldReady gate opens"]
+    R2 --> R3["next scan discovers and tracks the structures"]
+    R3 --> R4["emit world.ready"]
+    R4 --> R5["onWorldReady on every tracked instance"]
+```
+
+ワールドを出るとライブインスタンスはすべて破棄され、予約されていた emit も取り消されます。次の
+ロードでは、空のレジストリから同じ手順がもう一度走ります。
+
+```lua title="content/lamp.lua"
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("lamp")
+
+Building{
+    id     = "example:Lamp",
+    name   = "Signal Lamp",
+    gridCm = 100,
+    state  = { loads = 0 },
+    mesh   = {
+        kind  = "static",
+        model = "/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBenchPrimitive.SM_WorkBenchPrimitive",
+    },
+    events = {
+        onWorldReady = function(inst, ctx)
+            -- once per world load, on every lamp the first scan tracked
+            inst.state.loads = (inst.state.loads or 0) + 1
+            inst:save()
+            log.info(inst.key .. " online, load #" .. tostring(inst.state.loads))
+        end,
+        onRightClick = function(inst, ctx)
+            log.info(inst.key .. " has survived " .. tostring(inst.state.loads) .. " loads")
+        end,
+    },
+}
+
+-- the same moment, as a cross-cutting subscriber
+event.on("world.ready", function()
+    log.info(tostring(#event.instances()) .. " structures tracked")
+end)
+```
+
+<Callout type="info">
+`onWorldReady` はワールドロードという一度きりの瞬間であり、構造物ごとの瞬間ではありません。後の
+スキャンで流れ込んできた構造物は、emit がすでに終わっているため受け取れません。インスタンス単位の
+起動処理は `onLoad` の担当です。こちらはスキャンが追跡した時点で、それがいつのスキャンであっても
+発火し、`ctx.reconstructed` がセーブ由来かどうかを教えてくれます。
 </Callout>
 
 ### Pal
@@ -267,7 +357,7 @@ emit することだけです。
 <Callout type="warn">
 パルの `onTick` は発火しません。パルには建築物のようなインスタンススキャンがないため、パル単位の
 周期フックを駆動するものが存在しません。パルごとの定期処理が必要なら、自分で `tick` を購読し、
-対象のアクターを走査してください。
+対象のアクターを走査してください。このページの最後にレシピがあります。
 </Callout>
 
 ### Item
@@ -281,31 +371,65 @@ emit することだけです。
 
 `onObtain` はゲーム自身の「アイテム入手」ログに乗っているため、拾得・戦利品・報酬で発火します。
 入手ログに現れない内部的な追加はカバーされません。`item.craft` と `item.discard` にはチャンネルと
-ディスパッチの購読者がありますが、emit するものがありません。
+ディスパッチの購読者がありますが、emit するものがないので、`onCraft` と `onDiscard` は動きません。
+
+LIVE な 2 つのアイテムチャンネルはゲーム側のアイテム ID を運び、ディスパッチはそれを 2 段階で
+定義に突き合わせます。まず ID の完全一致、次に登録済み ID を解決した DataTable 行名との一致です。
+そのため、名前空間付きの `Item{ id = "example:Ration" }` も、ゲームが報告するのが
+`example_Ration` だけであってもイベントを受け取れます。
+
+```lua title="content/rations.lua"
+local log = require("palforge.utils.log").scope("rations")
+
+Item{
+    id       = "example:Ration",
+    name     = "Field Ration",
+    category = "consumable",
+    maxStack = 20,
+    events = {
+        onObtain = function(item, ctx)
+            log.info("picked up " .. tostring(ctx.count) .. " x " .. tostring(ctx.itemId))
+        end,
+        onUse = function(item, ctx)
+            -- ctx.itemId is "example_Ration" here: the row name, not the colon form
+            Item.get("Berries"):give(1)
+        end,
+    },
+}
+```
+
+<Callout type="warn">
+`item.use` の `ctx.actor` はネイティブ呼び出しの第 1 引数そのもので、ゲーム内で確認されている
+シグネチャではこの引数はキャラクターではなくアイテムデータオブジェクトです。対象は第 2 引数の
+`FPalInstanceID` ですが、こちらは一度もプローブされていません。使うのは `ctx.itemId` です。
+プレイヤーが必要な場合は、`ctx.actor` をポーンとして当てにせず `Player.character()` から取得して
+ください。
+</Callout>
 
 ### Effect
 
-4 つのフックはすべて LIVE ですが、タイミングを所有しているのはネイティブのゲームイベントでは
-なく `api/effect.lua` です。`:apply(target)` は実際の適用を開始し、それを `tick` チャンネルが
-進めます。
+4 つのフックはすべて動きます。そのタイミングを決めているのはゲームイベントではなく、
+`api/effect.lua` とハートビートです。`:apply(target)` が実際の適用を開始し、それを `tick`
+チャンネルが進め、`world.left` が終わらせます。
 
 | フック | 状態 | 駆動元 |
 | --- | --- | --- |
 | `onApply` | LIVE | まだ持っていない対象への `:apply(target)` |
 | `onTick` | LIVE | ハートビート。`interval` 秒ごと |
 | `onStack` | LIVE | すでに持っている対象への `:apply(target)` |
-| `onExpire` | LIVE | `duration` が 0 になる、`:remove(target)`、または対象が無効になる |
+| `onExpire` | LIVE | `duration` が 0 になる、`:remove(target)`、対象が無効になる、またはワールドがアンロードされる |
 
 <Callout type="warn">
 PalForge のエフェクトはゲーム自身の状態異常には触れません。`EPalStatusEffectType` はネイティブの
 enum で、それを適用するネイティブ呼び出しは確認されていないため、`nativeStatus` はメタデータに
-すぎず、ステータスアイコンは変化しません。ゲームプレイはあなたのハンドラの中にあります。
+すぎず、ステータスアイコンは変化しません。ゲームプレイはハンドラの中に書いてください。体力を
+削る、アイテムを渡す、何かをスポーンさせる、といった処理です。
 </Callout>
 
 ### Skill
 
-ネイティブのスキル SOURCE は存在しません。`skill.*` を emit するチャンネルはなく、自動で発火する
-ものは何もありません。動作するのは手動呼び出しで、クールダウンは Lua 側で強制されます。
+ゲームの側からスキルを発火させるものはありません。`skill.*` を emit するチャンネルもありません。
+動作するのは自分で呼び出す方法で、クールダウンは Lua 側で強制されます。
 
 ```lua
 local log = require("palforge.utils.log").scope("fireball")
@@ -335,7 +459,7 @@ Fireball:hit(targetActor)
 ライフサイクルチャンネルはありません。オーディオは再生するもの、メッシュは着せるもの、UI 要素は
 `render` と `update` に加えて、自分で呼ぶマウント・リフレッシュ・アンマウントを持ちます。
 
-## ハンドラのシグネチャ
+## ハンドラの引数
 
 第 1 引数は常に **そのイベントが起きたオブジェクト** です。
 
@@ -347,9 +471,9 @@ Fireball:hit(targetActor)
 | Skill | `Skill.Handle` | `function(skill, owner, ctx)` |
 | Effect | `Effect.Handle` | `function(effect, target, ctx)` |
 
-パル・アイテム・スキル・エフェクトでは、ディスパッチが呼ぶのは登録済みクラスで、定義時に仕込まれた
-フォワーダがハンドルに差し替えます。ハンドラの中から `:spawn`、`:give`、`:activate`、`:apply` に
-そのまま手が届くのはこのためです。
+パル・アイテム・スキル・エフェクトでは、この第 1 引数は定義したときに返ってきたハンドルです。
+だからハンドラの中から `:spawn`、`:give`、`:activate`、`:apply` にそのまま手が届きます。建築物では
+ライブインスタンスなので、`self.actor`、`self.pos`、`self.state`、`self:save()` がすぐ使えます。
 
 ```lua title="content/handlers.lua"
 local log = require("palforge.utils.log").scope("handlers")
@@ -367,7 +491,7 @@ Item{
     id = "Berries",
     events = {
         onUse = function(item, ctx)             -- item is the Item.Handle
-            log.info(item.id .. " used by " .. tostring(ctx.actor))
+            log.info(item.id .. " used as " .. tostring(ctx.itemId))
         end,
     },
 }
@@ -397,12 +521,27 @@ Effect{
 }
 ```
 
-`ctx` は素のテーブルです。キーはチャンネルによって変わり、上のチャンネル表がその唯一の一覧です。
+`ctx` は素のテーブルです。キーはチャンネルによって変わり、チャンネル表が全チャンネル分の内容を
+載せています。
+
+### ハンドラが例外を投げたとき
+
+ディスパッチはハンドラを `pcall` の中で呼び、捕まえた例外をチャンネル名とフック名つきでログに
+出します。ハンドラ本文のタイプミスは、発火しなかったフックとは別物として見分けられます。
+
+```text
+[PalForge.event][err] item.use -> onUse handler failed: content/rations.lua:12: attempt to index a nil value
+[PalForge.event][err] world.ready -> onWorldReady handler failed on 'example_Lamp@12,-8,3': ...
+```
+
+ワールド系のフックはライブ建築物すべてを回るため、インスタンスキーも出します。壊れたインスタンス
+1 つは飛ばされ、残りにはそのまま呼び出しが届きます。建築物の `onTick` はこれに加えて独自の報告と
+サーキットブレーカーを持ちます。
 
 ## 建築物ランタイム
 
-設置されたものが自身のオブジェクトと状態を持ち、ワールドごとに保存されるのは建築物だけです。
-以下はすべて `core/event.lua` の中にあります。
+設置された建築物は、自分専用のオブジェクトと状態を持ち、ワールドごとに保存される唯一の存在です。
+2 か所に置いたランプは別々のカウンタを持ち、どちらも再ロード後に残ります。
 
 ### 設置操作から onPlace まで
 
@@ -460,11 +599,11 @@ sequenceDiagram
 <Step>
 ### 生成と永続化
 
-インスタンスは `def.cls:new{ ... }` で作られるので、あなたの定義クラスのインスタンスであり、宣言
-したメソッドはすべてその上で解決します。state は保存済みレコードがあればそこから、なければ定義の
-`state` フィールドから取られます。`state` はテーブルでもファクトリ関数でも構いません。新規
-インスタンスは Mod フォルダ配下の `state/entities_<saveId>.json` に書き込まれます。ワールドの
-GUID を読めなかった場合、`saveId` は `world` にフォールバックします。
+インスタンスは `def.cls:new{ ... }` で作られるので、定義に書いたメソッドはすべてその上で解決
+します。state は保存済みレコードがあればそこから、なければ定義の `state` フィールドから取られ
+ます。`state` はテーブルでもファクトリ関数でも構いません。新規インスタンスは Mod フォルダ配下の
+`state/entities_<saveId>.json` に書き込まれます。ワールドの GUID を読めなかった場合、`saveId` は
+`world` にフォールバックします。
 </Step>
 
 <Step>
@@ -486,14 +625,13 @@ GUID を読めなかった場合、`saveId` は `world` にフォールバック
 </Steps>
 
 <Callout type="error">
-メッシュの取り付けが遅延されているのは意図的です。初期化途中のアクターに対して、設置されたその
-フレームでプロシージャルメッシュコンポーネントを追加すると、無効なネイティブオブジェクトに触れて
-ゲームがクラッシュします。ネイティブのアクセス違反は `pcall` では捕捉できないため、ランタイムは
-アクターがスキャンを 1 回生き延びたことを確認してから取り付けます。同じ理由で
-`OnCompleteBuild_ServerInternal` フックは使っていません。ワールドロードの嵐の最中にすべての建築物
-について発火し、初期化途中の `UPalMapObjectModel` メモリを読んだ結果フォルトしたためです。
+建築物が設置されたそのフレームでメッシュを取り付けると、まだ準備中のネイティブオブジェクトに
+触れてゲームがクラッシュします。ネイティブのアクセス違反は `pcall` では捕捉できないため、
+ランタイムはアクターがスキャンを 1 回生き延びるまで待ちます。
 
-実際上の帰結として、`onPlace` の中ではメッシュはまだ取り付けられていません。
+実際上の帰結として、`onPlace` の中ではメッシュはまだ取り付けられていません。完成した見た目に
+対して何かしたい場合は、`onRightClick` や `onTick` で行うか、後から自分で `inst:render()` を
+呼んでください。
 </Callout>
 
 ### インスタンスオブジェクト
@@ -522,8 +660,8 @@ GUID を読めなかった場合、`saveId` は `world` にフォールバック
 | `inst:update()` | `inst:currentColor()` からライブマテリアルを再着色します |
 | `inst:mesh()` | メッシュ記述子。状態に応じたメッシュにしたい場合はオーバーライドします |
 
-永続化レコードの `state` は `inst.state` と同一のテーブル参照なので、その場で書き換えるだけで
-十分です。`:save()` はディスクに落とすタイミングを決めるだけです。
+保存レコードの `state` は `inst.state` と同じテーブルなので、その場で書き換えるだけで十分です。
+`:save()` はディスクに落とすタイミングを決めるだけです。
 
 ```lua title="content/buildings.lua"
 local log = require("palforge.utils.log").scope("counter")
@@ -565,8 +703,8 @@ Building{
 ます。インスタンスがティックするのは `ctx.count % tickInterval == 0` のときだけなので、
 `tickInterval = 4` は 4 ハートビートに 1 回、つまり 2 秒に 1 回を意味します。
 
-ティックリストに入るのは `onTick` を実際にオーバーライドしているクラスだけなので、そのフックを
-持たない定義はハートビートごとのコストがゼロです。
+`onTick` を持たない建築物は、ハートビートごとのコストがゼロです。ティックリストに入るのは
+`onTick` をオーバーライドしているクラスだけだからです。
 
 ```lua
 Building{
@@ -603,7 +741,7 @@ stateDiagram-v2
 ```
 
 2 つの出口はセーブファイルへの影響が異なります。見失い閾値による削除は `building.remove` を emit
-して `onRemove` を呼び、永続化レコードを削除します。ワールド退出は `world.left` を emit し、まだ
+して `onRemove` を呼び、保存レコードを削除します。ワールド退出は `world.left` を emit し、まだ
 ライブな状態のまま全インスタンスの `onWorldLeft` を呼んでから、ライブインスタンスを破棄して
 レコードは **残します**。次のワールドロードで再構築されるためです。
 
@@ -620,14 +758,14 @@ event.isWorldReady()                    -- is the building runtime allowed to to
 Building.get("example:Counter"):instances()   -- the same list, from the handle
 ```
 
-`Handle:instances()` はスキャンが構造物を見つけるまで空なので、`world.ready` より前は空のままです。
+`Handle:instances()` はスキャンが構造物を見つけるまで空です。`world.ready` を emit するのはその
+最初のスキャンなので、`onWorldReady` ハンドラや `world.ready` の購読者の中ではすでに中身が
+入っています。後から流れ込んできた構造物は、それを見つけたスキャンの時点で加わります。
 
-## エフェクトの適用
+## 時間とともに進むエフェクト
 
-エフェクトのタイミングは `api/effect.lua` にあります。セッション中の最初の `:apply` が `tick`
-チャンネルに 1 つのステッパーを購読させるため、パックが実際に何かを適用するまでモジュールの
-require はコストゼロです。ステッパーはライブな適用をハートビートごとに `TICK_MS / 1000`、つまり
-0.5 秒ずつ進めます。
+エフェクトのタイミングは `api/effect.lua` にあり、ハートビートに乗っています。ライブな適用は
+ハートビートごとに `TICK_MS / 1000`、つまり 0.5 秒ずつ進みます。
 
 ```mermaid
 stateDiagram-v2
@@ -637,12 +775,17 @@ stateDiagram-v2
     active --> expired: duration reached zero
     active --> expired: remove called
     active --> expired: target no longer valid
+    active --> expired: the world unloaded
     expired --> [*]
 ```
 
 適用は対象をキーとする弱参照テーブルに保持されるので、デスポーンしたポーンは自分の適用も一緒に
 持ち去ります。`:apply(nil)` はグローバルのセンチネルの下に登録され、これがワールド全体に効く
 エフェクトの作り方です。
+
+ワールドを出ると、ライブな適用はすべて解放され、それぞれ理由 `"world_left"` の `onExpire` を
+通ります。適用は保存されないため、次のワールドロードで戻るものはありません。復活させたい場合は
+`onWorldReady`、`onLoad`、または `world.ready` の購読者から適用し直してください。
 
 ### スタック
 
@@ -699,7 +842,8 @@ Regen:remove(me)             -- onExpire with reason "removed"
 | `onTick` | `effect`、`elapsed`、`stacks` |
 | `onExpire` | `effect`、`reason`、`elapsed`、`stacks` |
 
-期限切れ時の `ctx.reason` は `"duration"`、`"removed"`、`"target_gone"` のいずれかです。
+期限切れ時の `ctx.reason` は `"duration"`、`"removed"`、`"target_gone"`、`"world_left"` のいずれか
+です。
 
 <Callout type="info">
 ステッパーは 0.5 秒単位で進むため、0.5 未満の `interval` を指定してもハートビートより速くは
@@ -707,11 +851,11 @@ Regen:remove(me)             -- onExpire with reason "removed"
 ハートビートの中で `onTick` が複数回」という結果になります。
 </Callout>
 
-## 直接購読する
+## 自分でチャンネルを購読する
 
-通常のケースは `events = { ... }` の宣言でカバーできます。バスを購読するのは、横断的な振る舞いが
-欲しいときや、`gameStart` や `tick` のようにオブジェクト単位のディスパッチを持たないチャンネルを
-扱うときです。
+通常のケースは `events = { ... }` の宣言でカバーできます。チャンネルを購読するのは、1 か所の
+コードで多くの定義をまとめて扱いたいときや、`gameStart` や `tick` のようにオブジェクト単位の
+フックを持たないチャンネルを扱うときです。
 
 | 呼び出し | 戻り値 |
 | --- | --- |
@@ -769,14 +913,14 @@ event.observable("tick")
 sub:unsubscribe()
 ```
 
-チャンネルの購読はディスパッチの代わりにはならず、ディスパッチを抑制もしません。両方が動きます。
+チャンネルの購読はフック呼び出しの代わりにはならず、それを抑制もしません。両方が動きます。
 
 <Callout type="warn">
-ディスパッチはフック呼び出しを毎回 `pcall` で包みますが、素の `event.on` 購読者はバスからその保護を
-受けません。購読者の中で投げられたエラーは emit 呼び出しへ伝播します。emit 自体は SOURCE 側か
-ハートビート側で `pcall` に包まれているため、例外を投げる購読者がハートビートを止めることは
-ありませんが、その emit の残りの購読者を止めることはあります。危険な処理は自分で `pcall` に包んで
-ください。
+ディスパッチはフック呼び出しを毎回 `pcall` で包み、捕まえた例外をログに出しますが、素の
+`event.on` 購読者はバスからそのどちらも受けません。購読者の中で投げられたエラーは emit 呼び出しへ
+伝播します。emit 自体は SOURCE 側かハートビート側で `pcall` に包まれているため、例外を投げる
+購読者がハートビートを止めることはありませんが、その emit の残りの購読者を、ログに何も残さずに
+止めることはあります。危険な処理は自分で `pcall` に包み、失敗をログに出してください。
 </Callout>
 
 ## レシピ
@@ -989,3 +1133,20 @@ end)
   <Card title="Pal" href="/docs/api/pal">スポーン、メッシュ、パルのフック</Card>
   <Card title="Item" href="/docs/api/item">give と take、アイテムのフック</Card>
 </Cards>
+
+## まとめ
+
+- 定義の `events` テーブルに関数を入れると、その瞬間がゲームで起きたときに実行されます。
+  「いつ」を決めるのはキーの名前です。
+- 第 1 引数はイベントが起きた相手です。建築物のハンドラはその 1 棟のライブインスタンス、
+  それ以外はハンドルを受け取ります。
+- 建築物は再ロード後も状態を保てます。`inst.state` を書き換えて `inst:save()` を呼びます。
+- 周期処理はすべて 500 ms のハートビート 1 本で動きます。建築物の `onTick`、エフェクトの
+  タイミング、`event.every(ms, fn)` がこれに乗っています。
+- 受理されるが呼ばれないフックがあります。パルの `onTick`、アイテムの `onCraft` と
+  `onDiscard`、建築物の `onBuild`、`onLeftClick`、`onBreak` です。その処理は `tick` か、
+  実際に発火するフックから動かしてください。
+- スキルはひとりでに発動しません。`:activate` や `:hit` を自分のコードから呼びます。
+
+次は [Building](/docs/api/building) を読むと、このページのランタイムを支える定義フィールドが
+わかります。

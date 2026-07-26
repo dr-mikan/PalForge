@@ -1,11 +1,19 @@
 ---
 title: Skill
-description: Active and passive skills, and the manual invocation that drives them
+description: Attacks and traits you can give a pal, and the line in your own code that sets them off
 ---
 
-A skill is a definition with four handlers and five actions. Calling `Skill{ ... }` validates the
-spec, registers the definition in the object registry under `("skill", id)`, and returns a
-`Skill.Handle` carrying the actions:
+## What you can do after this page
+
+- Add your own attack, with a name, an element, a power number and an icon
+- Set it off from your own code: when a pal gets hurt, when someone uses a building, or when you press a key
+- Stop it going off too often, with a cooldown you set in seconds
+- Add a trait that keeps doing something while a pal has it on
+- Read back the list of skills a pal carries
+
+A skill is an attack or a trait. You describe it once with `Skill{ ... }`, and you get back an
+object with the actions on it. Nothing in the game sets a skill off by itself, so the line that
+fires it belongs in your own code — here it is on the last line:
 
 ```lua title="content/skills.lua"
 local Ember = Skill{
@@ -25,24 +33,21 @@ local Ember = Skill{
 Ember:activate(Player.character())   -- runs onActivate unless it is still cooling down
 ```
 
-## Nothing fires a skill for you
+## You fire the skill yourself
 
-`core/event` has no skill channel. `event.CHANNELS` lists `gameStart`, `world.ready`, `world.left`,
-the four `building.*` channels, the four `pal.*` channels, the four `item.*` channels and `tick` —
-and nothing else. No native hook that reports "this pal used skill X" was found, so no source emits
-one and no dispatch calls a skill handler.
-
-Every other live domain looks like this:
+Most of PalForge runs the other way round: the game does something, and PalForge calls the
+function you wrote for it. A handler is that function — your code, called for you.
 
 ```mermaid
 flowchart LR
-  A["native game event"] --> B["core.event source"]
-  B --> C["channel such as pal.damaged"]
-  C --> D["dispatch"]
-  D --> E["your handler"]
+  A["the game does something"] --> B["PalForge notices"]
+  B --> C["a channel such as pal.damaged"]
+  C --> D["your pal handler runs"]
 ```
 
-A skill looks like this:
+PalForge has channels for the world, for buildings, for pals and for items. It has none for
+skills, because the game never reports "this pal used skill X". So a skill runs at the moment
+you ask for it, and not before:
 
 ```mermaid
 flowchart LR
@@ -53,19 +58,19 @@ flowchart LR
 
 <Callout type="warn">
 If your pack never calls `:activate`, `:hit`, `:equip` or `:unequip`, a skill handler never runs.
-Declaring `Pal{ skills = { ... } }` does not run one either. A skill is something your own code
-invokes — from a pal handler, a building `onRightClick`, a keybind, an effect tick, anything.
+Listing a skill in `Pal{ skills = { ... } }` does not run one either. Put the call where you want
+the skill to go off: in a pal handler, in a building's `onRightClick`, in a keybind, in an effect
+tick. The recipes near the bottom of this page do each of those.
 </Callout>
 
-What does work is the manual path, and it works fully: the cooldown is enforced in Lua, the handler
-receives the handle plus your context table, and the return value tells you whether it ran. The
-module header states that when a native source is found it will emit skill channels into these same
-handlers, so pack code written against `:activate` today does not change then.
+That path is complete, not a stand-in. The cooldown is counted in Lua, the handler gets the
+skill's own object plus whatever context table you pass it, and the return value tells you
+whether it ran.
 
 ## Defining a skill
 
-`id` is the only required field. Everything else is optional, and any field the spec does not
-declare is a hard error at define time.
+`id` is the only field you have to give. Everything else is optional, and a field name PalForge
+does not know stops the call with an error and a did-you-mean.
 
 <Tabs items={['Global', 'Namespaced']}>
 <Tab value="Global">
@@ -86,7 +91,7 @@ local Ember = api.Skill{ id = "example:Ember" }
 </Tab>
 </Tabs>
 
-A complete definition:
+A definition using every field:
 
 ```lua title="content/skills.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -112,6 +117,8 @@ local Ember = Skill{
 }
 ```
 
+Here is every field you can pass, with its type and its default:
+
 <TypeTable
   type={{
     id: { description: 'Skill id: a game row id, or "pack:name" for your own content. Registered as-is', type: 'string', required: true },
@@ -127,12 +134,11 @@ local Ember = Skill{
   }}
 />
 
-`element` and `power` are carried onto the definition and handed back by `:element()` and
-`:power()`. `data` is carried onto the definition too, but the handle has no query for it. Nothing in
-the framework reads any of the three — they exist so your handlers and your UI have somewhere to keep
-their numbers.
+`element` and `power` are kept on the definition and handed back by `:element()` and `:power()`.
+`data` is kept too, though the handle has no query for it. PalForge itself reads none of the
+three: they are places for your handlers and your UI to keep their own numbers.
 
-Look the shape up at runtime instead of memorising it:
+You can also print the field list from Lua instead of memorising it:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -154,7 +160,7 @@ Skill.Spec {
 }
 ```
 
-Getting one back later, from anywhere:
+You do not have to hold on to what the define call returned. Ask for it again from anywhere:
 
 ```lua
 Skill.get("example:Ember")      -- the definition you registered
@@ -164,14 +170,14 @@ Skill.get_all()                 -- every PalForge-registered skill, as handles
 
 `Skill.get` never returns nil. For an id nobody defined you get a bare definition: `:kind()` is
 `"active"`, `:name()` is the id, `:description()`, `:element()` and `:power()` are nil, there is no
-cooldown, and `:activate` runs the inert default handler and returns true.
+cooldown, and `:activate` runs an empty handler and returns true.
 
-Defining the same id twice replaces the registration — the last call wins, and handles taken from the
-earlier call keep pointing at the earlier definition.
+Defining the same id twice replaces the registration. The last call wins, and anything you took
+from the earlier call still points at the earlier definition.
 
 ## Active and passive
 
-`kind` is `"active"` by default and may only be `"active"` or `"passive"`.
+`kind` is `"active"` by default, and the only other value it accepts is `"passive"`.
 
 ```lua
 local Ember = Skill{
@@ -191,21 +197,22 @@ local Ironhide = Skill{
 }
 ```
 
-One guard enforces the difference: `:activate` returns `false` immediately when `kind` is
+One check makes the difference: `:activate` returns `false` straight away when `kind` is
 `"passive"`, without touching the cooldown and without running anything.
 
 ```lua
 Ironhide:activate(owner)   --> false, nothing ran
 ```
 
-Nothing else checks `kind`. `:equip`, `:unequip` and `:hit` run whatever handler is declared, on an
-active skill as readily as on a passive one, so an active skill with an `onEquip` handler is a legal
-way to model "while this is in the loadout".
+Nothing else looks at `kind`. `:equip`, `:unequip` and `:hit` run whatever handler you declared,
+on an active skill as readily as on a passive one — so an active skill with an `onEquip` handler
+is a fine way to model "while this is in the loadout".
 
 ## Handlers
 
-All four are optional, all four take the skill's own **handle** as the first argument, and a handler
-name the spec does not declare is a hard error rather than a silent no-op.
+Handlers are the functions PalForge runs for you when one of the actions is called. There are
+four, all optional. Each one gets the skill's own handle as its first argument, and a name that
+is not on this list stops the define call with an error instead of being ignored.
 
 | Handler | Signature | Runs when |
 | --- | --- | --- |
@@ -214,8 +221,8 @@ name the spec does not declare is a hard error rather than a silent no-op.
 | `onEquip` | `fun(skill, owner, ctx)` | you call `:equip(owner, ctx)` |
 | `onUnequip` | `fun(skill, owner, ctx)` | you call `:unequip(owner, ctx)` |
 
-The first argument is the handle the define call returned, so the actions and queries are right
-there inside the handler:
+The handle is the object the define call gave back, so every action and query is right there
+inside the handler:
 
 ```lua
 local Ember = Skill{
@@ -235,12 +242,14 @@ local Ember = Skill{
 ```
 
 <Callout type="warn">
-The actions wrap every handler call in `pcall` and discard the error message. A handler that raises
-shows up only as a `false` return, with no log line. Do your own logging inside the handler, or wrap
-the risky part yourself.
+The actions run every handler inside a `pcall` and throw the error message away. A handler that
+crashes shows up only as a `false` return, with nothing in the log. Log inside your handler, or
+wrap the risky part yourself.
 </Callout>
 
 ## Actions
+
+These five calls are how a skill gets used. All of them are yours to call.
 
 ```lua
 skill:activate(owner, ctx)    --> boolean, did the handler run
@@ -250,15 +259,15 @@ skill:unequip(owner, ctx)     --> boolean
 skill:cooldownLeft(owner)     --> number, seconds until ready, 0 when ready
 ```
 
-- `owner` and `target` are whatever you pass — a pal pawn, the player character, a plain table. Only
-  the cooldown bookkeeping looks at `owner`, and only as an identity.
-- `ctx` is a plain table of your own. Nothing populates it for you, and it is optional: all four
-  actions substitute an empty table when you omit it, so `ctx` is never nil inside a handler you
+- `owner` and `target` are whatever you pass — a pal pawn, the player character, a plain table.
+  The only thing that looks at `owner` is the cooldown bookkeeping, and only as an identity.
+- `ctx` is a context table of your own. Nothing fills it in for you, and you can leave it out:
+  all four actions put an empty table there instead, so `ctx` is never nil inside a handler you
   reached through an action.
-- `:activate` returns `false` when the skill is passive, `false` when the cooldown blocked it, and
-  otherwise `true` when the handler ran without raising.
-- `:hit`, `:equip` and `:unequip` ignore both the cooldown and `kind`. They return `true` unless the
-  handler raised.
+- `:activate` returns `false` when the skill is passive, `false` when the cooldown blocked it,
+  and otherwise `true` when the handler ran without crashing.
+- `:hit`, `:equip` and `:unequip` ignore both the cooldown and `kind`. They return `true` unless
+  the handler crashed.
 
 ```lua
 local Ember  = Skill.get("example:Ember")
@@ -271,14 +280,14 @@ else
 end
 ```
 
-The handle also carries raw forwarders — `skill:onActivate(owner, ctx)`, `skill:onHit`,
-`skill:onEquip`, `skill:onUnequip` — which call the definition hook directly. They skip the cooldown,
-skip the passive guard, do not substitute an empty `ctx`, and do not swallow errors. Reach for the
-actions unless you specifically want that.
+The handle also carries a raw call for each handler — `skill:onActivate(owner, ctx)`,
+`skill:onHit`, `skill:onEquip`, `skill:onUnequip`. These go straight to the handler: no cooldown,
+no passive check, no empty `ctx` filled in for you, and errors are not swallowed. Reach for the
+actions unless you want exactly that.
 
 ## Cooldown
 
-`cooldown` is declared in seconds and enforced by `:activate` alone.
+`cooldown` is a number of seconds, and `:activate` is the only thing that enforces it.
 
 ```mermaid
 flowchart TD
@@ -291,8 +300,8 @@ flowchart TD
   E --> G["return true unless the handler raised"]
 ```
 
-The bookkeeping is per owner and per skill id, so two pals holding the same skill cool down
-independently:
+The count is kept per owner and per skill id, so two pals holding the same skill cool down
+separately:
 
 ```lua
 local Ember = Skill{
@@ -311,16 +320,16 @@ Ember:cooldownLeft(two)   --> counts down from 5.0, independently
 
 Details worth knowing:
 
-- Omitting `owner` is allowed and puts the timestamp in one shared bucket, so `:activate()` with no
-  owner cools down globally for that skill.
-- The owner table is weak-keyed, so holding a cooldown never keeps a despawned pawn alive.
-- Timestamps come from `os.clock()`.
+- Leaving `owner` out is allowed. The time then goes into one shared slot, so `:activate()` with
+  no owner cools down globally for that skill.
+- Owners are held weakly, so a cooldown never keeps a pawn alive after it is gone.
+- Times come from `os.clock()`.
 - No `cooldown`, or a cooldown of zero or less, means no gate at all: `:activate` always runs and
   `:cooldownLeft` always returns `0`.
-- The clock is stamped **before** the handler runs. A handler that raises still consumed the
+- The clock is stamped **before** the handler runs. A handler that crashes has still used up the
   cooldown.
 
-A common shape is to show the remaining time in the UI rather than firing blindly:
+Showing the time left is usually nicer than firing blindly:
 
 ```lua
 local left = Ember:cooldownLeft(Player.character())
@@ -332,6 +341,8 @@ end
 ```
 
 ## Queries
+
+Everything you declared can be read back off the handle:
 
 ```lua
 local s = Skill.get("example:Ember")
@@ -345,25 +356,25 @@ s:power()        --> number | nil
 s:iconOf()       --> texture ref | the declared icon | nil
 ```
 
-`:iconOf()` resolves the id against Palworld's partner-skill icon DataTable
-(`/Game/Pal/DataTable/PartnerSkill/DT_partnerSkillIconDataTable`) at runtime through `core/icons`.
-Every step is fail-soft — a missing table, a missing row or a missing column returns nil — and on any
-miss the declared `icon` field is returned instead. An id that has no row in that table, which
-includes every `"pack:name"` id, always falls back to your `icon`.
+`:iconOf()` looks the id up in one of the game's own data tables — the partner-skill icon table
+at `/Game/Pal/DataTable/PartnerSkill/DT_partnerSkillIconDataTable` — through `core/icons`. Every
+step fails softly: a missing table, a missing row or a missing column all give nil, and on any
+miss you get the `icon` you declared instead. That table is keyed by pal, so most skill ids miss
+it, and a `"pack:name"` id always does. Declare an `icon` if you want one to show.
 
 ```lua
 local Ember = Skill{
     id   = "example:Ember",
     icon = "palforge/example/textures/ember.png",
 }
-Ember:iconOf()   --> the declared icon, since "example:Ember" has no DataTable row
+Ember:iconOf()   --> the declared icon, since "example:Ember" has no row in that table
 
-Skill.get("Legend"):iconOf()   --> the texture ref when that row carries one, else nil
+Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall back to
 ```
 
 ## Skills on a pal
 
-A pal declares the skills it owns by id, as an array of strings:
+A pal lists the skills it owns by id, as an array of strings:
 
 ```lua
 local Blaze = Pal{
@@ -375,19 +386,17 @@ local Blaze = Pal{
 Blaze:skillsOf()   --> { "example:Ember", "example:Ironhide" }
 ```
 
-The array is validated element by element, with the index in the error:
+Each element is checked, and the error carries the index:
 
 ```text
 PalForge: Pal: field "skills[2]" expects string, got number
 ```
 
 <Callout type="warn">
-`skills` is metadata. Nothing resolves those ids, nothing equips the passives and nothing fires the
-actives. The framework stores the list and hands it back through `pal:skillsOf()`; turning it into
-behaviour is your handler's job.
+That list is only a list. PalForge does not look the ids up, does not equip the passives and does
+not fire the actives. It stores the list and hands it back through `pal:skillsOf()`. Do the rest
+in a handler — the loop below is all it takes.
 </Callout>
-
-Resolving the list is one loop:
 
 ```lua
 for _, id in ipairs(Blaze:skillsOf()) do
@@ -398,11 +407,12 @@ for _, id in ipairs(Blaze:skillsOf()) do
 end
 ```
 
-## Native skill ids
+## Palworld's own skill ids
 
-`native/skills.lua` carries the row ids of Palworld's two skill tables —
-`DT_PassiveSkill_Main_Common` (passive traits) and `DT_PartnerSkillParameter` (partner skills, keyed
-by encounter with `RAID_`, `GYM_` and `BOSS_` prefixes) — as one flat catalog:
+If you want to hang behaviour on a skill the game already has, `native/skills.lua` carries the row
+ids of Palworld's two skill tables — `DT_PassiveSkill_Main_Common` (passive traits) and
+`DT_PartnerSkillParameter` (partner skills, keyed by encounter with `RAID_`, `GYM_` and `BOSS_`
+prefixes) — as one flat catalog:
 
 ```lua
 local skills = require("palforge.native.skills")
@@ -412,8 +422,9 @@ skills.get("Legend")        -- a cached handle for a catalog id, nil for anythin
 skills.get("not_a_row")     -- nil
 ```
 
-`get(id)` defines on first use and caches, so startup never registers the thousands of ids; the
-catalog itself stays plain data. The file also ships one curated definition:
+`get(id)` defines the skill the first time you ask for it and remembers the result, so startup
+never registers the thousands of ids. The catalog itself is plain data. The file also ships one
+ready-made definition:
 
 ```lua
 skills.Fireball             -- Skill{ id = "FlameThrower", kind = "active",
@@ -422,19 +433,19 @@ skills.Fireball:activate(owner)
 ```
 
 <Callout type="info">
-`"FlameThrower"` is a `DevName` column value from `DT_PartnerSkillParameter`, not a row FName, so it
-is not a catalog member — it is pre-seeded into the cache so `skills.get("FlameThrower")` returns the
-curated handle. Its `onActivate` is a placeholder: there is no confirmed native call to spawn the
-projectile, so it does nothing yet. Its `element`, `cooldown` and `power` are framework-side
-metadata, not values read from the DataTable.
+`skills.CATALOG` does not list `"FlameThrower"` — that name comes from the `DevName` column of
+`DT_PartnerSkillParameter` rather than from a row name — but `skills.get("FlameThrower")` still
+returns the handle above. Its `onActivate` does nothing yet: there is no confirmed way to spawn
+the projectile from Lua, so write your own gameplay in a handler if you want it to do something.
+Its `element`, `cooldown` and `power` are PalForge's own numbers, not values read from the game.
 </Callout>
 
 ## Recipes
 
 ### Fire a skill from a pal handler
 
-`onDamaged` is a live pal hook, so this is a skill that really does go off in play. `ctx.actor` is
-the pal pawn that took the damage, which makes it the natural owner.
+`onDamaged` runs on its own when a pal takes damage, so this is a skill that really does go off in
+play. `ctx.actor` is the pal that got hit, which makes it the natural owner.
 
 ```lua title="content/retaliate.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -471,14 +482,14 @@ Pal{
 }
 ```
 
-The cooldown is what keeps this sane: a burst of damage calls `onDamaged` repeatedly, and only the
-first call inside each five-second window gets through.
+The cooldown is what keeps this sane. A burst of damage calls `onDamaged` again and again, and
+only the first call inside each five-second window gets through.
 
 ### Fire a skill from a building
 
-`onRightClick` is live too, and the building handler receives the live instance as `self`, so the
-structure can keep its own state. The interact context carries `ctx.player`, the actor that
-interacted — a good owner for the cooldown.
+`onRightClick` runs on its own too, when a player interacts with your building. The handler gets
+the placed building itself as `self`, so the structure can keep its own state. The context carries
+`ctx.player`, the actor that interacted — a good owner for the cooldown.
 
 ```lua title="content/brazier.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -521,9 +532,9 @@ Building{
 
 ### Bind a skill to a key
 
-PalForge binds its own dev keys through `core/keyboard`, which wraps UE4SS's `RegisterKeyBind` and
-runs the callback inside `ExecuteInGameThread` guarded by a `pcall`. The same two calls work
-directly in a pack:
+UE4SS gives you `RegisterKeyBind`. Run the body inside `ExecuteInGameThread`, which is where it is
+safe to touch the game, and both calls work straight from a pack. PalForge binds its own dev keys
+the same way.
 
 ```lua title="content/keybind.lua"
 local log = require("palforge.utils.log").scope("example")
@@ -551,13 +562,13 @@ RegisterKeyBind(Key.F5, function()
 end)
 ```
 
-Holding the key down calls the bind repeatedly; the declared cooldown is what turns that into one
-activation every two seconds.
+Holding the key down calls the bind again and again; the cooldown turns that into one activation
+every two seconds.
 
 ### A passive that applies an Effect
 
-An `Effect` has a real runtime driven by the shared heartbeat, so pairing a passive skill with one is
-how "while equipped, something keeps happening" gets built: `onEquip` applies, `onUnequip` removes.
+An `Effect` has its own timer, so pairing a passive skill with one is how "while equipped,
+something keeps happening" gets built. `onEquip` applies it, `onUnequip` removes it.
 
 ```mermaid
 sequenceDiagram
@@ -627,15 +638,16 @@ Pal{
 }
 ```
 
-`onSpawned` and `onDeath` are live pal hooks, so the equip and the unequip both happen on their own
-once the pal is in the world. `onDeath` rides a confirmed native hook; `onSpawned` rides
-`BroadcastOnCompleteInitializeParameter`, an unconfirmed candidate, so treat the equip as
-best-effort. The skill contributes the declaration and the two handlers; the `Effect` contributes the
-timing.
+`onSpawned` and `onDeath` both run on their own once the pal is in the world, so the equip and the
+unequip happen without you. `onDeath` sits on a confirmed game hook; `onSpawned` sits on
+`BroadcastOnCompleteInitializeParameter`, which is still an unconfirmed guess, so treat the equip
+as best-effort and re-equip elsewhere if you need certainty. The skill brings the two handlers,
+and the `Effect` brings the timing.
 
 ## Validation errors
 
-Every problem is a hard error prefixed `PalForge: `, and the call never half-succeeds.
+Every problem is an error that stops the call, prefixed `PalForge: `. A definition never half
+succeeds.
 
 ```text
 PalForge: Skill: field "id" is required (skill id: a game row id or "pack:name")
@@ -645,15 +657,26 @@ PalForge: Skill: field "power" expects number, got string
 PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated" (did you mean "onActivate"?). Valid fields: onActivate, onHit, onEquip, onUnequip
 ```
 
-The handler list is closed on purpose. A misspelled `onActivated` that was quietly accepted would be
-indistinguishable from a skill that nothing invokes, which is the one failure mode this domain
-already has enough of.
+Handler names are checked the same way, and that is worth having: a typo like `onActivated` tells
+you at once, instead of leaving you with a skill that silently never runs.
 
 ## Related
 
 <Cards>
-  <Card title="Pal" href="/docs/api/pal">Declaring skills on a pal, and the live hooks that can drive them.</Card>
-  <Card title="Effect" href="/docs/api/effect">The domain with a real timer, for anything a passive should keep doing.</Card>
-  <Card title="Building" href="/docs/api/building">Live instances and onRightClick, the other natural trigger.</Card>
-  <Card title="Lifecycle" href="/docs/concepts/lifecycle">Which channels exist, and which hooks a native source actually feeds.</Card>
+  <Card title="Pal" href="/docs/api/pal">Listing skills on a pal, and the hooks that can drive them.</Card>
+  <Card title="Effect" href="/docs/api/effect">The domain with a timer, for anything a passive should keep doing.</Card>
+  <Card title="Building" href="/docs/api/building">Placed buildings and onRightClick, the other natural trigger.</Card>
+  <Card title="Lifecycle" href="/docs/concepts/lifecycle">Which channels exist, and which hooks the game actually feeds.</Card>
 </Cards>
+
+## Summary
+
+- Write `Skill{ ... }` to make a skill. `id` is the only field you must give.
+- Nothing fires it for you: your code calls `:activate`, `:hit`, `:equip` or `:unequip`.
+- `cooldown` is in seconds, counted per owner, and only `:activate` checks it.
+- `kind = "passive"` makes `:activate` return `false`; use `:equip` and `:unequip` for those.
+- A handler that crashes comes back as `false` with nothing in the log, so log inside it.
+- `pal:skillsOf()` gives you the ids a pal carries; looping over them is your job.
+
+Next, read [Effect](/docs/api/effect) — it has the timer a passive skill needs to keep doing
+something.

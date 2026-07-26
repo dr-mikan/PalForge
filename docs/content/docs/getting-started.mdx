@@ -1,12 +1,21 @@
 ---
 title: Getting started
-description: Install PalForge as a UE4SS mod, confirm it loaded, and get your first definition running
+description: Install PalForge, confirm it loaded, and get your first piece of content running in the game
 ---
 
-PalForge runs as a UE4SS Lua mod. You copy two things into place — `Scripts/main.lua` and the
-`Scripts/palforge/` module tree — enable the mod, and read the UE4SS log to confirm the kernel
-came up. After that, a content pack is Lua that calls `Pal{ ... }`, `Item{ ... }`,
-`Building{ ... }` and friends.
+PalForge lets you add your own buildings, items, pals, skills, sounds, effects and menus to
+Palworld. You describe what you want in a short Lua file, and it shows up in your game.
+
+This page gets it installed, proves it is running, and gets your first definition reacting to
+something you do in game.
+
+## What you can do after this page
+
+- Have PalForge running in your copy of Palworld
+- Tell at a glance whether it started, from the game's own log
+- Add your own item and see a message when you pick it up
+- Add a chest that counts how many times you opened it, and still remembers next time you play
+- Work out why something did not appear, without asking anyone
 
 ## Install
 
@@ -16,8 +25,12 @@ came up. After that, a content pack is Lua that calls `Pal{ ... }`, `Item{ ... }
 
 ### Copy the files
 
-The layout is fixed, because `main.lua` bootstraps `package.path` from its own directory:
-`palforge/` must sit next to `main.lua`.
+PalForge runs on UE4SS, the loader that lets Palworld run mods written in Lua. If you already
+have other Palworld Lua mods working, you have it.
+
+Make a folder called `PalForge` under `ue4ss/Mods/` and lay the files out like this. `palforge/`
+has to sit next to `main.lua`: `main.lua` looks for the rest of PalForge in its own folder, so a
+different layout breaks every part of it.
 
 ```text
 ue4ss/
@@ -36,17 +49,18 @@ ue4ss/
                 └── utils/
 ```
 
-`Scripts/palforge/types.lua` is annotations only — nothing requires it at runtime. It exists so
-LuaLS can complete every field of a definition. See [Editor setup](/docs/concepts/editor-setup).
+`Scripts/palforge/types.lua` is annotations only — nothing loads it while the game is running. It
+is there so your editor can complete every field of a definition as you type. See
+[Editor setup](/docs/concepts/editor-setup).
 
 </Step>
 
 <Step>
 
-### Enable the mod
+### Turn the mod on
 
-UE4SS enables a Lua mod either by an empty `enabled.txt` inside the mod folder, or by a line in
-`ue4ss/Mods/mods.txt`:
+UE4SS switches a Lua mod on in one of two ways: an empty file called `enabled.txt` inside the mod
+folder, or a line in `ue4ss/Mods/mods.txt`.
 
 ```text title="ue4ss/Mods/mods.txt"
 CheatManagerEnablerMod : 1
@@ -54,10 +68,13 @@ ConsoleEnablerMod : 1
 PalForge : 1
 ```
 
-`Pal.Handle:spawn` goes through `UPalCheatManager`, so keep `CheatManagerEnablerMod` enabled if
-you intend to spawn pals. Without it, `core/spawn` logs
-`spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)` and returns
-`false`.
+Keep `CheatManagerEnablerMod` on if you want to spawn pals. `Pal.Handle:spawn` goes through the
+game's own `UPalCheatManager`, so without that mod `core/spawn` writes this line and gives up,
+returning `false`:
+
+```text
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+```
 
 </Step>
 
@@ -65,25 +82,26 @@ you intend to spawn pals. Without it, `core/spawn` logs
 
 ### Start the game and read the log
 
-Every PalForge message goes through `utils/log`, whose default sink prints
-`[PalForge.<scope>][<level>] <msg>`. Watch the UE4SS console (and `UE4SS.log`) while the game
-loads — the exact lines to expect are below.
+UE4SS prints what mods say to its console window, and writes the same text to a file called
+`UE4SS.log`. Every PalForge message goes through `utils/log`, which formats it as
+`[PalForge.<scope>][<level>] <msg>`. Watch that while the game loads — the exact lines to look
+for are in the next two sections.
 
 </Step>
 
 </Steps>
 
-## What main.lua does at load
+## What happens when the game starts
 
-`main.lua` is a thin entry point. In order, it:
+`main.lua` is the single file UE4SS runs. In order, it:
 
-1. Prepends its own directory to `package.path`
-   (`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`), so `require("palforge.api")` resolves
-   relative to that `Scripts/` folder.
-2. Requires `palforge.env` and logs the version and the dev flag.
-3. Calls `registry.initialize()` inside a `pcall`, logging `initialize failed: <err>` on failure
-   and `ready` on success.
-4. Publishes `_G.PalForge` for companion mods.
+1. Points Lua's `package.path` at its own folder
+   (`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`), so `require("palforge.api")` finds the
+   modules sitting next to it.
+2. Loads `palforge.env` and prints the version and the dev flag.
+3. Calls `registry.initialize()` inside a `pcall`, printing `initialize failed: <err>` if that
+   raises and `ready` if it does not.
+4. Publishes `_G.PalForge` so other mods can use the same running copy.
 
 ```lua title="Scripts/main.lua (excerpt)"
 local thisDir = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
@@ -96,7 +114,7 @@ local log      = require("palforge.utils.log").scope("main")
 log.info("PalForge v" .. tostring(env.version) .. " starting (dev=" .. tostring(env.dev) .. ")")
 ```
 
-`registry.initialize()` is the kernel entry point and runs five steps:
+`registry.initialize()` is where everything comes up. It runs five steps:
 
 ```mermaid
 flowchart TD
@@ -110,12 +128,11 @@ flowchart TD
 ```
 
 The catalogs load in this order: `buildings`, `items`, `pals`, `skills`, `effects`, `audio`,
-`ui`. Registration is not a separate step — a definition call writes itself into
-`core/object_manager`, so requiring a catalog module is what registers its content. The big
-catalog lists stay plain data and are materialized lazily by each module's `get(id)`, which is why
-startup never registers the thousands of row ids.
+`ui`. Loading one is what registers its content — a definition call writes itself into
+`core/object_manager` as it runs. The long id lists inside those files stay plain data until
+something asks for one by `get(id)`, so startup never registers the thousands of row ids at once.
 
-`_G.PalForge` carries the whole downstream surface:
+`_G.PalForge` carries everything another mod might want:
 
 ```lua
 _G.PalForge = {
@@ -132,26 +149,27 @@ _G.PalForge = {
 
 ## A healthy startup log
 
-With `env.dev = true` (the shipped default), a clean start looks like this:
+`env.dev = true` is the shipped default. With it, a clean start looks like this:
 
 ```text
 [PalForge.main][info] PalForge v0.3.0 starting (dev=true)
 [PalForge.event][info] tick source live
-[PalForge.event][info] event wired: bus + sources (tick/world/building live; pal/item TODO(dump)) + dispatch
-[PalForge.keyboard][info] bound F1
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard TODO(dump)) + dispatch
 [PalForge.keyboard][info] bound F4
-[PalForge.keyboard][info] keybinds loaded (2 function file(s): F1,F4)
+[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
 [PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
-[PalForge.unittests][info] tests: 8 passed, 0 failed (8 total)
+[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
+[PalForge.keyboard][info] bound F1
 [PalForge.registry][info] initialized (dev=true, 19 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-The class count is whatever registered: 19 comes from the curated native definitions the shipped
-catalogs declare. Your own definitions add to it.
+The class count is simply how many definitions registered: the ones the shipped catalogs declare,
+plus your own. `[PalForge.main][info] ready` is the line that means PalForge started.
 
-Two more lines belong to the world gate — the first when a save has finished loading, the
-second when you leave that world again:
+Two more lines belong to the world gate. PalForge waits for a save to finish loading before it
+touches anything in the world; the first line appears when the save is ready, the second when you
+leave that world again:
 
 ```text
 [PalForge.event][info] world ready - building dispatch enabled
@@ -159,18 +177,17 @@ second when you leave that world again:
 ```
 
 <Callout type="info">
-The world source polls `FindFirstOf("PalPlayerCharacter")` every 1000 ms and needs five
-consecutive valid polls before it emits `world.ready`. The building, pal and item sources all
-return early until then, so none of them dispatch while you are still on the title screen; the
-tick heartbeat is the one source that runs from mod load. If the poll loop itself cannot be
-installed, the log says `ready-watch unavailable (...) - dispatch always on` and the runtime
-fails open.
+The world source checks for `FindFirstOf("PalPlayerCharacter")` every 1000 ms and wants five
+valid checks in a row before it emits `world.ready`. Until then the building, pal and item sources
+all return early, so nothing of yours fires while you are still on the title screen. The tick
+heartbeat is the one source that runs from mod load. If the check loop cannot be installed at all,
+the log says `ready-watch unavailable (...) - dispatch always on` and everything runs anyway.
 </Callout>
 
 ## The dev toggle
 
-`Scripts/palforge/env.lua` is the shared runtime config, cached by `require()`, so the table is a
-process-wide singleton:
+`Scripts/palforge/env.lua` holds the settings PalForge reads at runtime. `require()` caches it, so
+every module sees the same table:
 
 ```lua title="Scripts/palforge/env.lua"
 return {
@@ -180,16 +197,18 @@ return {
 }
 ```
 
-When `dev` is true, `registry.initialize()` additionally:
+When `dev` is true, `registry.initialize()` also:
 
-- loads the keybind behaviour files (`core/keyboard/`): **F1** spawns a level 5 `ChickenPal`
-  about 6 m in front of the player through `Pal.get(id):spawn{ at = ... }`, then announces where
-  it landed; **F4** calls `utils.items.unlockAllTech` so custom buildings and chests appear in
-  the build menu;
-- registers the `ps_catalog` console command, an opt-in DataTable dumper that is never auto-run;
-- requires `palforge.tests` and runs every registered suite, which produces the `tests: ...` line.
+- loads the keybind files under `core/keyboard/`, which put **F4** on `utils.items.unlockAllTech`
+  — press it and your custom buildings and chests appear in the build menu;
+- registers the `ps_catalog` console command, a DataTable dumper you run by hand and that never
+  starts on its own;
+- runs the headless test bundle in `palforge.tests`, which is where the `tests: ...` line comes
+  from;
+- loads `palforge.test`, the in-game test suite, and puts it on **F1**. Nothing there runs until
+  you press the key, because those tests spawn pals and hand out items.
 
-Set `dev = false` to ship a quiet release build with only the content catalogs registered:
+Set `dev = false` for a quiet release build with only the content catalogs registered:
 
 ```lua title="Scripts/palforge/env.lua"
 return {
@@ -211,15 +230,15 @@ end
 ```
 
 <Callout type="warn">
-The dev gate is read inside `registry.initialize()`. Mutating `require("palforge.env").dev` after
-initialization changes what your own code sees, but it will not load or unload the dev tooling.
-Editing `env.lua` is the reliable switch.
+The dev gate is read inside `registry.initialize()`. Changing `require("palforge.env").dev` after
+that changes what your own code sees, but it will not load or unload the dev tooling. Edit
+`env.lua` to switch it for real.
 </Callout>
 
 ## Your first definition
 
-Put your own code in its own file next to `main.lua`. `package.path` already covers that
-directory, so a plain `require` finds it.
+Put your own code in its own file next to `main.lua`. `package.path` already covers that folder,
+so a plain `require` finds it.
 
 ```lua title="ue4ss/Mods/PalForge/Scripts/mypack.lua"
 local api = require("palforge.api")
@@ -238,7 +257,7 @@ api.Item{
 }
 ```
 
-Load it from the bottom of `main.lua`, after the kernel is up:
+Load it from the bottom of `main.lua`, once PalForge itself is up:
 
 ```lua title="ue4ss/Mods/PalForge/Scripts/main.lua"
 _G.PalForge = {
@@ -252,17 +271,19 @@ return _G.PalForge
 ```
 
 <Callout type="warn">
-Require your file **after** `registry.initialize()` has run. Before that, the bare globals are not
-installed and the native catalogs have not loaded. The `pcall` matters too: a spec error is a hard
-error, and an unguarded one aborts the rest of `main.lua`.
+Require your file **after** `registry.initialize()` has run. Before that the bare globals are not
+installed and the native catalogs have not loaded. The `pcall` matters too: a bad field in a
+definition raises a hard error, and an unguarded one stops the rest of `main.lua`.
 </Callout>
 
-`Item{ id = "Stone" }` gives behaviour and metadata to an id that already exists in the game.
-Publishing a brand-new DataTable row is not possible from Lua alone — that is PalSchema's job —
-which is why the example keys onto a vanilla item id. Ids without a colon are literal game ids;
-`"pack:name"` is a namespaced id that resolves to the row FName `pack_name`.
+`Item{ id = "Stone" }` hangs your behaviour and metadata on an id the game already has. Lua on its
+own cannot add a brand-new row to the game's item, pal or building tables — those are the game's
+DataTables, and writing new rows into them is PalSchema's job. So build on an id that already
+exists, which is why the example uses a vanilla one. An id with no colon is a literal game id
+(`Stone`, `Wood`, `PalBoxV2`); `"pack:name"` is your own namespaced id, and it matches the row
+name `pack_name`.
 
-A second definition, this time stateful. A building instance carries `self.actor`, `self.pos`,
+Next, a definition that remembers something. A building instance carries `self.actor`, `self.pos`,
 `self.state` and `self:save()`:
 
 ```lua title="ue4ss/Mods/PalForge/Scripts/mypack.lua"
@@ -287,10 +308,10 @@ api.Building{
 }
 ```
 
-Defining an id that a native catalog already curates replaces that registration — the entry in
-`object_manager` is keyed by `(type, id)`. `native/buildings` curates `WorkBench` and `PalBoxV2`,
-`native/items` curates `Wood`, `Berries` and `Arrow`, and `native/pals` curates `ChickenPal` and
-`SheepBall`, so pick another id unless replacing one is what you want.
+One id holds one definition, keyed by kind and id in `object_manager`, so defining an id PalForge
+already ships a definition for replaces that one. `native/buildings` ships `WorkBench` and
+`PalBoxV2`, `native/items` ships `Wood`, `Berries` and `Arrow`, and `native/pals` ships
+`ChickenPal` and `SheepBall`. Pick another id unless replacing one is what you want.
 
 And a pal, to see an action rather than a handler:
 
@@ -321,7 +342,7 @@ local chicken = api.Pal{
 chicken:spawn(api.Player.coordinateOffset(300, 0, 0))
 ```
 
-## Verify it in game
+## Check it in game
 
 Load a save and watch the log.
 
@@ -344,8 +365,8 @@ heartbeat is running.
 
 ### Trigger the shipped demos
 
-The native catalogs already carry live handlers, so you can prove dispatch without writing
-anything:
+The definitions PalForge ships already have live handlers on them, so you can prove the wiring
+works without writing anything:
 
 ```text
 [PalForge.native.items][info] Wood onObtain: count=1
@@ -377,8 +398,9 @@ flowchart LR
   D --> E["your onObtain runs"]
 ```
 
-`ctx.itemId` and `ctx.count` come off the game's own get-log struct, and dispatch looks the id up
-in `object_manager`. A vanilla id you never defined resolves to nothing and the dispatch no-ops.
+`ctx.itemId` and `ctx.count` come off the game's own get-log struct, and the id is looked up in
+`object_manager`. A vanilla id you never defined matches nothing, and the whole thing quietly does
+nothing.
 
 </Step>
 
@@ -395,20 +417,20 @@ for id in pairs(registry.registered().item) do
 end
 ```
 
-`registry.registered()` returns a snapshot keyed by object type then id — `item`, `pal`,
-`building`, `skill`, `effect`, `audio`, `mesh`, `ui`.
+`registry.registered()` returns a snapshot keyed by kind and then id — `item`, `pal`, `building`,
+`skill`, `effect`, `audio`, `mesh`, `ui`.
 
 </Step>
 
 </Steps>
 
-With `env.dev = true` you also have F1 (spawn a `ChickenPal` in front of you) and F4 (unlock all
-technology) as immediate smoke tests.
+With `env.dev = true` you also have **F1** (run the in-game test suite) and **F4** (unlock all
+technology) as quick smoke tests.
 
 ## Reaching the API
 
-Requiring `palforge.api` installs the bare globals **and** returns the same table namespaced.
-Both styles are the same objects.
+`require("palforge.api")` does two things at once: it hands back a table with everything on it,
+and it also creates plain global names you can use directly. Both point at the same objects.
 
 <Tabs items={['Namespaced', 'Globals', 'Companion mod']}>
 
@@ -433,8 +455,8 @@ Pal.get("ChickenPal"):spawn(Player.coordinate())
 ```
 
 The globals are `Pal`, `Item`, `Building`, `Skill`, `Effect`, `Audio`, `Mesh`, `UI` and `Player`.
-UE4SS gives each Lua mod its own state, so they are mod-local and cannot clash with the game or
-another mod.
+UE4SS gives each Lua mod its own Lua state, so these names belong to your mod alone and cannot
+clash with the game or another mod.
 
 </Tab>
 
@@ -448,24 +470,24 @@ api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
 ```
 
 Use this when your code cannot `require("palforge.*")` because your own `package.path` does not
-point at PalForge's `Scripts/` directory.
+point at PalForge's `Scripts/` folder.
 
 </Tab>
 
 </Tabs>
 
-Every domain module has the same three entry points, so once you know one you know all of them:
+Every kind of content works the same way, so once you know one you know all of them:
 
 ```lua
-local pal = Pal{ id = "example:Boss", name = "Boss" }   -- CALL the module to define
-Pal.get("ChickenPal")                                   -- an existing one, by id
-Pal.get_all()                                           -- every registered one
+local pal = Pal{ id = "example:Boss", name = "Boss" }   -- make one
+Pal.get("ChickenPal")                                   -- find one by id
+Pal.get_all()                                           -- list every one
 ```
 
-## A pack as its own UE4SS mod
+## Ship your pack as its own mod
 
-`main.lua` publishes `_G.PalForge` so a separate mod can reuse the running framework instead of
-loading a second copy of it.
+`main.lua` publishes `_G.PalForge`, so a separate mod can use the copy that is already running
+instead of loading a second one.
 
 ```mermaid
 flowchart LR
@@ -506,14 +528,14 @@ api.Item{
 log.info("mypack loaded")
 ```
 
-List PalForge above your pack in `ue4ss/Mods/mods.txt` so the kernel is initialized before your
+List PalForge above your pack in `ue4ss/Mods/mods.txt`, so it has finished starting before your
 definitions run.
 
 <Callout type="warn">
 UE4SS gives each Lua mod its own Lua state. `_G.PalForge` is reachable from code loaded into the
 state PalForge's `main.lua` ran in; whether a separate mod folder shares that state depends on
 your UE4SS build and load configuration. Keep the `if not PF then ... return end` guard, and if it
-trips, load your file from PalForge's own `Scripts/` directory as shown in
+trips, load your file from PalForge's own `Scripts/` folder as shown in
 [Your first definition](#your-first-definition).
 </Callout>
 
@@ -532,9 +554,9 @@ PF.core.event.on("tick", function(ctx)
 end)
 ```
 
-Defining after startup is fine. A building defined later is picked up by the next reconstruction
-scan, and pal/item dispatch resolves by id at emit time, so a definition registered a minute after
-`gameStart` still receives events.
+Defining things after startup is fine. A building defined later is picked up by the next scan, and
+pal and item events resolve by id at the moment they fire, so a definition registered a minute
+after `gameStart` still gets its events.
 
 ## Troubleshooting
 
@@ -543,11 +565,11 @@ scan, and pal/item dispatch resolves by id at emit time, so a definition registe
 The mod never loaded. Check, in order:
 
 - `Scripts/main.lua` sits directly under `ue4ss/Mods/PalForge/`, and `palforge/` is next to it.
-  `main.lua` derives `package.path` from its own file location, so a shifted tree breaks every
+  `main.lua` works out `package.path` from where its own file is, so a moved folder breaks every
   `require`.
-- The mod is enabled: an empty `enabled.txt` in the mod folder, or `PalForge : 1` in
+- The mod is on: an empty `enabled.txt` in the mod folder, or `PalForge : 1` in
   `ue4ss/Mods/mods.txt`.
-- UE4SS itself is loading Lua mods (other Lua mods print their own lines).
+- UE4SS itself is loading Lua mods at all (other Lua mods print their own lines).
 
 ### `initialize failed: ...`
 
@@ -555,9 +577,9 @@ The mod never loaded. Check, in order:
 [PalForge.main][err] initialize failed: ...
 ```
 
-An error escaped `registry.initialize()`. `main.lua` catches it, so the game keeps running, but no
-sources, dispatch or catalogs are live. The message after the colon is the real error; the
-per-catalog failures are logged separately as
+An error escaped `registry.initialize()`. `main.lua` catches it, so the game keeps running, but
+nothing is live — no sources, no dispatch, no catalogs. The text after the colon is the real
+error. A single catalog that failed is reported on its own line, as
 `native catalog 'palforge.native.items' load error: ...`.
 
 ### Unknown field
@@ -566,15 +588,15 @@ per-catalog failures are logged separately as
 PalForge: Pal: unknown field "meshSpec" (did you mean "mesh"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 ```
 
-Validation is strict: anything not declared in the spec is a hard error with a did-you-mean, so a
-decorated name can never be silently ignored. The same check runs on nested shapes, including the
-`events` table:
+A field that is not part of the definition is a hard error with a suggested correction, so a
+misspelled name can never be silently ignored. The same check runs on nested tables, including
+`events`:
 
 ```text
 PalForge: Pal: field "events" (Pal.Spec.Events): unknown field "onSpawn" (did you mean "onSpawned"?). Valid fields: onSpawned, onDamaged, onDeath, onCaptured, onTick
 ```
 
-Ask the registry what a call accepts:
+You can also ask what a call accepts, from your own code:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -590,8 +612,8 @@ schema.get("Pal.Spec").fields           -- the same as a table, for tooling
 PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
 ```
 
-`id` is required in every domain. The text in parentheses is the field's own documentation, so the
-message tells you what shape the value should have.
+`id` is required for every kind of content. The text in parentheses is that field's own
+documentation, so the message tells you what shape the value should have.
 
 ### Wrong value or wrong type
 
@@ -601,34 +623,43 @@ PalForge: Item: field "maxStack" expects number, got string
 PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
 ```
 
-The call never half-succeeds: a failing validation raises before anything is registered.
+The call never half-succeeds: a failing check raises before anything is registered.
 
 ### A handler never fires
 
-- Check the hook actually has a native source. `onCraft` and `onDiscard` on items, `onTick` on
-  pals, and `onBuild` / `onLeftClick` / `onBreak` on buildings are declarable but nothing emits
-  them yet. [Lifecycle](/docs/concepts/lifecycle) lists what is live.
-- Check the world gate: no source runs before `world ready - building dispatch enabled`.
-- Check for a disabled hook:
+- Check that the hook has something to fire it. `onCraft` and `onDiscard` on items, and
+  `onLeftClick` and `onBreak` on buildings, can be written but nothing emits them yet — use
+  `onUse` / `onObtain` and `onRightClick` / `onRemove` instead.
+  [Lifecycle](/docs/concepts/lifecycle) lists what is live.
+- Check the world gate: nothing runs before `world ready - building dispatch enabled`.
+- Check for a hook the game would not let PalForge install:
 
   ```text
   [PalForge.event][warn] hook unavailable (feature disabled): /Script/Pal.PalBuildObject:OnBeginInteractBuilding -> ...
   ```
 
-- Check the id. Dispatch resolves items by `ctx.itemId` and pals by their BP class name
-  (`BP_<Id>_C`); an id that matches nothing in `object_manager` is a silent no-op, not an error.
+- Check the id. Items are matched by `ctx.itemId` and pals by their blueprint class name
+  (`BP_<Id>_C`), which is the game's internal name for that pal's actor. An id that matches nothing
+  in `object_manager` quietly does nothing — it is not an error.
 
-### A handler fires but nothing happens
+### A handler fires but something inside it breaks
 
-Dispatch calls your hook inside a `pcall` and does not log the failure, so a runtime error in a
-handler is swallowed. The one exception is a building `onTick`:
+Your handler runs inside a `pcall`, so a mistake in it cannot crash the game. The error is written
+to the log with the channel and the hook that raised it:
+
+```text
+[PalForge.event][err] item.use -> onUse handler failed: ...
+```
+
+A building `onTick` that keeps failing is switched off, so one bad handler cannot burn the
+heartbeat forever:
 
 ```text
 [PalForge.event][err] onTick 'WorkBench@1204,-431,84' failed: ...
 [PalForge.event][warn] onTick 'WorkBench@1204,-431,84' disabled after 5 failures
 ```
 
-Wrap risky work yourself while developing:
+Wrap risky work yourself while developing, so you decide what the message says:
 
 ```lua
 events = {
@@ -647,21 +678,38 @@ events = {
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
 ```
 
-`:spawn` goes through `UPalCheatManager`. Enable `CheatManagerEnablerMod` in `mods.txt`.
+`:spawn` goes through `UPalCheatManager`. Turn on `CheatManagerEnablerMod` in `mods.txt`.
 
 ## Where to go next
 
 <Cards>
   <Card title="Definitions" href="/docs/concepts/definitions">
-    The uniform module shape: call to define, get, get_all, and the Handle you get back.
+    How to make one, find one, list them all, and what you get back.
   </Card>
   <Card title="Schema" href="/docs/concepts/schema">
-    How specs are declared, validated and read back at runtime.
+    The fields each kind of content accepts, and how to read them at runtime.
   </Card>
   <Card title="Lifecycle" href="/docs/concepts/lifecycle">
-    Channels, native sources, dispatch, and exactly which hooks are live.
+    Which handlers fire, when, and what lands in `ctx`.
   </Card>
   <Card title="First content pack" href="/docs/guides/first-content-pack">
-    A complete pack built from the domains end to end.
+    A complete pack built from every kind of content, end to end.
   </Card>
 </Cards>
+
+## Summary
+
+- PalForge lives at `ue4ss/Mods/PalForge/Scripts/`, with `palforge/` next to `main.lua`. Any other
+  layout breaks it.
+- `[PalForge.main][info] ready` means PalForge started;
+  `world ready - building dispatch enabled` means your handlers can now fire.
+- Put your content in your own file next to `main.lua` and `require` it at the bottom of
+  `main.lua`, after `registry.initialize()`.
+- `Item{ ... }`, `Building{ ... }` and `Pal{ ... }` all work the same way: call with a table to
+  make one, `get(id)` to find one, `get_all()` to list them.
+- An id with no colon is one of the game's own; `"pack:name"` is yours.
+- A wrong field name stops the call with a message naming the field and listing the valid ones, so
+  read it rather than guessing.
+
+Next, read [Definitions](/docs/concepts/definitions) to see what a definition hands back and what
+you can do with it.

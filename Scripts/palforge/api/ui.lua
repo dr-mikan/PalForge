@@ -6,10 +6,14 @@
 -- state), so the Handle doubles as that instance — :new{...} gives you a fresh one.
 --
 -- RESPONSIBILITY SPLIT (owned here, not in the concrete elements):
---   * render(root) / update()      — the WHAT: an element builds / refreshes its widgets.
+--   * render(root) / update() / destroy()  — the WHAT: an element builds, refreshes and
+--     tears down its own widgets.
 --   * mount / refresh / unmount    — the WHEN: the lifecycle. render() runs exactly ONCE
---     per mount (idempotent, so re-mounting can never stack duplicate widgets); update()
---     runs on each refresh. A concrete element never writes its own render-once guard.
+--     per successful mount (idempotent, so re-mounting can never stack duplicate
+--     widgets); update() runs on each refresh; destroy() runs on unmount. A concrete
+--     element never writes its own render-once guard.
+--   * A render that returns false means "I could not build" (the host UI was not there
+--     yet): the element stays unmounted, so mounting again later retries.
 --
 -- HOW IT INTEGRATES: UI{ ... } registers the element class in object_manager under
 -- ("ui", id), so tooling and other mods can look it up. The native elements in
@@ -24,8 +28,9 @@
 --
 --   local Panel = UI{
 --       id = "example:Panel",
---       render = function(self, root) --[[ build widgets under root ]] end,
---       update = function(self) --[[ reflect changed state into the live widgets ]] end,
+--       render  = function(self, root) --[[ build widgets under root ]] end,
+--       update  = function(self) --[[ reflect changed state into the live widgets ]] end,
+--       destroy = function(self) --[[ remove the widgets render built ]] end,
 --   }
 --   Panel:new{ title = "Hello" }:mount(root)
 
@@ -42,7 +47,7 @@ local schema = require("palforge.core.schema")
 --
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 -- Per-element state does NOT go here — it belongs to an instance, so pass it to
--- :new{ label = "OK", onClick = fn } and read it as `self` inside render/update.
+-- :new{ label = "OK", onClick = fn } and read it as `self` inside render/update/destroy.
 -- Use `data` for defaults every instance should share.
 --=============================================================================
 
@@ -52,16 +57,18 @@ local Spec = schema.define("UI.Spec", {
                      doc = "element id, e.g. \"pack:Panel\"" },
     { "name",        type = "string",   doc = "human label (defaults to id)" },
     { "description", type = "string",   doc = "one-line description, for UI and tooling" },
-    { "render",      type = "function", sig = "fun(self: UI.Handle, root: any)",
-                     doc = "build the widget tree under `root` (self, root); runs once per mount" },
+    { "render",      type = "function", sig = "fun(self: UI.Handle, root: any): boolean?",
+                     doc = "build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted" },
     { "update",      type = "function", sig = "fun(self: UI.Handle)",
                      doc = "refresh the already-built widgets (self); runs on each :refresh()" },
+    { "destroy",     type = "function", sig = "fun(self: UI.Handle)",
+                     doc = "remove the widgets render() built (self); runs on :unmount()" },
     { "data",        type = "table",    doc = "default fields shared by every instance of this element" },
 })
 
 --=============================================================================
--- the registered UI element class. render/update are the seams a definition fills;
--- mount/refresh/unmount are the lifecycle, owned here.
+-- the registered UI element class. render/update/destroy are the seams a definition
+-- fills; mount/refresh/unmount are the lifecycle, owned here.
 --=============================================================================
 
 local Class = {}
@@ -70,22 +77,35 @@ Class.__index = Class
 -- ---- seams a definition fills (the "WHAT") ----
 
 -- Build this element's widgets under `root`. Called exactly ONCE per mount, by mount();
--- never call it directly. Default is inert so an element can be declaration-only.
+-- never call it directly. Return false to report that nothing was built (see mount).
+-- Default is inert so an element can be declaration-only.
 function Class:render(root) end
 
 -- Refresh already-built widgets from current state. Called by refresh(); never call it
 -- directly.
 function Class:update() end
 
+-- Remove the widgets render() built. Called by unmount(); never call it directly. Default
+-- is inert — an element that builds nothing has nothing to take down.
+function Class:destroy() end
+
 -- ---- lifecycle (the "WHEN") ----
 
 -- Mount: render once under `root`. Idempotent — a second call while mounted is a no-op,
--- so re-invoking mount() can never stack duplicate widgets. Returns true if this call
--- performed the render.
+-- so re-invoking mount() can never stack duplicate widgets. Returns true if the render
+-- reported success.
+--
+-- The element is latched as mounted on WHAT render REPORTED, not on the fact that it ran:
+-- an element whose host UI was absent returns false and stays unmounted, so mounting it
+-- again later retries. nil counts as success — a declarative render need not return
+-- anything.
 function Class:mount(root)
     if self._mounted then return false end
     self._root = root
-    self:render(root)
+    if self:render(root) == false then
+        self._root = nil
+        return false
+    end
     self._mounted = true
     return true
 end
@@ -99,9 +119,11 @@ end
 
 function Class:isMounted() return self._mounted == true end
 
--- Forget the rendered state so a later mount() re-renders (e.g. after the game rebuilt
--- the host UI and dropped our widgets). Does not itself destroy widgets.
+-- Take the element down: run destroy() (the element removes its own widgets) and forget
+-- the rendered state, so a later mount() renders afresh instead of stacking a second
+-- copy. A throwing destroy() cannot leave the element stuck mounted.
 function Class:unmount()
+    if self._mounted then pcall(function() self:destroy() end) end
     self._mounted = false
     self._root = nil
     if self._refreshSub then
@@ -133,6 +155,7 @@ local function define(spec)
     cls.__index = cls
     if spec.render then cls.render = spec.render end
     if spec.update then cls.update = spec.update end
+    if spec.destroy then cls.destroy = spec.destroy end
     -- `data` becomes per-element defaults: an instance reads them through the class
     -- metatable unless it sets its own field of the same name.
     if spec.data then
@@ -168,8 +191,8 @@ end
 --=============================================================================
 
 ---A mountable UI element. Obtain one from UI{ ... } / UI.get, or :new{...} for a fresh
----instance. Inside render/update, `self` is this instance — set fields on it freely
----(self.widget = ..., read self.label, ...).
+---instance. Inside render/update/destroy, `self` is this instance — set fields on it
+---freely (self.widget = ..., read self.label, ...).
 ---@class UI.Handle
 ---@field id string   # the element's id
 local Handle = {}
@@ -190,7 +213,9 @@ function Handle:new(spec) return wrap(self._cls, spec) end
 
 -- ---- actions ----
 
----Mount this element under `root` (render once). Returns true if it rendered.
+---Mount this element under `root` (render once). Returns true if the render succeeded;
+---false both when it is already mounted and when render reported it could not build — in
+---the latter case the element stays unmounted, so calling mount() again retries.
 ---@param root any?
 ---@return boolean rendered
 function Handle:mount(root) return self._st:mount(root) end
@@ -199,7 +224,8 @@ function Handle:mount(root) return self._st:mount(root) end
 ---@return boolean ok
 function Handle:refresh() return self._st:refresh() end
 
----Forget the rendered state so a later mount() re-renders. Also cancels autoRefresh.
+---Take the element down: runs destroy() so it removes its own widgets, then forgets the
+---rendered state so a later mount() renders afresh. Also cancels autoRefresh.
 function Handle:unmount() return self._st:unmount() end
 
 ---@return boolean
@@ -222,7 +248,7 @@ end
 
 -- ---- queries ----
 
----The element's own state instance — what `self` is inside render/update.
+---The element's own state instance — what `self` is inside render/update/destroy.
 ---@return table
 function Handle:state() return self._st end
 ---@return string
@@ -230,5 +256,5 @@ function Handle:name() return self._cls.name or self.id end
 ---@return string?
 function Handle:description() return self._cls.description end
 
-UI.Class = Class   -- the base class every element extends (lifecycle + seams)
+UI.Class = Class   -- the base class every element extends (lifecycle + the three seams)
 return UI

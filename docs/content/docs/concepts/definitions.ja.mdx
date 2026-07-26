@@ -1,9 +1,20 @@
 ---
 title: 定義とハンドル
-description: 定義の呼び出しが何を登録し、返ってきたハンドルで何ができるか
+description: コンテンツの作り方、返ってくるもの、そしてあとから見つける方法
 ---
 
-コンテンツパックが宣言するものはすべて、同じ 3 行の形を通ります。
+## このページでできるようになること
+
+- 自分の Pal、アイテム、建物、サウンド、メッシュをゲームに追加する
+- もとからあるものに、何も宣言せずに新しい動きを付ける
+- さきに作ったものを、パックのどこからでも探し出す
+- ほかの人の Mod と名前がぶつからない名前をつける
+- フィールドを書き間違えたときのメッセージを読んで直す
+
+## 何かを作る
+
+コンテンツは、その種類のモジュールに設定のテーブルを渡して呼び出すと作れます。どの種類でも
+やり方は同じです。
 
 ```lua
 local pal = Pal{ id = "example:Boss", name = "Boss" }  -- CALL the module to define
@@ -11,14 +22,12 @@ Pal.get("ChickenPal")                                  -- an existing one, by id
 Pal.get_all()                                          -- every registered one
 ```
 
-`Pal.define` はありません。モジュール自体がコンストラクタで、呼び出すと **定義** が登録され、
-返ってくるのが **ハンドル** です。この 2 つの言葉が仕組みのすべてで、ドメインごとに変わるのは
-細部だけです。
+呼び出すと、渡した設定が **定義** として記録され、**ハンドル** が返ってきます。ハンドルは操作
+するためのオブジェクトです。`Item`、`Building`、`Skill`、`Effect`、`Audio`、`Mesh`、`UI` も
+同じ形で呼び出します。違うのはフィールドだけです。
 
-## 呼び出しの形
-
-`Pal{ ... }` は PalForge が発明した特別な構文ではありません。Lua では呼び出しの引数がテーブル
-コンストラクタひとつだけのとき丸括弧を省略できるので、次の 2 つはまったく同じ呼び出しです。
+`Pal{ ... }` は Lua の短い書き方です。呼び出しの引数がテーブルひとつだけのときは丸括弧を省け
+るので、次の 2 つはまったく同じ呼び出しです。
 
 <Tabs items={['Sugared', 'Desugared']}>
 <Tab value="Sugared">
@@ -45,36 +54,87 @@ local pal = Pal({
 </Tab>
 </Tabs>
 
-波括弧の中身がそのまま引数リストです。これが Lua でできる名前つき引数にもっとも近い形で、
-値にはすべて名前がつき、順序は関係なく、あとからドメインにフィールドが追加されても、すでに
-書いた項目の意味がずれることはありません。
+波括弧の中身がそのまま引数リストです。値にはすべて名前がつくので順序は関係なく、あとから
+ドメインにフィールドが増えても、すでに書いた項目の意味がずれることはありません。
 
-同じ規則はテーブルをひとつ受け取る関数すべてに当てはまるので、名前つきコンストラクタも同じ
-書き方になります。
+この書き方はテーブルをひとつ受け取る関数すべてに使えるので、名前つきコンストラクタも同じ形に
+なります。
 
 ```lua
 Audio.bgm{ id = "AKE_BGM_Title" }     -- same as Audio.bgm({ id = "AKE_BGM_Title" })
 Panel:new{ title = "Hello" }          -- same as Panel:new({ title = "Hello" })
 ```
 
-モジュールを呼び出せるのは `__call` メタメソッドによるものです。
+モジュールを呼び出せるのは、そのテーブルが `__call` メタメソッド（テーブルが呼ばれたときに
+走る Lua の仕組み）を持っているからです。
 
 ```lua
 setmetatable(Pal, { __call = function(_, spec) return define(spec) end })
 ```
 
-`define` は `api/pal.lua` 内のローカル関数です。パックからは届きません。だからモジュール
-テーブルが唯一の入口になります。
+`define` は `api/pal.lua` の中のローカル関数です。そこへ届く方法がモジュールの呼び出しです。
 
 <Callout type="info">
 引数なしの `Pal()` は空の定義を作るショートカットではありません。spec が空テーブルになり、
 `id` が欠けているためエラーになります。
 </Callout>
 
-## 定義とは何か
+## 返ってくるもの
 
-定義とは、そのドメインの基底クラスをメタテーブルに持つ素の Lua テーブルで、`core/object_manager`
-に `(type, id)` の組で記録されたものです。
+ハンドルは操作の窓口です。Pal に対して「する」ことはすべてここにあります。
+
+```lua
+local boss = Pal{ id = "ChickenPal", name = "Scorched Chicken" }
+
+boss:spawn(Player.coordinate())   -- put one in the world
+boss:name()                       -- "Scorched Chicken"
+boss.id                           -- "ChickenPal"
+```
+
+`Pal.Handle:spawn`、`Item.Handle:give`、`Audio.Handle:play`、`Effect.Handle:apply`、
+`Mesh.Handle:attachTo`、`UI.Handle:new` は、どれもハンドルのメソッドです。
+
+中身を見ると、ハンドルは定義を包むフィールド 2 つのラッパーです。
+
+```lua
+wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) end
+```
+
+`id` が公開部分、`_cls` が実体の定義で、`Handle` メタテーブルがそのドメインのアクションと
+クエリを持ちます。ハンドルは軽く使い捨てで、`get` を呼ぶたびに新しいものが作られます。
+
+```lua
+local a = Pal.get("ChickenPal")
+local b = Pal.get("ChickenPal")
+
+a == b        -- false: two different wrapper tables
+a.id == b.id  -- true:  the same definition underneath
+```
+
+イベントハンドラも第 1 引数に同じハンドルを受け取ります。何が起きたときでも、その対象への
+アクションがすでに手元にあります。
+
+```lua
+Pal{
+    id = "ChickenPal",
+    events = {
+        onSpawned = function(pal, ctx)
+            pal:renderOn(ctx.actor)          -- `pal` is this definition's handle
+        end,
+    },
+}
+```
+
+<Callout type="info">
+`UI` のハンドルだけはもうひとつ持ち物があります。`wrap` は要素クラスをメタテーブルとする状態
+テーブルも作って `_st` に持たせるので、ハンドルそのものがマウントでき、`Handle:new{ ... }` は
+独自の状態を持つ独立したインスタンスを返します。
+</Callout>
+
+## 記録されるもの
+
+定義は、渡した内容を持つ素の Lua テーブルです。そのドメインの基底クラスをメタテーブルに持ち、
+`core/object_manager` に `(type, id)` の組で記録されます。
 
 Pal の場合、`Pal{ ... }` は次のテーブルを組み立てます。
 
@@ -94,14 +154,14 @@ local cls = setmetatable({
 cls.__index = cls
 ```
 
-spec のフィールドのうち 2 つは名前が変わります。`mesh` は `cls.meshSpec` に、`material` は
-`cls.materialSpec` になります。`Class:mesh()` と `Class:material()` がメソッドとして存在する
-ためです。建築物の `state` が `cls.defaultState` になるのは、生きた建築物の `state` がその
-インスタンス自身の永続テーブルであり、クラス側のデフォルトを同じ名前で置くわけにいかないから
-です。これらの名前に出会うのは、クラスを直接のぞいたときだけです。
+2 つのフィールドは別の名前で入ります。`mesh` は `cls.meshSpec`、`material` は
+`cls.materialSpec` になります。`Class:mesh()` と `Class:material()` がメソッドとしてあり、
+名前がぶつかるからです。建築物の `state` は `cls.defaultState` になります。設置された建築物の
+`state` は、その 1 つの建築物が保存している自分用のテーブルだからです。これらの名前に出会う
+のは、クラスを直接のぞいたときだけです。
 
-宣言したハンドラはそのクラスに取り付けられます。Pal、Item、Skill、Effect はフォワーダ越しに
-取り付けるので、ハンドラはクラスではなく **ハンドル** を受け取ります。
+宣言したハンドラはそのクラスに取り付けられます。Pal、Item、Skill、Effect は小さなフォワーダ
+越しに取り付けます。ハンドラがクラスではなく **ハンドル** を受け取るのはそのためです。
 
 ```lua
 for name, handler in pairs(spec.events or {}) do
@@ -110,7 +170,7 @@ end
 ```
 
 建築物はハンドラを書いたまま取り付けます。建築物のハンドラの第 1 引数は定義ではなく、設置され
-た生きたインスタンスだからです。
+た建築物そのものだからです。
 
 ```lua
 for name, handler in pairs(spec.events) do cls[name] = handler end
@@ -122,9 +182,9 @@ for name, handler in pairs(spec.events) do cls[name] = handler end
 pcall(function() om.register("pal", spec.id, cls) end)
 ```
 
-注意点が 2 つあります。登録は `pcall` で包まれているので、レジストリ側の問題が定義呼び出しを
-壊すことはありません。そしてキーは **あなたが書いたとおりの id** で、コロンも含みます。
-`"example:Boss"` は `"example_Boss"` ではなく `"example:Boss"` として格納されます。
+ここから 2 つのことが言えます。登録は `pcall` の中で走るので、レジストリ側の問題が定義の
+呼び出しを壊すことはありません。そしてキーは **あなたが書いたとおりの id** で、コロンも含み
+ます。`"example:Boss"` は `"example_Boss"` ではなく `"example:Boss"` として格納されます。
 
 レジストリは直接読めます。
 
@@ -136,53 +196,10 @@ om.all("pal")                 -- { id -> cls }, a shallow copy you may not mutat
 om.TYPES                      -- audio, building, effect, item, mesh, pal, skill, ui
 ```
 
-`om.all` はコピーを返すので、そこに書き込んでも何も変わりません。登録の取り消しはありません。
+`om.all` はコピーを返すので、そこに書き込んでも何も変わりません。一度登録した id は登録された
+ままです。変えたいときは定義し直します。
 
-## ハンドルとは何か
-
-ハンドルは、定義クラスを包むフィールド 2 つのラッパーです。
-
-```lua
-wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) end
-```
-
-`id` が公開部分、`_cls` が実体の定義で、`Handle` メタテーブルがそのドメインのアクションと
-クエリを持ちます。中身はそれだけです。ハンドルは軽く使い捨てで、`get` を呼ぶたびに新しいものが
-作られます。
-
-```lua
-local a = Pal.get("ChickenPal")
-local b = Pal.get("ChickenPal")
-
-a == b        -- false: two different wrapper tables
-a.id == b.id  -- true:  the same definition underneath
-```
-
-動詞はハンドル側にあります。`Pal.Handle:spawn`、`Item.Handle:give`、`Audio.Handle:play`、
-`Effect.Handle:apply`、`Mesh.Handle:attachTo`、`UI.Handle:new` — どれも定義クラスには存在
-せず、ハンドルにだけあります。
-
-ハンドラがハンドルを受け取るのはそのためです。どんなイベントであれ、その同じオブジェクトへの
-アクションがすでに手元にあります。
-
-```lua
-Pal{
-    id = "ChickenPal",
-    events = {
-        onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)          -- `pal` is this definition's handle
-        end,
-    },
-}
-```
-
-<Callout type="info">
-ハンドルが余分に持ち物を抱えるのは `UI` だけです。`wrap` は要素クラスをメタテーブルとする状態
-テーブルも作って `_st` に持たせるので、ハンドルそのものがマウント可能になり、
-`Handle:new{ ... }` は独自の状態を持つ独立したインスタンスを返します。
-</Callout>
-
-## 定義呼び出しの全体像
+## 呼び出しの全体像
 
 ```mermaid
 flowchart TD
@@ -195,10 +212,13 @@ flowchart TD
   G --> H["return the Pal.Handle"]
 ```
 
-検証が最初に走り、完全に成功するか例外を投げるかのどちらかです。呼び出しが途中まで成功する
-ことはないので、はねられた spec の定義が登録されたままになることもありません。バリデータは、
-個々のフィールドを見る前にテーブル全体の未知のキーを調べ、その後は宣言順にフィールドをたどり、
+最初に検査が走り、完全に通るか例外を投げるかのどちらかです。呼び出しが途中まで成功することは
+ないので、はねられた設定の定義が登録されたままになることもありません。検査はまず、個々の
+フィールドを見る前にテーブル全体の未知のキーを調べ、そのあと宣言順にフィールドをたどって、
 新しいコピーへデフォルトを埋めていきます。渡したテーブルが変更されることはありません。
+
+問題はすべてハードエラーになり、ドメイン名とフィールド名が出ます。たいていはメッセージだけで
+直せます。
 
 ```text
 PalForge: Pal: unknown field "meshSpec" (did you mean "mesh"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
@@ -209,8 +229,8 @@ PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMes
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "consumeable"
 ```
 
-形状の宣言そのものは各モジュールのプライベートです。ドメインは呼び出す対象であって、中を見て
-回る名前空間ではありません。実行時に読みたいときはスキーマレジストリを通します。
+書く前に何を渡せるか知りたいときは、スキーマレジストリ（宣言されている形の一覧を実行時に
+返すもの）に聞きます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -220,9 +240,9 @@ schema.get("Pal.Spec").fields         -- the same, as a table, for tooling
 schema.all()                          -- every declared spec, in declaration order
 ```
 
-## 定義、get、get_all
+## あとから見つける
 
-定義を作るのは `X{ ... }` だけです。`get` と `get_all` は定義しません。
+定義を作るのは `X{ ... }` だけです。`get` と `get_all` は探すだけです。
 
 ```lua
 Item{ id = "Wood", name = "Wood", maxStack = 9999 }   -- defines and registers
@@ -230,8 +250,8 @@ Item.get("Wood")                                      -- looks it up
 Item.get_all()                                        -- every registered item
 ```
 
-`X.get(id)` は `id` が空でない文字列であることを assert してからレジストリを引きます。見つから
-なかったときの挙動だけがドメインによって違います。
+`X.get(id)` は `id` が空でない文字列であることを assert してからレジストリを引きます。その id
+に何も登録されていなかったときの動きだけが、ドメインによって違います。
 
 ```mermaid
 flowchart LR
@@ -242,7 +262,7 @@ flowchart LR
 ```
 
 7 つのドメインは薄いフォールバックを作ります。id だけを持つ素のクラスをハンドルで包んだもの
-です。これがあるおかげで、何も宣言せずにバニラのコンテンツを操作できます。
+です。おかげで、何も宣言せずにゲームがもとから持つコンテンツを操作できます。
 
 ```lua
 Item.get("Wood"):give(10)                              -- no Item{ id = "Wood" } needed
@@ -251,22 +271,23 @@ Audio.get("AKE_BGM_Title"):play()
 ```
 
 薄いハンドルでも、id だけで済むことはすべてできます。`:spawn`、`:give`、`:take`、`:play` は
-いずれも id を通り、アイコン DataTable を読むドメイン（pal、item、building、skill）では
-`:iconOf()` も普段どおり解決します。できないのは宣言から来る部分です。`:mesh()` は `nil`、
-`:renderOn(actor)` は `false`、`:name()` は id にフォールバックし、ハンドラは何も走りません。
+いずれも id を通ります。アイコン DataTable（ゲームが持つアイテムや生き物のアイコン表）を読む
+ドメインでは `:iconOf()` も普段どおり解決します。対象は pal、item、building、skill です。
+薄いハンドルにできないのは、宣言から来る部分です。`:mesh()` は `nil`、`:renderOn(actor)` は
+`false`、`:name()` は id にフォールバックし、ハンドラは何も走りません。
 
 `Audio.get` だけはフォールバックにもうひとつ `soundId = id` を持たせるので、どの AkAudioEvent
-名でもそのまま再生できます。これは、音を指定しなかった定義に対して `Audio{ ... }` が適用するの
-と同じフォールバックです。
+名（ゲーム側でのサウンドの名前）でもそのまま再生できます。音を指定しなかった定義に対して
+`Audio{ ... }` が適用するのと同じフォールバックです。
 
-`Mesh.get` は代わりにエラーになります。
+`Mesh.get` は代わりに例外を投げます。
 
 ```text
 PalForge: Mesh.get("example:body"): no mesh is defined under that id
 ```
 
-`model` のないメッシュには描くものがありません。薄いフォールバックを返すと黙って何も付かず、
-見当違いの場所でバグを探すことになるので、取りこぼしはその場で投げます。
+`model` のないメッシュには描くものがありません。ですから、メッシュ id の取りこぼしは書いた
+場所でエラーになります。別の場所で黙って何も付かない、ということにはなりません。
 
 ```lua
 local log = require("palforge.utils.log").scope("mypack")
@@ -285,16 +306,16 @@ for _, item in ipairs(Item.get_all()) do
 end
 ```
 
-正直に書いておくべき点が 2 つあります。順序はスナップショットに対する `pairs` の走査なので
-安定しません。順序が必要なら結果をソートしてください。そして列挙されるのは実際に定義された
-ものだけです。ネイティブカタログは遅延読み込みなので、起動直後の `Item.get_all()` が返すのは
+覚えておくことが 2 つあります。順序はスナップショットに対する `pairs` の走査なので安定しま
+せん。順序が必要なら結果をソートしてください。そして並ぶのは実際に定義されたものだけです。
+ネイティブカタログは必要になってから読み込まれるので、起動直後の `Item.get_all()` が返すのは
 キュレーション済みの定義（`Wood`、`Berries`、`Arrow`）と自分のパックが宣言したものであって、
 ゲームのアイテムテーブルの全行ではありません。
 
 ### 一度定義し、何度でも操作する
 
 定義呼び出しは登録します。ハンドラはイベントのたびに走ります。ハンドラの中では `get` を使い、
-定義は絶対に書かないでください。
+定義は書かないでください。
 
 ```lua
 Pal{
@@ -308,14 +329,14 @@ Pal{
 }
 ```
 
-どちらの書き方でも音は鳴ります。ただし後者は、その Pal が死ぬたびに spec を検証し直し、
+どちらの書き方でも音は鳴ります。ただし後者は、その Pal が死ぬたびに設定を検査し直し、
 レジストリのエントリを上書きします。
 
-## ID: 名前空間つきとリテラル
+## ID: 自分のものと、ゲームのもの
 
 コロンを含む id はパック id で、形は `"packid:name"` です。ゲームの DataTable では対応する行の
-FName が `packid_name` になります。PalSchema の行はグローバルなので、この接頭辞がパック同士の
-衝突を防ぎます。
+FName が `packid_name` になります。PalSchema の行はすべての Mod で共有されるので、この接頭辞が
+パック同士の衝突を防ぎます。
 
 コロンのない id はリテラルなゲーム id です。`"Wood"`、`"ChickenPal"`、`"PalBoxV2"`、
 `"WorkBench"`、`"AKE_BGM_Title"` などがそれにあたります。
@@ -328,9 +349,9 @@ om.resolve("PalBoxV2")        -- "PalBoxV2"
 om.resolve("my pack:Bench")   -- nil, "invalid pack id 'my pack' (letters/digits/_ only)"
 ```
 
-名前空間つき id の 2 つの区間は、いずれも英数字かアンダースコアでなければなりません。この
-チェックが走るのは id を **解決** するときで、定義するときではありません。定義時に `id` に
-かかるのは、空でない文字列かどうかだけです。
+名前空間つき id の前後どちらの区間も、英数字かアンダースコアでなければなりません。この検査が
+走るのは id を **解決** するときで、定義するときではありません。定義時に `id` にかかるのは、
+空でない文字列かどうかだけです。
 
 解決はゲームの行名が必要になる箇所で行われ、レジストリでは行われません。
 
@@ -347,15 +368,16 @@ Building.get("example_Bench")   -- a thin fallback: nothing is registered under 
 ```
 
 <Callout type="warn">
-名前空間つき id を定義すると、その id に振る舞いとメタデータが与えられます。新しい DataTable の
-行が publish されるわけではありません。Lua だけではそれはできず、PalSchema の担当です。定義は
-存在する id、つまりバニラの id か、パックが PalSchema 経由で同梱する行に向けてください。
+名前空間つき id を定義すると、その id に振る舞いとメタデータが与えられます。ゲームに新しい
+DataTable の行が増えるわけではありません。Lua だけではそれはできず、PalSchema の担当です。
+定義は、すでに存在する id に向けてください。バニラの id か、パックが PalSchema 経由で同梱する
+行です。
 </Callout>
 
-## 定義を入れ子にする
+## メッシュを別の定義に入れ子にする
 
-メッシュは、それをまとう定義の中にインラインで書くことも、名前をつけて一度だけ宣言してそれ
-自体を渡すこともできます。どちらも同じように `core/mesh` に届きます。
+メッシュは、そのものがまとうモデルです。まとう定義の中にインラインで書くことも、名前をつけて
+一度だけ宣言してそれ自体を渡すこともできます。どちらも同じように `core/mesh` に届きます。
 
 <Tabs items={['Inline', 'Named']}>
 <Tab value="Inline">
@@ -396,8 +418,8 @@ Pal{ id = "SheepBall",  mesh = Mesh.get("example:ChickenBody") }
 Handle.__spec = function(self) return self._cls:source() end
 ```
 
-バリデータはこのメタフィールドを探し、見つかったらハンドルではなく、そこから返ってきた
-テーブルを検証します。
+検査はこのメタフィールドを探し、見つかったらハンドルではなく、そこから返ってきたテーブルを
+検査します。
 
 ```mermaid
 flowchart LR
@@ -420,16 +442,16 @@ pal:mesh().scale = 4.0
 body:source().scale     -- still 1.0
 ```
 
-2 つめ。`__spec` を持つのは `Mesh.Handle` だけです。定義済みオブジェクトを別の定義に入れ子で
-渡せるのは、いまのところメッシュだけで、`Item.Handle` や `Skill.Handle` をテーブルの位置に渡す
-仕組みはありません。
+2 つめ。`__spec` を持つハンドルは `Mesh.Handle` だけです。定義済みオブジェクトを別の定義に
+入れ子で渡せるのは、いまのところメッシュだけです。ほかのドメインの形が求められる場所には、
+素のテーブルを渡してください。
 
 <Callout type="warn">
 `Building.Spec.Mesh` は `Mesh.Spec` の `kind` のデフォルトを `"skeletal"` から `"static"` に
-差し替えたものです。デフォルトは値がないフィールドにしか効かず、名前つきの `Mesh{ ... }` は
-定義された時点で自分のデフォルトを埋め終えています。そのため建築物に入れ子にしたメッシュ
-ハンドルは `kind = "skeletal"` を持ったまま届き、建築物側の `"static"` は発動しません。建築物が
-まとうメッシュには `kind` を明示してください。
+差し替えたものです。デフォルトは書かなかったフィールドにしか効きません。名前つきの
+`Mesh{ ... }` は定義された時点で自分のデフォルトを埋め終えています。そのため建築物に入れ子に
+したメッシュハンドルは `kind = "skeletal"` を持ったまま届き、建築物側の `"static"` は発動しま
+せん。建築物がまとうメッシュには `kind` を明示してください。
 </Callout>
 
 ```lua
@@ -442,10 +464,10 @@ local BenchBody = Mesh{
 Building{ id = "WorkBench", name = "Workbench", gridCm = 100, mesh = BenchBody }
 ```
 
-## 同じ ID を再定義する
+## 同じ ID を 2 回定義する
 
 `om.register` はバケットへ直接書き込むので、同じ `(type, id)` を 2 回定義するとエントリが置き
-換わります。警告は出ず、登録の取り消しもありません。
+換わります。警告は出ず、登録を取り消すこともできません。
 
 ```lua
 local first  = Item{ id = "Wood", name = "Wood" }
@@ -465,10 +487,10 @@ Item.get("Wood"):name()   -- "Seasoned Wood" (the registry holds the second)
   同じ動きになります。`self.id` しか参照しないからです。
 - 建築物では、`core/event` がクラスごとに下ろした def をキャッシュし、クラスが変わっていれば次の
   スキャンで作り直します。すでに追跡されている構造物は生成時のクラスを保ったままで、新しい定義
-  はそれ以降に作られるインスタンスに効きます。
+  はそれ以降に設置された建築物に効きます。
 
 確実なやり方は、各 id をロード時に一度だけ定義し、それ以外の場所では `X.get` を使うことです。
-開発中にパックのファイルをホットリロードするなら、レジストリが保持するのは最後に読み込んだ版
+作業中にパックのファイルをホットリロードするなら、レジストリが保持するのは最後に読み込んだ版
 であり、ローカル変数に取っておいた古いハンドルは古いままだと考えてください。
 
 ## X.Class
@@ -504,9 +526,9 @@ Building{
 }
 ```
 
-**複数の定義で振る舞いを共有する。** メソッドはメタテーブルの連鎖で解決されます。生きた建築物
-インスタンスは自分の定義クラスへ、定義クラスは `Building.Class` へとたどるので、そこに足した
-メソッドはすべての定義とすべてのインスタンスから見えます。足す前に作られたものからも見えます。
+**複数の定義で振る舞いを共有する。** メソッドはメタテーブルの連鎖で解決されます。設置された
+建築物は自分の定義クラスへ、定義クラスは `Building.Class` へとたどるので、そこに足したメソッド
+はすべての定義とすべての建築物から見えます。足す前に作られたものからも見えます。
 
 ```lua
 function Building.Class:describe()
@@ -539,9 +561,9 @@ local Boss = Pal{
 | `UI` | `UI.Handle`、それ自体マウント可能 | 薄く何もしない要素 | マウントされたインスタンス | `UI.Class`, `Handle:new` |
 | `Player` | 呼び出し不可 | `get` なし | このドメインにイベントはなし | `character`, `coordinate`, `coordinateOffset` |
 
-`Mesh` は、定義で省略できるものも他のドメインと違います。`id` を省略できる形状は `Mesh.Spec`
-だけです。インラインのメッシュには名前をつける対象がないからです。ただし直接定義する場合は
-やはり必須です。
+`Mesh` は、定義で省略できるものも他と違います。`id` を省略できる形は `Mesh.Spec` だけです。
+インラインのメッシュには名前をつける対象がないからです。ただし直接定義する場合はやはり必須
+です。
 
 ```text
 PalForge: Mesh: field "id" is required (an unnamed mesh cannot be looked up again - write it inline as mesh = { ... } instead)
@@ -632,8 +654,8 @@ Bench:unlock()                                  -- resolves the id, unlocks the 
 local placed = #Bench:instances()               -- how many are live in the loaded world
 ```
 
-建築物のハンドラは `self` として生きたインスタンスを受け取ります。`self.state` と `self:save()`
-があるのはそのためです。どのフックが何に駆動されるかは
+建築物のハンドラは `self` として設置された建築物そのものを受け取ります。`self.state` と
+`self:save()` があるのはそのためです。どのフックが何に駆動されるかは
 [ライフサイクルのページ](/docs/concepts/lifecycle) を参照してください。
 
 ### 登録済みの内容を調べる
@@ -683,3 +705,19 @@ Pal{
   <Card title="Building" href="/docs/api/building">ハンドラが生きたインスタンスを受け取るドメイン</Card>
   <Card title="Lifecycle" href="/docs/concepts/lifecycle">実際に発火するフックと、それを駆動しているもの</Card>
 </Cards>
+
+## まとめ
+
+- 何かを作るときは、モジュールにテーブルを渡して呼び出します（`Pal{ id = "example:Boss" }`）。
+  `id` はどの種類でも必須です。
+- 呼び出すとハンドルが返ります。`:spawn`、`:give`、`:play`、`:apply` などのアクションはハンドル
+  側にあり、ハンドラは第 1 引数でそれを受け取ります。
+- あとから探すときは `X.get(id)` です。7 つのドメインは見つからないと id だけの薄いハンドルを
+  返すので、バニラのコンテンツは宣言なしで扱えます。`Mesh.get` だけは例外を投げます。
+- コロンつきの id は自分のもの（`"mypack:Bench"`）、コロンなしはゲームのもの（`"Wood"`）です。
+  定義は、すでに存在する id に振る舞いを付けます。
+- フィールドの間違いや綴りミスはハードエラーになり、フィールド名が出て、何も登録されません。
+- 各 id はロード時に一度だけ定義し、ハンドラの中では `X.get` を使います。
+
+次は [ライフサイクル](/docs/concepts/lifecycle) を読むと、どのイベントが実際にハンドラまで
+届くのかがわかります。

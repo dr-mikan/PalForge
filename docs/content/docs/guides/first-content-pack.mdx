@@ -1,45 +1,55 @@
 ---
 title: Building a content pack
-description: One walkthrough from an empty UE4SS mod folder to a beacon that fires a skill, calls a pal, pays out an item and blesses the player
+description: A walkthrough from an empty mod folder to a beacon you can place, interact with, and watch pay out
 ---
+
+## What you can do after this page
+
+- Put your own mod folder into Palworld and watch it load
+- Make a structure in the build menu do something when you interact with it
+- Play a sound, hand out a buff, call a pal and pay out an item from that one interaction
+- Give every structure you place a counter that is still there the next time you play
+- Read the game's log to find out why something did not happen
 
 ## What you are building
 
-A pack called **BeaconPack**. It claims one structure in the build menu — a beacon — and
-gives it behaviour:
+A pack called **BeaconPack**. It takes over one structure in the build menu — a beacon — and
+gives it something to do:
 
 - interacting with the beacon fires a skill with a 30 second cooldown,
-- the skill plays a sound on the interacting character,
-- applies a 12 second stacking effect to them,
+- the skill plays a sound on the character who interacted,
+- gives them a 12 second buff that can stack up to three times,
 - and calls a guardian pal at the beacon's position,
 - the beacon itself pays out an item, counts its uses, spends a charge, and saves that
   count into the world file,
-- a heartbeat handler recharges it while you are away from it.
+- a repeating handler recharges it while you are away from it.
 
-That touches Building, Skill, Audio, Effect, Pal and Item, and the whole thing is a
-separate UE4SS mod that reuses the PalForge already loaded in the session.
+That is Building, Skill, Audio, Effect, Pal and Item in one pack, and the pack is its own
+mod folder that reuses the PalForge already loaded in the session.
 
 Before you start:
 
-- PalForge is installed and loading — `ue4ss/Mods/PalForge/Scripts/main.lua` runs, and the
+- PalForge is installed and loading. `ue4ss/Mods/PalForge/Scripts/main.lua` runs, and the
   UE4SS console shows `[PalForge.main][info] ready`.
-- `Pal.Handle:spawn` goes through `UPalCheatManager`, so calling a pal needs the cheat
-  manager to exist this session (the CheatManagerEnabler mod). Without it the spawn logs a
-  warning and returns `false`; everything else in the pack still runs.
-- `Item.Handle:give` does not need the cheat manager — it goes through the inventory's own
-  `AddItem_ServerInternal`.
+- Calling a pal goes through `UPalCheatManager`, the game's own admin object. PalForge finds
+  one, or builds one on the player controller itself, so you only need to be in a world. With
+  no controller yet the spawn logs a warning and returns `false`, and everything else in the
+  pack still runs.
+- Handing out an item needs none of that. `Item.Handle:give` goes through the inventory's own
+  `AddItem_ServerInternal` call.
 
 <Callout type="info">
-Lua alone cannot publish a new DataTable row. Defining `Building{ id = "Altar" }` gives an
-**existing** structure behaviour and metadata; publishing a brand new build object, item or
-creature row is PalSchema's job. The pack below therefore claims real game ids, and the
-section on [moving to your own ids](#variations) shows the one line that changes when a row
-of your own exists.
+The beacon below takes over structures, items and creatures the game already has. Lua can
+give an existing id behaviour and metadata, but it cannot add a brand new row to the game's
+data tables — publishing a new build object, item or creature is PalSchema's job. The section
+on [moving to your own ids](#variations) shows the one line that changes once a row of your
+own exists.
 </Callout>
 
 ## How a pack is laid out
 
-A pack is its own UE4SS mod folder with its own `Scripts/main.lua`, exactly like PalForge:
+A pack is its own UE4SS mod folder with its own `Scripts/main.lua`, laid out the same way
+PalForge is:
 
 ```text
 ue4ss/Mods/BeaconPack/
@@ -56,11 +66,11 @@ ue4ss/Mods/BeaconPack/
             buildings.lua    <- the beacon itself
 ```
 
-Whether a mod folder is switched on by an `enabled.txt` inside it or by an entry in
-`mods.txt` is UE4SS's business, not PalForge's. What matters here is the shape below it:
-one file per domain, plus an `init.lua` that requires them.
+Switch the mod folder on the way your UE4SS install expects — an `enabled.txt` inside the
+folder, or a line in `mods.txt`. What matters below that is the shape: one file per kind of
+content, plus an `init.lua` that requires them all.
 
-PalForge's `main.lua` finishes by publishing itself:
+PalForge finishes loading by putting itself on a global called `_G.PalForge`:
 
 ```lua
 _G.PalForge = {
@@ -72,9 +82,9 @@ _G.PalForge = {
 }
 ```
 
-Your pack reads that table. It is the whole contract between the two mods: `api` is what you
-write content against, `utils.log` is the logger, `core.event` is the bus, and `native` is
-Palworld's own content as catalogs.
+Your pack reads that table, and it is everything the pack needs from PalForge. `api` is what
+you write content against, `utils.log` prints to the game's console, `core.event` is the event
+bus, and `native` is Palworld's own content listed out as catalogs you can look ids up in.
 
 ```mermaid
 flowchart TD
@@ -95,8 +105,8 @@ flowchart TD
   J --> K
 ```
 
-There is no registration step. Every `X{ ... }` call writes its definition into
-`object_manager` as it runs, so **requiring a module is registering its content**.
+Requiring a module registers its content. Every `X{ ... }` call inside it runs as the file
+loads and writes its definition into PalForge, so **the require is the registration**.
 
 ## Build the pack
 
@@ -107,8 +117,7 @@ There is no registration step. Every `X{ ... }` call writes its definition into
 ### Create the mod folder
 
 Make `ue4ss/Mods/BeaconPack/Scripts/beacon/` and switch the mod on the way your UE4SS
-install expects. Nothing else is needed: a pack has no manifest, no descriptor and no
-build step.
+install expects. That is the whole setup: nothing to generate, nothing to build.
 
 </Step>
 
@@ -116,8 +125,9 @@ build step.
 
 ### Write the entry point
 
-`main.lua` does three things: put its own `Scripts` directory on `package.path`, check that
-PalForge is there, and require the pack. Keep it thin — content belongs in the modules.
+`main.lua` does three things. It puts its own `Scripts` directory on `package.path` so
+`require("beacon.audio")` finds your files, checks that PalForge loaded, and requires the
+pack. Keep it short — the content belongs in the modules.
 
 ```lua title="ue4ss/Mods/BeaconPack/Scripts/main.lua"
 -- BeaconPack — a PalForge content pack, running as its own UE4SS Lua mod.
@@ -148,15 +158,16 @@ else
 end
 ```
 
-`forge.utils.log.scope("beacon")` returns a table with `info` / `warn` / `err`, each taking
-**one** message. Every line it prints starts with `[PalForge.beacon]` followed by the level
-it was logged at — `[PalForge.beacon][info]`, `[PalForge.beacon][warn]`,
-`[PalForge.beacon][err]` — so the pack's output filters the same way the framework's does.
+`forge.utils.log.scope("beacon")` gives you a logger with `info`, `warn` and `err`. Each one
+takes a single message. Every line it prints starts with `[PalForge.beacon]` and the level —
+`[PalForge.beacon][info]`, `[PalForge.beacon][warn]`, `[PalForge.beacon][err]` — so you can
+filter your pack's output the same way you filter PalForge's.
 
 <Callout type="warn">
-`_G.PalForge` is a global in the Lua state PalForge runs in. A pack that reads it has to be
-loaded into that same state and after PalForge, which is why the guard above bails instead
-of erroring. If it does fire, check the load order of the two mod folders.
+`_G.PalForge` exists only after PalForge itself has loaded, and only inside the same Lua
+state. Your pack has to load into that state, after it. The guard above returns quietly
+rather than erroring, so if you see that message, check the order UE4SS loads the two mod
+folders in.
 </Callout>
 
 </Step>
@@ -165,8 +176,8 @@ of erroring. If it does fire, check the load order of the two mod folders.
 
 ### Write the pack index
 
-One require per domain, in dependency order: the skill uses the sound, the blessing and the
-guardian, and the building uses the skill and the reward.
+One require per kind of content, in dependency order: the skill uses the sound, the buff and
+the guardian, and the building uses the skill and the reward.
 
 ```lua title="Scripts/beacon/init.lua"
 -- beacon — the pack's modules, one per domain, required in dependency order.
@@ -190,8 +201,9 @@ return M
 
 ### Declare the sounds
 
-`Audio` has no lifecycle: you play it. A definition names a Wwise `AkAudioEvent` twice —
-`soundPath` is the route that actually plays, `soundId` is the SoundID fallback.
+You play a sound when you want it; nothing plays it for you. A definition names an
+`AkAudioEvent` — one of the game's own sound events — in two ways. `soundPath` is the asset
+path that actually plays, and `soundId` is the fallback lookup by name.
 
 ```lua title="Scripts/beacon/audio.lua"
 -- beacon.audio — the sounds this pack plays.
@@ -219,13 +231,15 @@ if not M.Reward then log.warn("AKE_CampLevelUp is not in the AkAudioEvent catalo
 return M
 ```
 
-`Audio.se` and `Audio.bgm` are the same constructor with `kind` pinned; `kind` is
-descriptive, because the native play route is the same call for music and effects.
+`Audio.se` and `Audio.bgm` fill in `kind` for you. `kind` is a label for your own benefit:
+music and sound effects both play through the same call.
 
 <Callout type="warn">
-Two seams in this domain: `Handle:setVolume` is not implemented and returns `false`, and a
-`soundFile` (your own audio file) resolves but no-ops — no `USoundWave` loader is confirmed.
-`Handle:stop` is not per sound either; it stops everything playing on that actor.
+Two things here do not work yet, so plan around them. `Handle:setVolume` returns `false` and
+changes nothing — pick a sound event that is already the loudness you want. A `soundFile`
+(your own audio file) is accepted and then does nothing, so use a game `AkAudioEvent` from
+the catalog instead. `Handle:stop` is not per sound either: it stops everything playing on
+that actor.
 </Callout>
 
 </Step>
@@ -234,8 +248,8 @@ Two seams in this domain: `Handle:setVolume` is not implemented and returns `fal
 
 ### Declare the effect
 
-An effect's schedule is real. `:apply(target)` starts a live application that PalForge
-advances off the shared 500 ms heartbeat until it expires or you remove it.
+An effect keeps its own schedule. `:apply(target)` starts a live application, and PalForge
+advances it on a shared 500 ms heartbeat until it runs out or you remove it.
 
 ```lua title="Scripts/beacon/effects.lua"
 -- beacon.effects — the blessing the beacon hands out.
@@ -271,7 +285,7 @@ M.Blessing = Effect{
             log.info(string.format("blessing tick at %.1fs", ctx.elapsed))
         end,
         onExpire = function(effect, target, ctx)
-            -- ctx.reason is "duration", "removed" or "target_gone".
+            -- ctx.reason is "duration", "removed", "target_gone" or "world_left".
             log.info("blessing ended: " .. tostring(ctx.reason))
         end,
     },
@@ -281,14 +295,15 @@ return M
 ```
 
 The first argument of an effect handler is this effect's **handle**, so `:remove`,
-`:timeLeft` and `:stacksOn` are right there. The context you pass to `:apply(target, ctx)`
-is readable in `onApply` and `onStack`; `onTick` and `onExpire` get the runtime's own
-context only (`effect`, `elapsed`, `stacks`, and `reason` on expiry).
+`:timeLeft` and `:stacksOn` are right there. Whatever you pass as `:apply(target, ctx)` is
+readable in `onApply` and `onStack`. `onTick` and `onExpire` get the runtime's own context
+instead: `effect`, `elapsed`, `stacks`, and `reason` when it ends.
 
 <Callout type="warn">
-A PalForge effect does not toggle the game's own ailment icons. `EPalStatusEffectType` is a
-native enum and no call to apply one is confirmed, so `nativeStatus` is metadata. Whatever
-the effect should *do* has to happen in your handlers.
+A PalForge effect does not switch on the game's own status icons. `EPalStatusEffectType` is
+one of the game's internal lists, and no call to apply one is confirmed, so `nativeStatus` is
+a label you can read back rather than something that acts. Put whatever the effect should
+actually do into `onTick`.
 </Callout>
 
 </Step>
@@ -297,9 +312,9 @@ the effect should *do* has to happen in your handlers.
 
 ### Declare the guardian
 
-`"Kitsunebi"` is a real game CharacterID, so this definition attaches behaviour to a
-creature that already exists. No mesh is declared: the pal already has its own model, and
-`mesh` is what you use to make a pawn wear a different one.
+`"Kitsunebi"` is a creature id the game already has, so this definition gives an existing
+creature behaviour. Leave `mesh` out: the pal already has its own model, and you add `mesh`
+only when you want to put a different one on it.
 
 ```lua title="Scripts/beacon/pals.lua"
 -- beacon.pals — the guardian the beacon calls.
@@ -334,9 +349,15 @@ M.Guardian = Pal{
 return M
 ```
 
-Dispatch finds this definition by the spawned pawn's blueprint class name: `BP_Kitsunebi_C`
-becomes `Kitsunebi`, which is looked up in the registry. A vanilla pal with no PalForge
-definition resolves to nothing and the dispatch no-ops.
+PalForge finds this definition from the spawned creature's blueprint class name:
+`BP_Kitsunebi_C` becomes `Kitsunebi`, which it looks up. A vanilla pal with no definition of
+its own matches nothing, and the handlers are skipped.
+
+A pal can also declare `onTick`. PalForge sweeps the world for live pals every three seconds
+and calls it once per creature, with `ctx.actor` set to that creature, `ctx.count` the
+heartbeat number and `ctx.now` the clock. One handle serves every creature of the same id, so
+key anything per-creature by `ctx.actor` yourself. Change the pace with
+`require("palforge.core.event").PAL_SCAN_MS = 5000`, or set it to `0` to switch the sweep off.
 
 </Step>
 
@@ -379,11 +400,11 @@ return M
 ```
 
 <Callout type="warn">
-`onObtain` is driven by the game's own "obtained item" log
+`onObtain` follows the game's own "you obtained an item" log
 (`PalPlayerState:AddItemGetLog_ToClient`), which fires on pickups, loot and rewards. An
-inventory add that does not surface a get log is not covered, so do not assume your own
-`:give` call will come back to you as an `onObtain`. `onCraft` and `onDiscard` are
-declarable but nothing emits their channels yet.
+inventory add that does not show up in that log is not covered, so do not count on your own
+`:give` call coming back to you as an `onObtain` — log it where you call it instead.
+`onCraft` and `onDiscard` can be declared, but nothing sends them yet.
 </Callout>
 
 </Step>
@@ -392,9 +413,9 @@ declarable but nothing emits their channels yet.
 
 ### Declare the signal
 
-There is no native source for skills: nothing in the game fires one for you. What works is
-manual invocation, and `:activate` enforces the cooldown in Lua — which is exactly the gate
-the beacon needs.
+Nothing in the game fires a skill handler for you. You fire it yourself. `:activate(owner)`
+runs `onActivate` right now, and refuses while the skill is still cooling down — which is
+exactly the gate the beacon wants.
 
 ```lua title="Scripts/beacon/skills.lua"
 -- beacon.skills — the signal the beacon fires. :activate runs the handler now and refuses
@@ -429,9 +450,9 @@ M.Flare = Skill{
 return M
 ```
 
-The cooldown is tracked per owner and per skill id, so two players cool down independently.
-It is not per beacon: the owner here is `ctx.player`, so one player's second beacon is still
-blocked until the 30 seconds are up.
+The cooldown is kept per owner and per skill id, so two players cool down independently. It
+is not kept per beacon: the owner here is `ctx.player`, so the same player's second beacon
+stays blocked until the 30 seconds are up.
 
 </Step>
 
@@ -439,9 +460,9 @@ blocked until the 30 seconds are up.
 
 ### Declare the beacon
 
-Buildings are the one domain with a real per-structure runtime. `self` in every handler
-below is the **live instance**: `self.actor` is the placed actor, `self.pos` its world
-position, `self.state` your persisted table, `self.key` its stable registry key, and
+Every structure you place gets its own live object, and that object is `self` in the handlers
+below. `self.actor` is the placed actor, `self.pos` its position in the world, `self.state` a
+table of your own that gets saved, `self.key` its stable name in the save file, and
 `self:save()` writes the state to the world file.
 
 ```lua title="Scripts/beacon/buildings.lua"
@@ -521,10 +542,10 @@ return M
 
 Two details that are easy to miss:
 
-- `onTick` only runs for a definition that actually declares it. PalForge compares the
-  class against the inert base and ticks nothing else.
-- `tickInterval` counts heartbeats, not seconds. The heartbeat is 500 ms, so `4` is about
-  two seconds.
+- `onTick` runs only for a definition that writes one. A building with no `onTick` is never
+  put on the tick list at all.
+- `tickInterval` counts heartbeats, not seconds. A heartbeat is 500 ms, so `4` is about two
+  seconds.
 
 </Step>
 
@@ -532,8 +553,8 @@ Two details that are easy to miss:
 
 ### Load it and watch the log
 
-Start the game with both mods enabled, load a world, place an Altar and interact with it.
-The UE4SS console tells the whole story:
+Start the game with both mods enabled, load a world, place an Altar and interact with it. The
+UE4SS console tells the whole story:
 
 ```text
 [PalForge.main][info] PalForge v0.3.0 starting (dev=true)
@@ -544,16 +565,16 @@ The UE4SS console tells the whole story:
 [PalForge.beacon.buildings][info] beacon placed at 12345/-6789/420
 [PalForge.beacon.buildings][info] beacon tracked fresh: 0 use(s), 3 charge(s)
 [PalForge.beacon.effects][info] blessing applied by Altar@123,-68,4
-[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) @ (12345,-6789,420) via SpawnMonster+teleport
+[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) accepted; relocation to (12345,-6789,420) scheduled (SpawnMonster+teleport)
 [PalForge.beacon.skills][info] flare fired from Altar@123,-68,4
 [PalForge.items][info] give Ruby x3
 [PalForge.beacon.effects][info] blessing tick at 3.0s
 ```
 
-The registered-class count and the instance key are whatever your session produces; the
-order of the lines is not. `onActivate` runs the sound, the effect and the spawn before it
-logs its own line, so the blessing and the spawn are reported first — and `give Ruby x3`
-only after `:activate` has returned.
+The registered-class count and the instance key are whatever your session produces. The order
+of the lines is not. `onActivate` runs the sound, the effect and the spawn before it logs its
+own line, so the blessing and the spawn are reported first — and `give Ruby x3` only after
+`:activate` has returned.
 
 </Step>
 
@@ -561,10 +582,11 @@ only after `:activate` has returned.
 
 ## What happens at runtime
 
-Placing the beacon is not one event. A `RequestBuild_ToServer` hook records the intent
-before the actor exists, and a scan running on the same 500 ms heartbeat finds the real
-actor afterwards, creates the instance, persists it, and attaches any declared mesh on a
-*later* pass — attaching one the frame a structure is placed crashes the game.
+Placing the beacon is not one single event. The game announces the placement before the actor
+exists, through a `RequestBuild_ToServer` hook, and a scan running on the same 500 ms
+heartbeat finds the real actor afterwards, creates the live object, saves it, and attaches any
+declared mesh on a *later* pass. Attaching one the frame a structure is placed crashes the
+game, which is why the mesh waits.
 
 ```mermaid
 sequenceDiagram
@@ -578,13 +600,13 @@ sequenceDiagram
   S->>I: attach the mesh on a later pass
 ```
 
-A placed structure has no stable id of its own, so an instance is keyed by its build id plus
-its quantized cell — `Altar@123,-68,4` for a beacon with `gridCm = 100`. That key is
-`self.key`, and it is what the saved record is stored under.
+A placed structure carries no id of its own, so PalForge names each one by its build id plus
+its rounded-off position — `Altar@123,-68,4` for a beacon with `gridCm = 100`. That name is
+`self.key`, and the saved record is stored under it.
 
-Interaction is the short path. An `OnBeginInteractBuilding` hook debounces repeats for one
-second, emits `building.interact`, and dispatch resolves the live instance by its actor
-before calling `onRightClick` on it.
+Interaction is the short path. An `OnBeginInteractBuilding` hook ignores repeats within one
+second, sends `building.interact`, and PalForge finds the live object from the actor before
+calling its `onRightClick`.
 
 ```mermaid
 flowchart LR
@@ -599,62 +621,71 @@ flowchart LR
   D --> J["instance save"]
 ```
 
-The rest of the beacon's life runs on the same heartbeat and the world gate:
+The rest of the beacon's life runs on the same heartbeat and the same world gate:
 
-- **World ready.** Five consecutive one-second polls that find a valid `PalPlayerCharacter`
-  set the world ready, emit `world.ready`, and call `onWorldReady` on every live instance.
-  Until then the building scan does nothing, which is what keeps it away from the load storm
-  — and which is also why the instance set is still empty at that moment, so nothing
-  receives `onWorldReady`.
-- **Tick.** `LoopAsync(500)` emits `tick`. Every live instance whose class declares `onTick`
-  is called, subject to its `tickInterval`. If a handler raises five times, that instance's
-  `onTick` is disabled and a warning is logged; the rest keep running.
-- **Removal.** An instance the scan misses six times in a row emits `building.remove` — so
-  `onRemove` still sees the instance — and is then dropped along with its saved record.
-- **World left.** When the player pawn goes invalid, `world.left` is emitted, `onWorldLeft`
-  runs on every live instance, the world file is flushed, and the live instances are
-  dropped. Saved records survive, which is what `onLoad` reconstructs from next time.
+- **World ready.** Five one-second polls in a row that find a valid `PalPlayerCharacter` open
+  the gate, and the first scan that finishes afterwards sends `world.ready` and calls
+  `onWorldReady` on every live structure. Until the gate opens the building scan does nothing,
+  which keeps it clear of the load storm.
+- **Tick.** `LoopAsync(500)` sends `tick`. Every live structure whose definition declares
+  `onTick` is called, subject to its `tickInterval`. If a handler raises five times, that
+  structure's `onTick` is switched off and a warning is logged; the rest keep running.
+- **Removal.** A structure the scan misses six times in a row sends `building.remove` — so
+  `onRemove` still sees it — and is then dropped along with its saved record.
+- **World left.** When the player pawn goes invalid, `world.left` is sent, `onWorldLeft` runs
+  on every live structure, the world file is written out, and the live objects are dropped.
+  The saved records survive, and that is what `onLoad` restores from next time.
 
-State persistence has two entry points. `self:save()` marks the instance dirty and writes
-the world file now. `self:setDirty()` only marks it, which is what you want from a handler
-that runs twice a second — the write happens on the next `save()` or at world-left.
+There are two ways to save state. `self:save()` marks the structure changed and writes the
+world file now. `self:setDirty()` only marks it, which is what you want from a handler that
+runs twice a second — the write happens on the next `save()` or when the world unloads.
 
-Definitions registered after startup are fine. The building runtime refreshes its
-definitions before every scan and before recording a placement intent, so a pack that loads
-minutes after PalForge still gets its structures tracked.
+Definitions registered after startup are fine. The building runtime re-reads its definitions
+before every scan and before recording a placement, so a pack that loads minutes after
+PalForge still gets its structures tracked.
 
 ## What the game drives, and what you drive
 
-Be honest with yourself about this before you design around a hook.
+Check this before you design around a handler.
 
-| Domain | Fires by itself | You call it |
+| Domain | The game calls it | You call it |
 | --- | --- | --- |
-| Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
-| Pal | `onCaptured`, `onDamaged`, `onDeath`, `onSpawned` | `:spawn()`, `:renderOn(actor)` |
-| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()` |
-| Effect | `onApply`, `onTick`, `onStack`, `onExpire`, on PalForge's own schedule | `:apply()`, `:remove()`, `:isActive()`, `:timeLeft()` |
+| Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
+| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`, `:renderOn(actor)`, `:skillsOf()` |
+| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()`, `:recipeOf()` |
+| Effect | `onApply`, `onTick`, `onStack`, `onExpire`, on PalForge's own schedule | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
 | Skill | nothing | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()` |
 | Audio | nothing | `:play()`, `:stop()` |
 
-Declarable but never fired today, because no native source emits their channels:
-`Building.onBuild` / `onLeftClick` / `onBreak`, `Pal.onTick`, `Item.onCraft` / `onDiscard`.
-They stay declarable so your pack does not have to change when a source appears.
+Four handlers can be declared but never run yet, because nothing in the game announces them:
+`Building.onLeftClick`, `Building.onBreak`, `Item.onCraft` and `Item.onDiscard`. Use
+`onRightClick` and `onRemove` for a structure, and `onObtain` and `onUse` for an item. They
+stay declarable so your pack does not have to change if a source turns up.
 
-`Building.onWorldReady` is its own case: `world.ready` is emitted and dispatched, but the
-scan that creates instances is gated on the same flag and has not run yet, so the dispatch
-walks an empty set. Put the work in `onLoad` instead — `ctx.reconstructed` tells you the
-instance came back from the save — or subscribe to the channel yourself with
-`event.on("world.ready", fn)`.
+`Building.onBuild` runs when a structure finishes building, up to one scan before its live
+object exists. It is the one building handler whose `self` is the definition rather than the
+live object, so `self.actor`, `self.pos`, `self.state` and `self:save()` are not there —
+`ctx.buildId` and `ctx.model` are. PalForge starts listening for it only once the world has
+loaded, because the same signal fires for every structure already standing when a save opens.
+`onPlace` stays the safe placement handler; try `onBuild` in a throwaway world first.
 
-`Pal.onSpawned` is wired to `BroadcastOnCompleteInitializeParameter`, which is a candidate
-hook rather than a confirmed one. Treat it as best effort.
+`Building.onWorldReady` is a one-shot world-load moment, not a per-structure one.
+`world.ready` is sent by the first scan that finishes after the world opens, so the structures
+near the player are already tracked and do get it — but anything that streams in on a later
+scan misses it. Per-structure startup work belongs in `onLoad`, where `ctx.reconstructed`
+tells you the structure came back from the save. You can also subscribe to the channel
+yourself with `event.on("world.ready", fn)`.
+
+`Pal.onSpawned` is wired to `BroadcastOnCompleteInitializeParameter`, a candidate hook rather
+than a confirmed one, and PalForge arms it only after the world has loaded. Treat it as best
+effort and keep the handler safe to run twice.
 
 ## Variations
 
 ### Give the beacon its own mesh
 
-A mesh is a domain of its own, so you can declare one once and let several definitions wear
-it. Add a module:
+A mesh is content in its own right, so you can declare one once and let several definitions
+wear it. Add a module:
 
 ```lua title="Scripts/beacon/meshes.lua"
 -- beacon.meshes — named visuals, so a model is declared once and reused by id.
@@ -677,9 +708,9 @@ return M
 
 Then in `beacon/buildings.lua`, require it at the top
 (`local meshes = require("beacon.meshes")`) and pass the handle as the definition's `mesh`
-(`mesh = meshes.Beacon,` next to `gridCm`). A defined mesh nests as itself because its
-metatable carries the declaration the validator reads, so `mesh = meshes.Beacon` and an
-inline `mesh = { kind = "static", model = "..." }` are validated identically.
+(`mesh = meshes.Beacon,` next to `gridCm`). You can pass a mesh handle or write the mesh out
+inline — `mesh = meshes.Beacon` and `mesh = { kind = "static", model = "..." }` are checked
+exactly the same way.
 
 Once a mesh is attached, `self.color` and `self:update()` re-tint it from a handler:
 
@@ -692,37 +723,37 @@ onTick = function(self, ctx)
 end,
 ```
 
-`update()` is a safe no-op when the actor has no mesh PalForge attached, so a tint on a
+`update()` does nothing, safely, on an actor with no PalForge mesh attached, so a tint on a
 mesh-less definition changes nothing rather than failing.
 
 ### Move to your own ids
 
-A namespaced id `"beacon:Beacon"` resolves to the DataTable row name `beacon_Beacon`.
+An id with a colon in it, `"beacon:Beacon"`, becomes the data table row name `beacon_Beacon`.
 Once PalSchema publishes that row, the pack changes in one place:
 
 ```lua
 M.Beacon = Building{
-    id   = "beacon:Beacon",           -- was "Altar"
+    id   = "beacon:Beacon",           -- your own row instead of "Altar"
     name = "Signal Beacon",
     -- ... everything else identical
 }
 ```
 
-Modded building technologies get a `DT_TechnologyRecipeUnlock` row named after the resolved
-id, and `Handle:unlock()` unlocks exactly that row so the structure shows up in the build
-menu:
+A modded building's technology gets a `DT_TechnologyRecipeUnlock` row named after the
+resolved id, and `Handle:unlock()` unlocks exactly that row so the structure shows up in the
+build menu:
 
 ```lua
 _G.PalForge.api.Building.get("beacon:Beacon"):unlock()
 ```
 
-That call goes through `PalCheatManager`, so it needs the cheat manager available this
-session.
+That call needs `PalCheatManager` to already exist in the session, so it wants the
+CheatManagerEnabler mod.
 
 ### Add a debug module
 
-The event bus is public, which makes a diagnostics module a few lines. Subscribing costs
-nothing and every channel exists before anything emits, so subscribe-before-emit is safe.
+The event bus is yours to use, which makes a diagnostics module a few lines. Subscribing costs
+nothing, and every channel exists before anything is sent on it, so subscribing early is safe.
 
 ```lua title="Scripts/beacon/debug.lua"
 -- beacon.debug — diagnostics for the pack. Require it from init.lua while developing.
@@ -756,13 +787,13 @@ end)
 return M
 ```
 
-`event.every(ms, fn)` is quantized to the 500 ms heartbeat, and every subscription returns
-an object with `:unsubscribe()`.
+`event.every(ms, fn)` rounds to the 500 ms heartbeat, and every subscription gives you back an
+object with `:unsubscribe()`.
 
 ## When something does not fire
 
-**A define call errors.** Validation is strict and every problem is a hard error, so the
-call never half succeeds. A typo:
+**A define call errors.** Every problem is a hard error, so the call never half succeeds. Read
+the message — it usually contains the whole answer. A typo in a field name:
 
 ```text
 PalForge: Building: unknown field "tickinterval" (did you mean "tickInterval"?). Valid fields: id, name, description, gridCm, buildIds, tickInterval, mesh, material, color, texture, icon, state, events, data
@@ -774,7 +805,7 @@ A typo inside `events`, where the nested shape is named so you know what to go a
 PalForge: Building: field "events" (Building.Spec.Events): unknown field "onRightclick" (did you mean "onRightClick"?). Valid fields: onPlace, onLoad, onRightClick, onRemove, onTick, onWorldReady, onWorldLeft, onBuild, onLeftClick, onBreak
 ```
 
-A missing required field, with the field's own documentation as the explanation:
+A missing required field, with that field's own documentation as the explanation:
 
 ```text
 PalForge: Building: field "id" is required (build id: a game BuildObjectId ("PalBoxV2") or "pack:name")
@@ -788,61 +819,81 @@ print(schema.help("Building.Spec"))        -- every field, type, default and mea
 print(schema.help("Building.Spec.Events"))
 ```
 
-**Nothing happens when you interact.** Check `[PalForge.event][info] world ready` first —
-the building runtime is gated on it. Then confirm the instance exists:
+**Nothing happens when you interact.** Look for `[PalForge.event][info] world ready` first —
+the building runtime waits for it. Then check that the structure is being tracked:
 `#Building.get("Altar"):instances()`. An empty list means the scan has not matched the actor
 to your definition, usually because the id in `Building{ id = ... }` is not the id the game
 uses for that structure.
 
-**The pal does not appear.** With no cheat manager the coordinate spawn logs
-`spawn.palAt: no PalCheatManager (CheatManagerEnabler mod missing this session?)` and
-returns `false`. A `:spawn()` without an `at` reports the same thing as `spawn.pal:`.
+**The pal does not appear.** A coordinate spawn needs a player controller in the session.
+Without one it logs
+`spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`
+and returns `false`; a `:spawn()` with no `at` reports the same thing as `spawn.pal:`. A
+`true` means the spawn was accepted and the move to your coordinate was scheduled — not that
+a pal is standing there yet. The rest is reported in the log.
 
-**The skill never fires twice.** That is `cooldown` doing its job. `:activate` returns
-`false` while cooling down — it also returns `false` for a passive skill, and if your own
-handler raised.
+**The skill never fires twice.** That is `cooldown` doing its job. `:activate` returns `false`
+while cooling down. It also returns `false` for a skill whose `kind` is `"passive"`, and if
+your own handler raised.
 
-**The effect ticks but nothing changes.** Effects run their schedule, not the game's status
-system. Whatever should happen belongs in `onTick`.
+**The effect ticks but nothing changes.** An effect runs its own schedule, not the game's
+status system. Whatever should happen belongs in `onTick`.
 
-**Two definitions, one id.** Registering the same `(type, id)` twice replaces the earlier
-class, so the last definition to run wins. Define at load, and reach for `X.get(id)` inside
-handlers rather than redefining on every event.
+**Two definitions, one id.** Registering the same id twice for the same kind of content
+replaces the earlier one, so the last definition to run wins. Define at load, and reach for
+`X.get(id)` inside handlers rather than redefining on every event.
 
 ## Where to go next
 
 <Cards>
   <Card title="Building" href="/docs/api/building">
-    The instance, its state, the scan, and every field of the definition.
+    The live object, its state, the scan, and every field of the definition.
   </Card>
   <Card title="Lifecycle" href="/docs/concepts/lifecycle">
     Channels, sources and dispatch, end to end.
   </Card>
   <Card title="Skill" href="/docs/api/skill">
-    Manual activation, cooldowns and the missing native source.
+    Firing a skill yourself, and how the cooldown is kept.
   </Card>
   <Card title="Effect" href="/docs/api/effect">
-    Duration, interval, stacking, and what the runtime does each heartbeat.
+    Duration, interval, stacking, and what runs each heartbeat.
   </Card>
   <Card title="Pal" href="/docs/api/pal">
-    Spawning, meshes and which pal hooks are live.
+    Spawning, meshes and every pal handler.
   </Card>
   <Card title="Item" href="/docs/api/item">
     Give, take, recipes and the two live item events.
   </Card>
   <Card title="Audio" href="/docs/api/audio">
-    The native play route, the catalog, and the seams.
+    How a sound plays, the catalog, and what is missing.
   </Card>
   <Card title="Mesh" href="/docs/api/mesh">
     Named visuals, backends and material overrides.
   </Card>
   <Card title="Definitions" href="/docs/concepts/definitions">
-    Why every domain is one callable module with the same three entry points.
+    The three entry points every kind of content shares.
   </Card>
   <Card title="Schema" href="/docs/concepts/schema">
-    How specs are declared, validated and read back.
+    How field shapes are declared, checked and read back.
   </Card>
   <Card title="Editor setup" href="/docs/concepts/editor-setup">
     Completion for every field, generated from the specs.
   </Card>
 </Cards>
+
+## Summary
+
+- A pack is its own mod folder with a `Scripts/main.lua`. It reads `_G.PalForge`, requires its
+  own modules, and each `X{ ... }` call inside them registers that content as the file loads.
+- `id` is the only required field anywhere. An id with a colon (`"beacon:Flare"`) is your own;
+  an id without one (`"Altar"`, `"Ruby"`, `"Kitsunebi"`) is content the game already has.
+- A placed building is the one thing that gets its own live object. `self.state` is your table
+  and `self:save()` writes it to the world file, so it is still there next session.
+- Buildings, pals and items get their handlers called by the game. You fire skills and sounds
+  yourself, and effects run on PalForge's own schedule.
+- `tickInterval` counts 500 ms heartbeats, not seconds.
+- When a definition is wrong the call stops with a message naming the field and suggesting the
+  right one, and `schema.help("Building.Spec")` prints the same list at runtime.
+
+Next, read [Building](/docs/api/building) for every field a structure can carry and everything
+its live object can do.

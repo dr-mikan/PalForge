@@ -1,10 +1,19 @@
 ---
 title: Player
-description: The local player character and its world coordinate
+description: Find out where the player is standing, so you can put things near them
 ---
 
-`Player` answers two questions: who the local player pawn is, and where it stands.
-Three functions, no state, nothing to define.
+## What you can do after this page
+
+- Find out where the player is standing right now
+- Drop a pal at the player's feet, or a few metres away
+- Place several things in a ring around the player
+- Measure how far the player is from a building
+- Hold off until the player is really in a world before you do any of it
+
+## Where the player is
+
+`Player` gives you three functions. Call them whenever you need to know where the player is.
 
 ```lua
 local me = Player.character()                 -- APalPlayerCharacter, or nil
@@ -12,24 +21,8 @@ local at = Player.coordinate()                -- a Coord in centimetres, or nil
 local up = Player.coordinateOffset(0, 0, 200) -- the same point, 2 m higher, or nil
 ```
 
-## Not a callable domain
-
-Every other module is *called* to define content — `Pal{ ... }`, `Item{ ... }`,
-`Building{ ... }`. `Player` is not. It is a plain table of three functions with no
-`__call` metamethod, no registry entry and no handle.
-
-```lua
-local api = require("palforge.api")
-
-api.Player.coordinate()   -- namespaced access
-Player.coordinate()       -- the installed global; the same table
-
-Player{ id = "me" }       -- Lua error: Player is a table you index, not one you call
-Player.get("me")          -- Lua error: Player.get does not exist
-```
-
-There is no `Player.get`, no `Player.get_all`, no `Player.Class` and no `Player.Spec`.
-The whole surface is:
+All three hand back `nil` when the player is not in a world, so check the value before you
+use it.
 
 | Function | Returns | `nil` when |
 | --- | --- | --- |
@@ -37,15 +30,25 @@ The whole surface is:
 | `Player.coordinate()` | a `Coord` — `x`, `y`, `z` in centimetres | no pawn, or the location read failed |
 | `Player.coordinateOffset(dx, dy, dz)` | a `Coord`, offset from the one above | the same conditions as `coordinate()` |
 
-The one shape it owns is `Coord`, which is not a domain either — see
+You can reach the functions two ways. Both are the same table:
+
+```lua
+local api = require("palforge.api")
+
+api.Player.coordinate()   -- namespaced access
+Player.coordinate()       -- the installed global; the same table
+```
+
+A position comes back as a `Coord`, a small table of three numbers — see
 [The Coord shape](#the-coord-shape).
 
 ## character
 
-`Player.character()` looks the pawn up with `FindFirstOf("PalPlayerCharacter")`, checks
-`IsValid()` on it, and returns it. Anything that fails on the way gives `nil` — the
-`FindFirstOf` lookup is wrapped in a `pcall`, so a lookup that throws comes back as `nil`
-rather than as an error.
+`Player.character()` gives you the player's character in the world — the *pawn*, in Unreal's
+words, meaning the actor the player walks around as. It looks the pawn up with
+`FindFirstOf("PalPlayerCharacter")`, checks `IsValid()` on it, and returns it. Anything that
+fails on the way gives `nil` instead: the lookup runs inside a `pcall`, so a lookup that
+throws comes back as `nil` rather than as an error.
 
 ```lua
 local me = Player.character()
@@ -54,9 +57,9 @@ if me then
 end
 ```
 
-The lookup runs on every call; nothing is cached. That matters, because the pawn is
-replaced when a world is loaded, so a character stored in an upvalue at load time goes
-stale. Fetch it where you use it.
+Fetch it where you use it. The lookup runs on every call and nothing is cached, and the pawn
+is built again every time a world loads — so a character you stored in a variable at startup
+points at something that is gone.
 
 ```lua
 local event = require("palforge.core.event")
@@ -72,15 +75,15 @@ event.every(5000, function()
 end)
 ```
 
-What you get back is the raw Unreal actor, not a PalForge handle. Anything the game
-exposes on it is reachable — but it is outside this API, so keep those calls in a
-`pcall` (the "in front of the player" recipe below does exactly that).
+What you get back is the game's own actor, not a PalForge object. Anything the game puts on
+it is reachable — but those calls are outside this API, so keep them in a `pcall` (the
+"in front of the player" recipe below does exactly that).
 
 ## coordinate
 
-`Player.coordinate()` is `character()` plus a location read: it prefers
-`K2_GetActorLocation` and falls back to `GetActorLocation`. No pawn, or a read that
-throws, gives `nil`.
+`Player.coordinate()` finds the pawn and reads its position. It prefers
+`K2_GetActorLocation` and falls back to `GetActorLocation`. No pawn, or a read that throws,
+gives `nil`.
 
 ```mermaid
 flowchart LR
@@ -91,8 +94,8 @@ flowchart LR
   C -->|threw| D
 ```
 
-The returned table carries the same three numbers under three key styles, so it drops
-straight into Lua code, into UE-style code, and into positional helpers:
+The table you get back carries the same three numbers under three key styles, so it drops
+straight into Lua code, into UE-style code, and into helpers that take positions in order:
 
 ```lua
 local c = Player.coordinate()
@@ -103,14 +106,14 @@ if c then
 end
 ```
 
-It is a snapshot, not a live view: a fresh table is built on each call and it does not
-follow the player. Call it again to re-read.
+It is a snapshot, not a live view: a fresh table is built on each call and it does not follow
+the player. Call it again to re-read.
 
 ## coordinateOffset
 
-`Player.coordinateOffset(dx, dy, dz)` is `coordinate()` with the offset added to each
-axis. It returns `nil` under exactly the same conditions, and each argument you leave
-out counts as `0`.
+`Player.coordinateOffset(dx, dy, dz)` is the player's position with the offset added to each
+axis — the quick way to say "just over there". It returns `nil` under exactly the same
+conditions as `coordinate()`, and each argument you leave out counts as `0`.
 
 ```lua
 Player.coordinateOffset(300, 0, 0)      -- 3 m along +X
@@ -121,11 +124,14 @@ Player.coordinateOffset(nil, nil, 50)   -- only lift by 50 cm
 Units are centimetres, so `100` is one metre — the same unit the building grid uses
 (`core.spatial.GRID_CM` is `100`, one cell per metre). `z` is up.
 
-The offset is applied on world axes. It knows nothing about which way the player is
-facing; `coordinateOffset(600, 0, 0)` is 6 m along +X from the player whether they are
-looking at it or away from it. For a facing-relative point, see the recipe below.
+The offset is applied on world axes, not on the player's own. It knows nothing about which
+way the player is facing; `coordinateOffset(600, 0, 0)` is 6 m along +X from the player
+whether they are looking at it or away from it. For a point in front of them, see the recipe
+below.
 
 ## The Coord shape
+
+A `Coord` is a table of three numbers in centimetres. That is the whole shape:
 
 <TypeTable
   type={{
@@ -135,10 +141,7 @@ looking at it or away from it. For a facing-relative point, see the recipe below
   }}
 />
 
-`Coord` is declared in `api/player.lua` with `schema.define("Coord", ...)`. It belongs to
-no domain, so unlike `Pal.Spec` or `Mesh.Spec` it has no domain prefix, and nothing binds
-it: no call validates its argument against `Coord`. It exists so the shape is readable at
-runtime and so the generated editor types carry it.
+You can print the same thing from inside the game:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -153,7 +156,8 @@ Coord {
 }
 ```
 
-`Pal.Handle:spawn` consumes it, and accepts both the named form and the array form:
+`Pal.Handle:spawn` is the main thing that eats one, and it accepts both the named form and
+the array form:
 
 ```lua
 Pal.get("ChickenPal"):spawn(Player.coordinate())            -- named form, straight through
@@ -162,8 +166,8 @@ Pal.get("ChickenPal"):spawn{ at = { 12000, -3400, 500 } }   -- array form
 ```
 
 `:spawn` tells a coordinate from an options table by looking for `x` or `[1]` on it, then
-reads each axis as `a.x or a[1]`. Because `coordinate()` fills in both key styles, a
-value from this module works in either position.
+reads each axis as `a.x or a[1]`. Because `coordinate()` fills in both key styles, a value
+from this module works in either position.
 
 ```mermaid
 flowchart LR
@@ -181,18 +185,18 @@ All three functions return `nil` whenever there is no valid player pawn:
 - during a load screen, while the pawn is being built
 - after leaving a world, before entering the next one
 
-`nil` is a normal return, not a failure: the `FindFirstOf` lookup and the location read
-are each wrapped in a `pcall`, so a native call that throws also comes back as `nil`. That
-puts the whole burden on the caller: check before you use the value.
+`nil` is a normal return, not a failure: the `FindFirstOf` lookup and the location read are
+each wrapped in a `pcall`, so a native call that throws also comes back as `nil`. That puts
+the whole burden on you: check before you use the value.
 
 <Callout type="warn">
-Passing `nil` on is usually silent rather than loud. `Effect.Handle:apply(target)` keys
-its application by `target or GLOBAL`, so `apply(Player.character())` with no world
-applies the effect to the global bucket instead of to the player, and reports success.
-Guard first.
+Passing `nil` on is usually silent rather than loud. `Effect.Handle:apply(target)` keys its
+application by `target or GLOBAL`, so `apply(Player.character())` with no world applies the
+effect to the global bucket instead of to the player, and reports success. Guard first.
 </Callout>
 
-Waiting for the world is the `world.ready` channel:
+To wait for a world, listen on the `world.ready` channel — the signal PalForge sends once the
+player is in a loaded world:
 
 ```lua
 local event = require("palforge.core.event")
@@ -207,10 +211,9 @@ end)
 
 `world.ready` is driven by a poll of this very pawn: `core/event` checks
 `FindFirstOf("PalPlayerCharacter")` about once a second and emits the channel after five
-consecutive valid polls. So `Player.character()` can already return a pawn several
-seconds *before* `world.ready` fires, and it can start returning `nil` again at any point
-afterwards. The channel is a good place to start work; it is not a reason to drop the
-`nil` check.
+consecutive valid polls. So `Player.character()` can already return a pawn several seconds
+*before* `world.ready` fires, and it can start returning `nil` again at any point afterwards.
+The channel is a good place to start work; it is not a reason to drop the `nil` check.
 
 ## Recipes
 
@@ -247,8 +250,8 @@ then move. With the `CheatManagerEnabler` mod absent there is no cheat manager a
 
 ### Spawn in front of the player
 
-PalForge has no forward-vector helper. Take the vector off the character, flatten it to
-the XY plane and normalise it, then add it to the coordinate.
+There is no ready-made "which way am I facing" helper. Take the forward vector off the
+character, flatten it to the XY plane and normalise it, then add it to the coordinate.
 
 ```lua title="content/spawn_ahead.lua"
 ---The point `distanceCm` ahead of where the player is facing, or nil.
@@ -274,15 +277,15 @@ end
 ```
 
 <Callout type="info">
-`GetActorForwardVector` is a raw Unreal call on the pawn, not part of this API, so it
-stays inside a `pcall` with a sensible fallback direction. Only the X and Y components
-are used: normalising the full 3D vector would tilt the target up or down with the
-camera, and the pal would spawn in the air or under the ground.
+`GetActorForwardVector` is a raw Unreal call on the pawn, not part of this API, so it stays
+inside a `pcall` with a sensible fallback direction. Only the X and Y components are used:
+normalising the full 3D vector would tilt the target up or down with the camera, and the pal
+would spawn in the air or under the ground.
 </Callout>
 
 ### A ring of placements around the player
 
-`coordinateOffset` is at its best when you need several points relative to one origin.
+`coordinateOffset` is at its best when you need several points around one origin.
 
 ```lua title="content/ring.lua"
 local ring = { { 400, 0 }, { -400, 0 }, { 0, 400 }, { 0, -400 } }
@@ -295,14 +298,14 @@ for _, d in ipairs(ring) do
 end
 ```
 
-Every call is guarded individually, because `coordinateOffset` re-reads the pawn each
-time: if the player leaves the world halfway through the loop, the remaining iterations
-get `nil` rather than a stale position.
+Guard every call on its own, because `coordinateOffset` re-reads the pawn each time: if the
+player leaves the world halfway through the loop, the remaining rounds get `nil` rather than
+a stale position.
 
 ### Distance to something in the world
 
-A live building instance carries `pos`, which is the same `x, y, z`-in-centimetres shape,
-so a plain distance check needs nothing else.
+A live building carries `pos`, the same `x, y, z`-in-centimetres shape, so a plain distance
+check needs nothing else.
 
 ```lua title="content/nearest_palbox.lua"
 ---The live PalBoxV2 nearest to the player, plus its distance in centimetres.
@@ -328,6 +331,16 @@ if box then
     print(string.format("nearest PalBox is %.1f m away", distance / 100))
 end
 ```
+
+## Summary
+
+- `Player.coordinate()` is where the player stands, in centimetres. `100` is one metre, and `z` is up.
+- `Player.coordinateOffset(dx, dy, dz)` is that point shifted along the world axes — the short way to say "next to me".
+- `Player.character()` is the player's own actor, for anything you want to apply to them directly.
+- All three give `nil` when there is no world, so check before you use the value.
+- Read them fresh each time. They are snapshots, and the pawn is rebuilt on every world load.
+
+Next, read [Pal](/docs/api/pal) to see what `:spawn` does with the coordinate you just found.
 
 <Cards>
   <Card title="Pal" href="/docs/api/pal">The spawn call on the other end of a coordinate</Card>

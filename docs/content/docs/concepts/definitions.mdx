@@ -1,9 +1,20 @@
 ---
 title: Definitions and handles
-description: How a definition call registers content, and what the handle it returns can do
+description: How to make a piece of content, what you get back, and how to find it again
 ---
 
-Everything a content pack declares goes through the same three-line shape:
+## What you can do after this page
+
+- Add your own pal, item, building, sound or mesh to the game
+- Give something already in Palworld new behaviour, without declaring a thing
+- Find anything you made earlier from anywhere else in your pack
+- Pick names that will not clash with another player's mods
+- Read the message PalForge prints when a field is wrong, and fix it
+
+## Making something
+
+You make content by calling the module for that kind of thing with a table of
+settings. Every kind works the same way:
 
 ```lua
 local pal = Pal{ id = "example:Boss", name = "Boss" }  -- CALL the module to define
@@ -11,15 +22,12 @@ Pal.get("ChickenPal")                                  -- an existing one, by id
 Pal.get_all()                                          -- every registered one
 ```
 
-There is no `Pal.define`. The module itself is the constructor, calling it registers a
-**definition**, and what comes back is a **handle**. Those two words carry the whole
-model; only the details change between domains.
+The call writes your settings down as a **definition** and hands back a **handle**: an
+object you can act on. `Item`, `Building`, `Skill`, `Effect`, `Audio`, `Mesh` and `UI`
+are called the same way. Only the fields differ.
 
-## The call form
-
-`Pal{ ... }` is not special syntax that PalForge invented. Lua lets you drop the
-parentheses when a call's only argument is a table constructor, so the two forms below are
-the same call:
+`Pal{ ... }` is Lua shorthand. When a call's only argument is a table, you may leave the
+parentheses out, so the two forms below are the same call:
 
 <Tabs items={['Sugared', 'Desugared']}>
 <Tab value="Sugared">
@@ -46,36 +54,91 @@ local pal = Pal({
 </Tab>
 </Tabs>
 
-The braces are the argument list. That is as close to named arguments as Lua gets: every
-value is labelled, order does not matter, and a new field added to a domain later can
-never shift the meaning of the ones you already wrote.
+The braces are the argument list. Every value carries a name, so the order does not
+matter, and a field added to a domain later can never shift the meaning of the ones you
+already wrote.
 
-The same rule applies to any function that takes one table, so the named constructors work
-the same way:
+The same shorthand works for any function that takes one table, so the named
+constructors read the same way:
 
 ```lua
 Audio.bgm{ id = "AKE_BGM_Title" }     -- same as Audio.bgm({ id = "AKE_BGM_Title" })
 Panel:new{ title = "Hello" }          -- same as Panel:new({ title = "Hello" })
 ```
 
-Calling a module is wired through a `__call` metamethod:
+A module can be called because its table carries a `__call` metamethod, Lua's hook for
+"somebody called this table":
 
 ```lua
 setmetatable(Pal, { __call = function(_, spec) return define(spec) end })
 ```
 
-`define` is a local inside `api/pal.lua`. It is not reachable from a pack, which is why
-the module table is the only way in.
+`define` is a local function inside `api/pal.lua`, so calling the module is how you
+reach it.
 
 <Callout type="info">
 `Pal()` with no argument is not a shortcut for an empty definition. The spec becomes an
 empty table, `id` is missing, and the call errors.
 </Callout>
 
-## What a definition is
+## What you get back
 
-A definition is a plain Lua table with the domain's base class as its metatable, recorded
-in `core/object_manager` under the pair `(type, id)`.
+The handle is the object you act through. Everything you want to *do* to a pal lives
+there:
+
+```lua
+local boss = Pal{ id = "ChickenPal", name = "Scorched Chicken" }
+
+boss:spawn(Player.coordinate())   -- put one in the world
+boss:name()                       -- "Scorched Chicken"
+boss.id                           -- "ChickenPal"
+```
+
+`Pal.Handle:spawn`, `Item.Handle:give`, `Audio.Handle:play`, `Effect.Handle:apply`,
+`Mesh.Handle:attachTo` and `UI.Handle:new` are all methods on a handle.
+
+Inside, a handle is a two-field wrapper around the definition it stands for:
+
+```lua
+wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) end
+```
+
+`id` is public, `_cls` is the definition, and the `Handle` metatable carries that
+domain's actions and queries. Handles are cheap and disposable — every `get` call builds
+a fresh one:
+
+```lua
+local a = Pal.get("ChickenPal")
+local b = Pal.get("ChickenPal")
+
+a == b        -- false: two different wrapper tables
+a.id == b.id  -- true:  the same definition underneath
+```
+
+Your event handlers are called with that same handle as the first argument, so whatever
+just happened, the actions for that object are already in your hand:
+
+```lua
+Pal{
+    id = "ChickenPal",
+    events = {
+        onSpawned = function(pal, ctx)
+            pal:renderOn(ctx.actor)          -- `pal` is this definition's handle
+        end,
+    },
+}
+```
+
+<Callout type="info">
+A `UI` handle carries one thing more. `wrap` also builds a state table with the element
+class as its metatable and stores it in `_st`, so the handle is itself mountable, and
+`Handle:new{ ... }` produces an independent instance with its own state.
+</Callout>
+
+## What gets stored
+
+The definition is a plain Lua table holding what you passed, with the domain's base
+class as its metatable, recorded in `core/object_manager` under the pair `(type, id)`.
 
 For a pal, `Pal{ ... }` builds this:
 
@@ -95,15 +158,15 @@ local cls = setmetatable({
 cls.__index = cls
 ```
 
-Two spec fields are renamed on the way in: `mesh` becomes `cls.meshSpec` and `material`
-becomes `cls.materialSpec`, because `Class:mesh()` and `Class:material()` are methods.
-A building's `state` field lands as `cls.defaultState` because `state` on a live building
-is that instance's own persisted table, and the class-level default must not sit under the
-same name. You only meet those names if you inspect a class directly.
+Two fields are stored under a different name. `mesh` becomes `cls.meshSpec` and
+`material` becomes `cls.materialSpec`, because `Class:mesh()` and `Class:material()` are
+methods and would collide. A building's `state` field lands as `cls.defaultState`,
+because on a live building `state` is that one building's own saved table. You only meet
+those names if you inspect a class directly.
 
-Declared handlers are installed onto that class. Pals, items, skills and effects install
-each one behind a forwarder, so the handler is called with the **handle** rather than the
-class:
+The handlers you declared are installed onto that class. Pals, items, skills and effects
+install each one behind a small forwarder, which is what makes the handler receive the
+**handle** rather than the class:
 
 ```lua
 for name, handler in pairs(spec.events or {}) do
@@ -111,8 +174,8 @@ for name, handler in pairs(spec.events or {}) do
 end
 ```
 
-Buildings install handlers as written, because a building handler's first argument is the
-live placed instance, not the definition:
+Buildings install handlers exactly as written, because a building handler's first
+argument is the live placed building, not the definition:
 
 ```lua
 for name, handler in pairs(spec.events) do cls[name] = handler end
@@ -124,9 +187,9 @@ Then the class is registered:
 pcall(function() om.register("pal", spec.id, cls) end)
 ```
 
-Two things to note. Registration is wrapped in `pcall`, so a registry problem can never
-break a definition call. And the key is the id **exactly as you wrote it**, colon included
-— `"example:Boss"` is stored under `"example:Boss"`, not under `"example_Boss"`.
+Two things follow. Registration runs inside a `pcall`, so a registry problem can never
+break your definition call. And the key is the id **exactly as you wrote it**, colon
+included — `"example:Boss"` is stored under `"example:Boss"`, not under `"example_Boss"`.
 
 You can read the registry directly:
 
@@ -138,53 +201,10 @@ om.all("pal")                 -- { id -> cls }, a shallow copy you may not mutat
 om.TYPES                      -- audio, building, effect, item, mesh, pal, skill, ui
 ```
 
-`om.all` hands back a copy, so writing into it changes nothing. There is no unregister.
+`om.all` hands back a copy, so writing into it changes nothing. Once an id is registered
+it stays registered; to change it, define it again.
 
-## What a handle is
-
-A handle is a two-field wrapper around a definition class:
-
-```lua
-wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) end
-```
-
-`id` is public, `_cls` is the definition it stands for, and the `Handle` metatable carries
-that domain's actions and queries. Nothing else is in there. Handles are cheap and
-disposable — every `get` call builds a fresh one:
-
-```lua
-local a = Pal.get("ChickenPal")
-local b = Pal.get("ChickenPal")
-
-a == b        -- false: two different wrapper tables
-a.id == b.id  -- true:  the same definition underneath
-```
-
-The handle is where the verbs live. `Pal.Handle:spawn`, `Item.Handle:give`,
-`Audio.Handle:play`, `Effect.Handle:apply`, `Mesh.Handle:attachTo`, `UI.Handle:new` —
-none of those exist on the definition class, only on the handle.
-
-That is why a handler is called with the handle: whatever the event is, the actions for
-that same object are already in your hand.
-
-```lua
-Pal{
-    id = "ChickenPal",
-    events = {
-        onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)          -- `pal` is this definition's handle
-        end,
-    },
-}
-```
-
-<Callout type="info">
-`UI` is the one domain whose handle carries more. `wrap` also builds a state table with
-the element class as its metatable and stores it in `_st`, so a handle is itself
-mountable, and `Handle:new{ ... }` produces an independent instance with its own state.
-</Callout>
-
-## One definition call, end to end
+## One call, end to end
 
 ```mermaid
 flowchart TD
@@ -197,11 +217,14 @@ flowchart TD
   G --> H["return the Pal.Handle"]
 ```
 
-Validation runs first and it either succeeds completely or raises. A call never
-half-succeeds, so you can never end up with a definition registered under a spec that was
-rejected. The validator checks unknown keys across the whole table before it looks at any
-single field, then walks the declared fields in declaration order, filling defaults into a
-fresh copy. Your table is never mutated.
+Checking comes first, and it either passes completely or raises. A call never
+half-succeeds, so you can never end up with a definition registered under settings that
+were rejected. The checker looks for unknown keys across the whole table before it
+inspects any single field, then walks the declared fields in order, filling defaults into
+a fresh copy. Your table is never changed.
+
+Every problem is a hard error naming the domain and the field, so you can usually fix it
+from the message alone:
 
 ```text
 PalForge: Pal: unknown field "meshSpec" (did you mean "mesh"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
@@ -212,8 +235,8 @@ PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMes
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "consumeable"
 ```
 
-The shapes themselves are private to their module — a domain is a thing you call, not a
-namespace to browse. Read them at runtime through the schema registry:
+To see what a call accepts before you write it, ask the schema registry — the runtime
+list of every declared shape:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -223,9 +246,10 @@ schema.get("Pal.Spec").fields         -- the same, as a table, for tooling
 schema.all()                          -- every declared spec, in declaration order
 ```
 
-## define, get and get_all
+## Finding something again
 
-`X{ ... }` is the only thing that creates a definition. `get` and `get_all` never define.
+`X{ ... }` is the only thing that creates a definition. `get` and `get_all` only look
+things up:
 
 ```lua
 Item{ id = "Wood", name = "Wood", maxStack = 9999 }   -- defines and registers
@@ -234,7 +258,7 @@ Item.get_all()                                        -- every registered item
 ```
 
 `X.get(id)` asserts that `id` is a non-empty string, then looks in the registry. What
-happens on a miss is the one place the domains disagree:
+happens when nothing is registered under that id is the one place the domains differ:
 
 ```mermaid
 flowchart LR
@@ -245,7 +269,7 @@ flowchart LR
 ```
 
 Seven domains build a thin fallback: a bare class carrying only the id, wrapped in a
-handle. That is what makes vanilla content actionable without declaring anything:
+handle. That is what lets you act on the game's own content without declaring anything:
 
 ```lua
 Item.get("Wood"):give(10)                              -- no Item{ id = "Wood" } needed
@@ -254,24 +278,25 @@ Audio.get("AKE_BGM_Title"):play()
 ```
 
 A thin handle still does everything that only needs the id. `:spawn`, `:give`, `:take`
-and `:play` all go through the id, and in the domains that read an icon DataTable — pal,
-item, building and skill — `:iconOf()` resolves from it as usual.
-What it cannot do is anything that came from a declaration: `:mesh()` is `nil`,
-`:renderOn(actor)` returns `false`, `:name()` falls back to the id, and no handler runs.
+and `:play` all go through the id, and in the domains that read an icon DataTable — the
+game's table of item and creature icons — `:iconOf()` resolves from it as usual. That
+covers pal, item, building and skill.
+What a thin handle cannot do is anything that came from a declaration: `:mesh()` is
+`nil`, `:renderOn(actor)` returns `false`, `:name()` falls back to the id, and no handler
+runs.
 
 `Audio.get` is the one thin fallback with a second field, `soundId = id`, so any
-AkAudioEvent name is playable straight away — the same fallback `Audio{ ... }` applies to
-a definition that names no sound.
+AkAudioEvent name — the game's own name for a sound — is playable straight away. The
+same fallback `Audio{ ... }` applies to a definition that names no sound.
 
-`Mesh.get` errors instead:
+`Mesh.get` raises instead:
 
 ```text
 PalForge: Mesh.get("example:body"): no mesh is defined under that id
 ```
 
-A mesh with no `model` has nothing to render. A thin fallback would attach silently
-nothing, and you would go looking for the bug in the wrong place, so the miss is raised
-where it happened.
+A mesh with no `model` has nothing to render, so a missing mesh id fails where you wrote
+it rather than quietly attaching nothing somewhere else.
 
 ```lua
 local log = require("palforge.utils.log").scope("mypack")
@@ -290,11 +315,11 @@ for _, item in ipairs(Item.get_all()) do
 end
 ```
 
-Two honest caveats. The order is a `pairs` walk over a snapshot, so it is not stable —
-sort the result if you need one. And it only lists what has actually been defined: the
-native catalogs are lazy, so right after startup `Item.get_all()` gives you the curated
-definitions (`Wood`, `Berries`, `Arrow`) plus whatever your pack declared, not every row in
-the game's item table.
+Two things to expect from it. The order is a `pairs` walk over a snapshot, so it is not
+stable — sort the result if you need one. And it lists only what has actually been
+defined: the native catalogs load on demand, so right after startup `Item.get_all()`
+gives you the curated definitions (`Wood`, `Berries`, `Arrow`) plus whatever your pack
+declared, not every row in the game's item table.
 
 ### Define once, act many times
 
@@ -313,14 +338,14 @@ Pal{
 }
 ```
 
-Both spellings play the sound. The second one also re-validates a spec and overwrites the
+Both spellings play the sound. The second one also re-checks a spec and overwrites the
 registry entry every single time the pal dies.
 
-## Ids: namespaced and literal
+## Ids: your own, and the game's
 
 An id with a colon is a pack id: `"packid:name"`. In the game's DataTables the matching
-row FName is `packid_name`, and the prefix is what keeps two packs from colliding, since
-PalSchema rows are global.
+row FName is `packid_name`. PalSchema rows are shared across every mod, so that prefix is
+what keeps two packs from colliding.
 
 An id without a colon is a literal game id: `"Wood"`, `"ChickenPal"`, `"PalBoxV2"`,
 `"WorkBench"`, `"AKE_BGM_Title"`.
@@ -333,11 +358,11 @@ om.resolve("PalBoxV2")        -- "PalBoxV2"
 om.resolve("my pack:Bench")   -- nil, "invalid pack id 'my pack' (letters/digits/_ only)"
 ```
 
-Both segments of a namespaced id must be letters, digits or underscores. That check runs
-when the id is **resolved**, not when it is defined — at define time `id` is only checked
+Both halves of a namespaced id must be letters, digits or underscores. That check runs
+when the id is **resolved**, not when you define it — at define time `id` is only checked
 for being a non-empty string.
 
-Resolution is applied where a game row name is needed, not in the registry:
+Resolving happens where a game row name is needed, not in the registry:
 
 - `Building.Handle:unlock()` resolves the id before unlocking the technology row.
 - `core/event` resolves a building's `buildIds` before matching placed actors against them.
@@ -352,16 +377,17 @@ Building.get("example_Bench")   -- a thin fallback: nothing is registered under 
 ```
 
 <Callout type="warn">
-Defining a namespaced id gives an id behaviour and metadata. It does not publish a new
-DataTable row — Lua alone cannot do that, which is PalSchema's job. Point a definition at
-an id that exists, whether that is a vanilla one or a row your pack ships through
-PalSchema.
+Defining a namespaced id gives that id behaviour and metadata. It does not add a new
+DataTable row to the game — Lua alone cannot do that, which is PalSchema's job. Point a
+definition at an id that already exists, whether that is a vanilla one or a row your pack
+ships through PalSchema.
 </Callout>
 
-## Nesting a definition
+## Nesting a mesh inside another definition
 
-A mesh can be written inline inside the definition that wears it, or declared once by name
-and passed in as itself. Both reach `core/mesh` identically.
+A mesh is the model something wears. You can write it inline inside the definition that
+wears it, or declare it once by name and pass it in as itself. Both reach `core/mesh`
+the same way.
 
 <Tabs items={['Inline', 'Named']}>
 <Tab value="Inline">
@@ -401,8 +427,8 @@ The named form works because `Mesh.Handle`'s metatable carries a `__spec` metafi
 Handle.__spec = function(self) return self._cls:source() end
 ```
 
-The validator looks for that metafield and, when it finds one, validates the table it
-returns instead of the handle:
+The checker looks for that metafield and, when it finds one, checks the table it returns
+instead of the handle:
 
 ```mermaid
 flowchart LR
@@ -414,8 +440,8 @@ flowchart LR
 
 Two consequences worth knowing.
 
-First, the copy is real. `Pal.Handle:mesh()` returns the copy that was stored on the pal
-definition, not the mesh definition itself, so mutating it does not reach back into the
+First, the copy is real. `Pal.Handle:mesh()` returns the copy stored on the pal
+definition, not the mesh definition itself, so changing it does not reach back into the
 `Mesh` you declared.
 
 ```lua
@@ -426,16 +452,16 @@ pal:mesh().scale = 4.0
 body:source().scale     -- still 1.0
 ```
 
-Second, only `Mesh.Handle` carries `__spec`. Nesting a defined object inside another
-definition works for meshes and nothing else today — there is no equivalent for passing an
-`Item.Handle` or a `Skill.Handle` where a table is expected.
+Second, `Mesh.Handle` is the only handle that carries `__spec`. A mesh is the one defined
+object you can nest inside another definition today. Where any other domain's shape is
+expected, pass a plain table.
 
 <Callout type="warn">
 `Building.Spec.Mesh` is `Mesh.Spec` with `kind` defaulting to `"static"` instead of
-`"skeletal"`. A default only applies to an absent field, and a named `Mesh{ ... }` already
-had its own default filled in when it was defined, so a mesh handle nested into a building
-arrives carrying `kind = "skeletal"` and the building's `"static"` default never fires.
-Set `kind` explicitly on any mesh a building will wear.
+`"skeletal"`. A default only applies to a field you left out, and a named `Mesh{ ... }`
+already had its own default filled in when it was defined. So a mesh handle nested into a
+building arrives carrying `kind = "skeletal"`, and the building's `"static"` default
+never fires. Set `kind` explicitly on any mesh a building will wear.
 </Callout>
 
 ```lua
@@ -448,10 +474,10 @@ local BenchBody = Mesh{
 Building{ id = "WorkBench", name = "Workbench", gridCm = 100, mesh = BenchBody }
 ```
 
-## Re-defining an id
+## Defining the same id twice
 
 `om.register` writes straight into the bucket, so defining the same `(type, id)` twice
-replaces the entry. Nothing warns, and there is no unregister.
+replaces the entry. Nothing warns you, and a registration cannot be taken back.
 
 ```lua
 local first  = Item{ id = "Wood", name = "Wood" }
@@ -464,26 +490,26 @@ Item.get("Wood"):name()   -- "Seasoned Wood" (the registry holds the second)
 
 What follows from that:
 
-- `X.get`, `X.get_all` and event dispatch all resolve through the registry, so they see the
+- `X.get`, `X.get_all` and event dispatch all go through the registry, so they see the
   newest definition.
 - A handle from an earlier call keeps its own `_cls`. Its queries and its manual `:onXxx`
   forwarders still run the earlier declaration. Its id-only actions (`:spawn`, `:give`,
   `:play`) behave the same either way, because they only ever use `self.id`.
 - For buildings, `core/event` caches a lowered def per class and rebuilds it on the next
   scan when the class changed. A structure that is already tracked keeps the class it was
-  instantiated with; the new definition applies to instances created afterwards.
+  created with; the new definition applies to buildings placed afterwards.
 
 The reliable pattern is to define each id once, at load, and use `X.get` everywhere else.
-If you are hot-reloading a pack file during development, expect the registry to hold the
-last version loaded and expect old handles you kept in locals to be stale.
+If you are hot-reloading a pack file while you work, expect the registry to hold the last
+version loaded, and expect old handles you kept in locals to be stale.
 
 ## X.Class
 
-Every callable module exposes `X.Class`: the base class that every definition of that
-domain gets as its metatable. It holds the inert hook defaults plus the domain's own methods —
-`Pal.Class:mesh`, `Pal.Class:material`, `Pal.Class:iconOf`, `Building.Class:render`,
-`Building.Class:update`, `Building.Class.new`, `Mesh.Class:source`, `Audio.Class:source`,
-`UI.Class:mount`, and so on.
+Every callable module exposes `X.Class`: the base class every definition of that domain
+gets as its metatable. It holds the do-nothing hook defaults plus the domain's own
+methods — `Pal.Class:mesh`, `Pal.Class:material`, `Pal.Class:iconOf`,
+`Building.Class:render`, `Building.Class:update`, `Building.Class.new`,
+`Mesh.Class:source`, `Audio.Class:source`, `UI.Class:mount`, and so on.
 
 Most packs never touch it. Two situations where you do.
 
@@ -498,8 +524,9 @@ local function overrides(cls, name)
 end
 ```
 
-A definition that never declared `onTick` inherits the inert default, compares equal, and
-is left out of the tick list entirely. The flip side is that an empty handler is not free:
+A definition that never declared `onTick` inherits the do-nothing default, compares equal,
+and is left out of the tick list entirely. The flip side is that an empty handler is not
+free:
 
 ```lua
 Building{
@@ -511,9 +538,9 @@ Building{
 ```
 
 **Sharing behaviour across definitions.** Methods resolve through the metatable chain —
-a live building instance falls back to its definition class, which falls back to
-`Building.Class` — so a method added there is visible to every definition and every
-instance, including ones created before you added it.
+a live building falls back to its definition class, which falls back to `Building.Class`
+— so a method added there is visible to every definition and every live building,
+including ones created before you added it.
 
 ```lua
 function Building.Class:describe()
@@ -522,9 +549,8 @@ end
 ```
 
 Per-definition values do not belong there. Use the `data` field, which every domain but
-`Mesh` declares and carries onto the definition untouched. `UI` is the one that treats it
-differently: its `data` keys are spread onto the element class as defaults every instance
-inherits.
+`Mesh` declares and carries onto the definition untouched. `UI` treats it differently:
+its `data` keys are spread onto the element class as defaults every instance inherits.
 
 ```lua
 local Boss = Pal{
@@ -547,16 +573,16 @@ local Boss = Pal{
 | `UI` | `UI.Handle`, itself mountable | thin, inert element | the mounted instance | `UI.Class`, `Handle:new` |
 | `Player` | not callable | no `get` | no events in this domain | `character`, `coordinate`, `coordinateOffset` |
 
-`Mesh` also differs from every other domain in what a definition may omit. `Mesh.Spec` is
-the one shape whose `id` is optional, because an inline mesh has nothing to name — but
-defining one directly still requires it:
+`Mesh` also differs in what a definition may leave out. `Mesh.Spec` is the one shape
+whose `id` is optional, because an inline mesh has nothing to name — but defining one
+directly still requires it:
 
 ```text
 PalForge: Mesh: field "id" is required (an unnamed mesh cannot be looked up again - write it inline as mesh = { ... } instead)
 ```
 
 `Audio.bgm` and `Audio.se` are the same define with `kind` pinned. They copy your table
-rather than mutating it, and a contradicting `kind` is rejected instead of overwritten:
+rather than changing it, and a contradicting `kind` is rejected instead of overwritten:
 
 ```lua
 Audio.bgm{ id = "AKE_BGM_Title" }            -- kind = "bgm"
@@ -640,9 +666,9 @@ Bench:unlock()                                  -- resolves the id, unlocks the 
 local placed = #Bench:instances()               -- how many are live in the loaded world
 ```
 
-The building handlers take `self` as the live instance, which is why `self.state` and
-`self:save()` are there. See [the lifecycle page](/docs/concepts/lifecycle) for what drives
-each hook.
+A building handler takes `self` as the live placed building, which is why `self.state`
+and `self:save()` are there. See [the lifecycle page](/docs/concepts/lifecycle) for what
+drives each hook.
 
 ### Inspecting what is registered
 
@@ -691,3 +717,19 @@ other `get` returns a handle no matter what.
   <Card title="Building" href="/docs/api/building">The domain whose handlers get a live instance</Card>
   <Card title="Lifecycle" href="/docs/concepts/lifecycle">Which hooks actually fire, and what drives them</Card>
 </Cards>
+
+## Summary
+
+- Call the module with a table to make something: `Pal{ id = "example:Boss" }`. `id` is
+  always required.
+- The call returns a handle. Actions such as `:spawn`, `:give`, `:play` and `:apply` live
+  on the handle, and your handlers receive it as their first argument.
+- `X.get(id)` finds one again. Seven domains give you a thin, id-only handle on a miss,
+  so vanilla content works without being declared; `Mesh.get` raises instead.
+- An id with a colon is yours (`"mypack:Bench"`); an id without one is the game's
+  (`"Wood"`). Defining attaches behaviour to an id that already exists.
+- A wrong or misspelled field is a hard error naming the field, and nothing is registered.
+- Define each id once at load, and use `X.get` inside handlers.
+
+Next, read [Lifecycle](/docs/concepts/lifecycle) to see which events actually reach your
+handlers.

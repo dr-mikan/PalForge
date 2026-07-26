@@ -1,12 +1,16 @@
 -- PalForge core.mesh.base.renderer: the abstract renderer contract. Every mesh
--- backend (procedural OBJ, and the TODO static / skeletal ones) extends this and
--- overrides what it implements. Self-contained (no PalForge deps).
+-- backend (procedural OBJ, static UStaticMesh, skeletal USkeletalMesh) extends this
+-- and overrides what it implements. Self-contained (no PalForge deps).
 --
 -- Contract:
 --   renderer:attach(actor, spec)   -> attach a mesh to `actor` from `spec`
 --   renderer:setColor(actor, color)-> re-tint an attached mesh
---   renderer:detach(actor)         -> remove the attached mesh
--- The defaults are inert (return false) so an unfinished backend is a safe no-op.
+--   renderer:detach(actor)         -> remove again what attach added
+-- The defaults are inert (return false) so an unfinished backend is a safe no-op — and
+-- a backend that legitimately CANNOT do one of these keeps the inert default rather than
+-- faking a success. detach is the standing example: procedural and static add a component
+-- of their own and can destroy it again, while skeletal swaps the asset on the pawn's OWN
+-- component, so it has nothing of ours to remove and leaves the default in place.
 local Renderer = {}
 Renderer.__index = Renderer
 Renderer.__name  = "Renderer"
@@ -42,7 +46,9 @@ function Renderer:attach(actor, spec) return false end
 -- Re-tint an already-attached mesh. `color` = {r,g,b,a} 0..1. Returns true if applied.
 function Renderer:setColor(actor, color) return false end
 
--- Remove the attached mesh from `actor`. Returns true if something was removed.
+-- Remove from `actor` what this backend's attach added, so the actor can be dressed
+-- again. Returns true only when the removal actually executed; a backend that added
+-- nothing of its own returns false.
 function Renderer:detach(actor) return false end
 
 return Renderer
