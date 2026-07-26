@@ -311,15 +311,63 @@ end
 --
 -- `sink` is called as sink(line) for each line; without one the results come back as a
 -- list of { element, material, vector, scalar, texture } for the caller to report.
-function Renderer.describeMaterials(comp, sink)
+-- Every mesh component reachable from `root`, which may be an actor or a component.
+--
+-- ONE COMPONENT IS NOT ENOUGH, and the first live run is what showed it: asking the player pawn
+-- for its .Mesh found a component whose only slot was empty ("MATDESC [0] no material on this
+-- slot"). A Palworld player is not one mesh — dumps/cxx/ ships ABP_Player_Hair.hpp,
+-- ABP_Player_Head.hpp and ABP_Player.hpp as separate blueprints, and ALI_HumanCloth.hpp beside
+-- them — so the materials that are actually on screen hang off CHILD components, and a walk
+-- that stops at .Mesh reads the one place they are not.
+--
+-- GetComponentsByClass is the documented way to enumerate them (Engine.hpp, AActor). Failing
+-- that, the two named members are tried directly. Nothing here calls anything that writes.
+local function meshComponents(root)
     local out = {}
-    if not isLive(comp) then
-        if sink then pcall(sink, "MATDESC no live component to read") end
-        return out
-    end
+    local function add(c) if isLive(c) then out[#out + 1] = c end end
 
+    if isLive(root) then
+        -- root may already BE a component; a component has no GetComponentsByClass, so a failed
+        -- call here is the ordinary case rather than an error.
+        add(root)
+        for _, name in ipairs({ "Mesh", "SkeletalMesh", "StaticMeshComponent" }) do
+            local c; pcall(function() c = root[name] end)
+            add(c)
+        end
+        for _, className in ipairs({ "/Script/Engine.SkeletalMeshComponent",
+                                     "/Script/Engine.StaticMeshComponent" }) do
+            local cls; pcall(function() cls = StaticFindObject(className) end)
+            if isLive(cls) then
+                local list; pcall(function() list = root:GetComponentsByClass(cls) end)
+                pcall(function()
+                    for i = 1, #list do add(list[i]) end
+                end)
+            end
+        end
+    end
+    return out
+end
+
+function Renderer.describeMaterials(root, sink)
+    local out = {}
     local function say(line) if sink then pcall(sink, line) end end
 
+    local comps = meshComponents(root)
+    if #comps == 0 then
+        say("MATDESC no live mesh component to read")
+        return out
+    end
+    say(string.format("MATDESC %d mesh component(s) reachable", #comps))
+    for _, comp in ipairs(comps) do
+        local cname; pcall(function() cname = comp:GetFName():ToString() end)
+        say(string.format("MATDESC component %s (%d slot(s))", tostring(cname or "?"), slotCount(comp)))
+        Renderer.describeOneComponent(comp, say, out)
+    end
+    return out
+end
+
+-- One component's slots. Split out so describeMaterials can walk several without nesting.
+function Renderer.describeOneComponent(comp, say, out)
     for elem = 0, slotCount(comp) - 1 do
         local mat
         pcall(function() mat = comp:GetMaterial(elem) end)

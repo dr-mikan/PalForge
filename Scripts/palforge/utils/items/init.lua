@@ -542,11 +542,21 @@ end
 --     never reported as one);
 --   * it ran and the count did not fall. A late fall is still logged by watchLateFall.
 --
--- ⚠️ NOT YET OBSERVED IN GAME. TODO(item-remove-call): what remains is one live run — whether
--- RequestConsumeItem spends the id it is HANDED (which is what its parameter list says) rather
--- than whatever ammunition the weapon it hangs off happens to use, and whether it needs the
--- weapon to be the equipped one rather than merely spawned. Both show up the same way in the
--- log: a count that does not fall, with evidence "declared".
+-- OBSERVED WORKING, 2026-07-26, in a live save:
+--     give Wood x3: 161 -> 164 [evidence declared]
+--     take Wood x3: 164 -> 161 [evidence declared]
+-- Both open questions are answered by that pair. RequestConsumeItem spends the id it is HANDED,
+-- not the weapon's own ammunition — Wood is not ammunition for anything — and the weapon does
+-- not have to be the equipped one, only spawned. Its live declaration was read before it was
+-- called: [StaticItemId:NameProperty, ConsumeNum:IntProperty], two links up the super chain.
+--
+-- A pack can charge a cost now, and the items are CONSUMED rather than dropped — nothing lands
+-- at the player's feet to be picked straight back up, which is what made the DropItem route
+-- useless for this.
+--
+-- ONE LIMITATION, and it is reported as its own message rather than buried in a refusal: a
+-- player with nothing equipped has no weapon actor, so there is nothing to ask. That is a real
+-- constraint on when :take can be called, not a failure of the call.
 function M.take(itemId, count)
     count = math.floor(math.abs(tonumber(count) or 1))
     local resolved = object_manager.resolve(itemId) or itemId
@@ -563,7 +573,7 @@ function M.take(itemId, count)
         -- sphere) puts an APalWeaponBase in spawnedWeaponsArray and the route opens.
         log.err(string.format("take %s x%d: the player has no spawned weapon actor, and "
             .. "RequestConsumeItem is a method on one — equip something and the removal route "
-            .. "exists again (see TODO(item-remove-call))", resolved, count))
+            .. "exists again", resolved, count))
         return false
     end
 
@@ -604,7 +614,7 @@ function M.take(itemId, count)
         -- leaves the two questions on the marker, both about what the weapon consumes.
         log.warn(string.format("take %s x%d: RequestConsumeItem executed [evidence %s] and the "
             .. "count did not fall (%d -> %d). It returns void, so the count is the only witness "
-            .. "— see TODO(item-remove-call) for the two things that would explain this",
+            .. "— the weapon route is proven, so this is a state this run did not have",
             resolved, num, level, before, after))
         watchLateFall(resolved, before, num)
         return false

@@ -38,7 +38,8 @@
 --     have a spawned weapon actor (the consume is a method ON one — equip anything and the route
 --     exists), and no run has watched it succeed yet. The inventory itself has no removal at all:
 --     its whole class chain declares nothing that subtracts, and a NEGATIVE Count through the add
---     was measured accepted and inert (161 -> 161). See TODO(item-remove-call) in utils/items.
+--     was measured accepted and inert (161 -> 161). The route that DOES work is a weapon's
+--     RequestConsumeItem — see utils/items.take.
 --
 -- WHAT THAT COST, since it shaped this file for a long time. The add was blocked on ONE
 -- argument. The live declaration is five parameters and a return —
@@ -298,7 +299,7 @@ function Handle:give(count) return items.give(self.id, count or 1) end
 ---with nothing equipped has no route and this reports false saying exactly that. And ⚠️ NO RUN HAS
 ---WATCHED IT SUCCEED yet: the declaration is checked against the live class by core.signature
 ---before anything is marshalled, but whether it spends the id it is HANDED is the open half of
----TODO(item-remove-call). The inventory itself cannot subtract — see utils.items.take for the
+---The inventory itself cannot subtract — see utils.items.take for the
 ---whole eliminated list, including the negative-Count hypothesis that was finally measured dead.
 ---@param count integer?
 ---@return boolean ok  # true only when the inventory count was measured to fall

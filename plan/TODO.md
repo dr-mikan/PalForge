@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (23)
+## Closed (24)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -96,8 +96,9 @@ without the game running.
 - **`skill-icon-key`** — Skill.Handle:iconOf. Same read, 311 of 311 rows on DT_partnerSkillIconDataTable. What is left is not a read but a KEYING fact already recorded in core/icons: that table is keyed by PAL id, not skill id, so only a pal-derived partner skill can hit it. A passive skill has no row there and falls back to its declared icon — the correct answer rather than a missing one.
 - **`ui-host-paths`** — native.ui.widget / UI.Handle:mount into the game's own UI. `WBP_PalOverallUILayout` declares `UCanvasPanel* CanvasPanel_Root`, and a UCanvasPanel is a UPanelWidget, so it answers `AddChild` with a `UCanvasPanelSlot`. Live-confirmed: an instance is alive under BP_PalGameInstance with its own WidgetTree (`dumps/reflection/03_widgets.txt:54`). Eliminated on the way: `UPalUIHUDLayoutBase` has **no widget members at all**, so the child "one level down" everyone was looking for never existed — it exposes `AddHUD` instead.
 - **`audio-bus-volume`** — Audio.Handle:setVolume. The dump overturned the item's own premise. `UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)` takes **no bus name**: the second parameter is the Wwise game object, so it scales what ONE emitter sends to its bus, at exactly the scope `PlayAkEventSoundByActor` posts on. It was filed as bus-global and is not. Three other overloads were found and rejected with reasons (needs a component our play route never returns / world-global / needs a bus name, and this build has zero AkAuxBus). Wired as `setVolume(volume, actor)`, actor-wide by construction, exactly like `:stop`. Audibility is owed — nobody has heard it.
+- **`item-remove-call`** — Item.Handle:take. **Observed working**, 2026-07-26, in the same press that proved give: `give Wood x3: 161 -> 164` then `take Wood x3: 164 -> 161`. A pack can charge a cost, and the items are CONSUMED rather than dropped — nothing lands at the player's feet to be picked straight back up, which is what made the DropItem route useless for this. The route is `APalWeaponBase::RequestConsumeItem(const FName&, int32)`, and the reason it went unfound for so long is that nobody thought to look on a WEAPON: the inventory's own class chain has no subtract, and neither does the container, the slot, or the cheat manager. The same weapon class declares `IsExistBulletInPlayerInventory`, so a weapon demonstrably reads and spends the owning PLAYER's bag. Both of the questions left open when it was wired are answered by that one press — it spends the id it is HANDED rather than the weapon's ammunition, and the weapon need only be spawned, not equipped. One real constraint remains and is reported as its own message: a player carrying nothing has no weapon actor to ask.
 
-## Open (15)
+## Open (14)
 
 ### Pal
 
@@ -369,59 +370,6 @@ the lines and the sign of a2 for each. If nothing fires for (a)/(b), reflect
 "/Script/Pal.PalPlayerInventoryData" and "/Script/Pal.PalItemContainer" with
 cls:ForEachFunction(fn -> print(fn:GetFName():ToString())) and paste every name matching
 Discard|Drop|Remove|Sub|Consume|Trash|Throw.
-
-#### `item-remove-call` — Item.Handle:take
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:301
-
-**What a pack author sees**
-
-`:take` works — it removes the items from the inventory and verifies the count fell — but **it
-drops them on the ground at the player's feet**. They are gone from the bag and lying in the
-world, where the player can simply walk back over them.
-
-The consequence, stated bluntly because it is the common case: **`:take` cannot charge a cost.**
-A pack that takes 10 Wood as payment leaves 10 Wood on the floor next to the payer. Use it to
-move items out of a bag; do not use it to make something expensive.
-
-**What is still unknown**
-
-Whether any call on this build removes an item *without* putting it in the world. The search has
-been narrowed to two candidates, and everything else is eliminated by reading rather than by
-guessing:
-
-- The inventory's whole class chain was walked in a live save — `BP_PalPlayerInventoryData_C`
-  (0 own functions), `/Script/Pal.PalPlayerInventoryData` (69), `/Script/CoreUObject.Object` (1),
-  and `PalItemContainer` (13). One name matches remove/consume/discard/drop/delete across all
-  83, and it is `TryRemoveEquipment`, which unequips a slot.
-- `UPalItemContainer` and `UPalItemSlot` are now read in full in `dumps/cxx/Pal.hpp`. Every
-  function on both is a getter, except `UPalItemSlot::RequestUseToCharacter`, which consumes
-  through the use processor for a target character and is not an arbitrary-id removal.
-- `UPalCheatManager`'s whole surface is visible too. Its only item removals are `DropItem` /
-  `DropItems` (which put the item in the world — the thing being avoided) and
-  `ClearPlatformInventoryItem` / `ConsumePlatformInventoryItem`, which are storefront
-  entitlements, not inventory.
-
-The two that survive, both unread:
-
-1. `UPalCheatManager::InitInventory(const FName StaticItemId, const int32 Count)` — reads like a
-   SET rather than an add, which would make `Count = 0` a true removal. The name says "Init", so
-   it may wipe more than the one id. Nothing may be called on that guess; read what it does in a
-   throwaway world first.
-2. `UPalItemSlot.StackCount` is a plain writable `int32` **property** (offset `0x154`), not a
-   function, so a slot walk could decrement it with no marshalling involved at all. The risk is
-   not the write but replication — the class carries `OnRep_StackCount`, so a raw poke may leave
-   server and client disagreeing. `PalPlayerInventoryData.RequestForceMarkAllDirty` is the
-   obvious partner if this is ever tried.
-
-The old candidate — a negative `Count` through `AddItem_ServerInternal` — is retired. It is no
-longer the only option and is not worth its risk while those six parameters are unread.
-
-**What the probe prints**
-
-The inventory class chain and the container's function list, unfiltered, so a name nobody has
-proposed can be spotted. It writes to no inventory.
 
 #### `skill-activate-source` — Skill.Spec.Events.onActivate
 

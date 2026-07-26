@@ -316,10 +316,14 @@ s:test("give really adds to the live inventory, measured both ways", function(t)
     t:truthy(after, "the count is still readable after the write")
     t:eq(after - before, COUNT, string.format("exactly %d landed (%d -> %d)", COUNT, before, after))
 
-    -- Put them back. take is NOT give's equal and this suite must not pretend otherwise: its
-    -- route (the weapon's own consume) has never been watched succeed, and it needs the player to
-    -- have something equipped, so this is a best effort whose only job is to leave the save as it
-    -- was found. Its verdict is asserted as a boolean, never as a success.
+    -- Put them back, and this run is what leaves the save exactly as it was found. take works
+    -- now — observed as "take Wood x3: 164 -> 161" in the same press that gave them — so the
+    -- round trip is assertable rather than hoped for.
+    --
+    -- It is still not asserted UNCONDITIONALLY, and the reason is a real constraint rather than
+    -- doubt: take goes through a weapon's own consume, and a player carrying nothing has no
+    -- weapon actor to ask. A tester in that state should see a clear message, not a red test for
+    -- something they are not doing wrong.
     local removed = wood:take(COUNT)
     t:type(removed, "boolean", "take reports what it measured, never an assumed removal")
     if removed then
@@ -327,14 +331,14 @@ s:test("give really adds to the live inventory, measured both ways", function(t)
         t:eq(back, before, string.format("the %d %s went back out again (%d -> %s)",
             COUNT, support.GAME.item, after, tostring(back)))
     else
-        support.log(string.format("item: take could not give the %d %s back — the suite has left "
-            .. "them in the inventory, which is the honest outcome while TODO(item-remove-call) "
-            .. "is open. The [PalForge.items] line above says which step stopped it",
+        support.log(string.format("item: take left the %d %s in the inventory. The route is "
+            .. "proven, so the [PalForge.items] line above names the state this run was in — "
+            .. "most likely nothing equipped, which means no weapon actor to ask",
             COUNT, support.GAME.item))
     end
 end)
 
-s:test("the removal candidates' live declarations are printed, and none of them is called -- TODO(item-remove-call)", function(t)
+s:test("the removal candidates' live declarations are printed, and none of them is called", function(t)
     support.needWorld(t)
 
     -- READ-ONLY, deliberately. sig.describe walks a UFunction on the running build and logs the
