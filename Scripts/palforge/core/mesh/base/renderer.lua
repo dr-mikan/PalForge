@@ -1,13 +1,15 @@
 -- PalForge core.mesh.base.renderer: the abstract renderer contract PLUS the material
 -- layer every backend shares. Every mesh backend (procedural OBJ, static UStaticMesh,
 -- skeletal USkeletalMesh) extends this and overrides what it implements.
--- Self-contained (no PalForge deps).
+-- One PalForge dep: core.signature, for the two native calls here that no run has ever
+-- watched succeed (K2_DestroyComponent, ImportFileAsTexture2D).
 --
 -- Contract:
 --   renderer:attach(actor, spec)    -> attach a mesh to `actor` from `spec`
 --   renderer:setColor(actor, color) -> re-tint an attached mesh
 --   renderer:detach(actor)          -> remove again what attach added
 --   renderer:componentFor(actor)    -> the component this backend dressed `actor` with
+--   Renderer.destroyComponent(comp) -> destroy a component a backend created
 -- attach and detach default to inert (return false) so an unfinished backend is a safe
 -- no-op, and so a backend that legitimately CANNOT do one of them keeps the inert default
 -- rather than faking a success.
@@ -27,18 +29,32 @@
 -- The lazy path is what makes a re-tint work for a mesh declared with no colour at all: a
 -- backend only has to say WHICH component it dressed and it gets setColor for free.
 --
--- Native APIs used (all BlueprintCallable, so reachable from UE4SS Lua):
---   UPrimitiveComponent:CreateAndSetMaterialInstanceDynamic(int32 elem) -> MID
---   UPrimitiveComponent:CreateAndSetMaterialInstanceDynamicFromMaterial(int32, UMaterialInterface*)
---   UPrimitiveComponent:GetNumMaterials() -> int32 / :GetMaterial(int32) / :SetMaterial(int32, ...)
---   UMaterialInstanceDynamic:SetVectorParameterValue(FName, FLinearColor)
---   UMaterialInstanceDynamic:SetScalarParameterValue(FName, float)
---   UMaterialInstanceDynamic:SetTextureParameterValue(FName, UTexture*)
---   UKismetRenderingLibrary:ImportFileAsTexture2D(WorldCtx, FString) -> UTexture2D
--- The PARAM NAMES are the open question, not the calls: nothing in either tree records a
--- Palworld material's vector/texture parameter names, so each candidate below is written
--- in turn and the ones the material does not carry are no-ops (see the TODO at
--- COLOR_PARAMS). Every call is individually pcall'd; the layer never throws.
+-- Native APIs used, every one of them now read off the shipping binary rather than
+-- assumed. Line numbers are dumps/cxx/Engine.hpp; the owning classes are
+-- UPrimitiveComponent (:19614) and UMaterialInstanceDynamic (:17568), and every mesh
+-- component in the game is a UPrimitiveComponent, which is why this layer is shared:
+--   :19842  UMaterialInstanceDynamic* CreateAndSetMaterialInstanceDynamic(int32 ElementIndex)
+--   :19841  UMaterialInstanceDynamic* CreateAndSetMaterialInstanceDynamicFromMaterial(
+--                                       int32 ElementIndex, UMaterialInterface* Parent)
+--   :19822  int32 GetNumMaterials()
+--   :19824  UMaterialInterface* GetMaterial(int32 ElementIndex)
+--   :19759  void SetMaterial(int32 ElementIndex, UMaterialInterface* Material)
+--   :17572  void SetVectorParameterValue(FName ParameterName, FLinearColor Value)
+--   :17576  void SetScalarParameterValue(FName ParameterName, float Value)
+--   :17574  void SetTextureParameterValue(FName ParameterName, UTexture* Value)
+--   :14694  UTexture2D* ImportFileAsTexture2D(UObject* WorldContextObject, FString Filename)
+--           (on UKismetRenderingLibrary, :14678)
+-- Every arity and every argument type this file passes matches those declarations. The
+-- FLinearColor argument is a struct passed as a Lua table, which is the same marshalling
+-- the proven procedural chain already performs on FVector (SetWorldScale3D).
+--
+-- The PARAM NAMES remain the open question, and the dump cannot close it: a CXXHeaderDump
+-- records CLASS declarations, and a material's parameter names are asset DATA that lives
+-- in the .uasset, not in any header. So each candidate below is still written in turn and
+-- the ones the material does not carry are no-ops (see the TODO at COLOR_PARAMS). Every
+-- call is individually pcall'd; the layer never throws.
+local signature = require("palforge.core.signature")
+
 local Renderer = {}
 Renderer.__index = Renderer
 Renderer.__name  = "Renderer"
@@ -76,8 +92,15 @@ end
 
 -- Candidate parameter names to probe on the (unknown) base material. Each is written in
 -- turn; the ones the material does not carry are silent no-ops.
--- TODO(mesh-material-params): no dump records the vector/texture parameter names of any
--- Palworld material, so a tint may write six names none of which the material carries.
+-- TODO(mesh-material-params): NARROWED to the names alone. dumps/cxx/Engine.hpp:17572 /
+-- :17576 / :17574 settle the three writes themselves — SetVectorParameterValue(FName,
+-- FLinearColor), SetScalarParameterValue(FName, float), SetTextureParameterValue(FName,
+-- UTexture*) — so a call that runs is reaching a real UFunction with the right arity and
+-- the right argument types, and "the write did not execute" is eliminated as an
+-- explanation for an unchanged mesh. What is left is exactly one question: WHICH names a
+-- Palworld material carries. The dump cannot answer it (parameter names are asset data,
+-- not class declarations) and nothing else in dumps/ enumerates a loaded Material, so it
+-- takes an in-game probe: write each name onto a real MID and watch which one is visible.
 Renderer.COLOR_PARAMS    = { "Color", "BaseColor", "Tint", "BaseColorTint", "Albedo", "EmissiveColor" }
 Renderer.TEXTURE_PARAMS  = { "BaseColor", "Texture", "Albedo", "Diffuse", "BaseTexture", "MainTexture" }
 Renderer.EMISSIVE_PARAMS = { "EmissiveColor", "Emissive", "EmissiveColour" }
@@ -86,9 +109,16 @@ Renderer.EMISSIVE_PARAMS = { "EmissiveColor", "Emissive", "EmissiveColour" }
 -- material of its own (a fresh ProceduralMeshComponent section is the standing case:
 -- CreateAndSetMaterialInstanceDynamic returns nil there). StaticFindObject only returns
 -- ALREADY-LOADED objects, so we try several and take the first present.
--- TODO(mesh-base-material): every candidate below is an /Engine/ editor asset that a
--- cooked shipping build may not contain at all — the one in-game record of this path is
--- "no-MID -> white" — so a probe must find whether ANY loaded material can serve here.
+-- TODO(mesh-base-material): NARROWED to asset availability. The API half is settled —
+-- dumps/cxx/Engine.hpp:19841 declares CreateAndSetMaterialInstanceDynamicFromMaterial(
+-- int32 ElementIndex, UMaterialInterface* Parent) exactly as createMids calls it, so if a
+-- base material is ever found the parenting call itself is right. What the dump cannot
+-- say is whether any of these paths EXISTS in a cooked shipping build: it records classes
+-- from the binary, not the assets in the pak. The one live sweep on disk
+-- (dumps/reflection/05_assets.txt) enumerates SkeletalMesh, StaticMesh and Texture2D but
+-- never sweeps Material at all, so nothing in this tree names a single loaded material.
+-- Still an in-game probe: find ANY loaded UMaterialInterface that can serve as a parent.
+-- The one in-game record of this path is still "no-MID -> white".
 Renderer.BASE_MATERIAL_CANDIDATES = {
     "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",       -- has a "Color" vector param
     "/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial",
@@ -158,10 +188,21 @@ function Renderer.probeMaterials(extra, sink)
 end
 
 local kismetRendering = nil
+
+-- The declared shape of UKismetRenderingLibrary::ImportFileAsTexture2D, in the order
+-- core.signature checks it. dumps/cxx/Engine.hpp:14694 —
+--   UTexture2D* ImportFileAsTexture2D(UObject* WorldContextObject, FString Filename)
+-- on UKismetRenderingLibrary (:14678). Both halves of the old unknown are answered by
+-- that line: the world context is a plain UObject*, so an ACTOR qualifies (which is what
+-- writeMaterial passes), and the path really is an FString — an ordinary Lua string, NOT
+-- an FName, so this is not the marshalling shape that kills the process.
+local IMPORT_TEXTURE_PARAMS = { "ObjectProperty", "StrProperty" }
+
 -- Import a PNG off disk as a UTexture2D. Returns tex, or nil + reason.
--- TODO(mesh-texture-import): ImportFileAsTexture2D is listed as BlueprintCallable in the
--- V5 POC notes but has never been CALLED in either tree — its argument list (whether the
--- world-context object may be an actor, and whether the path is FString) is unconfirmed.
+-- STILL UNOBSERVED: the signature is right, but no run in either tree has ever CALLED
+-- this, so nothing has watched a texture come back. It goes through core.signature so a
+-- build that does not declare it is a refusal that never touches the game, and the reason
+-- string says which of the two it was.
 function Renderer.importTexture(worldCtx, absPath)
     if type(absPath) ~= "string" or #absPath == 0 then return nil, "no path" end
     if kismetRendering == nil then
@@ -169,9 +210,32 @@ function Renderer.importTexture(worldCtx, absPath)
         kismetRendering = (ok and o) or false
     end
     if not kismetRendering then return nil, "no KismetRenderingLibrary" end
-    local ok, tex = pcall(function() return kismetRendering:ImportFileAsTexture2D(worldCtx, absPath) end)
-    if ok and isLive(tex) then return tex end
-    return nil, "ImportFileAsTexture2D failed: " .. tostring(tex)
+    local ok, tex = signature.call(kismetRendering, "ImportFileAsTexture2D",
+                                   IMPORT_TEXTURE_PARAMS, worldCtx, absPath)
+    if not ok then return nil, "ImportFileAsTexture2D did not fire (see the signature log)" end
+    if isLive(tex) then return tex end
+    return nil, "ImportFileAsTexture2D ran and returned nothing importable"
+end
+
+-- Destroy a component a backend created. Shared because procedural and static both add a
+-- component of their own and both have to be able to take it off again; one copy means
+-- one place where the evidence lives.
+--
+-- UActorComponent::K2_DestroyComponent(UObject* Object) — dumps/cxx/Engine.hpp:9972, on
+-- UActorComponent (:9936), which every mesh component is. That settles what the
+-- mesh-detach-destroycomponent marker asked: one argument, an ObjectProperty, and the
+-- component itself is what the Blueprint node passes — which is exactly the call this
+-- makes. The argument-count mismatch that would have made detach a silent no-op reporting
+-- true is ruled out.
+--
+-- STILL UNOBSERVED: no run has watched a component actually disappear. A true here means
+-- core.signature found the function on the live class and the call returned without
+-- raising, which is the honest ceiling until someone counts ProceduralMeshComponents
+-- before and after.
+function Renderer.destroyComponent(comp)
+    if not isLive(comp) then return false end
+    local ok = signature.call(comp, "K2_DestroyComponent", { "ObjectProperty" }, comp)
+    return ok
 end
 
 --=============================================================================
@@ -234,6 +298,13 @@ end
 --                   prefer it, or the tint would replace the mesh's own look with a
 --                   flat engine material.
 -- Returns the list of MIDs (possibly empty) plus the base-material path that was used.
+--
+-- The two creators below are not two spellings of one capability, and the dump eliminates
+-- neither: Engine.hpp:19841 and :19842 declare both, and they need different things —
+-- ...FromMaterial needs a base material object to parent to, plain
+-- CreateAndSetMaterialInstanceDynamic needs the slot to already carry an authored material.
+-- Which of the two can work is a property of the COMPONENT, not of the build, so both stay
+-- and the second runs only where the first had nothing to work with.
 function Renderer:createMids(comp, actor, opts)
     opts = opts or {}
     if not isLive(comp) then return {}, nil end

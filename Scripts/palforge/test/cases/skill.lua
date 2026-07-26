@@ -10,6 +10,7 @@
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Skill   = require("palforge.api.skill")
+local character = require("palforge.core.character")
 
 local s = T.suite("skill")
 
@@ -337,6 +338,60 @@ s:test("with a world loaded, iconOf still fails soft against the real icon DataT
     local sk = Skill{ id = support.id("skill"), icon = "/Game/PalForge/Test/T_Icon.T_Icon" }
     t:eq(sk:iconOf(), "/Game/PalForge/Test/T_Icon.T_Icon",
         "a live DataTable probe that misses still yields the declared fallback")
+end)
+
+--=============================================================================
+-- teaching a live character — the game's own skill lists
+--=============================================================================
+
+s:test("an id is routed by what the GAME knows it as, not by the skill's declared kind", function(t)
+    -- Palworld stores active and passive skills separately, so :teach has to pick one. It picks
+    -- on the id: a name in the game's active-skill enum is an active skill, anything else is
+    -- treated as a passive name. `kind` describes YOUR skill's behaviour and deliberately has
+    -- no say here — this asks the game for one of its own.
+    t:truthy(character.isActiveSkill("FireBlast"), "a real game move is recognised as active")
+    t:truthy(character.isActiveSkill("fireblast"), "and the lookup does not care about case")
+    t:truthy(character.isActiveSkill(1), "an integer is taken as the enum value it is")
+    t:falsy(character.isActiveSkill("Legend"), "a passive name is not an active skill")
+    t:falsy(character.isActiveSkill("example:MyOwnSkill"), "and neither is a pack's own id")
+
+    -- Declaring kind="passive" must not turn a real active move into a passive one.
+    local active = Skill{ id = support.id("skill"), kind = "passive" }
+    t:falsy(character.isActiveSkill(active.id), "a pack id stays a passive whatever it declares")
+end)
+
+s:test("the active-skill vocabulary is the whole enum, not a curated handful", function(t)
+    local names = character.wazaNames()
+    t:truthy(#names > 300, "every skill the build declares is addressable, got " .. #names)
+    local seen = {}
+    for _, n in ipairs(names) do
+        t:type(n, "string", "every entry is a name a pack can write")
+        t:falsy(seen[n], "and no name is listed twice: " .. n)
+        seen[n] = true
+    end
+    t:falsy(seen["None"], "the None sentinel is not offered as a skill")
+end)
+
+s:test("teach and forget refuse honestly when there is no character to write to", function(t)
+    -- No world, so nothing resolves to a character parameter object. Every entry point must
+    -- answer without raising, and must distinguish "could not ask" from "no".
+    local sk = Skill.get("FireBlast")
+    t:eq(sk:teach({}), false, "teach reports false rather than raising")
+    t:eq(sk:forget({}), false, "and so does forget")
+    t:eq(sk:skillsOn({}), nil, "skillsOn answers nil — UNKNOWN, never an empty character")
+    t:eq(sk:teach(nil), false, "a nil target is refused the same way")
+end)
+
+s:test("equip is still your own bookkeeping and never touches the game", function(t)
+    -- :equip and :teach mean different things on purpose. :equip runs YOUR handler on ANY
+    -- value; :teach writes to a real character. This pins that separation, because quietly
+    -- making :equip write to the game would change what every existing pack's handler means.
+    local ran = 0
+    local sk  = Skill{ id = support.id("skill"), kind = "passive",
+                       events = { onEquip = function() ran = ran + 1 end } }
+    t:eq(sk:equip("not an actor at all"), true, "equip works on a value that is not a character")
+    t:eq(ran, 1, "and it ran the pack's handler")
+    t:eq(sk.teach ~= nil, true, "the game-facing pair exists alongside it")
 end)
 
 return s

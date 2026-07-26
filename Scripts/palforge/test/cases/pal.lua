@@ -419,7 +419,30 @@ end)
 -- LIVE — needs a world. One pal per test, and never a mesh the player would wear.
 --=============================================================================
 
-s:test("a coordinate spawn in front of the player is accepted", function(t)
+-- THESE THREE ASSERT FALSE ON PURPOSE. All three take the WILD route — UPalCheatManager
+-- :SpawnMonster — which is measured dead on this build: it runs, raises nothing and produces no
+-- PalCharacter, so :spawn observes the world and honestly answers false
+-- (TODO(pal-spawnmonster-signature) at core/spawn.lua). Skipping on false instead — which is
+-- what these used to do — would let all three pass in silence forever while the capability
+-- stayed dead.
+--
+-- STILL FALSE AFTER THE 2026-07-26 DUMP READ, and that is a finding rather than an omission:
+-- dumps/cxx/ eliminated the three explanations for the outage (wrong parameter list, a gate on
+-- the cheat-manager class, a world enumeration that could not see a pal) without producing a
+-- better wild-spawn call, so core/spawn kept SpawnMonster and only put it behind
+-- core.signature. Nothing here changed shape, so nothing here changes verdict.
+--
+-- NOT COVERED, deliberately: the `toPlayer` form. core/spawn.palForPlayer now goes to a
+-- different object (APalPlayerState:RequestSpawnMonsterForPlayer) and its `true` means only "the
+-- call was issued" — a party/box summon leaves nothing in the world to measure, so a live test
+-- of it would assert a side effect it cannot see while permanently adding a pal to the tester's
+-- box. Its verdict is exercised without a world by the recorder tests above.
+--
+-- So today's truth is pinned, defect and all: the day something spawns, THESE TESTS FAIL, and
+-- that failure is the notification that the TODO is closable. Do not weaken them to a type
+-- check; a boolean assertion passes in both worlds and tells nobody anything.
+
+s:test("a coordinate spawn reports false while no spawn route works -- TODO(pal-spawnmonster-signature)", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
@@ -427,36 +450,35 @@ s:test("a coordinate spawn in front of the player is accepted", function(t)
     local pal = Pal.get(support.GAME.pal)   -- one chicken; nothing in-tree can despawn it
     local ok  = pal:spawn(coord)
     t:type(ok, "boolean", ":spawn reports a boolean verdict")
-    if not ok then t:skip("no PalCheatManager this session — the spawn route is unavailable") end
+    t:eq(ok, false, "a coordinate spawn must report false while SpawnMonster produces nothing; "
+        .. "a true here means a pal was OBSERVED to appear and this test is what needs updating")
 
-    -- `true` means ACCEPTED, not arrived: the actor materialises a few frames later and
-    -- the relocation runs on a 400 ms retry chain, so the distance to `coord` is NOT
-    -- assertable here. What is assertable is that the world is enumerable at the point
-    -- we asked for — that is what the deferred pass will look through.
+    -- Independent of the outage, and the reason this test still earns its place: the
+    -- measurement :spawn's verdict is built on has to work. It enumerates the world before and
+    -- after the call, and that enumeration is what a working spawn would be detected BY — so
+    -- prove it functions even when it counts nothing new.
     local near = support.nearestPal(coord)
     if not near then t:skip("FindAllOf('PalCharacter') returned nothing enumerable") end
-    t:assert(near.count >= 1, "at least one pal exists in the world after an accepted spawn")
-    t:type(near.dist, "number", "and its distance to the requested point is measurable")
+    t:type(near.count, "number", "the world is enumerable, which is what a spawn is detected by")
+    t:type(near.dist, "number", "and a distance to the requested point is measurable")
     t:type(near.pos.x, "number", "the nearest pal reports a world position")
 end)
 
-s:test("an opts table with at + level is accepted the same way", function(t)
+s:test("the opts form reports false the same way -- TODO(pal-spawnmonster-signature)", function(t)
     support.needWorld(t)
     local coord = support.inFront(700.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
 
     local ok = Pal.get(support.GAME.pal):spawn{ at = coord, level = 3 }
     t:type(ok, "boolean", "the opts form reports a boolean verdict too")
-    if not ok then t:skip("no PalCheatManager this session — the spawn route is unavailable") end
-    t:eq(ok, true, "an accepted coordinate spawn is true")
+    t:eq(ok, false, "at + level goes through the same blocked call, so it answers false too")
 end)
 
-s:test("a spawn with no argument is accepted and placed by the game", function(t)
+s:test("a spawn with no argument reports false as well -- TODO(pal-spawnmonster-signature)", function(t)
     support.needWorld(t)
     local ok = Pal.get(support.GAME.pal):spawn()
     t:type(ok, "boolean", "the default form reports a boolean verdict")
-    if not ok then t:skip("no PalCheatManager this session — the spawn route is unavailable") end
-    t:eq(ok, true, "SpawnMonster ran, so the wild spawn was accepted")
+    t:eq(ok, false, "the wild route is the same SpawnMonster call, so it answers false too")
 end)
 
 s:test(":renderOn leaves the player pawn alone when there is no mesh to attach", function(t)

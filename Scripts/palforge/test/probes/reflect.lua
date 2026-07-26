@@ -1,23 +1,33 @@
 -- palforge/test/probes/reflect.lua — the read-only reflection sweep behind the F5 key.
 --
--- Twenty-five plan/TODO.md items are all blocked on the same KIND of missing fact: a class
+-- Most of the remaining plan/TODO.md items are blocked on the same KIND of missing fact: a class
 -- that may or may not exist in the shipping build, a UFunction's real parameter list, a row
--- struct's real column names. One press answers all of them at once. The ids this closes, in
--- the order they are printed: audio-akevent-play-signature, audio-volume-rtpc,
--- audio-custom-file-loader, item-remove-call, item-inventory-count-readback,
--- item-datatable-row-read, icons-row-read, icons-row-column, pal-icon-row, skill-icon-key,
--- spawn-actor-conventions, spatial-saveid, mesh-static-setstaticmesh, mesh-texture-import,
+-- struct's real column names. One press answers all of them at once.
+--
+-- TWO OF THEM ARE THE WHOLE POINT OF THE NEXT RUN, because two public capabilities are dead
+-- until they are answered and nothing else in the tree can answer them:
+--   item-additem-signature      -- :give and :take, and every recipe and cost that needs them
+--   pal-spawnmonster-signature  -- :spawn; nothing has ever spawned through this tree
+-- Both are one printed parameter list away, and both blocks call nothing.
+--
+-- The ids this covers, in the order they are printed: audio-akevent-play-signature,
+-- audio-bus-volume, audio-custom-file-loader, item-remove-call, item-additem-signature,
+-- item-inventory-count-readback, item-datatable-row-read, icons-row-read, icons-row-column,
+-- pal-icon-row, skill-icon-key, pal-spawnmonster-signature, spawn-actor-conventions,
+-- spatial-saveid, mesh-static-setstaticmesh, mesh-texture-import,
 -- mesh-detach-destroycomponent, mesh-base-material, building-leftclick, building-break,
 -- building-break-source, skill-activate-source, skill-passive-source, effect-native-status,
 -- pal-skills-equip, ui-host-paths, ui-update-event. WHAT YOU NEED ON SCREEN: a loaded save
 -- and nothing else — no pal has to be near you, nothing has to be crafted, and (for the
 -- richest ui-host-paths block) opening the Inventory and the Build menu first costs nothing.
 --
--- STRICTLY READ-ONLY. Several of those TODO paragraphs also describe a live half — call
--- AddItem_ServerInternal with a negative Count, add a component and destroy it, AddChild a
--- throwaway TextBlock into the HUD, arm a RegisterHook and go hit something. NONE of that
--- happens here: this probe only looks up, enumerates and calls getters, so it is safe in a
--- real save. Every section that has such a half ends with a NOTE naming it and saying which
+-- STRICTLY READ-ONLY, AND CRASH-SAFE. Several of those TODO paragraphs also describe a live
+-- half — add a component and destroy it, AddChild a throwaway TextBlock into the HUD, arm a
+-- RegisterHook and go hit something. NONE of that happens here: this probe only looks up,
+-- enumerates and calls getters, so it is safe in a real save. It also never calls a UFunction
+-- with an argument type it has not read (see the rule at the top of test/probe.lua): a wrong
+-- TYPE faults inside UE4SS's marshalling, pcall does not see it, and a probe that closes the
+-- game loses the whole run's findings — which has happened once already. Every section that has such a half ends with a NOTE naming it and saying which
 -- key (F6 / F7) or console line performs it, so the reader knows what is still owed.
 --
 -- LOG VOLUME. A class whose whole function list is the answer is dumped whole (PalBuildObject,
@@ -258,9 +268,20 @@ local function tryRow(dt, rowName, cols)
     if not probe.valid(dt) then probe.line("VALUE <no table> for row %s", tostring(rowName)); return end
     local key; pcall(function() key = FName(rowName) end)
     probe.line("VALUE FName(%q) -> %s", tostring(rowName), key ~= nil and asText(key) or "FName() unavailable")
+    -- READ THE SIGNATURE BEFORE CALLING. A wrong argument TYPE faults inside UE4SS's
+    -- marshalling and closes the game — pcall never sees it — which is how the first run
+    -- died. Every attempt below therefore passes an FName, the type a row key is, and the
+    -- raw-string variant that used to sit here is gone. Wrong ARITY is survivable (it raises
+    -- a normal Lua error), so the three-argument FindRow form stays.
+    for _, fn in ipairs({ "GetDataTableRowFromName", "FindRow", "GetRow", "GetRowNames" }) do
+        probe.params(dt, fn)
+    end
+    if key == nil then
+        probe.note("FName() is unavailable this session, so no row read is attempted")
+        return
+    end
     local attempts = {
         { "GetDataTableRowFromName(FName)",  function() return dt:GetDataTableRowFromName(key) end },
-        { "GetDataTableRowFromName(string)", function() return dt:GetDataTableRowFromName(rowName) end },
         { "FindRow(FName,'probe',false)",    function() return dt:FindRow(key, "probe", false) end },
         { "GetRow(FName)",                   function() return dt:GetRow(key) end },
         { "GetRowNames()",                   function() return dt:GetRowNames() end },
@@ -385,8 +406,22 @@ local function audio_akevent_play_signature()
     probe.finish()
 end
 
-local function audio_volume_rtpc()
-    probe.begin("audio-volume-rtpc")
+-- audio-volume-rtpc is CLOSED, negatively, by the first run of the block below: this build
+-- declares three AkRtpc assets (Supply_Altitude, OverHeatRifle, ChargeLaserRifle_01), no
+-- AkAuxBus and no AkAudioBank, so there is no volume parameter for SetRTPCValue* to address and
+-- no parameter list would have helped. The block stays, retargeted at what is still open: the
+-- one candidate left is SetOutputBusVolume, which moves a whole output BUS rather than one
+-- sound. It calls nothing — see the rule at the top of test/probe.lua.
+local function audio_bus_volume()
+    probe.begin("audio-bus-volume")
+
+    probe.section("(0) SetOutputBusVolume, the one candidate left — its declaration, from both owners")
+    for _, path in ipairs({ "/Script/AkAudio.Default__AkComponent",
+                            "/Script/AkAudio.Default__AkGameplayStatics" }) do
+        local o = probe.find(path)
+        probe.params(o, "SetOutputBusVolume")
+        probe.params(o and classOf(o), "SetOutputBusVolume")
+    end
 
     probe.section("(1) does any volume-capable class exist on this build at all")
     local targets = {
@@ -417,12 +452,15 @@ local function audio_volume_rtpc()
         probe.line("LIVE   outer = %s", probe.valid(outer) and probe.full(outer) or "?")
     end
 
-    probe.note("HIT: any SetRTPCValue* with a printed parameter list, PLUS one AkRtpc name that reads like "
-        .. "a volume, and setVolume can be written — the parameter list also decides its final shape "
-        .. "(setVolume(v) vs setVolume(v, actor) vs a module-level bus call).")
-    probe.note("MISS: four 'absent' lines plus '#AkRtpc -> none' means there is no volume entry point "
-        .. "reflected here, and Audio.Handle:setVolume should be documented as permanently false "
-        .. "rather than left looking implementable.")
+    probe.note("WHAT TO PASTE BACK: the SetOutputBusVolume PARAM lines from section (0) — is the bus an "
+        .. "FName or an FString, is there a leading AkComponent/actor, is the value 0..1 or dB, is "
+        .. "there a fade argument. Nothing can be called until they are read.")
+    probe.note("The AkRtpc/AkAuxBus/AkAudioBank listings below are the evidence that CLOSED "
+        .. "audio-volume-rtpc; they are reprinted so a build that ships more of them is noticed "
+        .. "rather than assumed to match. Three RTPCs and no buses is the known answer.")
+    probe.note("IF SetOutputBusVolume IS ABSENT FROM BOTH OWNERS: there is no volume entry point on this "
+        .. "build at all, and Audio.Handle:setVolume is permanently false — say so in the docs instead "
+        .. "of leaving it looking implementable. Picking a quieter AkAudioEvent stays the only control.")
     probe.finish()
 end
 
@@ -517,10 +555,70 @@ local function item_remove_call()
         .. "hypothesis in utils/items.take outright — take() gets a real call and a real result.")
     probe.note("MISS: nothing but AddItem_ServerInternal on the whole chain means the negative Count IS "
         .. "the only candidate, and only the live delta below can settle it.")
-    probe.note("STILL OWED (this probe never writes to an inventory): the delta test. In a THROWAWAY "
-        .. "world, console: local i=<the inv above>; print(i:CountItemNum(FName('Wood'))); "
-        .. "i:AddItem_ServerInternal(FName('Wood'), -1, false, 0.0); print(i:CountItemNum(FName('Wood'))) "
-        .. "— both numbers on one line, then repeat with -3.")
+    probe.note("STILL OWED (this probe never writes to an inventory): the delta test — but it CANNOT "
+        .. "be run yet. The negative-Count recipe that used to sit here passed four arguments, and "
+        .. "the first in-game run answered 'UFunction expected 6 parameters, received 4'. Read the "
+        .. "declaration first (block item-additem-signature, same run), then the delta test is: in a "
+        .. "THROWAWAY world, print CountItemNum(FName('Wood')), issue the write with a negative Count "
+        .. "and ALL SIX arguments in their declared types, print the count again.")
+    probe.finish()
+end
+
+-- The single highest-value unknown in the tree: what the SIX parameters of the inventory write
+-- actually are. utils/items.give and .take are both switched off until this block answers, and
+-- so is every cost and recipe in skills/. The first in-game run got
+--   "UFunction expected 6 parameters, received 4"
+-- from AddItem_ServerInternal — which says the DECLARATION has six slots, and nothing at all
+-- about whether the four PalForge passed were the right four in the right order.
+--
+-- This block only READS declarations. It does not call any of them: an argument list that does
+-- not match a declaration can fault natively inside UE4SS marshalling, where pcall cannot see
+-- it, and that is what closed the game on the first run.
+local function item_additem_signature()
+    probe.begin("item-additem-signature")
+
+    local inv = inventory()
+    if not probe.valid(inv) then
+        probe.note("no inventory reachable (see the lines above) — nothing here can be read this run")
+        probe.finish()
+        return
+    end
+    local cls = classOf(inv)
+    probe.line("CLASS inventory = %s", probe.full(inv))
+    probe.line("CLASS inventory class = %s", cls and probe.full(cls) or "?")
+
+    -- Ask BOTH the live object and its class. The first run printed "function absent" for every
+    -- lookup because it only ever asked the class; probe.params now walks live object -> class ->
+    -- super chain -> member access, and asking both ways is free insurance against a build where
+    -- only one of them answers.
+    probe.section("the write PalForge was built on, read from the live object and from the class")
+    probe.params(inv, "AddItem_ServerInternal")
+    probe.params(cls, "AddItem_ServerInternal")
+
+    -- Two more routes to the same outcome, both from dumps/reflection/02_reflection.txt. If
+    -- AddItem_ServerInternal's list stays unreadable, either of these can carry give() instead —
+    -- ForDebug sits on this very class, ToServer on the network component.
+    probe.section("the other two add routes this build declares")
+    probe.params(inv, "RequestAddItem_ForDebug")
+    probe.params(cls, "RequestAddItem_ForDebug")
+    local netcls = probe.find("/Script/Pal.PalNetworkPlayerComponent")
+    local net = probe.firstOf("PalNetworkPlayerComponent")
+    probe.params(net or netcls, "RequestAddItem_ToServer")
+    probe.params(netcls, "RequestAddItem_ToServer")
+
+    -- take() has no confirmed call at all, so its candidates are read in the same breath: one
+    -- press should not have to be spent twice on the same class.
+    probe.section("removal candidates, declarations only")
+    for _, fn in ipairs({ "RequestMoveItemToInventoryFromContainer", "RequestMoveItemToInventoryFromSlot",
+                          "TryGetContainerFromStaticItemID", "TryGetItemIdBySlot", "IsExistItem" }) do
+        probe.params(inv, fn)
+    end
+
+    probe.note("WHAT TO PASTE BACK: every PARAM line above, in order. Six named, typed slots for "
+        .. "AddItem_ServerInternal is the whole answer — it re-enables give() and take() together.")
+    probe.note("IF THEY ALL SAY 'function absent': that is probe.params failing on this UE4SS build, "
+        .. "NOT the functions missing — the FN listing under item-remove-call proves they exist. "
+        .. "Paste the absent lines back anyway; which of the five lookups failed is itself the fix.")
     probe.finish()
 end
 
@@ -541,15 +639,14 @@ local function item_inventory_count_readback()
         okm and tostring(member) or "read raised", okm and type(member) or "?")
 
     probe.section("and what does it ANSWER — an integer, or something tonumber() turns into nil")
-    local calls = {
-        { "inv:CountItemNum(FName('Wood'))", function() return inv:CountItemNum(FName("Wood")) end },
-        { "inv:CountItemNum('Wood')",        function() return inv:CountItemNum("Wood") end },
-    }
-    for _, c in ipairs(calls) do
-        local ok, v = pcall(c[2])
+    -- ONE call, with the type the engine declares. The raw-string variant that used to sit
+    -- beside this line faulted inside UE4SS's marshalling and closed the game mid-run; see
+    -- the rule at the top of test/probe.lua. FName is what a Palworld id parameter is.
+    do
+        local ok, v = pcall(function() return inv:CountItemNum(FName("Wood")) end)
         local num; pcall(function() num = tonumber(v) end)
-        probe.line("VALUE %s -> ok=%s value=%s luatype=%s tonumber=%s [%s]",
-            c[1], tostring(ok), asText(v), type(v), tostring(num), ok and probe.describe(v) or "raised")
+        probe.line("VALUE inv:CountItemNum(FName('Wood')) -> ok=%s value=%s luatype=%s tonumber=%s [%s]",
+            tostring(ok), asText(v), type(v), tostring(num), ok and probe.describe(v) or "raised")
     end
 
     probe.section("the signature, and every sibling name that might replace it")
@@ -730,6 +827,113 @@ end
 -- Spawn and world
 --=============================================================================
 
+-- The other blocked capability, read the same way: nothing has ever spawned through this tree.
+-- In a loaded save on 2026-07-26, cm:SpawnMonster(FName("ChickenPal"), level) completed without
+-- raising and no new PalCharacter existed either immediately or 1.2 s later. The call reaches
+-- the engine and does nothing.
+--
+-- ⚠️ THE QUESTION THIS BLOCK WAS WRITTEN FOR IS ANSWERED. It existed to read the declared
+-- parameter list of SpawnMonster, on the theory that a missing trailing argument was being
+-- marshalled as zero. dumps/cxx/Pal.hpp settled that on 2026-07-26 without a run:
+--     :16176  void SpawnMonster(const FName CharacterID, int32 Level);
+--     :16175  void SpawnMonsterForPlayer(const FName& CharacterID, int32 Num, int32 Level);
+-- Those are exactly the two argument lists core/spawn.lua passes. The arity hypothesis is DEAD,
+-- and so are its two companions: all 470 lines of `class UPalCheatManager` (Pal.hpp:16085-16554)
+-- carry no gate, mode, target or enable flag and no _ToServer/_ServerInternal spawn twin; and
+-- APalMonsterCharacter derives APalCharacter (:10167, :10195, :8956) with
+-- dumps/reflection/04_live_objects.txt showing the FindAllOf("PalCharacter") sweep returning
+-- BP_PinkCat_C out of a live world, so the world delta core/spawn measures would have seen a pal.
+--
+-- WHAT THE BLOCK IS FOR NOW. Two things the dump cannot supply. (1) The cheat manager's live
+-- function list, which is still worth having: dumps/reflection/02_reflection.txt covers 21
+-- /Script/Pal.* classes and PalCheatManager is not one of them, so nothing has ever confirmed
+-- that SpawnMonster still EXISTS on the installed binary — the dump is a patch behind it (dumped
+-- 2026-07-09, exe 2026-07-16, and the live reflection already shows names the dump lacks). (2)
+-- The surviving hypothesis, which is WHERE the call must run: see the network-role section.
+--
+-- It calls NOTHING, and that has not changed. Every line below finds an object, lists names, or
+-- reads a property. Calling a UFunction with a guessed argument list is what closed the game on
+-- the first run, and the two calls named in the closing notes are for a human in a throwaway
+-- world, not for this file.
+local function pal_spawnmonster_signature()
+    probe.begin("pal-spawnmonster-signature")
+
+    -- Three ways to the object, in the order core/spawn.cheatManager itself tries them. Any one
+    -- that answers is enough; all three are printed so a failure names which link broke.
+    probe.section("reach the cheat manager")
+    local cm = probe.firstOf("PalCheatManager")
+    local pc = probe.firstOf("PalPlayerController")
+    if not probe.valid(cm) and probe.valid(pc) then
+        pcall(function() cm = pc.CheatManager end)
+        probe.line("VALUE PalPlayerController.CheatManager -> %s", probe.describe(cm))
+    end
+    local cmcls = probe.find("/Script/Pal.PalCheatManager")
+    if not probe.valid(cm) and probe.valid(pc) then
+        local cheatClass; pcall(function() cheatClass = pc.CheatClass end)
+        probe.line("VALUE PalPlayerController.CheatClass -> %s", probe.describe(cheatClass))
+    end
+
+    local owner = probe.valid(cm) and cm or cmcls
+    if not probe.valid(owner) then
+        probe.note("neither a live PalCheatManager nor its class is reachable — that alone is the "
+            .. "finding, and it would mean core/spawn's whole route is unavailable rather than "
+            .. "mis-called. Paste the three lines above back.")
+        probe.finish()
+        return
+    end
+
+    probe.section("every UFunction on the cheat manager, unfiltered — no dump in this tree has this list")
+    probe.functions(probe.valid(cm) and classOf(cm) or cmcls, "PalCheatManager")
+
+    probe.section("the two spawn declarations — dumps/cxx says (FName, int32) and (FName, int32, int32)")
+    for _, fn in ipairs({ "SpawnMonster", "SpawnMonsterForPlayer" }) do
+        if probe.valid(cm) then probe.params(cm, fn) end
+        probe.params(cmcls, fn)
+    end
+
+    -- The surviving hypothesis, read-only. Palworld routes every mutating debug action through
+    -- the server rather than the local object: APalPlayerController declares a _ToServer twin for
+    -- each (Debug_AddMoney_ToServer, Debug_Muteki_ToServer, Debug_ForceSpawnRarePal_ToServer, and
+    -- the general Debug_CheatCommand_ToServer(FString) at Pal.hpp:10970, with
+    -- Debug_ReceiveCheatCommand_ToClient coming back at :10956 — all confirmed live at
+    -- dumps/reflection/02_reflection.txt:190-213), and UPalCheatManager itself carries
+    -- EnableCommandToServer() (:16440) and CommandToServer(const FString) (:16501). Those exist
+    -- because a cheat issued without authority is not expected to do anything locally — which is
+    -- the observed behaviour exactly. Role and RemoteRole are plain UPROPERTYs on AActor
+    -- (Engine.hpp:7873, :7867), so this is a property read and nothing is invoked.
+    probe.section("network role — does this session have authority at all")
+    if probe.valid(pc) then
+        probe.read(pc, "Role")
+        probe.read(pc, "RemoteRole")
+        probe.read(pc, "bReplicates")
+    else
+        probe.line("VALUE no PalPlayerController to read a role from")
+    end
+
+    probe.note("WHAT TO PASTE BACK, in order of what it settles: (1) the Role/RemoteRole pair. "
+        .. "ROLE_Authority (3) on the controller kills the authority hypothesis outright and the "
+        .. "search moves to the CharacterID and the spawn location instead; anything lower makes "
+        .. "the server forward THE candidate fix. (2) whether SpawnMonster and "
+        .. "SpawnMonsterForPlayer appear in the unfiltered function list at all — the dump is one "
+        .. "patch older than the installed exe, and nothing has confirmed these two survive in it.")
+    probe.note("STILL OWED, and NOT done here because it writes to the world: only if the role "
+        .. "above is NOT authority, in a THROWAWAY world, console: local "
+        .. "pc=FindFirstOf('PalPlayerController'); local n=#FindAllOf('PalCharacter'); "
+        .. "pc:Debug_CheatCommand_ToServer('SpawnMonster ChickenPal 5'); "
+        .. "print(n, #FindAllOf('PalCharacter')) — a rise closes "
+        .. "TODO(pal-spawnmonster-signature), and no rise is one more elimination worth as much. "
+        .. "The argument is a single FString, which is the safest scalar there is to marshal.")
+    probe.note("The full function list matters as much as the two signatures: a spawn name nobody in "
+        .. "either tree has tried may be sitting in it.")
+    probe.finish()
+end
+
+-- spawn-actor-conventions is SETTLED in core/spawn.lua as of the 2026-07-26 dump read:
+-- dumps/cxx/Engine.hpp:13438 declares BeginDeferredActorSpawnFromClass with FIVE parameters and
+-- no scale method, and :13416 declares FinishSpawningActor with TWO — so the four conventions
+-- core/spawn used to try are down to the one declared shape. This block stays because it asks the
+-- live build the same question the dump answered from a one-patch-old snapshot, and because its
+-- unfiltered GameplayStatics list serves audio-custom-file-loader as well.
 local function spawn_actor_conventions()
     probe.begin("spawn-actor-conventions")
 
@@ -1224,12 +1428,20 @@ end
 -- run
 --=============================================================================
 
--- Every section, in plan/TODO.md order. Each one is pcall-guarded in M.run so a section that
--- raises (a stale pointer, a class that answers strangely) cannot cost the other twenty-four
--- their block.
+-- Every section, in plan/TODO.md order EXCEPT the first two, which are the reason to press
+-- the key at all: item-additem-signature and pal-spawnmonster-signature are the only two
+-- unknowns with a dead public capability behind them (:give / :take, and :spawn), and a run
+-- that ends early for any reason must not be the run that lost them. They go first.
+--
+-- Each one is pcall-guarded in M.run so a section that raises (a stale pointer, a class that
+-- answers strangely) cannot cost the other twenty-six their block. A pcall cannot save a run
+-- from a native marshalling fault, which is why no section here calls a UFunction whose
+-- parameter types it has not printed first.
 local SECTIONS = {
+    { "item-additem-signature",         item_additem_signature },
+    { "pal-spawnmonster-signature",     pal_spawnmonster_signature },
     { "audio-akevent-play-signature",   audio_akevent_play_signature },
-    { "audio-volume-rtpc",              audio_volume_rtpc },
+    { "audio-bus-volume",               audio_bus_volume },
     { "audio-custom-file-loader",       audio_custom_file_loader },
     { "item-remove-call",               item_remove_call },
     { "item-inventory-count-readback",  item_inventory_count_readback },

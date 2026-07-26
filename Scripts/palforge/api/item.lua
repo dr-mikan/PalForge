@@ -20,12 +20,32 @@
 --     onCraft / onDiscard — nothing emits item.craft / item.discard, so these never fire.
 --     They stay declarable so a pack's code is future-proof.
 --
--- ACTIONS: :give moves the count through the game's own server path (AddItem_ServerInternal,
--- via utils.items) and is the best-proven call in the tree; it now reads the inventory count
--- back, so a bogus id or a full inventory answers false instead of pretending. :take is NOT
--- its equal — no removal call has ever been confirmed on this build, so it pushes a negative
--- delta through that same add call and then re-reads the count, returning whether anything
--- actually left (see utils.items.take).
+-- ACTIONS — read this before planning anything around :give or :take.
+--   * :count WORKS and is measured. It reads the live inventory through the game's own
+--     CountItemNum, which was observed in a loaded save answering 135 for Wood. nil means
+--     "could not read", never "none".
+--   * :give adds through UPalCheatManager:GetItem(FName StaticItemId, int32 Count) and then
+--     MEASURES the result — true means the inventory count was seen to RISE, false means the
+--     call was refused, did not execute, or moved nothing that could be observed. It no longer
+--     touches PalPlayerInventoryData:AddItem_ServerInternal, the call that answered "UFunction
+--     expected 6 parameters, received 4" on the first in-game run and had therefore never once
+--     executed (TODO(item-additem-signature) in utils/items is still open — that route is
+--     unread, it is simply no longer the only one).
+--   * :take removes through UPalCheatManager:DropItem(const FName StaticItemId, const int32
+--     Num), measured the same way — true only when the count was seen to FALL. ⚠️ A DROP IS NOT
+--     A DELETE: the items leave the inventory and land on the ground at the player's feet,
+--     where they can be picked back up. That is a real removal from the inventory, which is
+--     what :take promises, but a pack taking a payment this way leaves the payment lying there.
+--     There is no delete to use instead — the whole inventory class chain (69 + 13 + 1
+--     functions, base classes walked) declares nothing that subtracts an item (utils.items.take,
+--     TODO(item-remove-call)).
+--   * ⚠️ NEITHER WRITE HAS BEEN OBSERVED IN GAME YET. The two cheats come from UE4SS's
+--     CXXHeaderDump of this install (dumps/cxx/Pal.hpp:16398 and :16453) and are reached
+--     through core.signature, which checks the LIVE declaration before an argument is
+--     marshalled and logs the evidence it rested on; the cheat manager itself and the
+--     FName-plus-int marshalling are the ones PalForge already unlocks technologies through on
+--     this build. So the mechanism is well evidenced and the outcome is not yet witnessed:
+--     expect a verdict that was measured rather than assumed, and read the log line.
 --
 -- WHAT IS DECLARATIVE, NOT LIVE — read this before believing a field did something:
 --   * name / description / category / maxStack / recipe are metadata PalForge stores and
@@ -45,8 +65,9 @@
 --           onUse = function(item, ctx) log.info(tostring(ctx.actor)) end,
 --       },
 --   }
---   Item.get("Wood"):give(10)      -- false if nothing landed
 --   Item.get("Wood"):count()       -- what the inventory holds now (nil = could not read)
+--   Item.get("Wood"):give(10)      -- true only if the count was seen to rise; see ACTIONS above
+--   Item.get("Wood"):take(3)       -- drops them on the GROUND; true only if the count fell
 
 local om     = require("palforge.core.object_manager")
 local icons  = require("palforge.core.icons")
@@ -91,8 +112,10 @@ local Events = schema.define("Item.Spec.Events", {
     -- fires from a manual event.emit("item.craft", ...).
     { "onCraft",   type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "declarable; NO native source exists — fires only on a manual emit" },
-    -- TODO(item-discard-source): unknown which UFunction reports a drop / discard / consume,
-    -- and whether it is just AddItem_ServerInternal with a negative Count.
+    -- TODO(item-discard-source): unknown which UFunction reports a drop / discard / consume.
+    -- Whatever UPalCheatManager:DropItem drives internally is now the first place to look —
+    -- that is the call :take makes, so a hook that catches a drop would also catch PalForge's
+    -- own removals — but nothing has been hooked or observed there yet.
     { "onDiscard", type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "declarable; NO native source exists — fires only on a manual emit" },
 })
@@ -237,26 +260,44 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 -- ---- actions ----
 
----Add `count` of this item to the local player's inventory (default 1). Goes through the
----game's own AddItem_ServerInternal and then reads the inventory count back, so `ok` is
----false when nothing landed — an id the item table does not know, or no room. (A build that
----will not hand back a count answers true and logs that the add is unverified.)
+---Add `count` of this item to the local player's inventory (default 1) through the game's own
+---UPalCheatManager:GetItem(FName StaticItemId, int32 Count), and MEASURE the outcome.
+---
+---`ok` is the measurement, never the call: CountItemNum is read before and after, and true means
+---the count was seen to RISE. false means the cheat manager was missing (needs
+---CheatManagerEnabler), the live declaration did not match so the call was refused outright, the
+---count could not be read afterwards (UNKNOWN is never reported as success), or the count simply
+---did not move — an item id the game does not know and a full inventory both execute happily and
+---add nothing. Every outcome logs a line naming the item, the count and the evidence level.
+---⚠️ NOT YET OBSERVED IN GAME: the signature is UE4SS's CXXHeaderDump of this install
+---(dumps/cxx/Pal.hpp:16398), checked against the live class by core.signature, and the cheat
+---manager is the object PalForge already unlocks technologies through here — but no run has
+---exercised GetItem yet. See utils.items.give.
 ---@param count integer?
----@return boolean ok  # true when the count was seen to rise, or could not be read at all
+---@return boolean ok  # true only when the inventory count was measured to rise
 function Handle:give(count) return items.give(self.id, count or 1) end
 
----TRY to remove `count` of this item from the local player's inventory (default 1).
----Removal is UNCONFIRMED: no removal call is known on this build, so this pushes a
----negative delta through the same AddItem_ServerInternal that :give uses and then reads
----the inventory count back. `ok` is true only when that count was seen to fall — false
----means nothing observably left the inventory (see utils.items.take).
+---Remove `count` of this item from the local player's inventory (default 1) through the game's
+---own UPalCheatManager:DropItem(const FName StaticItemId, const int32 Num), measured the same
+---way as :give — true only when the count was seen to FALL.
+---
+---⚠️ THE ITEMS ARE DROPPED, NOT DESTROYED. They leave the inventory and land on the ground at the
+---player's feet, where anyone can pick them back up. The inventory really did lose them, which is
+---what :take means, but plan for the pile: a pack that charges a price this way leaves the price
+---lying on the floor. Nothing on this build deletes an item instead — the inventory's whole class
+---chain declares no remove/consume/discard function at all (utils.items.take,
+---TODO(item-remove-call)).
+---The request is clamped to what the inventory actually holds, and skipped when it holds none.
+---⚠️ NOT YET OBSERVED IN GAME either (dumps/cxx/Pal.hpp:16453; same route, same caveat as :give).
 ---@param count integer?
----@return boolean ok  # true only when the inventory count actually dropped
+---@return boolean ok  # true only when the inventory count was measured to fall
 function Handle:take(count) return items.take(self.id, count or 1) end
 
----How many of this item the local player is holding right now, or nil when the count cannot
----be read (no world, or CountItemNum unbound — nil is UNKNOWN, never zero). This is the same
----measurement :give and :take report their outcome from.
+---WORKS, and is measured. How many of this item the local player is holding right now, or nil
+---when the count could not be read (no world / no player — nil is UNKNOWN, never zero). It
+---goes through the game's own CountItemNum, which was observed in a loaded save handing Lua a
+---plain number (135 Wood). It is the only item action on this build proven end to end, and it
+---is also what :give and :take rest on: their verdicts are this read, taken twice.
 ---@return integer?
 function Handle:count() return items.count(self.id) end
 

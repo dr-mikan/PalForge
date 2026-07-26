@@ -31,9 +31,15 @@ node_modules/
 plan/
 
 # dumps
-# Measured reflection data recovered from a real session. reflection/ and catalog/ are the
-# evidence plan/TODO.md cites — they are the difference between "we measured this" and
+# Measured reflection data recovered from a real session. reflection/, catalog/ and cxx/ are
+# the evidence plan/TODO.md cites — they are the difference between "we measured this" and
 # "someone has to boot the game and measure it again", so they ship. The rest is scratch.
+#
+# cxx/ is UE4SS's own CXXHeaderDump of the installed binary: 1579 headers with every
+# UFunction's real signature. It is the strongest declaration source in the tree and the only
+# one that answers a parameter list without the game running — three dead capabilities were
+# diagnosed from it in a single afternoon. 10 MB is worth not having to regenerate it.
 dumps/*
 !dumps/reflection/
 !dumps/catalog/
+!dumps/cxx/

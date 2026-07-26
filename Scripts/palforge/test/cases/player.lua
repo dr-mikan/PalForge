@@ -27,6 +27,35 @@ local function fieldOf(spec, name)
     return nil
 end
 
+-- An object's class chain as short class names, leaf first — "BP_Player_Female_C",
+-- "PalPlayerCharacter", "PalCharacter", ... This is the walk the reflection probes already
+-- proved in game (test/probes/pal.lua, test/probes/reflect.lua): GetSuperStruct, with the
+-- SuperStruct property as the fallback, bounded so a cycle cannot hang the suite. Fail-soft:
+-- whatever was readable before a step failed is what comes back, and an engine that hands
+-- over nothing returns an empty list rather than raising.
+local function classChain(obj)
+    local out = {}
+    local function live(o)
+        local ok, v = pcall(function() return o ~= nil and o.IsValid and o:IsValid() end)
+        return ok and v == true
+    end
+
+    local k; pcall(function() k = obj:GetClass() end)
+    local depth = 0
+    while live(k) and depth < 12 do
+        local ok, name = pcall(function() return k:GetFName():ToString() end)
+        if not (ok and type(name) == "string" and #name > 0) then break end
+        out[#out + 1] = name
+
+        local parent
+        pcall(function() parent = k:GetSuperStruct() end)
+        if not live(parent) then pcall(function() parent = k.SuperStruct end) end
+        k = parent
+        depth = depth + 1
+    end
+    return out
+end
+
 --=============================================================================
 -- structure — true with or without a game
 --=============================================================================
@@ -177,20 +206,34 @@ s:test("coordinateOffset shifts a live position by the amount asked for on every
     t:near(off.z - base.z, 125.0, EPS, "z moved by dz")
 end)
 
-s:test("character returns the valid local player pawn", function(t)
+s:test("character returns the valid local player pawn, Blueprint subclass and all", function(t)
     support.needWorld(t)
 
     local actor = Player.character()
     t:truthy(actor, "a loaded world has a player character")
     t:assert(actor.IsValid and actor:IsValid(), "the returned actor must be live, not a stale UObject")
 
-    -- Read the class name fail-soft: a session that will not hand it over is not a defect in
-    -- this facade, so only assert when we actually got a name.
-    local name
-    pcall(function() name = actor:GetClass():GetFName():ToString() end)
-    if type(name) == "string" and #name > 0 then
-        t:assert(name:find("PalPlayerCharacter", 1, true) ~= nil,
-            "character() must return a PalPlayerCharacter, got " .. name)
+    -- The live pawn is ALWAYS a Blueprint subclass — every real Palworld player is
+    -- BP_Player_Female_C or BP_Player_Male_C — so its own class name is not
+    -- "PalPlayerCharacter". Demanding that exact name was this test's own bug: the first
+    -- in-game run failed here ("got BP_Player_Female_C") against a perfectly correct pawn.
+    -- What holds for every player pawn is the ANCESTRY, so walk the super chain instead.
+    local chain = classChain(actor)
+    local reaches = false
+    for _, name in ipairs(chain) do
+        if name:find("PalPlayerCharacter", 1, true) then reaches = true; break end
+    end
+
+    -- Fail-soft, in two steps, because a chain that stops at the leaf proves nothing either
+    -- way: a lone "BP_Player_Female_C" says nothing about what it derives from. So assert the
+    -- ancestry only when the walk actually climbed (or already found the base class); a
+    -- session that will not hand over a super chain is not a defect in this facade.
+    if reaches or #chain > 1 then
+        t:assert(reaches, "character() must return a PalPlayerCharacter or a subclass of one, "
+            .. "got the chain " .. table.concat(chain, " -> "))
+    elseif #chain == 1 then
+        support.log("player: class chain stopped at the leaf (" .. chain[1]
+            .. "); ancestry unverifiable this session")
     end
 end)
 

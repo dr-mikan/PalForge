@@ -2,28 +2,81 @@
 -- calls live here (the api/impl split: api/*:spawn() declares the capability, this holds
 -- the engine call), so base classes stay declaration-only.
 --
--- Pal spawning goes through UPalCheatManager — the server-authoritative admin API enabled by
--- the CheatManagerEnabler mod; SpawnMonsterForPlayer is real-server verified (see
--- mods/__knowledges/palworld-ue4ss-functions.md). On a DEDICATED SERVER no mod creates that
--- object (the enabler hooks PlayerController:ClientRestart, which never fires server-side),
--- so cheatManager() constructs one itself from the controller's CheatClass. Fail-soft: no
--- controller to build it on is a no-op that returns false, never an error.
+-- ⚠️ NO PAL SPAWN ROUTE HAS BEEN OBSERVED TO WORK ON THIS BUILD — measured, not suspected. In
+-- a loaded save with a live world on 2026-07-26, with a cheat manager that already existed
+-- (CheatManagerEnabler logged "CheatManager already exist") and on the game thread (every
+-- keybind and hook enters through ExecuteInGameThread), cm:SpawnMonster(FName("ChickenPal"),
+-- level) completed WITHOUT RAISING and no new PalCharacter existed 1.2 s later; the palAt
+-- placement pass ran twice and found no new pal actor to place. So the call reaches the
+-- engine and does nothing. Every route here still reports what it OBSERVED, and a route that
+-- observed nothing returns false.
+--
+-- WHAT dumps/cxx/ SETTLED (read 2026-07-26; UE4SS's own CXXHeaderDump of this install, 1579
+-- headers of real signatures out of the shipping binary). Three candidate explanations for
+-- that no-op are now DEAD, and the surviving one is named at TODO(pal-spawnmonster-signature):
+--   * WRONG ARITY — dead. Pal.hpp:16176 declares UPalCheatManager::SpawnMonster(const FName
+--     CharacterID, int32 Level) and :16175 SpawnMonsterForPlayer(const FName& CharacterID,
+--     int32 Num, int32 Level). Those are exactly the two lists this file passes. The
+--     AddItem_ServerInternal shape (four passed, six declared) does NOT repeat here.
+--   * A CLASS-WIDE GATE — dead. All 470 lines of `class UPalCheatManager : public
+--     UCheatManager` (Pal.hpp:16085-16554) were read. It holds six members —
+--     DebugWindowSetting, DebugProgressPresetDataTable, SpawnerInfoReporterClass, PalImGui,
+--     PalCountSystem, SpawnInfoReporter — and not one of them is a spawn mode, a target, an
+--     enable flag or a "spawn at the reticle" concept. There is no SpawnMonster_ToServer, no
+--     _ServerInternal twin and no second overload anywhere on the class.
+--   * A BLIND MEASUREMENT — dead, and this one matters most: the world delta below really
+--     would have seen a pal. APalMonsterCharacter derives APalNPC derives APalCharacter
+--     (Pal.hpp:10167, 10195, 8956), and dumps/reflection/04_live_objects.txt shows the
+--     FindAllOf("PalCharacter") sweep returning BP_PinkCat_C out of a live world — a monster
+--     blueprint, not a player. Subclasses are enumerated. A spawned pal would have been counted.
+--
+-- TWO CAPABILITIES, TWO OBJECTS, ONE ROUTE EACH — no route falls back onto another, so a false
+-- names one call rather than hiding three.
+--   WILD, into the world (M.pal, M.palAt)  -> UPalCheatManager:SpawnMonster. The
+--     server-authoritative admin API enabled by the CheatManagerEnabler mod. On a DEDICATED
+--     SERVER no mod creates that object (the enabler hooks PlayerController:ClientRestart, which
+--     never fires server-side), so cheatManager() constructs one itself from the controller's
+--     CheatClass. Fail-soft: no controller to build it on is a no-op that returns false, never
+--     an error.
+--   OWNED, to the player (M.palForPlayer)  -> APalPlayerState:RequestSpawnMonsterForPlayer,
+--     which needs no cheat manager at all. It is the ONLY spawn function name this tree has
+--     confirmed on the INSTALLED binary (dumps/reflection/02_reflection.txt:656) — the reasoning
+--     is written out at M.palForPlayer, which is also where the route changed.
+-- (mods/__knowledges/palworld-ue4ss-functions.md:143 calls SpawnMonsterForPlayer "real-server
+-- verified"; the sibling mod it credits says otherwise about its own code —
+-- mods/AdminCommands/src/server/Scripts/main.lua:6 calls its give/spawn execution "best-effort
+-- and marked [VERIFY]". Treat that ✅ as unearned.)
+--
+-- EVERY ENGINE CALL BELOW GOES THROUGH core.signature, which finds the UFunction on the live
+-- class (walking the super chain), matches the declared parameter list where this UE4SS build
+-- exposes one, and REFUSES rather than marshalling a shape it cannot vouch for. Each call logs
+-- the evidence level it fired on — "declared" (the running game agreed), "present" (the name
+-- exists, the walk was unavailable, the types are dumps/cxx's) — so a log line from a live
+-- session says how much was actually checked. The one exception is named at teleportActor.
 --
 -- IDS ARE RESOLVED HERE, once, for every route: a PalForge id may be namespaced
 -- ("pack:Boss"), and the GAME only ever knows the DataTable row spelling ("pack_Boss") —
 -- FName("pack:Boss") matches no row at all. object_manager.resolve is the framework's one
 -- id model (utils.items does exactly this before AddItem_ServerInternal, and core/event
--- matches a spawned pal's BP id against the same resolved form), so a namespaced pal is
--- spawnable rather than silently unspawnable. A literal game id passes through untouched.
+-- matches a spawned pal's BP id against the same resolved form), so a namespaced pal reaches
+-- the engine as a row the game could match instead of as a string it never will. A literal
+-- game id passes through untouched.
 --
--- WHAT A `true` MEANS. Every route below reports that the native call RAN. None of these
--- calls returns anything: an unknown CharacterID neither throws nor answers, and the actor
--- materializes a few frames after we return, so nothing here can be synchronous about
--- arrival. What the routes CAN do is look again a moment later and say in the log which way
--- it went — M.pal confirms an actor appeared, M.palAt reports its placement — which is why
--- the log is the honest record and the return value is only ever "asked for".
+-- WHAT A `true` MEANS. None of these calls answers anything — an unknown CharacterID neither
+-- throws nor reports — so "the native call RAN" is worth nothing and is no longer reported as
+-- success. The only evidence in reach is the world itself: FindAllOf("PalCharacter")
+-- immediately before the call and immediately again after it. M.pal and M.palAt return true
+-- ONLY when a pal that was not there a statement ago is there now; otherwise they warn and
+-- return false. That immediate look cannot be fooled by a wild pal streaming in — the two
+-- enumerations are adjacent statements on the game thread with no tick between them — but it
+-- CAN miss an actor that materializes a few frames late, so both routes still look AGAIN
+-- ~1.2 s later and log what they find. That deferred line is what recorded the bug above, and
+-- it is where the route coming alive would show up first.
+-- The one exception is M.palForPlayer: it summons into the party/box, which nothing here can
+-- enumerate, so its true still means only "the call was issued". It says so at its own doc.
 local log            = require("palforge.utils.log").scope("spawn")
 local object_manager = require("palforge.core.object_manager")
+local sig            = require("palforge.core.signature")
 
 local M = {}
 
@@ -32,46 +85,55 @@ local M = {}
 -- polling). `worldCtx` = any live UObject for world context (e.g. the player pawn); `owner`
 -- optional. ⚠️ transform.Scale3D MUST be set — an empty FTransform zeroes scale to (0,0,0).
 --
--- UNOBSERVED. Nothing in either tree has ever run this: both calls are listed as
--- BlueprintCallable in __knowledges/palworld-ue4ss-functions.md:28 and nothing more, so the
--- argument conventions below are UE's documented shapes, not measurements. It fails soft
--- (nil) rather than pretending.
+-- SETTLED (was spawn-actor-conventions) by dumps/cxx/Engine.hpp. The question was which of four
+-- guessed argument conventions this build accepts; the dump answers it outright, so the guessing
+-- is gone and the two shapes below are the declared ones:
+--     Engine.hpp:13438  AActor* BeginDeferredActorSpawnFromClass(const UObject* WorldContextObject,
+--                           TSubclassOf<AActor> actorClass, const FTransform& SpawnTransform,
+--                           ESpawnActorCollisionHandlingMethod collisionHandlingOverride,
+--                           AActor* Owner)                                    -- FIVE, no scale method
+--     Engine.hpp:13416  AActor* FinishSpawningActor(AActor* Actor, const FTransform& SpawnTransform)
+--                                                                             -- TWO, no scale method
+-- So the old six-argument and four-argument attempts were never callable here, and the UE 5.3+
+-- scale-method argument this file used to try first does not exist on this build's GameplayStatics.
+--
+-- STILL UNOBSERVED, and now honestly gated. Nothing in either tree has run this. Both calls carry
+-- an object, a class and a struct, which core.signature refuses to marshal on "present" evidence —
+-- that refusal is the point: a struct pushed against an unread declaration is the failure mode that
+-- kills the process, and no caller in this tree needs M.actor badly enough to risk it. In practice
+-- that means M.actor fires only on a UE4SS build whose UFunction parameter walk succeeds ("declared"),
+-- and returns nil with a logged reason everywhere else. If that walk ever reports the collision
+-- argument as ByteProperty rather than EnumProperty, the refusal below is a false one and BEGIN_PARAMS
+-- is what to correct — the dump cannot tell the two spellings apart from a C++ enum class.
+local BEGIN_PARAMS  = { "ObjectProperty", "ClassProperty", "StructProperty", "EnumProperty", "ObjectProperty" }
+local FINISH_PARAMS = { "ObjectProperty", "StructProperty" }
+
 function M.actor(worldCtx, cls, transform, owner)
     if not (worldCtx and cls and type(transform) == "table") then return nil end
     local gs = StaticFindObject("/Script/Engine.Default__GameplayStatics")
     if not (gs and gs:IsValid()) then log.warn("spawn.actor: no GameplayStatics"); return nil end
     owner = owner or worldCtx
-    -- collision 2 = AdjustIfPossibleButAlwaysSpawn; scale method 0 = OverrideRootScale.
-    -- Arg count/owner varies across UE builds — try conventions in order until one spawns.
-    -- TODO(spawn-actor-conventions): which of these four (if any) UE4SS can actually call on
-    -- this build is unknown — no run of BeginDeferredActorSpawnFromClass is recorded anywhere.
-    local attempts = {
-        function() return gs:BeginDeferredActorSpawnFromClass(worldCtx, cls, transform, 2, owner, 0) end,
-        function() return gs:BeginDeferredActorSpawnFromClass(worldCtx, cls, transform, 2, owner) end,
-        function() return gs:BeginDeferredActorSpawnFromClass(worldCtx, cls, transform, 2) end,
-        function() return gs:BeginDeferredActorSpawnFromClass(worldCtx, cls, transform) end,
-    }
-    local a
-    for i, fn in ipairs(attempts) do
-        local ok, r = pcall(fn)
-        if ok and r and r:IsValid() then
-            a = r; log.info("spawn.actor: convention " .. i .. " worked"); break
-        end
-    end
-    if a and a:IsValid() then
-        -- FINISHING IS NOT OPTIONAL: a deferred actor that never reaches FinishSpawningActor
-        -- is in the world but un-initialized (its construction script and BeginPlay never
-        -- ran). The parameter list moved across UE versions — the scale-method argument is
-        -- 5.3+ — so try the long form and fall back to the short one, and report nil when
-        -- NEITHER ran instead of handing back a half-constructed actor as if it were live.
-        local finished = pcall(function() gs:FinishSpawningActor(a, transform, 0) end)
-        if not finished then finished = pcall(function() gs:FinishSpawningActor(a, transform) end) end
-        if finished and a:IsValid() then return a end
-        log.err("spawn.actor: FinishSpawningActor never ran — the actor stays deferred and "
-            .. "un-initialized, so it is NOT handed back")
+    -- collision 2 = AdjustIfPossibleButAlwaysSpawn.
+    local ok, a, level = sig.call(gs, "BeginDeferredActorSpawnFromClass", BEGIN_PARAMS,
+        worldCtx, cls, transform, 2, owner)
+    -- `.IsValid and :IsValid()`, never a bare :IsValid(): a refused call answers nil and a build
+    -- that returns something other than an actor would otherwise raise inside the guard itself.
+    local live = function(o) return o ~= nil and o.IsValid ~= nil and o:IsValid() end
+    if not (ok and live(a)) then
+        log.err(string.format("spawn.actor: BeginDeferredActorSpawnFromClass did not produce an "
+            .. "actor [evidence %s]", tostring(level)))
         return nil
     end
-    log.err("spawn.actor: all BeginDeferredActorSpawnFromClass conventions failed")
+    -- FINISHING IS NOT OPTIONAL: a deferred actor that never reaches FinishSpawningActor is in
+    -- the world but un-initialized (its construction script and BeginPlay never ran). Report nil
+    -- when it did not run instead of handing back a half-constructed actor as if it were live.
+    local finished, _, flevel = sig.call(gs, "FinishSpawningActor", FINISH_PARAMS, a, transform)
+    if finished and live(a) then
+        log.info(string.format("spawn.actor: spawned and finished [evidence %s/%s]", level, flevel))
+        return a
+    end
+    log.err(string.format("spawn.actor: FinishSpawningActor never ran [evidence %s] — the actor "
+        .. "stays deferred and un-initialized, so it is NOT handed back", tostring(flevel)))
     return nil
 end
 
@@ -157,12 +219,25 @@ local function actorLoc(a)
     return nil
 end
 
--- Deferred spawn CONFIRMATION, log-only. SpawnMonster answers nothing — a CharacterID the
--- game does not have neither throws nor reports — so "the call ran" is all a caller can be
--- told at the time. This looks again ~1.2 s later and says whether an actor actually turned
--- up, which is what turns a silent bad id into a visible one and is the only way the wild
--- route's outcome is ever recorded. Costs one FindAllOf per spawn the caller asked for, and
--- nothing at all where the async pair is unavailable.
+-- How many live PalCharacters are in the world that were not in `before`. This is the whole
+-- of what this module can measure: no spawn call on this build answers anything, so a count
+-- taken against a snapshot is the only thing that can tell a spawn from a no-op.
+local function newPalCount(before)
+    local n = 0
+    for _, a in ipairs(palActors()) do
+        if a and a.IsValid and a:IsValid() then
+            local id = actorId(a)
+            if id and not before[id] then n = n + 1 end
+        end
+    end
+    return n
+end
+
+-- Deferred spawn CONFIRMATION, log-only, and the SECOND look: the immediate count at the call
+-- site catches a spawn that is synchronous, this one catches an actor that materializes a few
+-- frames late. Its warning is what recorded the standing bug — the call ran, nothing arrived —
+-- so it stays armed on exactly the path that reported false. Costs one FindAllOf per spawn the
+-- caller asked for, and nothing at all where the async pair is unavailable.
 local function canDefer()
     return type(LoopAsync) == "function" and type(ExecuteInGameThread) == "function"
 end
@@ -172,18 +247,14 @@ local function confirmSpawnLater(before, what)
     LoopAsync(1200, function()
         ExecuteInGameThread(function()
             pcall(function()
-                local n = 0
-                for _, a in ipairs(palActors()) do
-                    if a and a.IsValid and a:IsValid() then
-                        local id = actorId(a)
-                        if id and not before[id] then n = n + 1 end
-                    end
-                end
+                local n = newPalCount(before)
                 if n > 0 then
                     log.info(string.format("%s: %d new PalCharacter in the world 1.2 s later", what, n))
                 else
                     log.warn(string.format("%s: the call ran but NO new PalCharacter appeared "
-                        .. "1.2 s later — is that CharacterID real?", what))
+                        .. "1.2 s later either — the route produced nothing (see TODO "
+                        .. "pal-spawnmonster-signature). A CharacterID the game does not have "
+                        .. "looks exactly the same from here", what))
                 end
             end)
         end)
@@ -191,10 +262,71 @@ local function confirmSpawnLater(before, what)
     end)
 end
 
+-- THE spawn call, made once for both world routes, wrapped in the only measurement available:
+-- the world enumerated immediately before it and immediately after. Answers
+--   ran       the native call executed without raising — worth nothing on its own,
+--   appeared  how many PalCharacters exist now that did not exist a statement ago,
+--   before    that snapshot, for the deferred pass that looks again 1.2 s later,
+--   level     which evidence core.signature fired on ("declared" / "present"), or nil when
+--             it refused and the game was never touched.
+--
+-- The declared shape is (const FName CharacterID, int32 Level) — dumps/cxx/Pal.hpp:16176 —
+-- i.e. NameProperty then IntProperty, which is the same FName-plus-integer marshalling this
+-- tree already performs successfully on this exact object every time utils/items unlocks a
+-- technology through cm:UnlockOneTechnology(FName(...)) (Pal.hpp:16104). That is why "present"
+-- evidence is acceptable for this call and would not be for a struct one.
+--
+-- TODO(pal-spawnmonster-signature): THE SIGNATURE HALF IS CLOSED — the name is kept because
+-- api/pal.lua, the pal test suite and test/probes/reflect.lua all cite it, but the unknown it
+-- names has moved. What dumps/cxx/ ELIMINATED on 2026-07-26 is written out at the file header:
+-- the parameter list is exactly the two arguments passed here, the cheat-manager class carries
+-- no gate/mode/target/enable flag of any kind, and the world delta below really does enumerate
+-- monster subclasses so it would have SEEN a pal. None of the three explanations anyone had
+-- survives.
+-- WHAT IS STILL UNKNOWN, and it is now one question rather than three: WHERE the call has to
+-- run. The dump has no function bodies, so this is a hypothesis, offered because it is the
+-- only one the headers still support — Palworld routes every mutating debug action through the
+-- SERVER, never the local object. APalPlayerController declares a _ToServer twin for each one
+-- (Debug_AddMoney_ToServer, Debug_AddPlayerExp_ToServer, Debug_Muteki_ToServer,
+-- Debug_SetStatusPoint_ToServer, Debug_ForceSpawnRarePal_ToServer, and the general
+-- Debug_CheatCommand_ToServer(FString Command) at Pal.hpp:10970 with
+-- Debug_ReceiveCheatCommand_ToClient(FString Message) coming back at :10956), and
+-- UPalCheatManager itself carries EnableCommandToServer() (:16440) and CommandToServer(const
+-- FString Command) (:16501). Those exist because the game does NOT expect a cheat issued where
+-- the caller lacks authority to do anything locally — which is precisely the observed
+-- behaviour: runs, raises nothing, changes nothing. It also explains why UnlockOneTechnology
+-- works on the same object: technology is the player's own replicated data, an actor is not.
+-- WHY THAT DOES NOT MAKE THE FORWARD A FIX YET, and why it is not wired: every one of those
+-- names is confirmed on the LIVE build (dumps/reflection/02_reflection.txt:190-213) but nothing
+-- says the single-player session is non-authoritative, and on an authoritative controller a
+-- Server RPC just runs its implementation locally — i.e. straight back into this same function.
+-- Swapping a measured-dead direct call for the same call reached through an unverified command
+-- STRING would trade one unknown for two. So the direct call stays and the forward is the named
+-- next experiment.
+-- WHAT THE NEXT RUN MUST DO (read-only first, one line each, in a loaded save):
+--   1. print the network role — local pc = FindFirstOf("PalPlayerController"); print(pc.Role,
+--      pc.RemoteRole, pc:HasAuthority()). An authoritative controller kills the hypothesis
+--      outright and the search moves to the CharacterID and the spawn location instead.
+--   2. only if step 1 says the session is NOT authority: in a THROWAWAY world,
+--      pc:Debug_CheatCommand_ToServer("SpawnMonster ChickenPal 5") — one FString, which is a
+--      scalar core.signature will pass — then count FindAllOf("PalCharacter") before and after.
+--      A rise is the close; nothing is one more elimination and is worth as much.
+local SPAWN_MONSTER_PARAMS = { "NameProperty", "IntProperty" }
+
+local function spawnMonster(cm, name, level)
+    local before = snapshotPals()
+    local ran, _, level_ = sig.call(cm, "SpawnMonster", SPAWN_MONSTER_PARAMS, FName(name), level)
+    return ran, (ran and newPalCount(before) or 0), before, level_
+end
+
 -- Spawn a WILD pal of game CharacterID `charId` at `level` INTO THE WORLD, near the player
 -- (visible, un-owned). CharacterID is the game code id (e.g. "ChickenPal", "Kitsunebi",
 -- "BlueSkyDragon") = a PalForge Pal's id; a namespaced id resolves to its row spelling.
--- Returns true if the native call executed — the log says whether anything spawned.
+--
+-- Returns true ONLY when a PalCharacter that was not in the world a statement ago is in it
+-- now. On this build that has never happened (see the file header): the call runs, nothing
+-- appears, and this answers false. The 1.2 s confirmation still runs on that path — an actor
+-- arriving late would show up there, and that is the line that would say the route came alive.
 function M.pal(charId, level)
     if type(charId) ~= "string" or #charId == 0 then return false end
     level = tonumber(level) or 1
@@ -204,47 +336,84 @@ function M.pal(charId, level)
         return false
     end
     local name = charName(charId)
-    -- Only worth the enumeration when there is a deferred pass to read it back.
-    local before = canDefer() and snapshotPals() or nil
-    local ok = pcall(function() cm:SpawnMonster(FName(name), level) end)
-    if ok then
-        log.info(string.format("spawn.pal(world) %s (lv %d)", name, level))
-        confirmSpawnLater(before, "spawn.pal " .. name)
-    else
-        log.err("spawn.pal: SpawnMonster threw for " .. name)
+    local ran, appeared, before, evidence = spawnMonster(cm, name, level)
+    if not ran then
+        -- core.signature has already logged WHY — a refusal (the live class does not declare
+        -- SpawnMonster the way dumps/cxx does) or a binding error naming the arity it wanted.
+        log.err(string.format("spawn.pal: SpawnMonster did not execute for %s [evidence %s]",
+            name, tostring(evidence)))
+        return false
     end
-    return ok
-end
-
--- ---- coordinate placement (post-spawn relocation) ----
--- The native bridge's UPalCharacterManager::SpawnNewCharacter creates the pal NEAR THE PLAYER
--- and ignores the requested SpawnParameter.SpawnLocation (verified 2026-07-23). Palworld spawns
--- the pal's actor deferred (a few frames later), so we relocate the freshly-spawned actor to
--- the target once it materializes. Identity is by UObject address so only the pal we just added
--- is moved.
-
-local function teleportActor(a, x, y, z)
-    local loc = { X = x, Y = y, Z = z }
-    local rot = { Pitch = 0, Yaw = 0, Roll = 0 }
-    -- Prefer K2_TeleportTo: it's the character-aware relocate (updates the movement component
-    -- and resolves encroachment), so the pal keeps its AI/physics instead of freezing.
-    local ok, r = pcall(function() return a:K2_TeleportTo(loc, rot) end)
-    if ok and r ~= false then return true end
-    if pcall(function() return a:K2_SetActorLocation(loc, false, {}, true) end) then return true end
-    if pcall(function() a:SetActorLocation(loc) end) then return true end
+    if appeared > 0 then
+        log.info(string.format("spawn.pal(world) %s (lv %d): %d new PalCharacter in the world "
+            .. "[evidence %s]", name, level, appeared, evidence))
+        return true
+    end
+    log.warn(string.format("spawn.pal: SpawnMonster(%s, lv %d) ran [evidence %s] and NOTHING "
+        .. "spawned — no spawn route has been observed to work on this build, so this reports "
+        .. "false (see TODO pal-spawnmonster-signature). Watching for a late arrival",
+        name, level, evidence))
+    confirmSpawnLater(before, "spawn.pal " .. name)
     return false
 end
 
--- Relocate ONLY our freshly-spawned pal to (x,y,z). The native spawn drops it right at the
--- player, so among pals absent from `before` we move the SINGLE one nearest the player's spawn
--- position (px,py,pz) — never a batch, so wild pals that streamed in meanwhile are not dragged
--- along (that was the "20 -> 40 floating pals" bug). Retries; the actor spawns deferred.
--- Returns true ONLY when a new pal was found AND the move reported success. Nobody can
--- receive that today — every call site is a retry timer that ran long after palAt returned —
--- so the return exists for the log line to be honest and for a future caller to poll on.
+-- ---- coordinate placement (post-spawn relocation) ----
+-- No spawn call in this file takes a location, so a coordinate spawn is spawn-then-move: we
+-- relocate the freshly-spawned actor once it materializes, identifying it by UObject address
+-- so only the pal we just added is moved. That the actor appears NEAR THE PLAYER, and a few
+-- frames late, is inherited belief — it is what the C++ bridge's UPalCharacterManager::
+-- SpawnNewCharacter did (it ignored the requested SpawnParameter.SpawnLocation, verified
+-- 2026-07-23), and that bridge is not installed here. Nothing has ever spawned through THIS
+-- file, so the near-the-player anchor below is untested along with everything else.
+
+-- ONE route, and the one deliberate exception to "every engine call goes through
+-- core.signature". K2_TeleportTo is the character-aware relocate — it updates the movement
+-- component and resolves encroachment, so the pal keeps its AI and physics instead of freezing —
+-- and dumps/cxx/Engine.hpp:7971 declares it `bool K2_TeleportTo(FVector DestLocation, FRotator
+-- DestRotation)`: two StructProperty arguments. core.signature REFUSES a struct on "present"
+-- evidence, and "present" is what this build is expected to answer (a UFunction is a UObject in
+-- UE4SS's Lua API, so its parameter walk is often unavailable) — routing this through sig.call
+-- would therefore not make the relocate safer, it would permanently delete a half that has never
+-- yet had anything to move. So the existence of the function is checked through core.signature
+-- (that much it can always answer) and the call itself is made directly.
 --
--- TODO(pal-spawn-placement): unobserved end to end — no run of this pass (found / moved /
--- landed at the coordinate) is recorded anywhere in either tree.
+-- The two fallbacks that used to follow are GONE, and the dump is why: K2_SetActorLocation
+-- declares an OUT parameter (Engine.hpp:7978 — `bool K2_SetActorLocation(FVector NewLocation,
+-- bool bSweep, FHitResult& SweepHitResult, bool bTeleport)`), which this file used to satisfy
+-- with a bare `{}`, and a plain `SetActorLocation` is not reflected on AActor at all — the whole
+-- K2_ prefix exists because the C++ name is not a UFUNCTION. Neither was ever a real second
+-- chance; one was a guess against an out-param and the other was a call to a name that does not
+-- exist.
+local function teleportActor(a, x, y, z)
+    local fn = sig.find(a, "K2_TeleportTo")
+    if not fn then
+        log.warn("spawn.palAt: this actor's class does not declare K2_TeleportTo — nothing is "
+            .. "guessed in its place, so the pal is not moved")
+        return false
+    end
+    local loc = { X = x, Y = y, Z = z }
+    local rot = { Pitch = 0, Yaw = 0, Roll = 0 }
+    local ok, r = pcall(function() return a:K2_TeleportTo(loc, rot) end)
+    return ok and r ~= false
+end
+
+-- Relocate ONLY our freshly-spawned pal to (x,y,z). The spawn is expected to drop it right at
+-- the player, so among pals absent from `before` we move the SINGLE one nearest the player's
+-- spawn position (px,py,pz) — never a batch, so wild pals that streamed in meanwhile are not
+-- dragged along (that was the "20 -> 40 floating pals" bug). Retries; the actor is expected
+-- deferred. Returns true ONLY when a new pal was found AND the move reported success. Nobody
+-- can receive that today — every call site is a retry timer that ran long after palAt returned
+-- — so the return exists for the log line to be honest and for a future caller to poll on.
+--
+-- TODO(pal-spawn-placement): NARROWED by the 2026-07-26 in-game run, and now BLOCKED behind
+-- pal-spawnmonster-signature. What that run settled: this pass RUNS in a live world. It
+-- reached its own last line — "no new pal actor appeared to place" — twice, so the 400 ms
+-- retry chain, the enumeration and the reporting all work end to end. What it could not
+-- settle, and cannot until something spawns at all: the found / moved / landed half. No run
+-- of teleportActor on a real pawn, and no read-back distance, exists anywhere in either tree.
+-- NARROWED again by dumps/cxx/Engine.hpp: the relocate is no longer three guesses but the one
+-- declared call, K2_TeleportTo(FVector, FRotator) at :7971 (see teleportActor). So a failure
+-- here can no longer mean "we called the wrong name" — it means the teleport itself refused.
 local function placeNewPal(before, px, py, pz, x, y, z, tries)
     tries = tries or 0
     local best, bd
@@ -278,8 +447,8 @@ local function placeNewPal(before, px, py, pz, x, y, z, tries)
                     .. "(its position could not be read back)", x, y, z))
             end
         else
-            log.warn(string.format("spawn.palAt: found the new pal but every relocate call "
-                .. "failed; it stays where it spawned, not (%.0f,%.0f,%.0f)", x, y, z))
+            log.warn(string.format("spawn.palAt: found the new pal but K2_TeleportTo did not "
+                .. "report success; it stays where it spawned, not (%.0f,%.0f,%.0f)", x, y, z))
         end
         return moved
     end
@@ -289,22 +458,31 @@ local function placeNewPal(before, px, py, pz, x, y, z, tries)
             return true
         end)
     else
-        log.warn("spawn.palAt: no new pal actor appeared to place")
+        log.warn("spawn.palAt: no new pal actor appeared to place — after ~2.4 s of retries "
+            .. "there is still nothing in the world that was not there before the spawn call, "
+            .. "so there is nothing to move (see TODO pal-spawnmonster-signature)")
     end
     return false
 end
 
 -- Spawn a pal of game CharacterID `charId` at `level` at EXACT world coordinates (x,y,z).
--- Strategy: SpawnMonster (server-authoritative admin API) creates a FULLY FUNCTIONING wild pal
--- (moves, can be damaged/killed, correct level) near the player, then we relocate that one pal
--- to the target. This beats the C++ SpawnNewCharacter path, which yielded a static/invincible
--- pal. Fail-soft on a missing cheat manager.
+-- Strategy: SpawnMonster (server-authoritative admin API) is supposed to put a wild pal near
+-- the player, and we then relocate that one pal to the target. Fail-soft on a missing cheat
+-- manager.
 --
--- RETURN VALUE: true means the SPAWN CALL WAS ACCEPTED and the relocation pass was scheduled —
--- NOT that a pal is standing at (x,y,z). The actor materializes a few frames later and the move
--- happens in placeNewPal on a 400 ms retry chain, long after this has returned; that pass can
--- still find no new actor or fail to move it, and it reports only to the log. Treat a true here
--- as "asked for, en route"; false is definite (bad args, or nothing was even attempted).
+-- ⚠️ THE FIRST HALF DOES NOT HAPPEN ON THIS BUILD. This comment used to justify the route by
+-- saying SpawnMonster "creates a FULLY FUNCTIONING wild pal (moves, can be damaged/killed,
+-- correct level)" and that this "beats the C++ SpawnNewCharacter path, which yielded a
+-- static/invincible pal". That comparison was never true here: the route produces NO pal at
+-- all (file header, and the twin "no new pal actor appeared to place" lines of 2026-07-26).
+-- The C++ bridge is not installed in this tree and is not being re-litigated — what is owed
+-- is TODO(pal-spawnmonster-signature), marked at spawnMonster above.
+--
+-- RETURN VALUE: true means a NEW PAL ACTOR WAS OBSERVED in the world right after the call, i.e.
+-- the SPAWN half happened. It still does NOT mean a pal is standing at (x,y,z): the move runs
+-- in placeNewPal on a 400 ms retry chain long after this returns, and that pass reports only to
+-- the log (TODO(pal-spawn-placement)). false means nothing was seen to spawn — which is what
+-- this build does — or that nothing was even attempted (bad args, no cheat manager).
 function M.palAt(charId, level, x, y, z)
     if type(charId) ~= "string" or #charId == 0 then return false end
     level = tonumber(level) or 1
@@ -316,88 +494,129 @@ function M.palAt(charId, level, x, y, z)
         return false
     end
     local name = charName(charId)
-    -- Snapshot existing pals + the player position (SpawnMonster drops the pal near the player).
-    local before = snapshotPals()
+    -- The player position, read BEFORE the spawn: it is the anchor placeNewPal picks the
+    -- nearest new actor from (the pal is expected to appear beside the player).
     local px, py, pz = 0, 0, 0
     local pl; pcall(function() pl = FindFirstOf("PalPlayerCharacter") end)
     if pl and pl.IsValid and pl:IsValid() then
         local l = actorLoc(pl)
         if l then px, py, pz = l.X, l.Y, l.Z end
     end
-    local ok = pcall(function() cm:SpawnMonster(FName(name), level) end)
-    if not ok then
-        log.err("spawn.palAt: SpawnMonster threw for " .. name)
+    local ran, appeared, before, evidence = spawnMonster(cm, name, level)
+    if not ran then
+        log.err(string.format("spawn.palAt: SpawnMonster did not execute for %s [evidence %s]",
+            name, tostring(evidence)))
         return false
     end
+    if appeared == 0 then
+        log.warn(string.format("spawn.palAt: SpawnMonster(%s, lv %d) ran [evidence %s] and "
+            .. "NOTHING spawned, so there is nothing to move to (%.0f,%.0f,%.0f); this reports "
+            .. "false (see TODO pal-spawnmonster-signature)", name, level, evidence, x, y, z))
+    end
+    -- The relocation pass is scheduled EITHER WAY: an actor that materializes a few frames
+    -- late is exactly what the retry chain exists for, and its final line is the record of
+    -- whether anything ever arrives.
     if canDefer() then
         LoopAsync(400, function()
             ExecuteInGameThread(function() pcall(placeNewPal, before, px, py, pz, x, y, z, 0) end)
             return true
         end)
-        log.info(string.format("spawn.palAt %s (lv %d) accepted; relocation to (%.0f,%.0f,%.0f) "
-            .. "scheduled (SpawnMonster+teleport)", name, level, x, y, z))
-    else
-        -- Without the async pair there is no way to catch the deferred actor, so the pal is
-        -- spawned but stays next to the player. Say so rather than logging a placement.
+        if appeared > 0 then
+            log.info(string.format("spawn.palAt %s (lv %d): %d new pal in the world [evidence "
+                .. "%s]; relocation to (%.0f,%.0f,%.0f) scheduled (SpawnMonster+teleport)",
+                name, level, appeared, evidence, x, y, z))
+        end
+    elseif appeared > 0 then
+        -- Without the async pair there is no retry chain to move it with, so the pal that DID
+        -- spawn stays next to the player. Say so rather than logging a placement.
         log.warn(string.format("spawn.palAt %s (lv %d): spawned, but LoopAsync/ExecuteInGameThread "
             .. "are unavailable — it stays near the player, not (%.0f,%.0f,%.0f)",
             name, level, x, y, z))
     end
-    return true
+    return appeared > 0
 end
 
--- The cheat-manager-FREE summon route: APalPlayerState:RequestSpawnMonsterForPlayer(FName
--- CharacterID, int Num, int Level). Server-authoritative like the cheat manager, but it hangs
--- off the player state, so it needs neither CheatManagerEnabler nor a constructed cheat
--- manager. Ported from the sibling AdminCommands server mod (src/server/Scripts/main.lua:142),
--- where it IS the !spawn command on a live dedicated server. Used only as a fallback, so a
--- build without that function changes nothing: the pcall fails and we report what the cheat
--- manager route already reported. Returns true if the call executed on some player state.
--- WHOSE player: the FIRST valid PalPlayerState the enumeration hands back. In single player
--- that is the only one; on a server it need not be the player who asked, which is the same
--- limitation the cheat-manager route has (it summons for the local/first player) and the
--- reason this is a fallback rather than the primary route.
-local function requestSpawnForPlayer(name, num, level)
-    local states
-    local okAll = pcall(function() states = FindAllOf("PalPlayerState") end)
-    if not (okAll and type(states) == "table") then return false end
-    for _, ps in pairs(states) do
-        if ps and ps.IsValid and ps:IsValid() then
-            local ok = pcall(function() ps:RequestSpawnMonsterForPlayer(FName(name), num, level) end)
-            if ok then
-                log.info(string.format("spawn.palForPlayer %s x%d (lv %d) via PalPlayerState:"
-                    .. "RequestSpawnMonsterForPlayer", name, num, level))
-                return true
-            end
-        end
+-- ---- the player-summon route ------------------------------------------------------------
+-- The player state the summon is addressed to. The LOCAL player's, via the controller's own
+-- GetPalPlayerState (declared on the live build — dumps/reflection/02_reflection.txt lists it
+-- under /Script/Pal.PalPlayerController), falling back to the first PalPlayerState in the world
+-- when there is no controller to ask. That is object RESOLUTION, not a route chain: both steps
+-- reach the same class and the same call. On a dedicated server the enumeration order is not
+-- meaningful, which is why the controller is asked first — it names the player who is here.
+local function localPlayerState()
+    local pc; pcall(function() pc = FindFirstOf("PalPlayerController") end)
+    if pc and pc.IsValid and pc:IsValid() then
+        local ok, ps = sig.call(pc, "GetPalPlayerState", {})
+        if ok and ps and ps.IsValid and ps:IsValid() then return ps end
     end
-    return false
+    local ps; pcall(function() ps = FindFirstOf("PalPlayerState") end)
+    if ps and ps.IsValid and ps:IsValid() then return ps end
+    return nil
 end
+
+-- Declared (const FName& CharacterID, int32 Num, int32 Level) — dumps/cxx/Pal.hpp:11096. The
+-- reference is a C++ detail: a `const FName&` reflects as a NameProperty exactly like the
+-- by-value one, and carries no out-param, so the marshalling is the FName-plus-integers this
+-- tree already performs successfully on this build.
+local REQUEST_SPAWN_PARAMS = { "NameProperty", "IntProperty", "IntProperty" }
 
 -- Summon `num` pals of `charId` at `level` OWNED BY the player (into party/box, not the
--- world in front). Returns true if a native call executed — the cheat manager's
--- SpawnMonsterForPlayer (the verified route), else the player-state request above.
+-- world in front).
+--
+-- THE ROUTE CHANGED, and this is the one place dumps/ produced a better-evidenced call rather
+-- than an elimination. It used to be cm:SpawnMonsterForPlayer with the player state as a
+-- fallback; it is now APalPlayerState:RequestSpawnMonsterForPlayer alone, because:
+--   * it is the ONLY spawn function name this tree has confirmed on the INSTALLED binary —
+--     dumps/reflection/02_reflection.txt:656 lists it under /Script/Pal.PalPlayerState, read
+--     out of the running game. UPalCheatManager is not among the 21 classes that dump covers at
+--     all, so cm:SpawnMonsterForPlayer's very existence here rests on dumps/cxx alone, and that
+--     dump is one game patch old (dumped 2026-07-09, exe 2026-07-16 — the same live reflection
+--     shows Debug_ForceSpawnPredatorPal_ToServer, which dumps/cxx does not have);
+--   * the two declarations are the same shape — Pal.hpp:11096 vs :16175, both (FName, int32
+--     Num, int32 Level) — so nothing is given up by preferring the confirmed object;
+--   * it needs no cheat manager, so it works where CheatManagerEnabler is absent (a dedicated
+--     server, where cheatManager() otherwise has to CONSTRUCT one);
+--   * and the cheat manager's own sibling of that call, SpawnMonster, is the one measured to do
+--     nothing on this build. Preferring a different object is the cheapest way to not inherit
+--     whatever is wrong with that one.
+-- No fallback: if this call is refused or raises, that is the answer, and it is reported.
+--
+-- THE ONE `true` IN THIS FILE THAT IS NOT AN OBSERVATION, and deliberately so: this route's
+-- result lands in the player's party/box, which nothing here enumerates, so there is no
+-- readback to tighten it with — a false would claim a failure nobody has seen, exactly as a
+-- true claims a success nobody has seen. It therefore means "a native call executed", and the
+-- logged evidence level says how much of the declaration was checked before it did. ⚠️ NOTHING
+-- HAS WATCHED THIS LAND. The sibling AdminCommands mod ships the same call as its !spawn
+-- (src/server/Scripts/main.lua:143) but marks its own spawn execution [VERIFY] at :6, so there
+-- is no in-game observation behind it there either. The world IS counted beside it, log-only:
+-- a new PalCharacter proves the summon materialized somewhere, while 0 is exactly what a box
+-- delivery looks like and settles nothing.
 function M.palForPlayer(charId, num, level)
     if type(charId) ~= "string" or #charId == 0 then return false end
     num   = tonumber(num) or 1
     level = tonumber(level) or 1
     local name = charName(charId)
-    local cm = cheatManager()
-    if cm then
-        local ok = pcall(function() cm:SpawnMonsterForPlayer(FName(name), num, level) end)
-        if ok then
-            log.info(string.format("spawn.palForPlayer %s x%d (lv %d)", name, num, level))
-            return true
-        end
-        log.err("spawn.palForPlayer: SpawnMonsterForPlayer threw for " .. name
-            .. "; trying the player-state route")
-    else
-        log.warn("spawn.palForPlayer: no PalCheatManager and none could be constructed; "
-            .. "trying the player-state route")
+
+    local ps = localPlayerState()
+    if not ps then
+        log.warn("spawn.palForPlayer: no PalPlayerState reachable (no world / not connected yet?)")
+        return false
     end
-    if requestSpawnForPlayer(name, num, level) then return true end
-    log.err("spawn.palForPlayer: no route accepted " .. name)
-    return false
+
+    local before = snapshotPals()
+    local ok, _, evidence = sig.call(ps, "RequestSpawnMonsterForPlayer", REQUEST_SPAWN_PARAMS,
+        FName(name), num, level)
+    if not ok then
+        -- core.signature logged the reason already: refused on the declaration, or raised on
+        -- binding (which names the arity the live build actually wants).
+        log.err(string.format("spawn.palForPlayer: RequestSpawnMonsterForPlayer did not execute "
+            .. "for %s x%d (lv %d) [evidence %s]", name, num, level, tostring(evidence)))
+        return false
+    end
+    log.info(string.format("spawn.palForPlayer %s x%d (lv %d): the call ran [evidence %s]; %d new "
+        .. "PalCharacter in the world (0 is expected for a party/box summon and is NOT evidence "
+        .. "either way)", name, num, level, evidence, newPalCount(before)))
+    return true
 end
 
 return M

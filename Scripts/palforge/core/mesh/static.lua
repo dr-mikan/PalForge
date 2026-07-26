@@ -11,14 +11,27 @@
 -- Collision stays off for the same reason as procedural — a decorative collider both
 -- hitches and intercepts the build placement raycast.
 --
--- The one link with NO record in either tree is the setter itself,
--- `UStaticMeshComponent:SetStaticMesh(UStaticMesh*)`: dump/docs/05_mesh_material.md §5.2
--- still lists its reflected signature as a to-confirm. So attach does not take the call
--- on trust — it READS THE ASSET BACK off the component (GetStaticMesh(), then the
--- `StaticMesh` property dump/dump.lua reads off live actors) and reports success only
--- when the read-back asset is really there. On any failure the component we added is
--- destroyed again, so a build where the setter is missing or ignored gets an honest
--- false and no orphaned component, not a mesh nobody rendered.
+-- The setter is no longer a guess. dumps/cxx/Engine.hpp:21720 declares, on
+-- UStaticMeshComponent (:21687):
+--
+--     bool SetStaticMesh(class UStaticMesh* NewMesh);
+--
+-- One argument, an ObjectProperty, and a bool return — exactly the call below. The same
+-- class listing also settles the read-back, in the opposite direction: there is NO
+-- reflected `GetStaticMesh` anywhere in the 1579-header dump. The asset is reachable only
+-- as the UProperty `UStaticMesh* StaticMesh` at Engine.hpp:21693 (offset 0x0580), which is
+-- also what dumps/reflection reads off live actors. So meshOn() reads that one property
+-- and nothing else — the getter it used to try first cannot exist.
+--
+-- attach still does not take the call on trust: it reads the asset back and reports
+-- success only when it is really sitting there. On any failure the component we added is
+-- destroyed again, so a build where the setter is ignored gets an honest false and no
+-- orphaned component, not a mesh nobody rendered.
+--
+-- STILL UNOBSERVED: a correct signature is not a watched success. No run in either tree
+-- has seen a UStaticMesh appear on a component this way, and the dump is one game patch
+-- (2026-07-09 vs an exe of 2026-07-16) behind the installed binary, which is why the call
+-- goes through core.signature and the read-back is kept.
 --
 -- MATERIAL: an authored UStaticMesh arrives with real materials on its slots, so unlike
 -- the procedural section this component can be instanced directly — base/renderer's MID
@@ -34,9 +47,17 @@
 -- `asset` is accepted as an alias for `model`: this file's original TODO named the field
 -- `asset` while every caller passes `model`.
 local Renderer = require("palforge.core.mesh.base.renderer")
+local sig      = require("palforge.core.signature")
 local log      = require("palforge.utils.log").scope("mesh")
 
 local StaticMesh = Renderer:extend("StaticMeshRenderer")
+
+-- The declared shape of UStaticMeshComponent::SetStaticMesh, in the order core.signature
+-- checks it: `class UStaticMesh* NewMesh` is an ObjectProperty (dumps/cxx/Engine.hpp:21720).
+-- Handing a live UObject to a UObject* parameter is the one argument kind core.signature
+-- will pass on "present" evidence, so this call can still fire on a build whose UE4SS
+-- cannot walk a UFunction's properties.
+local SET_STATIC_MESH_PARAMS = { "ObjectProperty" }
 
 -- Loaded UStaticMesh assets cached by path (load once, reuse forever). Same resolve
 -- order proven for the AkAudioEvent assets in core/sound/native.lua: LoadAsset pulls in
@@ -53,31 +74,21 @@ local function loadAsset(path)
     return nil
 end
 
--- Read the mesh back off a component. Two independent paths, so the confirm does not
--- hinge on a single unverified name: the BlueprintPure getter, then the property.
+-- Read the mesh back off a component. ONE path, because the dump leaves only one: the
+-- UProperty `class UStaticMesh* StaticMesh` (dumps/cxx/Engine.hpp:21693). This used to try
+-- a `GetStaticMesh()` getter first; no such UFunction is declared on UStaticMeshComponent
+-- (:21687) or anywhere else in dumps/cxx, so that branch could only ever raise and be
+-- swallowed. Nil here is a "cannot tell", not a "not set".
 local function meshOn(comp)
     local m
-    pcall(function() m = comp:GetStaticMesh() end)
-    if m and m.IsValid and m:IsValid() then return m end
-    m = nil
     pcall(function() m = comp.StaticMesh end)
     if m and m.IsValid and m:IsValid() then return m end
     return nil
 end
 
--- Destroy a component we added. K2_DestroyComponent is the BlueprintCallable
--- counterpart of the proven AddComponentByClass, but has no in-game record of its own,
--- so the pcall status (i.e. "the component carried the function and it ran") is the
--- strongest thing we can honestly report.
--- TODO(mesh-detach-destroycomponent): K2_DestroyComponent's reflected argument list is
--- undumped — we pass the component as the Object argument, which is what the Blueprint
--- node does, but a mismatch would make BOTH this and procedural:detach silent no-ops that
--- still report true. Same call site in core/mesh/procedural.lua : Procedural:detach.
-local function destroyComponent(comp)
-    if not (comp and comp.IsValid and comp:IsValid()) then return false end
-    local ok = pcall(function() comp:K2_DestroyComponent(comp) end)
-    return ok
-end
+-- Destroying a component we added is Renderer.destroyComponent — one implementation for
+-- both component-adding backends, with the K2_DestroyComponent evidence beside it.
+local destroyComponent = Renderer.destroyComponent
 
 -- The component this backend created, per actor, so detach removes exactly what attach
 -- added (and nothing that was already on the actor), and so base/renderer's setColor
@@ -104,18 +115,36 @@ function StaticMesh:attach(actor, spec)
     local ok, aerr = pcall(function()
         local smcClass = StaticFindObject("/Script/Engine.StaticMeshComponent")
         assert(smcClass and smcClass:IsValid(), "StaticMeshComponent class not found")
+        -- AddComponentByClass(TSubclassOf<UActorComponent> Class, bool bManualAttachment,
+        -- const FTransform& RelativeTransform, bool bDeferredFinish) — Engine.hpp:8056.
+        -- Four arguments, which is what the proven procedural chain already passes.
         comp = actor:AddComponentByClass(smcClass, false, {}, false)
         assert(comp and comp:IsValid(), "AddComponentByClass failed")
-        -- TODO(mesh-static-setstaticmesh): SetStaticMesh's reflected signature is undumped
-        -- and so are both read-back paths in meshOn(); if none of the three names exist,
-        -- every static building attach is an honest-but-permanent false.
-        comp:SetStaticMesh(asset)
-        -- prove the (unconfirmed) setter took before anything downstream assumes it did
-        assert(meshOn(comp), "SetStaticMesh did not take")
-        pcall(function() comp:SetCollisionEnabled(0) end)          -- ECollisionEnabled::NoCollision
-        pcall(function() comp:SetCollisionProfileName("NoCollision") end)
+        -- bool SetStaticMesh(UStaticMesh* NewMesh) — Engine.hpp:21720. Through
+        -- core.signature so the live class is asked before the argument is marshalled;
+        -- the declared bool return says whether the engine accepted the mesh.
+        local set, took = sig.call(comp, "SetStaticMesh", SET_STATIC_MESH_PARAMS, asset)
+        assert(set, "SetStaticMesh did not fire (core.signature refused it, or it raised)")
+        -- prove the setter took before anything downstream assumes it did: the bool it
+        -- returns is the engine's opinion, the property is the fact.
+        assert(meshOn(comp), "SetStaticMesh returned " .. tostring(took)
+            .. " and the component's StaticMesh property is still empty")
+        -- ECollisionEnabled::NoCollision = 0 (dumps/cxx/Engine_enums.hpp:777), passed to
+        -- SetCollisionEnabled(TEnumAsByte<ECollisionEnabled::Type>) — one argument,
+        -- Engine.hpp:19786. This is the WHOLE of switching collision off; the
+        -- SetCollisionProfileName("NoCollision") that used to follow it has been removed,
+        -- because Engine.hpp:19784 declares it SetCollisionProfileName(FName, bool) — two
+        -- arguments, and an FName rather than a string. The one-argument call could never
+        -- have run, and making it run correctly would mean marshalling a bare Lua string
+        -- into an FName parameter, which is the shape that has killed this process before.
+        pcall(function() comp:SetCollisionEnabled(0) end)
+        -- SetWorldScale3D(FVector NewScale) — Engine.hpp:20408, one argument. Mandatory
+        -- (the empty {} FTransform above zero-initialized the relative scale).
         local s = spec.scale or 1.0
-        comp:SetWorldScale3D({ X = s, Y = s, Z = s }) -- mandatory (zero-scale trap)
+        comp:SetWorldScale3D({ X = s, Y = s, Z = s })
+        -- K2_SetRelativeLocation(FVector NewLocation, bool bSweep, FHitResult& SweepHitResult,
+        -- bool bTeleport) — Engine.hpp:20428. Four arguments, which is what is passed here;
+        -- the {} stands in for the out FHitResult.
         local o = spec.offset or {}
         comp:K2_SetRelativeLocation({ X = o.x or 0, Y = o.y or 0, Z = o.z or 0 }, false, {}, false)
     end)
@@ -168,7 +197,8 @@ function StaticMesh:detach(actor)
         return false
     end
     if not destroyComponent(comp) then
-        log.warn("static: detach failed (K2_DestroyComponent unavailable)")
+        log.warn("static: detach failed (K2_DestroyComponent did not fire - core.signature "
+            .. "has logged whether it was refused or raised)")
         return false
     end
     -- the whole component goes with it, so there is no material to put back

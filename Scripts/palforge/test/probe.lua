@@ -19,6 +19,15 @@
 -- build must print "absent" and carry on — that is a result, not a failure. Nothing here
 -- writes to the save or changes game state.
 --
+-- ONE RULE ABOVE ALL: NEVER CALL A UFUNCTION WITH AN ARGUMENT TYPE YOU ARE NOT SURE OF.
+-- "Try it both ways and see which works" reads like exactly what a probe is for, and it
+-- closed the game on the first real run: `inv:CountItemNum(FName("Wood"))` answered 135, and
+-- the very next line, `inv:CountItemNum("Wood")`, faulted inside UE4SS's argument marshalling
+-- and took Palworld down. That fault is native — pcall does not see it, and there is no
+-- amount of guarding on this side that makes it survivable.
+-- So: read the signature with M.params and pass what it declares, or do not call at all and
+-- leave the question in plan/TODO.md. A probe that crashes loses the whole run's findings.
+--
 --   local probe = require("palforge.test.probe")
 --   probe.begin("mesh-static-setstaticmesh")
 --   local cls = probe.class("/Script/Engine.StaticMeshComponent")
@@ -174,27 +183,81 @@ function M.properties(cls, label)
     return rows
 end
 
----A UFunction's parameter list. A UFunction is a UStruct, so its parameters enumerate as
----properties — this is how to learn a call's real signature.
-function M.params(cls, fnName)
-    if not M.valid(cls) then M.line("PARAM <no class> for %s", tostring(fnName)); return end
-    local fn; pcall(function() fn = cls:GetFunctionByName(fnName) end)
-    if not M.valid(fn) then
+-- Find a UFunction on `owner`, which may be a UClass OR a live object / CDO. The first run
+-- printed "function absent" for every lookup because it only ever asked GetFunctionByName on
+-- what the caller passed, and callers pass CDOs — a CDO has no such method, its CLASS does.
+-- Member access is the route that demonstrably works: reading inv.CountItemNum handed back a
+-- UFunction userdata, so that is tried too.
+local function findFunction(owner, fnName)
+    if not M.valid(owner) then return nil end
+    local fn
+
+    -- owner is already a UClass / UStruct
+    pcall(function() fn = owner:GetFunctionByName(fnName) end)
+    if M.valid(fn) then return fn, "class:GetFunctionByName" end
+    pcall(function() fn = owner:GetFunctionByNameInChain(fnName) end)
+    if M.valid(fn) then return fn, "class:GetFunctionByNameInChain" end
+
+    -- owner is an object: ask its class, then walk the super chain
+    local cls; pcall(function() cls = owner:GetClass() end)
+    if M.valid(cls) then
+        pcall(function() fn = cls:GetFunctionByName(fnName) end)
+        if M.valid(fn) then return fn, "GetClass():GetFunctionByName" end
         pcall(function() fn = cls:GetFunctionByNameInChain(fnName) end)
+        if M.valid(fn) then return fn, "GetClass():GetFunctionByNameInChain" end
+
+        local k, depth = cls, 0
+        while M.valid(k) and depth < 12 do
+            pcall(function() fn = k:GetFunctionByName(fnName) end)
+            if M.valid(fn) then return fn, "super chain [" .. depth .. "]" end
+            local parent; pcall(function() parent = k:GetSuperStruct() end)
+            if not M.valid(parent) then pcall(function() parent = k.SuperStruct end) end
+            k, depth = parent, depth + 1
+        end
     end
-    if not M.valid(fn) then M.line("PARAM %s -> function absent", fnName); return nil end
-    M.line("PARAM %s -> %s", fnName, M.full(fn))
+
+    -- member access: reading the name off an object yields the bound UFunction
+    local member; pcall(function() member = owner[fnName] end)
+    if type(member) == "userdata" then return member, "member access" end
+
+    return nil
+end
+
+---A UFunction's parameter list — the one thing that lets a caller be written correctly.
+---`owner` may be a UClass or a live object; both are tried, because a CDO does not answer
+---GetFunctionByName but its class does.
+---
+---Reading this is what a probe is FOR: a call written against a guessed argument list either
+---throws (visible) or faults natively (fatal). Print the list, then write the call.
+function M.params(owner, fnName)
+    if not M.valid(owner) then M.line("PARAM <no owner> for %s", tostring(fnName)); return end
+
+    local fn, how = findFunction(owner, fnName)
+    if not fn then M.line("PARAM %s -> function absent", fnName); return nil end
+    M.line("PARAM %s -> %s   (found via %s)", fnName, M.full(fn), how)
+
     local n = 0
-    local ok = pcall(function()
+    local listed = pcall(function()
         fn:ForEachProperty(function(p)
             pcall(function()
                 n = n + 1
-                M.line("PARAM   %d %s : %s", n, M.name(p), M.className(p))
+                local flags = ""
+                pcall(function()
+                    local off = p:GetOffset_Internal()
+                    if off then flags = string.format(" @%d", off) end
+                end)
+                M.line("PARAM   %d %s : %s%s", n, M.name(p), M.className(p), flags)
             end)
         end)
     end)
-    if not ok then M.line("PARAM   <ForEachProperty unavailable on the function>") end
-    if n == 0 then M.line("PARAM   (no parameters listed)") end
+
+    if not listed or n == 0 then
+        -- ForEachProperty is not on a UFunction on every build; the parameter count still is.
+        local parms; pcall(function() parms = fn:GetNumParms() end)
+        local size;  pcall(function() size = fn:GetParmsSize() end)
+        M.line("PARAM   (no property walk; NumParms=%s ParmsSize=%s)",
+            tostring(parms), tostring(size))
+    end
     return fn
 end
 
@@ -266,6 +329,8 @@ function M.rowAccessors(dt, rowName)
     for _, fnName in ipairs({ "GetDataTableRowFromName", "FindRow", "GetRow", "GetRowMap", "GetRowNames" }) do
         M.params(cls, fnName)
     end
+    -- Every call below passes an FName, which is what a row key is. Do not add a variant
+    -- that passes the raw string "to see" — that faults natively and ends the session.
     for _, fnName in ipairs({ "GetDataTableRowFromName", "FindRow", "GetRow" }) do
         local v; local ok = pcall(function() v = dt[fnName](dt, FName(rowName)) end)
         M.line("VALUE dt:%s(FName(%q)) -> %s", fnName, rowName, ok and M.describe(v) or "call raised")

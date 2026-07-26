@@ -15,7 +15,7 @@ a future implementer will open.
 2. Copy what the probe wrote to `UE4SS.log` — it brackets its output with `#### BEGIN <id>`
    and `#### END <id>`.
 3. The missing fact is then known and the implementation follows from it. Delete the marker.
-4. Press **F1** to re-run the 294-check API suite, and **F9** to reload without restarting.
+4. Press **F1** to re-run the 300-check API suite, and **F9** to reload without restarting.
 
 ## Keys
 
@@ -30,9 +30,13 @@ a future implementer will open.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (6)
+## Closed (14)
 
-Settled from the reflection dumps in `dumps/`, without touching the game.
+Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
+settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
+`dumps/cxx/`, UE4SS's own header dump of the installed binary — 1579 headers carrying every
+UFunction's real signature, which is the only source in this tree that answers a parameter list
+without the game running.
 
 - **`audio-akevent-play-signature`** — Audio.Handle:play. The recorded session caught the GAME ITSELF calling PalSoundUtility:PlayAkEventSoundByActor six times with exactly (AActor, UObject) in that order, which is the call PalForge already makes. Arity, order and callee are settled.
 - **`spatial-saveid`** — core.spatial.saveId. PalGameInstance's full 111-property listing contains no WorldGuid, WorldSaveName or SaveName — all three probed names were wrong, which is why every save shared one persistence file. The real accessors are GetSelectedWorldSaveDirectoryName and GetSelectedWorldName, and core/spatial now reads them.
@@ -40,15 +44,23 @@ Settled from the reflection dumps in `dumps/`, without touching the game.
 - **`building-break`** — Building onBreak. None of PalBuildObject, PalMapObjectModel, PalMapObjectConcreteModelBase or PalNetworkPlayerComponent carries a destroy, dismantle or break function. Destruction exists only as delegate FIELDS, which RegisterHook cannot address by path. Disappearance keeps surfacing as onRemove with reason "missing".
 - **`building-break-source`** — the building.break and building.leftclick channels. Same evidence, applied to the source side: neither channel is worth adding, and core/event now records why rather than carrying a hopeful TODO.
 - **`icons-row-column`** — core.icons ICON_COLUMNS. The DataTable dump printed every table's real column list. Items and pals use `Icon`, buildings use `SoftIcon`, and partner skills use `TextureID_8_2B2F...`. Of the five names the code had been guessing, IconName, IconTexture and Texture are columns of no icon table on this build.
+- **`item-inventory-count-readback`** — utils.items.count. Read back from a live save, not inferred: `inv.CountItemNum` is bound (a UFunction userdata), `inv:CountItemNum(FName('Wood'))` answered **135** as a plain Lua number, and the whole resolve chain printed real objects at every step (PalUtility CDO -> BP_Player_Female_C -> BP_PalPlayerState_C -> BP_PalPlayerInventoryData_C). The `CountItemNum64` fallback is gone — a second spelling was only ever there for a return shape that turned out to be a number. Reading an inventory is the one item capability that fully works today.
+- **`audio-volume-rtpc`** — Audio.Handle:setVolume. Settled NEGATIVELY, which is still settled. The routes all exist (UPalSoundUtility reflects SetRTPCValueByActor / SetRTPCValueByActorByEnum; AkGameplayStatics reflects SetRTPCValue / GetRTPCValue / ResetRTPCValue), but the build declares exactly **three** AkRtpc assets — Supply_Altitude, OverHeatRifle, ChargeLaserRifle_01 — plus zero AkAuxBus and zero AkAudioBank. None is a volume, so there was never a parameter for those functions to address and no parameter list would have helped. Do not re-probe them. The capability moved to `audio-bus-volume`, which is a different call with a different contract.
+- **`spawn-actor-conventions`** — core.spawn.actor. `dumps/cxx/Engine.hpp` declares both halves of deferred spawning outright: `BeginDeferredActorSpawnFromClass` takes FIVE parameters (world context, actor class, transform, collision handling, owner) and `FinishSpawningActor` takes TWO (actor, transform). Neither has the UE 5.3+ scale-method argument this file used to try first. So the four guessed argument conventions were never all callable — three of them could not have worked on any build — and the guess chain is replaced by the one declared shape. Still unobserved end to end, and now honestly gated: both calls take a struct, so `core/signature.lua` only fires them when the live parameter walk succeeds.
+- **`mesh-static-setstaticmesh`** — Mesh.Handle:attachTo on kind="static". `dumps/cxx/Engine.hpp:21720` declares `bool SetStaticMesh(UStaticMesh*)` on UStaticMeshComponent — exactly the call being made. The same listing settles the READ-BACK, which was the harder half: there is no reflected `GetStaticMesh` anywhere in the dump, and the asset is reachable only as the UProperty `StaticMesh` (`:21693`). The old two-path check had a first branch that could only ever raise; it is now the property.
+- **`mesh-detach-destroycomponent`** — Mesh.Handle:detach. `Engine.hpp:9972` declares `void K2_DestroyComponent(UObject* Object)` on UActorComponent — one object argument, the component itself, which is what both call sites already passed. The two sites are now one shared `Renderer.destroyComponent`.
+- **`mesh-skeletal-setter`** — Mesh.Handle:attachTo on kind="skeletal" and Pal.Handle:renderOn. The class ladder is confirmed end to end — `APalCharacter : ACharacter`, whose `Mesh` is a reflected `USkeletalMeshComponent*` (`Engine.hpp:8156`), and `UPalSkeletalMeshComponent` derives from it. Two guesses collapsed: `actor:GetMesh()` is not declared anywhere in the dump, and the two mesh setters are inherited by the SAME component, so the second was never a fallback. One route remains, `SetSkinnedAssetAndUpdate(asset, true)`, chosen because it re-initialises the pose, with the getter that pairs with it for the read-back.
+- **`mesh-skeletal-animclass`** — Mesh.Spec.animClass. All three assumptions confirmed: `SetAnimClass(UClass*)`, `SetAnimationMode(TEnumAsByte<EAnimationMode::Type>)`, and `EAnimationMode::AnimationBlueprint = 0`. The calls were already right, and the log line claiming "SetAnimClass is not on this component" was simply wrong. The real weak link turned out to be elsewhere and is recorded in its place: `SetAnimClass` wants an AnimBlueprintGeneratedClass, and the one live asset sweep on disk found zero loaded while the classes plainly exist — so what is unproven is the LoadAsset resolve, not the call.
+- **`mesh-texture-import`** — Mesh.Spec.texture. `Engine.hpp:14694` declares `UTexture2D* ImportFileAsTexture2D(UObject* WorldContextObject, FString Filename)` on UKismetRenderingLibrary. Both halves of the unknown are answered: the world context is a plain `UObject*`, so the actor already being passed qualifies, and the path is an FString — an ordinary Lua string, and NOT the FName shape that kills the process.
 
-## Open (29)
+## Open (24)
 
 ### Pal
 
 #### `pal-icon-row` — Pal.Handle:iconOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/pal.lua:238
+- **Marked at:** Scripts/palforge/api/pal.lua:244
 
 **What a pack author sees**
 
@@ -73,54 +85,92 @@ dt:GetDataTableRowFromName(FName("ChickenPal")) and dt:FindRow(FName("ChickenPal
 false), printing type() and tostring() of each result and the pcall error message when one
 raises. "ChickenPal" is a confirmed row of that table (674 rows on disk).
 
-#### `pal-skills-equip` — Pal.Spec.skills / Pal.Handle:skillsOf
+#### `pal-skills-equip` — Skill.Handle:teach / :forget, Pal.Handle:teachAll
 
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/pal.lua:203
+- **Probe:** F1
+- **Marked at:** Scripts/palforge/core/character.lua:43
 
 **What a pack author sees**
 
-skills = { "FlameThrower" } is validated, stored and read back by :skillsOf(), but the spawned
-creature never gains the skill — the field is author metadata only.
+`Skill.get("FireBlast"):teach(pal)` may return false and the pal may not learn the move. When it
+works, the pal really does carry it — every write here is verified by reading the character back,
+so a true is never "the call ran".
 
 **What is still unknown**
 
+Only whether the writes land. Everything else is settled by `dumps/cxx/Pal.hpp`, and this went
+from "the argument shape is unmeasured, so calling one would be a guess with a live pawn on the
+other end" to four declared calls with scalar arguments:
+
 ```text
-The declared skill ids, verbatim. DECLARATIVE ONLY: nothing here teaches the pawn
-anything — a pack reads the list back and drives each skill itself through api/skill.
-TODO(pal-skills-equip): NARROWED — the attach calls EXIST, only their argument shape is
-still unmeasured. dumps/reflection/02_reflection.txt lists, on /Script/Pal.PalIndividual-
-CharacterParameter: AddEquipWaza / RemoveEquipWaza / ClearEquipWaza / ReplaceEquipWaza
-(via the controller RPCs) for actives, AddPassiveSkill / RemovePassiveSkill for passives,
-and the readbacks that would VERIFY a write — GetEquipWaza, GetEquipableWaza,
-GetMasteredWaza, HasMasteredWaza, GetPassiveSkillList. The route from a pawn to that
-object is named too: /Script/Pal.PalUtility:GetIndividualCharacterParameterByActor, or
-PalCharacter:GetCharacterParameterComponent -> PalCharacterParameterComponent:
-GetIndividualParameter. /Script/Pal.PalPlayerController additionally carries the
-server-authoritative forms AddEquipWaza_ToServer / RemoveEquipWaza_ToServer /
-ReplaceEquipWaza_ToServer.
-THE ONE THING LEFT: the parameter list of AddEquipWaza / AddPassiveSkill — an FName, a
-struct or an index — and whether the direct call replicates or the _ToServer RPC is
-required. 02_reflection prints function NAMES only, never parameters, so calling one now
-would be a guess with a live pawn on the other end. Nothing is pushed onto the pawn until
-a probe prints those parameters (f:ForEachProperty on the UFunction) — this stays a
-read-back of what the author declared.
+class UPalIndividualCharacterParameter                       (Pal.hpp:20822)
+    void AddEquipWaza(EPalWazaID WazaID);          RemoveEquipWaza(EPalWazaID);  ClearEquipWaza();
+    void AddPassiveSkill(FName AddSkill, FName OverrideSkill);  RemovePassiveSkill(FName SkillId);
+    TArray<EPalWazaID> GetEquipWaza();            TArray<FName> GetPassiveSkillList();
+class UPalUtility
+    UPalIndividualCharacterParameter* GetIndividualCharacterParameterByActor(const AActor*);
+                                                                 (Pal.hpp:32340)
 ```
+
+Every argument is an enum integer or an FName — never a struct — so none is the shape that
+faults inside UE4SS marshalling, and every write has a matching read that proves it landed.
+
+Settled alongside it: **the vocabulary**. `EPalWazaID` (`dumps/cxx/Pal_enums.hpp`) names 309
+active skills, which is what `Pal{ skills = { ... } }` can contain and what
+`core.character.wazaNames()` lists. Active skills are an enum and passives are FNames — a real
+distinction a caller cannot paper over, so `:teach` routes on which one the id is rather than on
+the skill's declared `kind`.
 
 **What the probe prints**
 
-Use the dumper's own reflection pattern (dump/dump.lua:104). For each of
-"/Script/Pal.PalCharacter", "/Script/Pal.PalCharacterParameterComponent",
-"/Script/Pal.PalIndividualCharacterParameter", "/Script/Pal.PalMonsterParameterComponent": local
-cls = StaticFindObject(path); cls:ForEachFunction(function(fn) print(fn:GetFName():ToString())
-end); cls:ForEachProperty(function(p) print(p:GetFName():ToString()) end). Paste every name
-containing Waza, Skill, Passive, Learn, Equip or Add. Then repeat ForEachFunction on a live pal:
-actor:GetClass() for the first entry of FindAllOf("PalCharacter").
+F1 in a loaded world, no dedicated block. Watch two things: the evidence level (an
+`EnumProperty` build spells `EPalWazaID` differently from a `ByteProperty` one, which shows up
+as a refusal, not a crash), and a `declared` call that still does not land — that would point at
+server authority and make `APalPlayerController::AddEquipWaza_ToServer` the next thing to read.
+It takes an `FPalInstanceID` struct, so `core/signature.lua` will not fire it unattended.
+
+#### `pal-spawnmonster-signature` — Pal.Handle:spawn / core.spawn.pal / core.spawn.palAt
+
+- **Probe:** F5
+- **Marked at:** Scripts/palforge/core/spawn.lua:279
+
+**What a pack author sees**
+
+`Pal{...}:spawn()` returns false and no pal appears. Nothing has ever spawned through PalForge.
+
+This was measured on 2026-07-26 in a loaded save, with a cheat manager that already existed
+(`CheatManagerEnabler` logged "CheatManager already exist") and on the game thread:
+`cm:SpawnMonster(FName("ChickenPal"), level)` completed **without raising**, no new
+`PalCharacter` existed a statement later, and none existed 1.2 s later either. The call reaches
+the engine and does nothing.
+
+**What is still unknown**
+
+The reflected parameter list of `UPalCheatManager::SpawnMonster` and `::SpawnMonsterForPlayer`
+on this build. Nothing in either tree has ever reflected it — `dumps/reflection/02_reflection.txt`
+covers 21 `/Script/Pal.*` classes and PalCheatManager is not one of them; its only trace anywhere
+is PalUtility's `.GetPalCheatManager`. The arity `core/spawn.lua` is written to,
+`SpawnMonster(FName CharacterID, int Level)`, comes from a CXXHeaderDump note about *some* build,
+not a measurement of this one.
+
+Why that is the suspect: the same run measured `AddItem_ServerInternal` declaring six parameters
+where PalForge passes four (`item-additem-signature`), and UE4SS accepts a short argument list
+silently — a missing trailing parameter is marshalled as zero. A `SpawnMonster` whose real list
+carries, say, a count or an enabling flag after `Level` would behave exactly like this: runs,
+raises nothing, spawns nothing.
+
+**What the probe prints**
+
+The cheat manager reached three ways (live object, the controller's `.CheatManager`, its
+`.CheatClass`), then its complete UFunction list — which no dump in this tree has — then every
+parameter of both spawn functions in declared order, with each one's name and property class. It
+calls neither: a guessed argument list faults natively, past `pcall`, and that is what crashed
+the first F5 run.
 
 #### `pal-spawn-placement` — Pal.Handle:spawn(coord) / core.spawn.palAt
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/core/spawn.lua:246
+- **Marked at:** Scripts/palforge/core/spawn.lua:408
 
 **What a pack author sees**
 
@@ -156,7 +206,7 @@ scheduled" line, followed by ONE of "placed new pal at (x,y,z); it reads back (.
 #### `pal-spawned-hook` — Pal.Spec.Events.onSpawned
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/pal.lua:143
+- **Marked at:** Scripts/palforge/api/pal.lua:158
 
 **What a pack author sees**
 
@@ -188,45 +238,10 @@ in order: (1) stand idle 30 s (expect 0 lines); (2) run Pal.get("ChickenPal"):sp
 every line for the next 10 s; (3) release one pal from the box. Paste the per-step line counts
 and the BP class names printed.
 
-#### `spawn-actor-conventions` — core.spawn.actor
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/core/spawn.lua:46
-
-**What a pack author sees**
-
-Public through _G.PalForge.core.spawn.actor and has never spawned anything for anyone: it tries
-four argument conventions, logs that all of them failed, and returns nil.
-
-**What is still unknown**
-
-```text
-collision 2 = AdjustIfPossibleButAlwaysSpawn; scale method 0 = OverrideRootScale.
-Arg count/owner varies across UE builds — try conventions in order until one spawns.
-TODO(spawn-actor-conventions): which of these four (if any) UE4SS can actually call on
-this build is unknown — no run of BeginDeferredActorSpawnFromClass is recorded anywhere.
-```
-
-**What the probe prints**
-
-A UFunction is a UStruct, so its parameters enumerate like properties. Run: local f =
-StaticFindObject("/Script/Engine.GameplayStatics:BeginDeferredActorSpawnFromClass");
-f:ForEachProperty(function(p) print(p:GetFName():ToString(), p:GetClass():GetFName():ToString())
-end) — paste the names and classes in printed order; repeat for
-"/Script/Engine.GameplayStatics:FinishSpawningActor". If StaticFindObject returns nothing for a
-function path, fall back to
-StaticFindObject("/Script/Engine.Default__GameplayStatics"):GetClass():ForEachFunction(fn ->
-print name) to confirm the names exist. Then call core.spawn.actor(playerPawn,
-StaticFindObject("/Script/Engine.StaticMeshActor"), { Translation = <player pos>, Rotation = {},
-Scale3D = { X = 1, Y = 1, Z = 1 } }) and paste the "convention N worked" / "all conventions
-failed" / "FinishSpawningActor never ran" line.
-
-### Item
-
 #### `item-craft-source` — Item.Spec.Events.onCraft (channel item.craft)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:89
+- **Marked at:** Scripts/palforge/api/item.lua:110
 
 **What a pack author sees**
 
@@ -279,7 +294,7 @@ present. Then craft one item at a workbench and paste which line fired with whic
 #### `item-datatable-row-read` — Item.Handle:iconOf / Item.Handle:recipeOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:146
+- **Marked at:** Scripts/palforge/api/item.lua:169
 
 **What a pack author sees**
 
@@ -327,7 +342,7 @@ Product_Count, WorkAmount, Material1_Id, Material1_Count.
 #### `item-discard-source` — Item.Spec.Events.onDiscard (channel item.discard)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:94
+- **Marked at:** Scripts/palforge/api/item.lua:115
 
 **What a pack author sees**
 
@@ -379,209 +394,140 @@ the lines and the sign of a2 for each. If nothing fires for (a)/(b), reflect
 cls:ForEachFunction(fn -> print(fn:GetFName():ToString())) and paste every name matching
 Discard|Drop|Remove|Sub|Consume|Trash|Throw.
 
-#### `item-inventory-count-readback` — utils.items.count / Item.Handle:count (and the verification inside :give and :take)
+#### `item-additem-signature` — utils.items, the direct inventory write
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/utils/items/init.lua:60
+- **Marked at:** Scripts/palforge/utils/items/init.lua:136
 
 **What a pack author sees**
 
-count() may answer nil for every call, and take() may log 'CountItemNum unreadable, removal
-unconfirmed' and answer false forever. In that state give() also loses its verification and
-falls back to 'the call was issued'. Nothing in the tree has ever recorded this accessor
-actually returning a number — the one caller (deprecated/container.lua:320) wrapped it in its
-own pcall and its log was never captured.
+Nothing, if the cheat manager is available — `:give` and `:take` work through it. This matters
+when it is NOT: the cheat manager needs `CheatManagerEnabler`, and without it both helpers say
+so and return false. A direct write to the inventory object would need no such dependency, and
+would report an `EPalItemOperationResult` saying exactly why an add failed (inventory full,
+unknown id, container mismatch) instead of PalForge inferring it from a count that did not move.
 
 **What is still unknown**
 
+What the SIX parameters of `/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal` are on
+this build. The first in-game run answered `UFunction expected 6 parameters, received 4`, and
+note what that does NOT say: UE4SS rejected the call before binding any argument, so it tells us
+the declaration has six slots and nothing about whether the four PalForge passed were the right
+four in the right order.
+
+**This is the one place the header dump is provably behind the running game.** `dumps/cxx/Pal.hpp:27053`
+declares it with four parameters:
+
 ```text
-How many of `id` the local inventory holds right now; nil when the count could not be read.
-
-CountItemNum IS REFLECTED on this build — measured, not assumed. dumps/reflection/
-02_reflection.txt enumerated /Script/Pal.PalPlayerInventoryData with ForEachFunction and
-`.CountItemNum` is in its 69-function list, alongside the `.AddItem_ServerInternal` both
-write helpers already call and the `.IsExistItem` boolean. The whole resolve chain in
-playerInventory() is on that same measured footing: PalUtility.GetPlayerStateByPlayer and
-PalPlayerState.GetInventoryData are both in the dump too. So the call reaches a real
-UFunction; that is no longer the open question.
-
-What is still open is the RETURN. ForEachFunction lists function NAMES only — no parameter
-or return types — so whether this hands Lua a plain integer or a struct/userdata that
-tonumber() flattens to nil is unmeasured. `.CountItemNum64` sits right beside it in the same
-list, so when the 32-bit call yields something tonumber() cannot read, the 64-bit sibling is
-tried before giving up; it costs one call and only on a path that was about to answer nil.
-Every caller treats nil as UNKNOWN, never as zero, so a build that will not hand back a
-number degrades to "unverified", not to a lie.
-TODO(item-inventory-count-readback): unknown what CountItemNum RETURNS to Lua (int vs
-struct/userdata) — its existence is settled, its shape is not. If both spellings answer
-nil, the measured escape hatch is the container walk: PalPlayerInventoryData exposes
-.TryGetContainerFromStaticItemID and .TryGetItemIdBySlot, PalItemContainer exposes
-.Num / .Get / .GetItemStackCount, and PalItemSlot exposes .GetItemId / .GetStackCount /
-.IsEmpty — all present in 02_reflection.txt, none of them with a known signature yet.
+EPalItemOperationResult AddItem_ServerInternal(const FName StaticItemId, const int32 Count,
+                                              bool IsAssignPassive, const float LogDelay);
 ```
+
+The live build wants six. That gap — dump generated 2026-07-09, `Palworld-Win64-Shipping.exe`
+dated 2026-07-16 — is the concrete reason every dump-derived signature in this tree is checked
+against the live object by `core/signature.lua` before it is called, rather than trusted.
 
 **What the probe prints**
 
-Same inv as item-remove-call. Print, on separate lines: type(inv.CountItemNum); the result of
-inv:CountItemNum(FName('Wood')) as both tostring(v) and type(v) and tonumber(v); then
-inv:GetClass():GetFunctionByName('CountItemNum') and, if non-nil, walk its Children logging
-every property's name, class name, offset and whether it is a return-param. Also try the sibling
-names GetItemNum, GetItemCount, HasItem, GetItemStackCount the same way and print which ones
-resolve.
+Every parameter of `AddItem_ServerInternal` in declared order, asked of both the live inventory
+and its class, plus the two sibling add routes this build declares (`RequestAddItem_ForDebug` on
+the same class, `RequestAddItem_ToServer` on the network component). It calls none of them.
 
 #### `item-remove-call` — Item.Handle:take
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/utils/items/init.lua:207
+- **Marked at:** Scripts/palforge/api/item.lua:41
 
 **What a pack author sees**
 
-take() issues AddItem_ServerInternal with a negative Count and then reports what it measured.
-Nothing has ever been observed to leave an inventory on this build, so a pack charging a cost
-most likely gets false back and has to reverse its own give(). The call is made, the removal is
-a hypothesis.
+`:take` works — it removes the items from the inventory and verifies the count fell — but **it
+drops them on the ground at the player's feet**. They are gone from the bag and lying in the
+world, where the player can simply walk back over them.
+
+The consequence, stated bluntly because it is the common case: **`:take` cannot charge a cost.**
+A pack that takes 10 Wood as payment leaves 10 Wood on the floor next to the payer. Use it to
+move items out of a bag; do not use it to make something expensive.
 
 **What is still unknown**
 
-```text
-TRY to remove `count` of `itemId` from the local player's inventory. `count` is treated
-as a magnitude.
+Whether any call on this build removes an item *without* putting it in the world. The search has
+been narrowed to two candidates, and everything else is eliminated by reading rather than by
+guessing:
 
-⚠️ REMOVAL IS UNCONFIRMED, and there is now MEASURED reason to think no dedicated remove
-call is coming. dumps/reflection/02_reflection.txt enumerated the four classes an item
-removal could plausibly live on and none of them declares one:
-* PalPlayerInventoryData (69 functions) — has AddItem_ServerInternal, CountItemNum,
-IsExistItem, RequestAddItem_ForDebug. It has no RemoveItem, RemoveItem_ServerInternal,
-SubItem, ConsumeItem, DecreaseItem, DeleteItem, DiscardItem, DropItem, TakeItem,
-LostItem or UseItem. Its only Remove is TryRemoveEquipment, which unequips a slot.
-* PalItemContainer (13 functions) — Get, Num, GetItemStackCount[64], GetLastNotEmptyIndex,
-GetPermission, filter/OnRep members. Nothing that subtracts.
-* PalItemSlot (23 functions) — GetItemId, GetStackCount, IsEmpty, RequestUseToCharacter.
-Nothing that subtracts; StackCount is a PROPERTY, which is the save-corrupting hand-write
-deprecated.container._extractImpl is gated off for.
-* PalItemUseProcessor (2 functions) — CanUseItemToCharacter, UseItemToCharacter_ServerInternal.
-One caveat keeps this from being absolute: UE4SS ForEachFunction lists a class's OWN
-functions only (proven in the same dump — PalPlayerCharacter and PalCharacter share zero
-entries, and no engine APlayerController function appears under PalPlayerController), so a
-base class of these four could still carry one. The four most likely homes are ruled out,
-including the very class that declares the ADD.
+- The inventory's whole class chain was walked in a live save — `BP_PalPlayerInventoryData_C`
+  (0 own functions), `/Script/Pal.PalPlayerInventoryData` (69), `/Script/CoreUObject.Object` (1),
+  and `PalItemContainer` (13). One name matches remove/consume/discard/drop/delete across all
+  83, and it is `TryRemoveEquipment`, which unequips a slot.
+- `UPalItemContainer` and `UPalItemSlot` are now read in full in `dumps/cxx/Pal.hpp`. Every
+  function on both is a getter, except `UPalItemSlot::RequestUseToCharacter`, which consumes
+  through the use processor for a target character and is not an arbitrary-id removal.
+- `UPalCheatManager`'s whole surface is visible too. Its only item removals are `DropItem` /
+  `DropItems` (which put the item in the world — the thing being avoided) and
+  `ClearPlatformInventoryItem` / `ConsumePlatformInventoryItem`, which are storefront
+  entitlements, not inventory.
 
-The only consumption path ever OBSERVED is UseItemToCharacter_ServerInternal: 06_events.txt
-caught it firing with `{Id=Berries}` when the player ate one. That is the game invoking its
-own use processor, not an inventory API a pack can call for an arbitrary id.
+The two that survive, both unread:
 
-So this still pushes a NEGATIVE delta through the add call, on the untested hypothesis that
-the game accepts it. Because that is a hypothesis, the outcome is MEASURED instead of
-assumed: CountItemNum is read before and after and the return value is whether the count
-really fell. false here means "nothing was observed to leave the inventory" — the negative
-delta did nothing, there was nothing to take, or the count could not be read at all (all
-logged, distinctly). A caller is never told a removal happened that was not seen.
+1. `UPalCheatManager::InitInventory(const FName StaticItemId, const int32 Count)` — reads like a
+   SET rather than an add, which would make `Count = 0` a true removal. The name says "Init", so
+   it may wipe more than the one id. Nothing may be called on that guess; read what it does in a
+   throwaway world first.
+2. `UPalItemSlot.StackCount` is a plain writable `int32` **property** (offset `0x154`), not a
+   function, so a slot walk could decrement it with no marshalling involved at all. The risk is
+   not the write but replication — the class carries `OnRep_StackCount`, so a raw poke may leave
+   server and client disagreeing. `PalPlayerInventoryData.RequestForceMarkAllDirty` is the
+   obvious partner if this is ever tried.
 
-Two guards keep the unproven write as small as it can be: when the count IS readable the
-delta is clamped to what the inventory actually holds (never ask for an underflow), and
-when it holds none the write is skipped entirely (nothing to remove, so an untested
-negative delta buys nothing).
-TODO(item-remove-call): unknown whether AddItem_ServerInternal honours a negative Count.
-The other half of this item is answered: no remove/consume UFunction is declared on
-PalPlayerInventoryData, PalItemContainer, PalItemSlot or PalItemUseProcessor, so there is
-no better call to switch to on those classes and a probe should stop hunting for one there.
-Only an observed before/after delta around this write can settle what is left — 02_reflection
-lists names, never signatures or behaviour, so no dump can answer it.
-```
+The old candidate — a negative `Count` through `AddItem_ServerInternal` — is retired. It is no
+longer the only option and is not worth its risk while those six parameters are unread.
 
 **What the probe prints**
 
-In a loaded throwaway world: (1) local inv = StaticFindObject('/Script/Pal.Default__PalUtility')
-:GetPlayerStateByPlayer(FindFirstOf('PalPlayerCharacter')):GetInventoryData(); print
-inv:GetClass():GetFullName(). (2) Enumerate that UClass's functions (ForEachFunction, or
-GetFunctionByName over each of: RemoveItem, RemoveItem_ServerInternal, SubItem, ConsumeItem,
-DecreaseItem, DeleteItem, DiscardItem, DropItem, TakeItem, LostItem, UseItem) and for every one
-that resolves, walk its Children printing each property's name, class name and offset. (3) print
-inv:CountItemNum(FName('Wood')), then call inv:AddItem_ServerInternal(FName('Wood'), -1, false,
-0.0), then print CountItemNum again — both numbers on ONE log line so the delta is unambiguous.
-Repeat step 3 with -3. Log everything with a distinct prefix.
+The inventory class chain and the container's function list, unfiltered, so a name nobody has
+proposed can be spotted. It writes to no inventory.
 
-### Skill and Effect
+#### `effect-native-status` — Effect.Spec.nativeStatus
 
-#### `effect-native-status` — Effect.Spec.nativeStatus (and the native half of Effect.Handle:apply / :remove)
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/effect.lua:20
+- **Probe:** F1
+- **Marked at:** Scripts/palforge/core/status.lua:127
 
 **What a pack author sees**
 
-A pack sets nativeStatus = "Burn"; the field is validated and stored on the definition and then
-read by nothing. :apply starts a real, correctly-timed application and fires the pack's
-handlers, but no game ailment is toggled and no status icon appears. native/effects.lua's
-curated Poison / Burn / Freeze are empty handler bodies for the same reason.
+`Effect{ nativeStatus = "Poison" }` may not light up the game's real status icon. Everything else
+about the effect — timing, stacking, your handlers — works regardless, by design: a native
+ailment that will not fire is logged and never fails the apply.
 
 **What is still unknown**
 
-```text
-palforge/api/effect.lua — PUBLIC effect API + implementation (SELF-CONTAINED).
+Only whether `AddStatus` / `RemoveStatus` actually fire. Every other part of this item is now
+settled, and it went from "no route has been found on any reflected class" to one call:
 
-An effect is a status applied to a character (a player or a Pal): buffs, debuffs,
-damage-over-time, shields. Same shape as every other api module (call it to define,
-plus get / get_all + a Handle object with actions and grouped `events`).
+- **Where it lives.** `PalCharacter` carries a `StatusComponent` property — visible in the live
+  property list at `dumps/reflection/02_reflection.txt:1007`, so the component is reachable off
+  any player pawn or pal.
+- **What it exposes.** `dumps/cxx/Pal.hpp:29774`, `class UPalStatusComponent`:
+  `AddStatus(EPalStatusID)`, `RemoveStatus(EPalStatusID)`, `GetExecutionStatus(EPalStatusID)`,
+  `AddStatusParameter(EPalStatusID, FStatusDynamicParameter)`. One integer argument, no struct,
+  no FName — the enum form the earlier analysis predicted.
+- **The vocabulary**, which previously had no source on disk anywhere: `EPalStatusID`,
+  `dumps/cxx/Pal_enums.hpp:4246`, 38 named ailments. Poison, Stun, Sleep, Burn, Freeze,
+  Electrical, Darkness, Wetness, AttackUp, DefenseUp and the rest. `core/status.lua` carries
+  them verbatim, and an unknown name is now rejected while the definition is being written.
 
-HOW IT INTEGRATES: Effect{ ... } registers the definition class in object_manager under
-("effect", id). The TIMING — duration, periodic interval, stacking, expiry — is owned
-HERE, driven off core/event's "tick" channel (the shared ~500 ms heartbeat). That makes
-this a REAL runtime, not a seam: :apply(target) starts a live application and the
-handlers fire on schedule until it expires or is removed. The runtime also listens on
-"world.left" and releases everything it is holding when the world unloads, so no
-application survives a world reload (reason "world_left"); it is not persisted, so
-nothing is re-applied on the next world.
-
-What is NOT wired: the game's own ailments (EPalStatusEffectType — Poison / Burn /
-Freeze) are a native enum, and no native call to apply one has been found on any class
-yet reflected, so a PalForge effect does not toggle the game's status icon.
-`nativeStatus` is therefore an ANNOTATION today: it is validated, stored on the
-definition and readable off it, and nothing acts on it — see TODO(effect-native-status)
-in Handle:apply for where the search now stands. The gameplay lives in YOUR handlers —
-onTick is where you deal the damage / heal / buff through whatever call you have (e.g.
-utils.items, an actor method).
-
-local Regen = Effect{
-id = "example:Regen", name = "Regeneration",
-duration = 10.0,   -- seconds; nil = until :remove()
-interval = 1.0,    -- seconds between onTick calls
-events = {
-onApply  = function(effect, target, ctx) end,
-onTick   = function(effect, target, ctx) --[[ heal target; ctx.elapsed ]] end,
-onExpire = function(effect, target, ctx) end,
-},
-}
-Regen:apply(Player.character())
-```
+`AddStatusParameter`'s struct variant is deliberately not used: `core/signature.lua` does not
+pass a struct on an unread declaration.
 
 **What the probe prints**
 
-In a loaded world. STEP 1 (do these classes exist?): for n in {"PalStatusEffectComponent","PalBa
-dStatusComponent","PalCharacterParameterComponent","PalIndividualCharacterParameter","PalCharact
-er","PalPlayerCharacter","PalStatusUtility","PalDamageUtility"} do `local c =
-StaticFindObject("/Script/Pal."..n); print(n, c ~= nil)` — the existence answers alone are load-
-bearing. STEP 2 (enumerate): for each existing c, walk `while c do c:ForEachFunction(function(f)
-print("FN", f:GetFName():ToString()) end); c:ForEachProperty(function(p) print("PROP",
-p:GetFName():ToString(), p:GetClass():GetFName():ToString()) end); c = c:GetSuperStruct() end`.
-Also do this from a live instance: `local pc = FindFirstOf("PalPlayerCharacter");
-print(pc:GetClass():GetFName():ToString())` then the same walk on pc:GetClass(). Log everything
-containing Status / BadStatus / Ailment / Effect / Add / Remove / Apply / Set. STEP 3
-(signatures): for every shortlisted UFunction f, `f:ForEachProperty(function(p) print(" PARAM",
-p:GetFName():ToString(), p:GetClass():GetFName():ToString(), p:GetOffset_Internal()) end)` — a
-ByteProperty/EnumProperty here means the enum form, a NameProperty means the FName form. STEP 4
-(get the enum values): arm the shortlisted add/remove functions with the count-capped
-RegisterHook pattern from dump/auto_mod/main.lua:41-53, logging self class and every parameter
-as `p:get()` normalised through `v.ToString and v:ToString() or tostring(v)`. Then in game
-deliberately catch each ailment: stand in fire (Burn), take a poison attack (Poison), stand in a
-snow biome / take an ice attack (Freeze), get wet, get electrified. PASTE BACK: which class
-existed, which function fired for each ailment, and the exact parameter value printed for each —
-those printed values ARE the nativeStatus values the field must hold.
+F1 in a loaded world, no dedicated block needed. `core.signature` logs `declared` or `present`
+plus the ailment name on a call that fires, or refuses and names the lookup that failed. Watch
+the parameter spelling: an `EnumProperty` build declares it differently from a `ByteProperty`
+one, which shows up as a refusal rather than a crash.
 
 #### `skill-activate-source` — Skill.Spec.Events.onActivate
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:58
+- **Marked at:** Scripts/palforge/api/skill.lua:59
 
 **What a pack author sees**
 
@@ -632,7 +578,7 @@ value string.
 #### `skill-hit-source` — Skill.Spec.Events.onHit
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/skill.lua:71
+- **Marked at:** Scripts/palforge/api/skill.lua:72
 
 **What a pack author sees**
 
@@ -675,7 +621,7 @@ name.
 #### `skill-icon-key` — Skill.Handle:iconOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:26
+- **Marked at:** Scripts/palforge/api/skill.lua:150
 
 **What a pack author sees**
 
@@ -749,7 +695,7 @@ every column for row "Alpaca".
 #### `skill-passive-source` — Skill.Spec.Events.onEquip / Skill.Spec.Events.onUnequip
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:87
+- **Marked at:** Scripts/palforge/api/skill.lua:88
 
 **What a pack author sees**
 
@@ -835,51 +781,43 @@ print(#(FindAllOf('SoundWave') or {})) and #(FindAllOf('AkMediaAsset') or {}) �
 shipping game has any instance of either class loaded is itself the answer about whether that
 pipeline is alive.
 
-#### `audio-volume-rtpc` — Audio.Handle:setVolume
+#### `audio-bus-volume` — Audio.Handle:setVolume
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/audio.lua:277
+- **Marked at:** Scripts/palforge/api/audio.lua:302
 
 **What a pack author sees**
 
-Returns false for every value, including 0.0 and 1.0, and nothing changes. There is no way to
-make one sound quieter than another; a pack can only pick a quieter event.
+`setVolume` returns false and changes nothing. **The way to be quieter today is to pick a quieter
+AkAudioEvent** — choosing the event is the only volume control a pack has, and on this build
+there may be no per-sound volume at all.
+
+The RTPC route this used to wait on is ruled out with evidence (see `audio-volume-rtpc` under
+Closed): the build declares three AkRtpc assets and none is a volume. The only candidate left is
+`SetOutputBusVolume`, reflected on both AkComponent and AkGameplayStatics — and it moves a whole
+output BUS, not one sound, so even when it works it cannot satisfy this method's per-sound
+contract. If it is wired it belongs on the module as a bus call.
 
 **What is still unknown**
 
-```text
-TODO(audio-volume-rtpc): existence is settled — UPalSoundUtility::SetRTPCValueByActor and
-::SetRTPCValueByActorByEnum are reflected in this build, and the route is per-actor. Still
-unknown, and all a probe needs now: their parameter lists (is the RTPC an FName or an
-FString, is there an InterpolationTimeMs), which RTPC controls volume, and the entries of
-the enum the ByEnum overload takes — enumerating that UEnum is the cheapest way to get a
-real RTPC name, since no dump in the tree carries one.
-```
+1. `SetOutputBusVolume`'s parameter list, on either owner — is the bus an FName or an FString, is
+   there a leading AkComponent/actor, is the value 0..1 or dB, is there a fade argument. Until a
+   real list is printed, do not call it.
+2. Whether a per-sound AkComponent is reachable at all. 248 AkComponents are live, but the first
+   sampled one is a PalAkComponent owned by a level gimmick, and our play route
+   (`PlayAkEventSoundByActor`) hands back nothing — no component, no PlayingID. If there is no
+   component to call the overload on, the AkGameplayStatics overload is bus-global and this
+   method stays false permanently, which is itself an answer worth having.
 
 **What the probe prints**
 
-In a fully loaded save, print all four blocks and paste the whole log — an empty result is
-itself a useful answer: (1) existence: for each of '/Script/Pal.Default__PalSoundUtility',
-'/Script/AkAudio.Default__AkGameplayStatics', '/Script/AkAudio.Default__AkComponent',
-'/Script/AkAudio.Default__AkAudioEvent' do local o = StaticFindObject(path); print(path, o, o
-and o:GetFullName()). (2) for every one that resolved, log its COMPLETE function list
-unfiltered: o:GetClass():ForEachFunction(function(fn) print('FN', o:GetFullName(),
-fn:GetFName():ToString()) end). (3) for any function whose name contains RTPC, Volume, Bus,
-Gain, Fade, Mute or Set, walk its parameters in order: fn:ForEachProperty(function(p) print('
-PARM', p:GetFName():ToString(), p:GetClass():GetFName():ToString(), p:GetOffset_Internal(),
-p:GetSize()) end). (4) the RTPC names themselves — this is the part nothing in the repo can
-supply: print(#(FindAllOf('AkRtpc') or {})) and then for each, print its GetFName():ToString()
-and GetFullName(); do the same for FindAllOf('AkAuxBus') and FindAllOf('AkAudioBank'). Also
-print how many AkComponent instances exist and one's full name plus its Outer: local cs =
-FindAllOf('AkComponent'); print('#AkComponent', cs and #cs); if cs and cs[1] then
-print(cs[1]:GetFullName(), cs[1]:GetOuter() and cs[1]:GetOuter():GetFullName()) end.
-
-### Mesh
+`SetOutputBusVolume`'s declared parameters on AkComponent and on AkGameplayStatics, and what a
+live AkComponent sample looks like. It calls neither.
 
 #### `mesh-base-material` — Mesh.Spec.color / texture / material on kind="procedural" and kind="obj"; Mesh.Handle:setColor on a procedural mesh
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:89
+- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:112
 
 **What a pack author sees**
 
@@ -911,49 +849,10 @@ VectorParameterValues array is present and, if so, each `entry.ParameterInfo.Nam
 Report one loaded object path that carries a colour parameter — that path goes to the front of
 Renderer.BASE_MATERIAL_CANDIDATES.
 
-#### `mesh-detach-destroycomponent` — Mesh.Handle:detach on kind="procedural" / "obj" / "static" (and core.mesh.detach)
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/core/mesh/static.lua:72
-
-**What a pack author sees**
-
-detach returns true and PalForge forgets the actor, but the mesh is still on screen. A later
-attachTo then stacks a SECOND component on the same actor, because the once-guard was cleared by
-the detach that did not actually remove anything.
-
-**What is still unknown**
-
-```text
-Destroy a component we added. K2_DestroyComponent is the BlueprintCallable
-counterpart of the proven AddComponentByClass, but has no in-game record of its own,
-so the pcall status (i.e. "the component carried the function and it ran") is the
-strongest thing we can honestly report.
-TODO(mesh-detach-destroycomponent): K2_DestroyComponent's reflected argument list is
-undumped — we pass the component as the Object argument, which is what the Blueprint
-node does, but a mismatch would make BOTH this and procedural:detach silent no-ops that
-still report true. Same call site in core/mesh/procedural.lua : Procedural:detach.
-```
-
-**What the probe prints**
-
-On the player pawn: `local before = #(FindAllOf('ProceduralMeshComponent') or {});
-print('before', before)`. `local cls =
-StaticFindObject('/Script/ProceduralMeshComponent.ProceduralMeshComponent'); local comp =
-pawn:AddComponentByClass(cls, false, {}, false); print('after add',
-#(FindAllOf('ProceduralMeshComponent') or {}))`. Enumerate the function:
-`comp:GetClass():ForEachFunction(function(f) if f:GetFullName():find('DestroyComponent') then
-print('FN '..f:GetFullName()); f:ForEachProperty(function(pr) print(' PARAM
-'..pr:GetFName():ToString()..' '..pr:GetClass():GetFName():ToString()..'
-@'..tostring(pr:GetOffset_Internal())) end) end end)`. Then try both call shapes on two separate
-freshly-added components, printing for each the pcall status, `comp:IsValid()` afterwards, and
-the FindAllOf count: (a) `comp:K2_DestroyComponent(comp)`, (b) `comp:K2_DestroyComponent()`.
-Report which one drops the count back to `before`.
-
 #### `mesh-material-params` — Mesh.Spec.color / texture / params on every kind, Mesh.Handle:setColor, Building.Instance:update(), Building.Handle:update(), Pal.Class:material()
 
 - **Probe:** F6
-- **Marked at:** Scripts/palforge/api/building.lua:45
+- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:95
 
 **What a pack author sees**
 
@@ -1061,153 +960,6 @@ comp:CreateAndSetMaterialInstanceDynamic(0)`, and for each candidate name in {Co
 Tint, BaseColorTint, Albedo, EmissiveColor} plus every name harvested from
 VectorParameterValues, call `mid:SetVectorParameterValue(FName(name), {R=1,G=0,B=0,A=1})`, print
 the name, wait ~2s, and report WHICH name visibly turned the mesh red.
-
-#### `mesh-skeletal-animclass` — Mesh.Spec.animClass (skeletal only) — reached from Mesh.Handle:attachTo and Pal.Handle:renderOn
-
-- **Probe:** F6
-- **Marked at:** Scripts/palforge/core/mesh/skeletal.lua:177
-
-**What a pack author sees**
-
-The pal's model swaps but stands frozen in a T-pose, or vanishes because an undriven skinned
-mesh culls to nothing. The log line is "skeletal: SetAnimClass is not on this component -
-animClass dropped", or nothing at all when SetAnimationMode silently took the wrong enum value.
-
-**What is still unknown**
-
-```text
-TODO(mesh-skeletal-animclass): SetAnimClass / SetAnimationMode are
-written as UE5 names them, but nothing dumps them on a Pal component and
-the enum value 0 for AnimationBlueprint is likewise assumed — if either
-is wrong the swapped mesh stands still or culls to nothing.
-```
-
-**What the probe prints**
-
-Reuse the component from the mesh-skeletal-setter probe. From its class listing, print the full
-names of the `SetAnimClass` and `SetAnimationMode` UFunctions and each of their params via
-`f:ForEachProperty(function(pr) print(' PARAM '..pr:GetFName():ToString()..'
-'..pr:GetClass():GetFName():ToString()..' @'..tostring(pr:GetOffset_Internal())) end)`. Then
-resolve a real ABP class: `local abp = StaticFindObject('/Game/Pal/Blueprint/Character/Monster/P
-alActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C') or LoadAsset('/Game/Pal/Blueprint/Charact
-er/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C'); print('abp', tostring(abp),
-abp and abp:GetFullName(), abp and abp:GetClass():GetFName():ToString())`. Call `print('mode
-ok', pcall(function() mc:SetAnimationMode(0) end))` and `print('animclass ok', pcall(function()
-mc:SetAnimClass(abp) end))`, then print `tostring(mc.AnimClass)` and `pcall(function() return
-mc:GetAnimInstance() end)` with :GetFullName() on any valid result. Also dump the enum if
-reachable: `local e = StaticFindObject('/Script/Engine.EAnimationMode')` and print its names and
-values.
-
-#### `mesh-skeletal-setter` — Mesh.Handle:attachTo / Mesh.Handle:detach on kind="skeletal" (the DEFAULT kind), and Pal.Handle:renderOn
-
-- **Probe:** F6
-- **Marked at:** Scripts/palforge/core/mesh/skeletal.lua:94
-
-**What a pack author sees**
-
-A pack author writes Mesh{ id="x", model="/Game/.../SK_ChickenPal.SK_ChickenPal" } — kind
-defaults to skeletal — and calls :attachTo(ctx.actor). It returns false and UE4SS.log shows
-either "skeletal: actor carries no readable mesh component (.Mesh / :GetMesh())" or "skeletal:
-component carries neither SetSkinnedAssetAndUpdate nor SetSkeletalMeshAsset". No pal ever
-changes shape. If it returns true instead, nobody has ever confirmed the pal visibly changed.
-
-**What is still unknown**
-
-```text
-Run the mesh setters in order, returning the name of the one that executed, or nil.
-SetSkinnedAssetAndUpdate(mesh, reinit) recreates the render state + re-inits the pose,
-so a cross-skeleton swap renders; plain SetSkeletalMeshAsset can leave the new mesh
-INVISIBLE. Fall back only if the first is absent.
-TODO(mesh-skeletal-setter): neither the pawn's mesh-component property nor these setter
-names are dumped anywhere — a probe must confirm which of them a live pal actually
-carries before a true here can be read as "the pal changed shape".
-```
-
-**What the probe prints**
-
-With a pal in the world: `local p = FindFirstOf('PalCharacter')` (or FindAllOf and pick a valid
-one); print `p:GetFullName()`. Then `local mc; pcall(function() mc = p.Mesh end); print('Mesh
-prop ->', tostring(mc))` and `pcall(function() mc = p:GetMesh() end); print('GetMesh() ->',
-tostring(mc))`. For whichever is valid print `mc:GetClass():GetFullName()`. Then enumerate the
-component class: `mc:GetClass():ForEachFunction(function(f) print('FN '..f:GetFullName()) end)`
-and `mc:GetClass():ForEachProperty(function(pr) print('PROP '..pr:GetFName():ToString()..'
-'..pr:GetClass():GetFName():ToString()..' @'..tostring(pr:GetOffset_Internal())) end)`. Grep
-that output for SetSkinnedAssetAndUpdate, SetSkeletalMeshAsset, SetDisableChangeMesh,
-GetSkinnedAsset, GetSkeletalMeshAsset, SkinnedAsset, SkeletalMesh, RelativeScale3D,
-RelativeLocation. For each mesh setter found, walk its own params:
-`f:ForEachProperty(function(pr) print(' PARAM '..pr:GetFName():ToString()..'
-'..pr:GetClass():GetFName():ToString()..' @'..tostring(pr:GetOffset_Internal())) end)`. Finally
-print the CURRENT asset four ways, each in a pcall, printing ok and (when valid) :GetFullName():
-mc:GetSkinnedAsset(), mc:GetSkeletalMeshAsset(), mc.SkinnedAsset, mc.SkeletalMesh.
-
-#### `mesh-static-setstaticmesh` — Mesh.Handle:attachTo on kind="static", Building.Instance:render(), Building.Handle:render()
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/core/mesh/static.lua:109
-
-**What a pack author sees**
-
-Placing the shipped WorkBench or PalBoxV2 attaches nothing. UE4SS.log shows "static: attach
-failed: SetStaticMesh did not take", render() returns false, and because the component is
-destroyed again there is nothing half-attached to see.
-
-**What is still unknown**
-
-```text
-TODO(mesh-static-setstaticmesh): SetStaticMesh's reflected signature is undumped
-and so are both read-back paths in meshOn(); if none of the three names exist,
-every static building attach is an honest-but-permanent false.
-```
-
-**What the probe prints**
-
-In-world: `local cls = StaticFindObject('/Script/Engine.StaticMeshComponent'); print('cls',
-tostring(cls))`. Enumerate it: `cls:ForEachFunction(function(f) print('FN '..f:GetFullName())
-end)`; find SetStaticMesh and GetStaticMesh and for each print their params with
-`f:ForEachProperty(function(pr) print(' PARAM '..pr:GetFName():ToString()..'
-'..pr:GetClass():GetFName():ToString()..' @'..tostring(pr:GetOffset_Internal())) end)`. Also
-`cls:ForEachProperty(...)` and grep for a property literally named StaticMesh. Then do a LIVE
-round trip on the player pawn: `local comp = pawn:AddComponentByClass(cls, false, {}, false)`;
-`local asset = StaticFindObject('/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBen
-chPrimitive.SM_WorkBenchPrimitive') or LoadAsset(...)`; print `tostring(asset)`; then
-`print('set ok', pcall(function() comp:SetStaticMesh(asset) end))`; then print all of
-`pcall(function() return comp:GetStaticMesh() end)` and `pcall(function() return comp.StaticMesh
-end)` with :GetFullName() on any valid result, plus `pcall(function() return
-comp:GetNumMaterials() end)`.
-
-#### `mesh-texture-import` — Mesh.Spec.texture and Mesh.Spec.params.texture on every kind
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:162
-
-**What a pack author sees**
-
-Declaring texture = "C:/mods/example/body.png" logs "tex-fail(no KismetRenderingLibrary)" or
-"tex-fail(ImportFileAsTexture2D failed: ...)" and the mesh keeps its original surface. The
-attach still returns true, because the material layer is deliberately best-effort.
-
-**What is still unknown**
-
-```text
-Import a PNG off disk as a UTexture2D. Returns tex, or nil + reason.
-TODO(mesh-texture-import): ImportFileAsTexture2D is listed as BlueprintCallable in the
-V5 POC notes but has never been CALLED in either tree — its argument list (whether the
-world-context object may be an actor, and whether the path is FString) is unconfirmed.
-```
-
-**What the probe prints**
-
-In-world: `local krl = StaticFindObject('/Script/Engine.Default__KismetRenderingLibrary');
-print('krl', tostring(krl), krl and krl:GetFullName())`. Enumerate:
-`krl:GetClass():ForEachFunction(function(f) print('FN '..f:GetFullName()) end)`; find
-ImportFileAsTexture2D and print each param with `f:ForEachProperty(function(pr) print(' PARAM
-'..pr:GetFName():ToString()..' '..pr:GetClass():GetFName():ToString()..'
-@'..tostring(pr:GetOffset_Internal())) end)`. Then put a real PNG on disk and call it three
-ways, printing the pcall status, tostring(result) and result:GetFullName() when valid: with the
-player pawn as world context, with FindFirstOf('World'), and with krl itself. Report which
-context argument (if any) returns a valid UTexture2D.
-
-### UI
 
 #### `ui-host-paths` — native.ui.widget.cloneGameWidget / UI.Handle:mount(<a panel of the game's own live UI>)
 
@@ -1334,57 +1086,53 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `icons-row-read` — core.icons.resolve -> Item/Pal/Building/Skill Handle:iconOf()
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/core/icons.lua:311
+- **Marked at:** Scripts/palforge/core/icons.lua:396
 
 **What a pack author sees**
 
-iconOf() always returns the declared `icon` (nil unless the author set one). The table is now
-genuinely found, but no row is ever read, so Item.get("Wood"):iconOf() is nil even though the
-row exists.
+`:iconOf()` falls back to the icon you declared yourself and never finds the vanilla one, so a
+pack cannot reuse the game's own artwork for an item, pal, building or partner skill.
 
 **What is still unknown**
 
+Whether `GetDataTableColumnAsString` is reflected on this build. That is the whole of it — the
+question used to be "does any way to read a DataTable value exist" and is now one yes/no.
+
+What changed: reading a ROW was the wrong question. `dumps/cxx/Engine.hpp` dumps `UDataTable`
+in full and it declares five properties and **zero functions**, so every accessor this code used
+to try (`dt:GetDataTableRowFromName`, `dt:FindRow`) was called on an object that does not have
+it. The real accessors are statics on `UDataTableFunctionLibrary` and take the table as their
+first argument:
+
 ```text
-Fetch the row struct for `id`, across the row-access APIs a UDataTable may expose. NEITHER
-of these has been observed to work on this build — reading a row value from Lua is a
-capability nobody in this tree has demonstrated — so a nil here means "the unproven route
-did not fire", not "there is no such row".
-
-Be pessimistic about both, and about anything shaped like them. In UE, GetDataTableRowFromName
-is not a member of UDataTable at all: it is a static on UDataTableFunctionLibrary declared
-CustomThunk with a wildcard output struct, and the wildcard's real type comes from Blueprint
-bytecode — a reflected call can only offer the declared FTableRowBase, which the thunk
-rejects as incompatible with the table's row type. FindRow is a C++ template and is not
-reflected at all. The library's SIBLING function is the shape that does work here
-(dtfl:GetDataTableRowNames(dt) — dump/dump.lua:64, tests/catalog.lua:105-119, and
-utils/items/init.lua's rowNamesInto), and it returns row NAMES, not values. So the missing
-capability is probably not a call spelling but a whole accessor; whatever probe closes this
-has to go LOOKING for one rather than assume one, which is why no third guess is bolted on
-here.
-
-The 2026-07 reflection dumps do not touch this. They re-confirm both halves that already
-worked — 01_datatables.txt read `dt.RowStruct` and a row-NAME accessor for all 391 loaded
-tables, 0 of them reporting "<no row-name accessor>" — and they add nothing about values,
-because 02_reflection.txt covers 21 /Script/Pal.* classes ONLY: no /Script/Engine.UDataTable
-and no UDataTableFunctionLibrary appear anywhere in the tree. This stays a /Script/Engine
-question and cannot be answered from those files.
-TODO(icons-row-read): unknown whether ANY reflected row-VALUE accessor exists on this build
-(on UDataTable, on UDataTableFunctionLibrary, or as a Pal-specific icon getter). This is now
-the ONLY missing step: the table is found, its package path is measured, and the column to
-index once a row is in hand is measured too (ICON_COLUMNS_BY_TABLE).
+void GetDataTableRowNames(UDataTable* Table, TArray<FName>& OutRowNames);
+bool GetDataTableRowFromName(UDataTable* Table, FName RowName, FTableRowBase& OutRow);
+TArray<FString> GetDataTableColumnAsString(const UDataTable* DataTable, FName PropertyName);
+bool DoesDataTableRowExist(UDataTable* Table, FName RowName);
 ```
+
+The row-VALUE one still cannot be used, for the reason this module worked out correctly long
+ago: it is CustomThunk with a wildcard out-struct whose real type comes from Blueprint bytecode,
+so a reflected call can only offer the declared `FTableRowBase` and the thunk rejects it. So
+`core/icons.lua` reads a COLUMN instead — no wildcard, no out-param, an object and an FName in,
+an array of plain strings out, one per row in RowMap order. `GetDataTableRowNames` walks the
+same RowMap in the same order, so zipping the two gives id -> icon path for a whole table in two
+calls and never needs a row struct in Lua.
+
+The sibling is the evidence: `GetDataTableRowNames` on this same library is proven on this build
+and runs in production in `utils/items`. The column call has simply never been made.
+
+Settled alongside it, from `dumps/cxx/Pal.hpp`: the column TYPE. All three row structs carry
+exactly one field and it is a `TSoftObjectPtr<UTexture2D>` — an asset path, which is what
+`LoadAsset` wants, so reading the column as a string loses nothing. It also confirms the column
+NAMES (`Icon`, `Icon`, `SoftIcon`) from the shipping binary.
 
 **What the probe prints**
 
-In a loaded world, print three lists. (1) local dt = FindObject("DataTable",
-"DT_ItemIconDataTable"); print(dt:GetFullName()); dt:GetClass():ForEachFunction(function(fn)
-print("UDataTable." .. fn:GetFName():ToString()) end). (2) local lib =
-StaticFindObject("/Script/Engine.Default__DataTableFunctionLibrary");
-lib:GetClass():ForEachFunction(function(fn) print("DTFL." .. fn:GetFName():ToString()) end). (3)
-local u = StaticFindObject("/Script/Pal.Default__PalUtility");
-u:GetClass():ForEachFunction(function(fn) local n = fn:GetFName():ToString(); if n:find("Icon")
-or n:find("Row") or n:find("Texture") then print("PalUtility." .. n) end end). Paste all three
-lists verbatim.
+The F5 run answers this without a dedicated block: `core.signature` refuses the call unless the
+live class declares it, so one line settles it. `declared`/`present` plus a row count closes the
+item; `refused ... is not declared on this build` means the library is unreflected here and icon
+resolution has no route at all, which is equally an answer.
 
 #### `pal-spawned-fresh` — Pal{ events = { onSpawned } } / event.on("pal.spawned")
 

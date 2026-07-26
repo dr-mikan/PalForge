@@ -13,14 +13,21 @@
 -- application survives a world reload (reason "world_left"); it is not persisted, so
 -- nothing is re-applied on the next world.
 --
--- What is NOT wired: the game's own ailments (EPalStatusEffectType — Poison / Burn /
--- Freeze) are a native enum, and no native call to apply one has been found on any class
--- yet reflected, so a PalForge effect does not toggle the game's status icon.
--- `nativeStatus` is therefore an ANNOTATION today: it is validated, stored on the
--- definition and readable off it, and nothing acts on it — see TODO(effect-native-status)
--- in Handle:apply for where the search now stands. The gameplay lives in YOUR handlers —
--- onTick is where you deal the damage / heal / buff through whatever call you have (e.g.
--- utils.items, an actor method).
+-- `nativeStatus` REACHES THE GAME'S OWN AILMENTS. Name one of Palworld's status effects —
+-- "Poison", "Burn", "Freeze", "Stun", "Sleep", "Electrical", "Darkness", "AttackUp" — and
+-- applying the effect turns the real ailment on for the target, with the real status icon;
+-- removing or expiring it turns it off again. The full list of names is
+-- core.status.names(), and an unknown name is rejected when the definition is applied rather
+-- than silently ignored.
+--
+-- It is a MIRROR, not a replacement: the ailment runs on the game's own rules and PalForge does
+-- not control its strength or duration. Your own `duration` still governs when PalForge takes
+-- it off. The gameplay you invent still lives in YOUR handlers — onTick is where you deal the
+-- damage / heal / buff through whatever call you have (e.g. utils.items, an actor method) — and
+-- an effect with no `nativeStatus` at all is completely normal.
+--
+-- Not yet observed in a running game: see core/status.lua. A native ailment that does not fire
+-- is logged and never fails the effect — your handlers run either way.
 --
 --   local Regen = Effect{
 --       id = "example:Regen", name = "Regeneration",
@@ -36,6 +43,7 @@
 
 local om     = require("palforge.core.object_manager")
 local schema = require("palforge.core.schema")
+local status = require("palforge.core.status")
 
 --=============================================================================
 -- SPEC — the shape of Effect{ ... }, declared as data so it is enforced on every call and
@@ -73,8 +81,18 @@ local Spec = schema.define("Effect.Spec", {
     { "stackable",    type = "boolean", default = false, doc = "may several copies coexist on one target?" },
     { "maxStacks",    type = "number",  default = 1, doc = "stack ceiling when stackable" },
     { "icon",         doc = "status-bar icon" },
+    -- Checked against the game's own EPalStatusID list at DEFINITION time, not at apply time.
+    -- A typo in an ailment name is a mistake a pack author makes once, while writing the
+    -- definition, and the useful moment to hear about it is right then — with the real
+    -- vocabulary in the message — rather than as a quiet log line the first time an effect
+    -- lands on a player. core.status.names() is the list.
     { "nativeStatus", type = "string",
-                      doc = "the game's own EPalStatusEffectType this mirrors, when it has one" },
+                      check = function(v)
+                          if status.known(v) then return true end
+                          return false, string.format("not an ailment this build has; the names are %s",
+                              table.concat(status.names(), ", "))
+                      end,
+                      doc = "the game's own ailment this mirrors, e.g. \"Poison\" (core.status.names())" },
     { "events",       type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
     { "data",         type = "table", doc = "free-form payload of your own, carried onto the definition" },
 })
@@ -126,6 +144,11 @@ end
 -- "duration" / "removed" / "target_gone" / "world_left" and reaches the handler as ctx.reason.
 local function expire(byId, id, app, reason)
     byId[id] = nil
+    -- Take the native ailment back off first, so a handler that inspects the target during
+    -- onExpire sees the state this effect is leaving behind rather than the one it is about to.
+    -- Every end-of-life path converges here — duration elapsed, :remove(), a world teardown —
+    -- so there is exactly one place the ailment is cleared.
+    if app.cls.nativeStatus then status.remove(app.target, app.cls.nativeStatus) end
     pcall(function()
         app.cls:onExpire(app.target, { effect = id, reason = reason, elapsed = app.elapsed,
                                        stacks = app.stacks })
@@ -348,28 +371,15 @@ function Handle:apply(target, ctx)
         remaining = tonumber(cls.duration) or nil,
     }
     byId[cls.id] = app
-    -- TODO(effect-native-status): NARROWED, and mostly by ELIMINATION. cls.nativeStatus is
-    -- still stored and read by nothing, but the search space has collapsed. Four of the
-    -- classes this was going to be looked for on are now fully reflected in dumps/reflection/
-    -- 02_reflection.txt — PalCharacter, PalPlayerCharacter, PalCharacterParameterComponent,
-    -- PalIndividualCharacterParameter — and NONE of them has an add- or remove-status
-    -- function; neither does PalUtility, which is the game's 597-function catch-all. So the
-    -- ailment API does not live on the character or its parameter objects.
-    -- WHERE IT DOES LIVE, most likely: /Script/Pal.PalCharacter carries a :StatusComponent
-    -- property (right beside :PassiveSkillComponent), and PalCharacterParameterComponent
-    -- carries GetStatusHit, IsStatusHitActive, :StatusAccumulateMap, :IsStun and :StunPoint —
-    -- an accumulate-then-hit model with the applier on that component. Its CLASS is not one
-    -- of the 21 reflected here, so its function list is unread, not absent.
-    -- THE VOCABULARY IS ALSO STILL MISSING: not one DataTable in 01_datatables.txt — a full
-    -- sweep of the loaded set — is a status-effect table, which repeats on live data what the
-    -- on-disk catalog said. The only "StatusEffect" name is DT_StatusEffectFood, 54 FOOD
-    -- rows over columns EffectTime / EffectType1 / EffectType2 / EffectValue1 / EffectValue2 /
-    -- Interaval1 / Interaval2 — enum columns whose MEMBER names that dump does not print. So
-    -- the legal values of nativeStatus have no source on disk either.
-    -- THE ONE THING LEFT: reflect the class behind PalCharacter.StatusComponent (read it off
-    -- a live pal, then walk it with ForEachFunction/ForEachProperty up GetSuperStruct) and
-    -- print the parameters of whatever Add/Apply/Remove it exposes — a ByteProperty there
-    -- means the enum form, a NameProperty the FName form. The remove side belongs in expire().
+    -- The game's own ailment, when this definition mirrors one. The route is
+    -- PalCharacter.StatusComponent -> UPalStatusComponent:AddStatus(EPalStatusID), settled in
+    -- core/status.lua and reached only for a target that really is a PalCharacter.
+    --
+    -- A failure here does NOT fail the apply. PalForge's own timing, stacking and handlers are
+    -- what a pack actually programmes against, and they work with or without the native icon;
+    -- making the whole effect fail because the game would not light up a status would be
+    -- trading a working feature for a cosmetic one. core.status logs the reason.
+    if cls.nativeStatus then status.add(target, cls.nativeStatus) end
     pcall(function()
         cls:onApply(target, setmetatable({ effect = cls.id, stacks = 1 }, { __index = ctx }))
     end)

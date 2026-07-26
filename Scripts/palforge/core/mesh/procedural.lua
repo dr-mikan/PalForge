@@ -8,8 +8,10 @@
 -- the explicit SetWorldScale3D call is mandatory.
 --
 -- detach removes again what attach added: K2_DestroyComponent on the component we
--- created (the BlueprintCallable counterpart of the proven AddComponentByClass — not
--- itself confirmed in-game, so detach reports only whether that call executed).
+-- created, through the shared Renderer.destroyComponent. Its declaration is settled —
+-- UActorComponent::K2_DestroyComponent(UObject* Object), dumps/cxx/Engine.hpp:9972, one
+-- ObjectProperty argument, which is the component itself — but no run has watched a
+-- component actually vanish, so detach still reports only whether that call executed.
 --
 -- MATERIAL: the MID handling lives in base/renderer (it is UPrimitiveComponent API, the
 -- same on every mesh component). This backend only supplies the two things that ARE
@@ -129,14 +131,29 @@ function Procedural:attach(actor, def)
         assert(comp and comp:IsValid(), "AddComponentByClass failed")
         -- remember it immediately: even a half-built component is ours to destroy again
         pcall(function() compByActor[actor] = comp end)
-        -- CreateMeshSection(section, verts, tris, normals, UV0, vertexColors, tangents, collision)
+        -- CreateMeshSection(int32 SectionIndex, TArray<FVector>& Vertices,
+        --   TArray<int32>& Triangles, TArray<FVector>& normals, TArray<FVector2D>& UV0,
+        --   TArray<FColor>& VertexColors, TArray<FProcMeshTangent>& Tangents,
+        --   bool bCreateCollision) — dumps/cxx/ProceduralMeshComponent.hpp:67. Eight
+        -- arguments, which is what this passes.
         -- collision=false: decorative meshes must never collide (a collider here both
         -- hitches on cook AND intercepts the build placement raycast).
         comp:CreateMeshSection(0, mesh.verts, mesh.tris, {}, mesh.uvs or {}, vertexColors, {}, false)
-        pcall(function() comp:SetCollisionEnabled(0) end)          -- ECollisionEnabled::NoCollision
-        pcall(function() comp:SetCollisionProfileName("NoCollision") end)
+        -- ECollisionEnabled::NoCollision = 0 (dumps/cxx/Engine_enums.hpp:777) into
+        -- SetCollisionEnabled(TEnumAsByte<ECollisionEnabled::Type>) — one argument,
+        -- dumps/cxx/Engine.hpp:19786. The SetCollisionProfileName("NoCollision") that used
+        -- to sit beside it is gone: Engine.hpp:19784 declares it
+        -- SetCollisionProfileName(FName, bool), so the one-argument call never ran, and
+        -- firing it correctly would mean pushing a bare Lua string at an FName parameter —
+        -- the marshalling shape that has taken this process down before. Switching
+        -- collision off is one capability and SetCollisionEnabled is its one route.
+        pcall(function() comp:SetCollisionEnabled(0) end)
+        -- SetWorldScale3D(FVector NewScale) — Engine.hpp:20408. Mandatory: the empty {}
+        -- FTransform handed to AddComponentByClass zero-initializes the relative scale.
         local s = def.scale or 1.0
-        comp:SetWorldScale3D({ X = s, Y = s, Z = s }) -- mandatory (zero-scale trap)
+        comp:SetWorldScale3D({ X = s, Y = s, Z = s })
+        -- K2_SetRelativeLocation(FVector NewLocation, bool bSweep, FHitResult& SweepHitResult,
+        -- bool bTeleport) — Engine.hpp:20428. Four arguments; the {} is the out FHitResult.
         local o = def.offset or {}
         comp:K2_SetRelativeLocation({ X = o.x or 0, Y = o.y or 0, Z = o.z or 0 }, false, {}, false)
         -- material layer (fail-soft, logged). always=true so a marker declared with no
@@ -185,8 +202,9 @@ function Procedural:detach(actor)
         self:forgetMaterial(actor)
         return false
     end
-    if not pcall(function() comp:K2_DestroyComponent(comp) end) then
-        log.warn("detach failed (K2_DestroyComponent unavailable)")
+    if not Renderer.destroyComponent(comp) then
+        log.warn("detach failed (K2_DestroyComponent did not fire - core.signature has "
+            .. "logged whether it was refused or raised)")
         return false
     end
     -- the whole component goes, so there is no material to put back — just drop the record

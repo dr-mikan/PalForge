@@ -13,6 +13,7 @@
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Effect  = require("palforge.api.effect")
+local status  = require("palforge.core.status")
 local event   = require("palforge.core.event")
 local om      = require("palforge.core.object_manager")
 
@@ -155,15 +156,50 @@ s:test("re-defining an id replaces the registered definition", function(t)
     t:eq(Effect.get(id):name(), "second", "the last definition wins")
 end)
 
-s:test("nativeStatus is recorded but nothing native is wired to it yet", function(t)
-    -- TRIPWIRE. The game's ailments are an enum with no confirmed apply call, so
-    -- nativeStatus is inert data today: no handle accessor, no toggle on apply. When
-    -- somebody wires native/effects' TODO, this is the test that should start failing.
-    local id  = support.id("effect")
-    local h   = Effect{ id = id, nativeStatus = "Burn" }
-    t:eq(h.nativeStatus, nil, "the handle exposes no nativeStatus")
-    t:eq(rawget(h, "applyNative"), nil, "and no native application route")
-    t:eq(om.get("effect", id).nativeStatus, "Burn", "it is carried on the definition only")
+s:test("nativeStatus names one of the game's own ailments and is checked when declared", function(t)
+    local id = support.id("effect")
+    local h  = Effect{ id = id, nativeStatus = "Burn" }
+    t:eq(om.get("effect", id).nativeStatus, "Burn", "it is carried on the definition")
+    t:eq(h.nativeStatus, nil, "and stays off the handle, like every other declarative field")
+
+    -- The names are the game's own EPalStatusID spellings, and matching is case-insensitive
+    -- because "poison" is what somebody will actually type.
+    t:truthy(status.known("Poison"), "Poison is an ailment this build has")
+    t:truthy(status.known("poison"), "and the lookup does not care about case")
+    t:truthy(#status.names() >= 30, "the vocabulary is the whole enum, not a curated handful")
+
+    -- A typo is caught while the definition is being written, with the real list in the
+    -- message — not as a quiet log line the first time an effect lands on a player.
+    local ok, err = pcall(function() return Effect{ id = support.id("effect"), nativeStatus = "Poizon" } end)
+    t:eq(ok, false, "an ailment this build does not have is rejected at definition time")
+    t:truthy(tostring(err):find("nativeStatus", 1, true), "and the message names the field")
+    t:truthy(tostring(err):find("Burn", 1, true), "and lists the names that would have worked")
+end)
+
+s:test("core.status refuses honestly when there is nothing to apply to", function(t)
+    -- No world, no PalCharacter, so there is no StatusComponent to reach. Every entry point
+    -- must answer without raising, and must distinguish "cannot ask" from "no".
+    t:eq(status.add(nil, "Poison"), false, "add reports false rather than raising")
+    t:eq(status.remove(nil, "Poison"), false, "and so does remove")
+    t:eq(status.isActive(nil, "Poison"), nil, "isActive answers nil — UNKNOWN, never false-as-in-no")
+    t:eq(status.add(nil, "Poizon"), false, "an unknown name is refused before any engine call")
+end)
+
+s:test("a nativeStatus that cannot fire never fails the effect", function(t)
+    -- The contract that matters to a pack: PalForge's own timing, stacking and handlers work
+    -- with or without the game's status icon. Failing the whole apply because the native
+    -- ailment did not light up would trade a working feature for a cosmetic one.
+    --
+    -- With no world this exercises exactly that path — status.add cannot reach a component and
+    -- returns false — and :apply must still be true and the handler must still have run.
+    local id, ran = support.id("effect"), 0
+    local h = Effect{ id = id, nativeStatus = "Freeze",
+                      events = { onApply = function() ran = ran + 1 end } }
+    local target = {}
+    t:eq(h:apply(target), true, "the effect applies even though no ailment could be set")
+    t:eq(ran, 1, "and the pack's own handler ran")
+    t:truthy(h:isActive(target), "and PalForge's bookkeeping is live")
+    t:eq(h:remove(target), true, "removal is symmetric")
 end)
 
 --=============================================================================

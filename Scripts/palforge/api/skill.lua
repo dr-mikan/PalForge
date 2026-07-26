@@ -36,9 +36,10 @@
 --   }
 --   Fireball:activate(myPalActor)      -- runs onActivate unless still cooling down
 
-local om     = require("palforge.core.object_manager")
-local icons  = require("palforge.core.icons")
-local schema = require("palforge.core.schema")
+local om        = require("palforge.core.object_manager")
+local icons     = require("palforge.core.icons")
+local schema    = require("palforge.core.schema")
+local character = require("palforge.core.character")
 
 --=============================================================================
 -- SPEC — the shape of Skill{ ... }, declared as data so it is enforced on every call and
@@ -282,6 +283,10 @@ end
 ---Run this skill's onEquip handler for `owner` — the "a passive was attached" moment.
 ---Nothing is attached FOR you: PalForge keeps no equipped set and the game is never told,
 ---so whatever "equipped" means is what your handler does. Ignores the cooldown and `kind`.
+---
+---For the OTHER meaning — actually putting this skill on a live pal or player so the game
+---itself knows about it — use :teach / :forget below. They are separate on purpose: :equip is
+---your own bookkeeping and works on any value, while :teach writes to a real character.
 ---@param owner any
 ---@param ctx table?
 ---@return boolean ok  # false only when the handler raised
@@ -300,6 +305,38 @@ function Handle:unequip(owner, ctx)
     local ok = pcall(function() self._cls:onUnequip(owner, ctx or {}) end)
     return ok
 end
+
+---Put this skill on a LIVE character — a pal or the player — so the game itself carries it.
+---
+---The id decides which kind of skill the game is asked for, because Palworld stores the two
+---separately: an id the game knows as an active skill (`"FireBlast"`, `"Psychokinesis"` — the
+---full list is core.character.wazaNames()) is added to the character's equipped moves, and any
+---other id is added as a passive skill by name. Nothing about this reads your definition's
+---`kind` field: `kind` describes YOUR skill's behaviour, and this asks the GAME for one of its
+---own, so a pack skill whose id is not a real game skill will be added as a passive under that
+---name or not at all.
+---
+---Returns true only when reading the character back AFTERWARDS shows the skill is there. False
+---means it did not land — a target that is not a character, a route the build does not declare,
+---or the game refusing the id. It is never "the call ran".
+---@param actor any    # a live pal or player character
+---@return boolean ok  # true only when the skill was seen ON the character afterwards
+function Handle:teach(actor) return character.addSkill(actor, self.id) end
+
+---Take this skill back off a live character. The counterpart of :teach, with the same routing
+---and the same read-back: true only when the skill is gone afterwards.
+---@param actor any
+---@return boolean ok
+function Handle:forget(actor) return character.removeSkill(actor, self.id) end
+
+---What `actor` actually carries right now, straight from the game:
+---`{ active = { "FireBlast", ... }, passive = { "Legend", ... } }`. Empty lists mean the read
+---worked and found none; nil means the character could not be read at all — UNKNOWN, never
+---"has none". This is a query about the CHARACTER, not about this skill, and it is on the
+---handle only because that is where a caller already is.
+---@param actor any
+---@return table?
+function Handle:skillsOn(actor) return character.skillsOn(actor) end
 
 ---Seconds until this skill is ready again for `owner` (0 when ready).
 ---@param owner any?

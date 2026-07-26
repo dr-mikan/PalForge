@@ -180,7 +180,7 @@
 ---@field stackable? boolean # may several copies coexist on one target? (default false)
 ---@field maxStacks? number # stack ceiling when stackable (default 1)
 ---@field icon? any # status-bar icon
----@field nativeStatus? string # the game's own EPalStatusEffectType this mirrors, when it has one
+---@field nativeStatus? string # the game's own ailment this mirrors, e.g. "Poison" (core.status.names())
 ---@field events? Effect.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 

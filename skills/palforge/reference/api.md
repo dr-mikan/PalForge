@@ -58,10 +58,10 @@ means — most of this api is fail-soft, so a `false` is information, not an exc
 
 | domain | define | look up | handle | hooks (live/total) | what it is |
 |---|---|---|---|---|---|
-| [Pal](#pal) | `Pal{ … }` | `.get(id)` `.get_all()` | 7 methods | 5/5 | A pal is a spawnable creature. |
+| [Pal](#pal) | `Pal{ … }` | `.get(id)` `.get_all()` | 8 methods | 5/5 | A pal is a spawnable creature. |
 | [Item](#item) | `Item{ … }` | `.get(id)` `.get_all()` | 9 methods | 2/4 | An item is a piece of inventory content: materials, consumables, equipment, ammo. |
 | [Building](#building) | `Building{ … }` | `.get(id)` `.get_all()` | 9 methods | 8/10 | A building is a placeable structure: workbenches, storage, machines, decorations —… |
-| [Skill](#skill) | `Skill{ … }` | `.get(id)` `.get_all()` | 11 methods | 0/4 | A skill is what a Pal can do: an active attack or a passive trait. |
+| [Skill](#skill) | `Skill{ … }` | `.get(id)` `.get_all()` | 14 methods | 0/4 | A skill is what a Pal can do: an active attack or a passive trait. |
 | [Effect](#effect) | `Effect{ … }` | `.get(id)` `.get_all()` `.activeOn(target)` | 10 methods | 4/4 | An effect is a status applied to a character (a player or a Pal): buffs, debuffs,… |
 | [Audio](#audio) | `Audio{ … }` | `.get(id)` `.get_all()` `.bgm(spec)` `.se(spec)` | 7 methods | — | Audio is one playable sound: background music or a one-shot effect. |
 | [Mesh](#mesh) | `Mesh{ … }` | `.get(id)` `.get_all()` | 6 methods | — | A mesh is the VISUAL a definition wears: a model asset plus how to paint it. |
@@ -104,7 +104,7 @@ A pal is a spawnable creature.
 | call | returns | notes |
 |---|---|---|
 | `Pal{ … }` | `Pal.Handle` | Define a NEW pal and register it. |
-| `Pal.get(id)` | `Pal.Handle` | Get an EXISTING pal by id: a previously-defined one, else a thin definition over any game CharacterID (so native / other-mod pals are spawnable too). |
+| `Pal.get(id)` | `Pal.Handle` | Get an EXISTING pal by id: a previously-defined one, else a thin definition over any game CharacterID (so a native / other-mod id takes the same… |
 | `Pal.get_all()` | `Pal.Handle[]` | Every PalForge-registered pal, as a list of handles. |
 
 ### Pal.Spec
@@ -154,7 +154,8 @@ Declared as `events = { onX = function(self, …) end }` inside `Pal{ … }`.
 | `:name()` | `string` | — |
 | `:renderOn(actor)` | `boolean` | Attach this pal's declared mesh to a live pawn (one-shot; core.mesh guards against re-stacking). |
 | `:skillsOf()` | `string[]` | The skill ids this pal owns (resolve them with Skill.get). |
-| `:spawn(arg)` | `boolean` | Spawn this pal. → the spawn call was accepted (see above), NOT arrival |
+| `:spawn(arg)` | `boolean` | Spawn this pal. → a new pal actor was observed (see above), NOT arrival at `at` |
+| `:teachAll(actor)` | `integer` | Put every skill this pal DECLARES onto a live character, so the game itself carries them. `skillsOf()` is what the author wrote; this is how that list reaches a real pal standing in the world. |
 
 Event forwarders (same names as the hooks above; they call the definition's
 handler NOW — a test seam, not the real dispatch): `:onCaptured(ctx)` `:onDamaged(ctx)` `:onDeath(ctx)` `:onSpawned(ctx)` `:onTick(ctx)`.
@@ -211,14 +212,14 @@ Declared as `events = { onX = function(self, …) end }` inside `Item{ … }`.
 | method | returns | notes |
 |---|---|---|
 | `:category()` | `string` | — |
-| `:count()` | `integer?` | How many of this item the local player is holding right now, or nil when the count cannot be read (no world, or CountItemNum unbound — nil is UNKNOWN, never zero). |
+| `:count()` | `integer?` | WORKS, and is measured. How many of this item the local player is holding right now, or nil when the count could not be read (no world / no player — nil is UNKNOWN, never zero). |
 | `:description()` | `string?` | — |
-| `:give(count)` | `boolean` | Add `count` of this item to the local player's inventory (default 1). → true when the count was seen to rise, or could not be read at all |
+| `:give(count)` | `boolean` | Add `count` of this item to the local player's inventory (default 1) through the game's own UPalCheatManager:GetItem(FName… → true only when the inventory count was measured to rise |
 | `:iconOf()` | `any?` | texture ref from the icon DataTable, else the declared icon |
 | `:maxStack()` | `integer` | — |
 | `:name()` | `string` | — |
 | `:recipeOf()` | `Item.Spec.Recipe?` | — |
-| `:take(count)` | `boolean` | TRY to remove `count` of this item from the local player's inventory (default 1). → true only when the inventory count actually dropped |
+| `:take(count)` | `boolean` | Remove `count` of this item from the local player's inventory (default 1) through the game's own UPalCheatManager:DropItem(const… → true only when the inventory count was measured to fall |
 
 Event forwarders (same names as the hooks above; they call the definition's
 handler NOW — a test seam, not the real dispatch): `:onCraft(ctx)` `:onDiscard(ctx)` `:onObtain(ctx)` `:onUse(ctx)`.
@@ -373,11 +374,14 @@ Declared as `events = { onX = function(self, …) end }` inside `Skill{ … }`.
 | `:description()` | `string?` | — |
 | `:element()` | `string?` | — |
 | `:equip(owner, ctx)` | `boolean` | Run this skill's onEquip handler for `owner` — the "a passive was attached" moment. → false only when the handler raised |
+| `:forget(actor)` | `boolean` | Take this skill back off a live character. The counterpart of :teach, with the same routing and the same read-back: true only when the skill is gone afterwards. |
 | `:hit(target, ctx)` | `boolean` | Report a hit on `target`: runs onHit. Ignores the cooldown and `kind`. → false only when the handler raised |
 | `:iconOf()` | `any?` | texture ref from the icon DataTable, else the declared icon |
 | `:kind()` | `string` | "active" \| "passive" |
 | `:name()` | `string` | — |
 | `:power()` | `number?` | — |
+| `:skillsOn(actor)` | `table?` | What `actor` actually carries right now, straight from the game: `{ active = { "FireBlast", ... }, passive = { "Legend", ... } }`. |
+| `:teach(actor)` | `boolean` | Put this skill on a LIVE character — a pal or the player — so the game itself carries it. → true only when the skill was seen ON the character afterwards |
 | `:unequip(owner, ctx)` | `boolean` | Run this skill's onUnequip handler for `owner` — the counterpart of :equip. → false only when the handler raised |
 
 Event forwarders (same names as the hooks above; they call the definition's
@@ -409,7 +413,7 @@ An effect is a status applied to a character (a player or a Pal): buffs, debuffs
 | `stackable` | `boolean` | = `false` | may several copies coexist on one target? |
 | `maxStacks` | `number` | = `1` | stack ceiling when stackable |
 | `icon` | `any` | — | status-bar icon |
-| `nativeStatus` | `string` | — | the game's own EPalStatusEffectType this mirrors, when it has one |
+| `nativeStatus` | `string` | checked | the game's own ailment this mirrors, e.g. "Poison" (core.status.names()) |
 | `events` | `table` | shape [Effect.Spec.Events](#effectspecevents) | lifecycle handlers (grouped) |
 | `data` | `table` | — | free-form payload of your own, carried onto the definition |
 
@@ -479,7 +483,7 @@ Audio is one playable sound: background music or a one-shot effect.
 | `:kind()` | `string` | "bgm" \| "se" |
 | `:name()` | `string` | — |
 | `:play(actor)` | `boolean` | Play this sound on `actor` (default: the local player pawn). |
-| `:setVolume(volume)` | `boolean` | Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell it did nothing. |
+| `:setVolume(volume)` | `boolean` | Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell it did nothing, and on this build there is no per-sound volume to set AT ALL. |
 | `:source()` | `table?` | The lowered source spec core.sound will resolve ({ kind = "native"\|"file", ... } \| nil). |
 | `:stop(actor)` | `boolean` | Stop sounds on `actor` (default: the local player pawn). ACTOR-WIDE by design: the native call is StopSoundByActor, so it silences everything playing on that actor and WHICH sound you called it on is ignored. |
 

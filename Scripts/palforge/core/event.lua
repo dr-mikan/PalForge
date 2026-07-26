@@ -951,13 +951,19 @@ end
 --                PickupItemDelegate, RequestAddItem_ToServer and RequestObtainLevelObject
 --                all fired 0 times over three probe rounds in single-player.
 --             2. PalPlayerInventoryData:AddItem_ServerInternal(FName StaticItemId, int Count,
---                bool IsAssignPassive, float LogDelay) — the best-verified SIGNATURE in the
---                reference library (__knowledges/palworld-ue4ss-functions.md:76-85, "✅完全検証",
---                the same call utils.items.give makes), and param1 is a bare FName with no
---                struct dig. Its weakness is the mirror of the get-log's strength: the
---                signature is certain, the FIRING for a player pickup is not — see 1. Both
---                are armed because they fail in opposite directions; neither is authoritative
---                enough to drop.
+--                bool IsAssignPassive, float LogDelay) — the signature the reference library
+--                calls fully verified (__knowledges/palworld-ue4ss-functions.md:76-85,
+--                "✅完全検証"), and param1 is a bare FName with no struct dig. Read the leading
+--                params ONLY, and read them positionally: the live build rejected a call to
+--                this function with "expected 6 parameters, received 4", so it declares two
+--                more than that library and dumps/cxx/Pal.hpp:27053 list, and nothing here
+--                knows what they are (TODO(item-additem-signature) in utils/items — which is
+--                also why utils.items.give no longer CALLS this; it goes through the cheat
+--                manager). A hook only reads what is handed to it, so the extra parameters cost
+--                this source nothing. Its weakness is the mirror of the get-log's strength: the
+--                first two params are certain, the FIRING for a player pickup is not — see 1.
+--                Both are armed because they fail in opposite directions; neither is
+--                authoritative enough to drop.
 --             Silent internal adds that surface no get-log are covered only if they take
 --             route 2; nothing here can distinguish crafting from pickup (item.craft stays
 --             sourceless on purpose rather than being faked from these).
@@ -1042,9 +1048,11 @@ local function installItemSource()
     -- genuine second pickup of the SAME id within the window is lost. Half a second is
     -- shorter than any human repeat pickup and longer than the gap between two views of one.
     --
-    -- `emitting` is a separate concern: utils.items.give IS an AddItem_ServerInternal call,
-    -- so an onObtain handler that gives an item would re-enter this hook. Without the guard
-    -- that recurses until the stack dies for any id the dedupe window does not cover.
+    -- `emitting` is a separate concern: an onObtain handler that gives an item can re-enter
+    -- this hook. utils.items.give issues UPalCheatManager:GetItem rather than the add below,
+    -- but a cheat that puts items in an inventory has every reason to end up in the same
+    -- inventory add this source watches — unmeasured either way, and the guard costs nothing.
+    -- Without it that recurses until the stack dies for any id the dedupe window does not cover.
     local OBTAIN_DEDUPE_SEC = 0.5
     local lastObtain, emitting = {}, false
     local function emitObtain(id, count, via)
@@ -1078,10 +1086,12 @@ local function installItemSource()
         end)
     end)
 
-    -- obtain 2: the inventory add. a1 is a bare FName, a2 the count — read positionally,
-    -- because that signature is the verified part of this source. A NEGATIVE count is a
-    -- removal (what utils.items.take pushes through this very call), never an obtain, so it
-    -- is skipped rather than reported as one.
+    -- obtain 2: the inventory add. a1 is a bare FName, a2 the count — read positionally, and
+    -- only those two, because the leading pair is the part of this declaration that is not in
+    -- doubt (the live build declares six parameters in total; see the header note). A NEGATIVE
+    -- count would be a removal rather than an obtain, so it is skipped rather than reported as
+    -- one — a cheap guard on a shape nothing in this tree has been seen to produce, since
+    -- utils.items.take drops items through the cheat manager and never signs a count.
     tryHook("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal", function(self, a1, a2, a3, a4)
         if not worldReady then return end
         pcall(function()

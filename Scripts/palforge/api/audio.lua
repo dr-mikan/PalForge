@@ -30,14 +30,30 @@
 -- that names nothing, or a world that has no player pawn, returns false rather than a
 -- reassuring true. It is still not a promise of audibility (the engine returns nothing).
 --
--- TWO THINGS HERE STILL DO NOTHING, and say so rather than pretending. Custom audio FILES are
--- not playable: every shipped Palworld sound is a Wwise AkAudioEvent, and although the shipping
--- build does still carry UE-native sound objects (05_assets.txt: 6 USoundWave + 2 SoundCue, all
--- from SkyCreatorPlugin), no runtime path from a file on DISK to one of them is confirmed — so
--- a `soundFile` definition resolves and then no-ops (core/sound/file.lua). Volume is not wired
--- either, but for a narrower reason than before: UPalSoundUtility does carry
--- SetRTPCValueByActor and SetRTPCValueByActorByEnum (02_reflection.txt); what is missing is
--- their parameter lists and the NAME of a volume RTPC (see Handle:setVolume).
+-- TWO THINGS HERE STILL DO NOTHING, and say so rather than pretending.
+--
+-- Custom audio FILES are not playable, and the in-game F5 harvest (dumps/f5-partial-run.txt,
+-- audio-custom-file-loader) narrowed why. The Wwise half is CLOSED: AkExternalMediaAsset and
+-- AkMediaAsset resolve as classes but reflect ZERO functions each and have ZERO live instances,
+-- and AkGameplayStatics' 58 functions contain no *WithExternalSources overload — there is no
+-- external-source route on this build. The UE-native half SURVIVED shipping: GameplayStatics
+-- still carries PlaySound2D / CreateSound2D / SpawnSound2D / SpawnSoundAttached, and 6 SoundWave
+-- + 8 SoundBase are live — the same SkyCreatorPlugin assets 05_assets.txt recorded (6 USoundWave
+-- + 2 SoundCue; SoundBase is their common parent), nothing new — and _G.LoadAsset and
+-- _G.StaticConstructObject are callable (NewObject is nil). What is still missing is the step
+-- that matters: nothing observed turns BYTES on disk into a USoundWave. So a `soundFile`
+-- definition resolves and then no-ops (core/sound/file.lua).
+--
+-- VOLUME IS NOT A MISSING SIGNATURE — IT IS A MISSING PARAMETER. The same harvest ruled the
+-- RTPC route out with evidence rather than leaving it unmeasured: the routes all exist
+-- (UPalSoundUtility reflects SetRTPCValueByActor / SetRTPCValueByActorByEnum; AkGameplayStatics
+-- reflects SetRTPCValue / GetRTPCValue / ResetRTPCValue), but the whole build declares exactly
+-- THREE AkRtpc assets — Supply_Altitude, OverHeatRifle, ChargeLaserRifle_01 — and no AkAuxBus
+-- and no AkAudioBank at all. None of the three is a volume, so there is no volume parameter to
+-- set and a parameter list would not help. The only candidate left is SetOutputBusVolume
+-- (AkComponent and AkGameplayStatics), which moves a whole output BUS, not one sound
+-- (TODO audio-bus-volume, on Handle:setVolume). UNTIL THEN, THE WAY TO BE QUIETER IS TO PICK A
+-- QUIETER EVENT from the catalog — that is the only volume control a pack has today.
 -- Both return false, and both carry a TODO marker naming the one fact a probe has to settle.
 --
 --   local Theme = Audio.bgm{ id = "AKE_BGM_Title",
@@ -263,23 +279,47 @@ function Handle:stop(actor)
     return sound.stop(a)
 end
 
----Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell
----it did nothing. A volume entry point DOES exist now: UPalSoundUtility reflects
----SetRTPCValueByActor and SetRTPCValueByActorByEnum (02_reflection.txt). What is missing is
----what to hand them — neither parameter list has been walked, and no RTPC NAME is known
----anywhere: the Wwise registry dump holds 1958 objects and every single one is an AkAudioEvent,
----with no AkRtpc / AkAuxBus / AkAudioBank in the tree at all. A guessed RTPC name would return
----true and change nothing, which is worse than false. Note also that the confirmed route is
----per-ACTOR, so wiring it may change this signature to setVolume(volume, actor).
+---Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell it
+---did nothing, and on this build there is no per-sound volume to set AT ALL.
+---
+---The in-game F5 harvest settled this negatively. The routes are all present —
+---UPalSoundUtility reflects SetRTPCValueByActor and SetRTPCValueByActorByEnum, AkGameplayStatics
+---reflects SetRTPCValue / GetRTPCValue / ResetRTPCValue (9 of its 58 functions are volume-ish) —
+---but the game declares only THREE AkRtpc assets in total: Supply_Altitude, OverHeatRifle and
+---ChargeLaserRifle_01 (plus zero AkAuxBus and zero AkAudioBank). None is a volume parameter, so
+---the missing piece was never a signature: there is nothing for SetRTPCValue* to address.
+---
+---WHAT TO DO INSTEAD, TODAY: choose a quieter AkAudioEvent. Picking the event is the only
+---volume control a pack has — there is no supported way to make one sound quieter than another.
+---
+---The one candidate left is SetOutputBusVolume (reflected on both AkComponent and
+---AkGameplayStatics), and it is a BUS control: it would move every sound routed through that
+---bus, so it can never satisfy this method's per-sound contract even once it is measured. If it
+---is ever wired it belongs on the module as a bus call, not here (TODO audio-bus-volume).
 ---@param volume number
 ---@return boolean ok
 function Handle:setVolume(volume)
-    -- TODO(audio-volume-rtpc): existence is settled — UPalSoundUtility::SetRTPCValueByActor and
-    -- ::SetRTPCValueByActorByEnum are reflected in this build, and the route is per-actor. Still
-    -- unknown, and all a probe needs now: their parameter lists (is the RTPC an FName or an
-    -- FString, is there an InterpolationTimeMs), which RTPC controls volume, and the entries of
-    -- the enum the ByEnum overload takes — enumerating that UEnum is the cheapest way to get a
-    -- real RTPC name, since no dump in the tree carries one.
+    -- TODO(audio-bus-volume): the RTPC route is RULED OUT, with evidence rather than silence —
+    -- the harvest enumerated every AkRtpc in the build and there are three (Supply_Altitude,
+    -- OverHeatRifle, ChargeLaserRifle_01), none of them a volume, with AkAuxBus -> none and
+    -- AkAudioBank -> none. Do not re-probe SetRTPCValue*: no parameter list can conjure a
+    -- parameter that does not exist. The surviving candidate is SetOutputBusVolume, reflected on
+    -- AkComponent (3 of 14 volume-ish) and on AkGameplayStatics (9 of 58).
+    -- STILL UNKNOWN, and exactly what a probe now owes:
+    --   (a) SetOutputBusVolume's PARAMETER LIST, on either owner — is the bus an FName or an
+    --       FString, is there a leading AkComponent/actor, is the value 0..1 or dB, is there a
+    --       fade/interpolation argument. The harvest printed no list for it: every PARAM line in
+    --       that whole run reads "function absent", including for PlayAkEventSoundByActor, which
+    --       the same block proves exists — so that is the probe's lookup failing on this UE4SS
+    --       build, not the function missing. Until a real list is printed, DO NOT CALL IT: a
+    --       wrong argument type faults natively inside UE4SS marshalling and pcall does not
+    --       catch it (that is what crashed the F5 run).
+    --   (b) whether a per-sound AkComponent is REACHABLE at all. 248 AkComponents are live, but
+    --       the first sampled one is a PalAkComponent owned by a level-gimmick actor, and our
+    --       play route (PlayAkEventSoundByActor) hands back nothing — no component, no PlayingID
+    --       — so there may be no object to call the AkComponent overload ON for a sound we
+    --       played. If it is not reachable, the AkGameplayStatics overload is bus-global and
+    --       this method stays false forever.
     return false
 end
 

@@ -490,27 +490,34 @@ local function pal_spawn_placement()
         baseline and baseline.count or 0,
         baseline and string.format("%.0f cm away", baseline.dist) or "unknown")
 
-    -- Armed BEFORE the call so the immediate "accepted; relocation scheduled" line is caught
-    -- along with the deferred outcome.
+    -- Armed BEFORE the call so the immediate world-delta line is caught along with the
+    -- deferred outcome.
     captureSpawnLog(24)
 
-    local accepted, err
+    local spawned, err
     local ok = pcall(function()
         local Pal = require("palforge.api.pal")
-        accepted = Pal.get("ChickenPal"):spawn(target)
+        spawned = Pal.get("ChickenPal"):spawn(target)
     end)
     if not ok then
         err = "api.pal route raised"
         pcall(function()
             local spawn = require("palforge.core.spawn")
-            accepted = spawn.palAt("ChickenPal", 1, target.x, target.y, target.z)
+            spawned = spawn.palAt("ChickenPal", 1, target.x, target.y, target.z)
             err = "api.pal raised; fell back to core.spawn.palAt"
         end)
     end
     probe.line("VALUE Pal.get('ChickenPal'):spawn(target) -> %s%s",
-        tostring(accepted), err and ("  [" .. err .. "]") or "")
-    probe.note("that return means 'the native call was accepted', NOT 'a pal is standing there' "
-        .. "— the placement happens on a 400 ms retry chain and reports only to the log.")
+        tostring(spawned), err and ("  [" .. err .. "]") or "")
+    -- The word "accepted" used to be here, and it was the wrong word: nothing about this call
+    -- is accepted or refused. :spawn enumerates the world immediately before and immediately
+    -- after the native call and reports whether a PalCharacter that was not there a statement
+    -- ago is there now.
+    probe.note("false is the EXPECTED answer on this build — SpawnMonster runs, raises nothing "
+        .. "and no pal appears (TODO pal-spawnmonster-signature). A true means a new PalCharacter "
+        .. "was OBSERVED, which is the single most valuable line this whole probe can print. It "
+        .. "still does not mean a pal is standing AT the target: placement happens on a 400 ms "
+        .. "retry chain and reports only to the log, which is what the LATE line below reads.")
 
     -- Read the world back once the retry chain has had its six tries (6 x 400 ms).
     if type(LoopAsync) == "function" then

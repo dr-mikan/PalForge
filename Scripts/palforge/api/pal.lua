@@ -66,13 +66,27 @@
 --   NO PER-PAL STATE: `self` is this definition's handle, one handle for every pawn of that
 --   id, so anything per-pawn has to be keyed by ctx.actor yourself.
 --
--- ACTIONS are real: :spawn goes through UPalCheatManager (server-verified; core/spawn
--- constructs one itself on a dedicated server, where nothing else does). A coordinate
--- spawn is a spawn-then-relocate, so it reports that the spawn was ACCEPTED, not that
--- the pal reached the coordinate — see :spawn below. The id reaches core/spawn exactly as
--- it was declared and is resolved there ("pack:Boss" -> the row spelling "pack_Boss"), so a
--- namespaced pal spawns like a literal one. Note that defining gives an EXISTING CharacterID
--- behaviour — Lua cannot add a brand-new creature row (that is PalSchema's job).
+-- ACTIONS. :spawn has TWO routes, because there are two capabilities. A WILD spawn into the
+-- world (the plain and coordinate forms) goes through UPalCheatManager:SpawnMonster — core/spawn
+-- constructs a cheat manager itself on a dedicated server, where nothing else does. A summon TO
+-- THE PLAYER (`toPlayer`) goes through APalPlayerState:RequestSpawnMonsterForPlayer and touches
+-- no cheat manager at all.
+-- ⚠️ NO SPAWN ROUTE HAS BEEN OBSERVED TO WORK ON THIS BUILD. The wild route is measured DEAD:
+-- 2026-07-26, a loaded save whose cheat manager already existed — cm:SpawnMonster ran without
+-- raising and NO PalCharacter appeared, neither for the plain spawn (nothing in the world 1.2 s
+-- later) nor for the coordinate form (nothing to place, twice). :spawn therefore answers false
+-- there rather than reporting a spawn it never saw. dumps/cxx/ has since ELIMINATED the three
+-- explanations anyone had for that (the parameter list is exactly what is passed, the cheat
+-- manager carries no gate of any kind, and the world enumeration really would have seen a pal);
+-- what survives is written at TODO(pal-spawnmonster-signature) in core/spawn.lua. The toPlayer
+-- route is not measured dead — it is simply UNWATCHED: its function is the one spawn name this
+-- tree has confirmed on the installed binary, but a party/box summon puts nothing in the world
+-- to count, so nobody has yet seen a pal arrive from it either. A
+-- coordinate spawn is additionally a spawn-then-relocate, so even a true would not mean the
+-- pal reached the coordinate — see :spawn below. The id reaches core/spawn exactly as it was
+-- declared and is resolved there ("pack:Boss" -> the row spelling "pack_Boss"), so a
+-- namespaced pal takes the same route as a literal one. Note that defining gives an EXISTING
+-- CharacterID behaviour — Lua cannot add a brand-new creature row (that is PalSchema's job).
 --
 -- LAYOUT
 --   SPEC    — the shape of Pal{ ... }, declared as data (core/schema). It is PRIVATE to
@@ -108,6 +122,7 @@ local spawn   = require("palforge.core.spawn")
 local mesh    = require("palforge.core.mesh")
 local icons   = require("palforge.core.icons")
 local schema  = require("palforge.core.schema")
+local character = require("palforge.core.character")
 local log     = require("palforge.utils.log").scope("pal")
 
 -- The mesh a spawned pawn wears is api/mesh's shape, not a copy of it, so `mesh = { ... }`
@@ -150,6 +165,12 @@ local Events = schema.define("Pal.Spec.Events", {
     -- answer it — the probe mod that produced it had dropped this hook from its arming list,
     -- so there is no line there to be missing. Handlers stay idempotent until a post-load
     -- arming records a firing.
+    -- HOW TO GET THAT FIRING HAS CHANGED, and this is the 2026-07-26 addition: the obvious
+    -- trigger — arm the hook, then call Pal.get("ChickenPal"):spawn() and watch — is
+    -- UNAVAILABLE until TODO(pal-spawnmonster-signature) is closed, because that spawn now
+    -- provably produces no pal at all, so an empty log would prove nothing about the hook.
+    -- Use a trigger that does not go through the cheat manager: release a pal from the box,
+    -- capture one, or walk into a region that streams wild pals in.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -198,25 +219,10 @@ function Class:onCaptured(ctx) end
 -- implements it, so a pal that declares no onTick costs nothing per sweep.
 function Class:onTick(ctx) end
 
--- The declared skill ids, verbatim. DECLARATIVE ONLY: nothing here teaches the pawn
--- anything — a pack reads the list back and drives each skill itself through api/skill.
--- TODO(pal-skills-equip): NARROWED — the attach calls EXIST, only their argument shape is
--- still unmeasured. dumps/reflection/02_reflection.txt lists, on /Script/Pal.PalIndividual-
--- CharacterParameter: AddEquipWaza / RemoveEquipWaza / ClearEquipWaza / ReplaceEquipWaza
--- (via the controller RPCs) for actives, AddPassiveSkill / RemovePassiveSkill for passives,
--- and the readbacks that would VERIFY a write — GetEquipWaza, GetEquipableWaza,
--- GetMasteredWaza, HasMasteredWaza, GetPassiveSkillList. The route from a pawn to that
--- object is named too: /Script/Pal.PalUtility:GetIndividualCharacterParameterByActor, or
--- PalCharacter:GetCharacterParameterComponent -> PalCharacterParameterComponent:
--- GetIndividualParameter. /Script/Pal.PalPlayerController additionally carries the
--- server-authoritative forms AddEquipWaza_ToServer / RemoveEquipWaza_ToServer /
--- ReplaceEquipWaza_ToServer.
--- THE ONE THING LEFT: the parameter list of AddEquipWaza / AddPassiveSkill — an FName, a
--- struct or an index — and whether the direct call replicates or the _ToServer RPC is
--- required. 02_reflection prints function NAMES only, never parameters, so calling one now
--- would be a guess with a live pawn on the other end. Nothing is pushed onto the pawn until
--- a probe prints those parameters (f:ForEachProperty on the UFunction) — this stays a
--- read-back of what the author declared.
+-- The declared skill ids, verbatim — what the AUTHOR wrote, not what any live pal carries.
+-- The two are different questions and both are answerable now: Pal.Handle:teachAll(actor)
+-- writes this list onto a live character, and Skill.Handle:skillsOn(actor) reads back what
+-- that character actually has. See core/character.lua for the route and its evidence.
 function Class:skillsOf() return self.skills or {} end
 function Class:mesh() return self.meshSpec end
 
@@ -299,7 +305,8 @@ end
 setmetatable(Pal, { __call = function(_, spec) return define(spec) end })
 
 ---Get an EXISTING pal by id: a previously-defined one, else a thin definition over any
----game CharacterID (so native / other-mod pals are spawnable too). Never nil.
+---game CharacterID (so a native / other-mod id takes the same routes as a defined one).
+---Never nil.
 ---@param id string
 ---@return Pal.Handle
 function Pal.get(id)
@@ -338,12 +345,26 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 ---  :spawn{ at = coord, level =, toPlayer =, num = }
 ---  :spawn()                               -- default placement (wild, near player)
 ---
----`true` means the native spawn call was ACCEPTED, not that a pal is standing there:
----the game spawns the actor a few frames later, and the coordinate form additionally
----relocates it in a deferred pass that finishes long after this returns (its outcome is
----logged, not returned). `false` is definite — nothing was even attempted.
+---⚠️ NO SPAWN ROUTE HAS BEEN OBSERVED TO WORK. The wild forms (coordinate and default) run
+---UPalCheatManager:SpawnMonster, which in a live world with a real cheat manager runs, raises
+---nothing and produces no pal (measured 2026-07-26). dumps/cxx/ has since eliminated the
+---parameter-list, the class-gate and the blind-measurement explanations for that; what is left
+---is TODO(pal-spawnmonster-signature) in core/spawn.lua. Expect false from them, and do not
+---build a pack around a wild pal arriving until that entry is closed. The `toPlayer` form goes
+---to a DIFFERENT object — APalPlayerState:RequestSpawnMonsterForPlayer, the one spawn function
+---this tree has confirmed on the installed binary — so it is unwatched rather than measured
+---dead, and it is the form worth trying first in a throwaway world.
+---
+---`true` means A NEW PAL ACTOR WAS OBSERVED in the world immediately after the call — never
+---that it reached the coordinate you asked for: the coordinate form relocates it in a
+---deferred pass that finishes long after this returns and reports only to the log. `false`
+---means nothing was seen to spawn, or nothing was even attempted (no cheat manager, no player
+---state, bad args, or core.signature refusing a call whose live declaration does not match the
+---dump). The `toPlayer` form is the one exception: a party/box summon puts nothing in the
+---world to look for, so there a `true` means only that the call was issued
+---(core.spawn.palForPlayer says so at its own doc).
 ---@param arg Coord|table|nil
----@return boolean accepted   # the spawn call was accepted (see above), NOT arrival
+---@return boolean spawned   # a new pal actor was observed (see above), NOT arrival at `at`
 function Handle:spawn(arg)
     local opts = {}
     if type(arg) == "table" then
@@ -410,6 +431,26 @@ function Handle:onTick(ctx) if self._cls.onTick then return self._cls:onTick(ctx
 ---The skill ids this pal owns (resolve them with Skill.get).
 ---@return string[]
 function Handle:skillsOf() return self._cls.skills or {} end
+
+---Put every skill this pal DECLARES onto a live character, so the game itself carries them.
+---
+---`skillsOf()` is what the author wrote; this is how that list reaches a real pal standing in
+---the world. Each id routes on what the game knows it as — one of its 309 active skills, or a
+---passive skill by name — and each write is verified by reading the character back.
+---
+---Returns how many landed and how many were asked for, so a partial result is visible instead
+---of being flattened into a boolean: `taught, asked = pal:teachAll(actor)`. Both zero means
+---nothing was declared. Skills are applied in declared order and a failure does not stop the
+---rest — one unknown id should not cost a pal its other four moves.
+---@param actor any        # a live pal or player character
+---@return integer taught, integer asked
+function Handle:teachAll(actor)
+    local ids, taught = self._cls.skills or {}, 0
+    for _, id in ipairs(ids) do
+        if character.addSkill(actor, id) then taught = taught + 1 end
+    end
+    return taught, #ids
+end
 ---@return table?
 function Handle:mesh() return self._cls.meshSpec end
 ---@return any?  # texture ref from the icon DataTable, else the declared icon
