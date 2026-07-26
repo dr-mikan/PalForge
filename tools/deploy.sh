@@ -32,6 +32,11 @@ OLD="$DEST/.Scripts.previous"
 rm -rf "$STAGE" "$OLD"
 mkdir -p "$STAGE"
 
+# autorun.txt is a DEV QUEUE and is copied like any other file. It runs named pf_* actions on
+# world.ready and needs no key and no console — which matters because all three input routes
+# have failed in turn on this machine (a key the game claimed, a second key, and a console UE4SS
+# ships switched off). Edit it in the source tree, deploy, load a save.
+#
 # Everything the mod needs at runtime. tests/ stays: the kernel runs it at startup in dev.
 cp -r "$SRC/Scripts/main.lua" "$STAGE/main.lua"
 cp -r "$SRC/Scripts/palforge" "$STAGE/palforge"

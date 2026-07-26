@@ -854,6 +854,9 @@ local function installBuildingSource()
         if pendingWorldReady then
             pendingWorldReady = false
             pcall(function() srcEmit("world.ready") end)
+            -- The one moment a dev queue can run: the world exists, the player pawn exists, and
+            -- nothing has been asked of the keyboard. See core/autorun.lua for why that matters.
+            pcall(function() require("palforge.core.autorun").run() end)
         end
     end)
 

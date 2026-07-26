@@ -1,0 +1,13 @@
+# PalForge dev queue — runs on world.ready, no key and no console needed.
+#
+#   <name>            run as soon as the world is ready
+#   <seconds> <name>  run that many seconds after the world is ready
+#
+# The names are the pf_* actions: pf_tests pf_spawn pf_teach pf_reflect pf_pal pf_watch pf_title
+# Lines starting with # are ignored. Delete a line to stop it running.
+#
+# THIS SESSION'S GOAL: settle skill.hit and skill.equip without catching a pal.
+# pf_spawn puts a ChickenPal in front of you — hit it with a melee weapon.
+# pf_teach gives the nearest pal a passive skill 20 s later, by which time the spawn has landed.
+pf_spawn
+20 pf_teach

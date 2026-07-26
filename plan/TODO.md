@@ -74,6 +74,21 @@ pf_tests   pf_watch   pf_reflect   pf_pal   pf_title
 pf_spawn   pf_teach
 ```
 
+### When neither a key nor the console works
+
+`Scripts/palforge/autorun.txt` runs named actions on world.ready — no key, no console, nothing
+to press. Put a line in it, deploy, load a save:
+
+```text
+pf_spawn        # as soon as the world is ready
+20 pf_teach     # 20 seconds after
+```
+
+Only names already in the `pf_*` action table can run; it reads a list of names, never code.
+This exists because three input routes failed in turn on a real machine — a key Palworld had
+already claimed, a second key, and a console UE4SS ships switched off — and each time the work
+was fine and only the way in was missing.
+
 **UE4SS ships with its console OFF**, and a command registers perfectly well into a window that
 does not exist — which is the same failure the console was meant to escape, one layer down. Turn
 it on in `ue4ss/UE4SS-settings.ini` and restart:
