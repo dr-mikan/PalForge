@@ -6,15 +6,15 @@ description: スポーンしたとき・ダメージを受けたとき・捕ま�
 ## このページでできるようになること
 
 - 捕まえた瞬間、殴った瞬間、倒した瞬間にパルを反応させる
-- パルが死んだらプレイヤーにアイテムを渡す、音を鳴らす
+- パルが死んだときに音を鳴らす、時限のエフェクトを始める
 - パルの体・色・大きさを別のものに変える
-- 自分が立っている場所に、好きなレベルのパルを出す
 - 遊んでいる間ずっと、自分のパル全員に自分のコードを繰り返し走らせる
+- このバージョンの `:spawn` に何ができて何ができないかを把握する
 
 ## パルを作る
 
-パルはスポーンできるクリーチャーです。ゲーム側でそのクリーチャーに付いている名前を使って
-`Pal{ ... }` と書くと、スポーンしたり、あとから取り出したり、動きを付けたりできるオブジェクトが
+パルはゲームのクリーチャーです。ゲーム側でそのクリーチャーに付いている名前を使って
+`Pal{ ... }` と書くと、あとから取り出したり、動きを付けたり、操作したりできるオブジェクトが
 返ってきます。
 
 ```lua title="content/pals.lua"
@@ -29,7 +29,7 @@ local pal = Pal{
     },
 }
 
-pal:spawn(Player.coordinate())
+pal:spawn(Player.coordinate())   -- no creature appears in this version; see :spawn below
 ```
 
 ゲームの中で Chicken Pal を捕まえると、勝利のジングルが鳴ります。流れはこれだけです。どの
@@ -43,8 +43,8 @@ Pal.get("SheepBall")        -- a handle for an existing id; never nil
 Pal.get_all()               -- every PalForge-registered pal, as handles
 ```
 
-`Pal.get` は決して nil を返しません。誰も定義していない id には薄い定義が作られ、`:spawn` する
-ぶんには十分ですが、ハンドラは載っていません。登録するのは `Pal{ ... }` だけで、ハンドラが
+`Pal.get` は決して nil を返しません。誰も定義していない id には薄い定義が作られ、アクションを
+呼ぶぶんには十分ですが、ハンドラは載っていません。登録するのは `Pal{ ... }` だけで、ハンドラが
 呼ばれるのも登録済みのパルだけです。
 
 Palworld 自身のクリーチャー一覧は `native/pals` にあります。
@@ -84,7 +84,7 @@ pals.SheepBall             -- the curated SheepBall demo definition
       type: 'string',
     },
     skills: {
-      description: 'このパルが持つスキル id',
+      description: 'このパルが持つスキル id。:skillsOf で読み戻すか、:teachAll で生きているクリーチャーにまとめて載せます',
       type: 'string[]',
     },
     mesh: {
@@ -234,8 +234,8 @@ Pal{
 
 ### skills
 
-`skills` は id を並べたリスト以上のものではありません。PalForge が装備させることはなく、ゲーム側に
-これを発火させるものもありません。`:skillsOf()` でリストを読み戻し、各スキルは
+`skills` は、この定義が宣言する id のリストです。宣言しただけではどのクリーチャーにも何も載りませんし、
+ゲーム側がこれを発火させることもありません。`:skillsOf()` でリストを読み戻し、各スキルは
 [`Skill`](/docs/api/skill) から自分で動かしてください。
 
 ```lua
@@ -250,6 +250,9 @@ for _, id in ipairs(boss:skillsOf()) do
     Skill.get(id):activate(Player.character())
 end
 ```
+
+宣言したリストを、ワールドに立っているクリーチャーへ載せてゲーム自身に持たせたいときは
+`:teachAll(actor)` を使います。下の [teachAll](#teachall) を参照してください。
 
 ### icon
 
@@ -287,7 +290,7 @@ local pal = Pal{
 
 パルに動きを付けるのはここです。ハンドラは `events` の下にまとめます。どれも
 `function(pal, ctx)` の形で、`pal` は **この定義自身のハンドル**（`Pal{ ... }` が返したのと同じ
-オブジェクトなので、`:spawn`、`:renderOn`、各クエリがその場で使えます）、`ctx` は今何が起きたかを
+オブジェクトなので、`:renderOn` や各クエリがその場で使えます）、`ctx` は今何が起きたかを
 表すテーブルです。下の一覧に無いイベント名は、黙って無視されるのではなく定義時のエラーになります。
 
 PalForge はゲームを見張り、起きたことを名前の付いたチャンネルに流し、それが起きたパルを見つけて
@@ -436,9 +439,26 @@ ctx は自分の購読先には届きますが、定義側のハンドラに届�
 
 ### spawn
 
+<Callout type="error" title="パルをワールドに出す機能はこのバージョンでは使えません">
+`:spawn` はクリーチャーを出現させられません。ゲーム自身のスポーン呼び出しは文句も言わずに走り、
+それでも何も現れません。その瞬間にも、1 秒後にも現れないので、`:spawn` は頼んだ内容ではなく実際に
+見えたものを報告し、`false` を返します。
+
+代わりに動くのは、**すでに**ワールドにいるパルに関するすべてです。`onCaptured`、`onDamaged`、
+`onDeath`、`onSpawned`、`onTick` はゲーム自身のクリーチャーに対して発火しますし、`:renderOn` は
+今も見た目を変えられます。自分で置いたクリーチャーではなく、ゲームが置いてくれるパル — 野生の個体や、
+プレイヤーがいま捕まえた個体 — を土台にしてください。
+
+`toPlayer` の経路はクリーチャーをプレイヤーの手持ちやボックスへ渡しますが、そのどちらも Lua からは
+覗けません。したがって `true` の意味は「呼び出しを発行した」だけで、それ以上は保証できません。
+ボックスにパルが入った証拠として読まないでください。
+
+下に示す書き方は変わりません。ここで書いたコードは後々もそのまま正しいままです。
+</Callout>
+
 ```lua
 ---@param arg Coord|table|nil
----@return boolean accepted
+---@return boolean appeared
 pal:spawn(arg)
 ```
 
@@ -472,16 +492,16 @@ flowchart TD
   F --> H["teleport the new actor - palAt only"]
 ```
 
-どの経路も、ゲームがサーバー側で検証する管理 API `UPalCheatManager` を通ります。`true` は
-スポーンの呼び出しが**受け付けられた**という意味で、どこかにパルが立っていることまでは意味しません。
-クリーチャーは数フレーム遅れて現れ、座標の経路ではそのあと、`:spawn` が返ったずっとあとに終わる
-処理で移動させます。その処理の結果はログにしか出ず、呼び出し元には返りません。`false` の方は
-確定で、id が空だった・座標が数値でなかった・チートマネージャに届かなかったといった理由で、何も
-試みられなかったことを表します。
+どの経路も、ゲームがサーバー側で検証する管理 API `UPalCheatManager` を通ります。ワールドに出す
+2 つの経路では、結果を仮定せずに確かめます。呼び出しの直前と直後にワールドのクリーチャーを数え、
+さっきまで居なかった 1 体が今いるときだけ `true` を返します。`:spawn` が `false` を返すのはこの
+検査のためです。呼び出しは走り、そのあとにクリーチャーが存在した試しがありません。`false` は
+素朴な拒否 — id が空、座標が数値でない、チートマネージャに届かない — も兼ねています。
 
-座標の経路では、ゲームが指定した位置を無視してプレイヤーの近くにパルを落とします。そこで
-PalForge は先にパルのスナップショットを取り、新しく現れたうちプレイヤーに一番近い 1 体だけを
-動かします。クリーチャーが現れるまで数フレームかかるので、400 ms 間隔で最大 6 回まで再試行します。
+座標指定はスポーンのあとに移動を足したものです。ゲーム自身の呼び出しは指定した位置を無視して
+プレイヤーの近くにパルを落とすので、PalForge はさっきまでワールドに居なかったクリーチャーを探して
+それをテレポートさせます。現れるまで数フレームかかる想定で、400 ms 間隔で最大 6 回まで再試行します。
+何も現れない今は、この処理は動かす対象を見つけられず、その旨をログに書きます。
 
 #### チートマネージャ
 
@@ -492,11 +512,11 @@ CheatManagerEnabler mod が `PlayerController:ClientRestart` からこのオブ�
 で生成し（そのクラスが null のときは `/Script/Pal.PalCheatManager`、次に
 `/Script/Engine.CheatManager` にフォールバックします）、できたオブジェクトをコントローラに
 取り付けます。オブジェクトはそのまま残るので、これはスポーンのたびではなくセッションに一度だけ
-起こり、その一度はログに記録されます。専用サーバーでも `:spawn` が効くのはこのためです。
+起こり、その一度はログに記録されます。専用サーバーがクライアントと同じ経路を通れるのはこのためです。
 
-残る失敗は、プレイヤーコントローラがそもそも無い場合、つまりワールド未ロードか未接続のときだけ
-です。そのときはどの経路も `false` を返し、チートマネージャが見つからず作成もできなかったと
-警告します。`world.ready` からスポーンすれば、この時間帯を避けられます。
+いちばん早い失敗は、プレイヤーコントローラがそもそも無い場合、つまりワールド未ロードか未接続の
+ときです。そのときはどの経路もゲームに届く前に `false` を返し、チートマネージャが見つからず作成も
+できなかったと警告します。`world.ready` から呼べば、この時間帯を避けられます。
 
 ```lua
 local event = require("palforge.core.event")
@@ -504,7 +524,7 @@ local log   = require("palforge.utils.log").scope("example")
 
 event.on("world.ready", function()
     if not Pal.get("ChickenPal"):spawn{ level = 10 } then
-        log.warn("spawn not attempted - no player controller yet")
+        log.warn("no pal appeared")
     end
 end)
 ```
@@ -562,10 +582,41 @@ Pal{
 自身のコンポーネントにモデルが設定された、ということです。その結果何が描画されるかまでは、この
 呼び出しでは分かりません。
 
+### teachAll
+
+```lua
+---@param actor any   # a live pal or player character
+---@return integer taught, integer asked
+pal:teachAll(actor)
+```
+
+この定義が**宣言している**スキルをすべて、生きているキャラクターに載せてゲーム自身に持たせます。
+`:skillsOf()` は作者が書いた内容で、こちらはそのリストを実在のクリーチャーに届ける手段です。
+
+```lua
+local Blaze = Pal{
+    id     = "FoxMage",
+    skills = { "FireBlast", "Legend" },
+}
+
+local taught, asked = Blaze:teachAll(somePalActor)
+-- 2, 2 when both landed; 1, 2 when only one did
+```
+
+各 id の振り分けは、宣言した内容ではなく**ゲームが**その id を何として知っているかで決まります。
+ゲーム自身のアクティブ技である id はそのクリーチャーの装備技に追加され、それ以外の id はその名前の
+パッシブスキルとして追加されます。規則の全体と名前の一覧は [Skill](/docs/api/skill) にあります。
+
+戻り値が真偽値ではなく数値 2 つなのは、一部だけ成功した状態をそのまま見せるためです。スキルは宣言順に
+載せられ、書き込みごとにキャラクターを読み戻して確認し、1 つ失敗しても残りは続きます。未知の id が
+1 つあるせいで他の 4 つの技を失うべきではないからです。両方 0 なら、その定義はスキルを 1 つも宣言して
+いません。
+
 ### クエリ
 
 ```lua
 pal:skillsOf()      --> string[]   the declared skill ids, an empty table when none
+pal:teachAll(actor) --> integer, integer   how many landed, how many were asked for
 pal:mesh()          --> table?     the validated mesh declaration, nil when none
 pal:iconOf()        --> any?       DataTable texture ref, else the declared icon, else nil
 pal:name()          --> string     the declared name, else the id
@@ -656,10 +707,10 @@ Pal{
 }
 ```
 
-`Item.get(...):give(n)` は、ゲーム自身の `AddItem_ServerInternal` の経路でローカルプレイヤーの
-インベントリに追加します。PalForge に地面へ落とす呼び出しは無いので、これは拾いに行く袋ではなく
-プレイヤーが受け取る報酬です。アイテムでできることは
-[Item](/docs/api/item) を参照してください。
+`Item.get(...):give(n)` はローカルプレイヤーのインベントリに追加し、インベントリが実際にどう動いたかを
+返します。ドロップが成立したと決めつけず、戻り値を確かめてください。パルが倒れた場所に戦利品を
+置いておく呼び出しは PalForge にはないので、これは拾いに行く袋ではなくプレイヤーが直接受け取る
+報酬です。アイテムでできることは [Item](/docs/api/item) を参照してください。
 
 ### 殴られると燃え始めるパル
 
@@ -734,6 +785,7 @@ local function summonSquad(n, level)
         return false
     end
     for i = 1, n do
+        -- false in this version: no member appears
         Squad:spawn{ at = { x = at.x + i * 250, y = at.y + 250, z = at.z }, level = level }
     end
     return true
@@ -745,17 +797,20 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-1 体ずつ別々の `SpawnMonster` 呼び出しでスポーンし、それぞれの `onSpawned` が自分のクリーチャーに
-メッシュを付けます。
+1 体ずつ別々の `SpawnMonster` 呼び出しを使い、それぞれの `onSpawned` が自分のクリーチャーにメッシュを
+付ける — という形です。このバージョンでは 1 体も現れないので、何も配置されず `onSpawned` も続きません。
+ワールドへの経路が動くようになれば、このままのコードが分隊を呼び出します。
 
 ## Limits
 
 <Callout type="warn">
 
+- **パルをワールドに出すことはできません。** クリーチャーをワールドに配置する経路では `:spawn` は
+  必ず `false` を返し、何も現れません。このページの残りは、ゲーム自身が置いたパルについての話で、
+  そちらはすべて動きます。
 - **Lua から新しいクリーチャーは作れません。** `Pal{ id = ... }` は、ゲームに既にいる
   クリーチャーに挙動・見た目・メタデータを付けるものです。データ行そのものを作るのは PalSchema の
-  仕事です。対応する `BP_<Id>_C` がゲームに無い id はハンドラが呼ばれず、`:spawn` しても出てくる
-  ものがありません。
+  仕事です。対応する `BP_<Id>_C` がゲームに無い id はハンドラが呼ばれません。
 - **`onTick` はゲームのイベントではなく巡回です。** `core/event` が
   `core.event.PAL_SCAN_MS`（既定 3000 ms）ごとに生きたパルを見て回り、1 体につき 1 回 `onTick` を
   呼びます。`require("palforge.core.event").PAL_SCAN_MS = 5000` で遅くでき、`0` で止められます。
@@ -781,17 +836,15 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 - **ハンドラのエラーは、そのハンドラを終わらせます。** PalForge は `pcall` の中でフックを呼び、
   失敗をチャンネル名とフック名つきでログに書くので、バグはログから見えます。ただしハンドラの
   残りは実行されず、チャンネルもゲームもそれに気づきません。
-- **`:spawn` にはプレイヤーコントローラが必要です。** `PalCheatManager` も必要ですが、誰かが先に
-  作っておく必要はありません。セッションにひとつも無ければ、`core/spawn` がコントローラの
+- **`:spawn` は試みる前からプレイヤーコントローラを必要とします。** `PalCheatManager` も必要ですが、
+  誰かが先に作っておく必要はありません。セッションにひとつも無ければ、`core/spawn` がコントローラの
   `CheatClass` からひとつ作って取り付けます。CheatManagerEnabler の `ClientRestart` フックが動かない
-  専用サーバーでも `:spawn` が効くのはこのためです。作る土台となる `PalPlayerController` が無い
-  場合は、どの経路も `false` を返して警告します。
+  専用サーバーでも、クライアントと同じ経路を通れるのはこのためです。作る土台となる
+  `PalPlayerController` が無い場合は、どの経路もゲームに届く前に `false` を返します。
 - **座標指定はスポーン位置の指定ではなく、スポーン後の移動です。** ゲーム側の呼び出しは指定した
-  位置を無視するため、PalForge は現れたクリーチャーを 400 ms 間隔で最大 6 回まで再試行しながら
-  テレポートさせます。`:spawn` が返す `true` はスポーン呼び出し自体に対するものです。移動の結果は
-  ログにしか出ません。新しいクリーチャーが現れなかったときの警告と、見つかったもののどの移動
-  呼び出しも失敗してスポーン地点に留まったときの警告があります。`LoopAsync` と
-  `ExecuteInGameThread` が使えない環境ではこの遅延処理自体が無く、パルはプレイヤーの隣に留まります。
+  位置を無視するため、PalForge は今しがた現れたクリーチャーを探し、400 ms 間隔で最大 6 回まで
+  再試行しながらテレポートさせます。この処理の結果はログにしか出ず、今日そこに書かれるのは
+  「動かすべき新しいクリーチャーが無かった」という内容です。
 - **メッシュが自動で付くことはありません。** ハンドラから `:renderOn(actor)` を呼んでください。
   `core.mesh.ENABLED` はグローバルのキルスイッチで、これを切るとすべての装着が no-op になります。
   また、マテリアル関連のフィールドが実際に塗られるのは `kind` が `procedural` か `obj` のときだけです。
@@ -807,8 +860,8 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
   `id` だけです。
 - パルに起きたことへの反応は `events` に書きます。`onSpawned`、`onDamaged`、`onDeath`、
   `onCaptured`、`onTick` の 5 つがあり、どれも動いています。
-- `pal:spawn()` でワールドに出します。場所を決めたいときは座標を、プレイヤーに直接渡したいときは
-  `{ toPlayer = true, num = 3 }` を渡します。
+- `pal:spawn()` はパルを配置するための呼び出しですが、このバージョンでは配置できません。`false` を
+  返し、何も現れません。ゲーム自身が出すクリーチャーを相手にしてください。
 - `mesh` で見た目を変えられますが、装着は `onSpawned` から `pal:renderOn(ctx.actor)` を呼んで
   自分で行います。
 - ハンドラが呼ばれるのは `Pal{ ... }` で定義した id だけです。`Pal.get` はアクションだけを返し、

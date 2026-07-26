@@ -101,7 +101,7 @@ require `palforge.api` 之后，你可以直接用 `Pal`、`Item`、`Building`�
 ```lua
 require("palforge.api")
 
-Pal.get("ChickenPal"):spawn(Player.coordinate())
+Pal.get("ChickenPal"):spawn(Player.coordinate())   -- :spawn places nothing in this version
 Item.get("Wood"):give(10)
 ```
 
@@ -261,11 +261,23 @@ flowchart LR
   要写成运行两次也没问题。`onTick` 由一个遍历世界里所有帕鲁的扫描驱动，大约每三秒一次。
 - **Item** —— `onObtain` 和 `onUse` 会运行，带着 `ctx.itemId`、`ctx.count` 和 `ctx.actor`。
 - **Effect** —— `onApply`、`onTick`、`onStack` 和 `onExpire` 都会运行。时间由 PalForge 自己按
-  半秒一次的心跳来数。它不会点亮游戏自带的状态异常图标（中毒、燃烧、冰冻），所以效果对目标做
-  什么，全由你的处理函数决定。
+  半秒一次的心跳来数。定义里写上 `nativeStatus`，效果运行期间就会点亮游戏自带的状态异常；除此
+  之外目标身上发生了什么，全由你的处理函数决定。
 - **Audio、Mesh 和 UI** —— 完全没有生命周期事件。声音要你自己播放，网格要你自己指定给谁穿，界面
   元素也要你自己挂载、刷新和卸载。`Audio.Handle:stop(actor)` 不是按单个声音来的：它会把那个
   actor 上正在播放的一切都停掉。
+
+<Callout type="error" title="这个版本做不到的两件事">
+设计整合包之前先把这两件事考虑进去。它们都还能照常写出来 —— 返回 `false`、什么都不改，而不是
+做到一半失败。
+
+- **帕鲁没法放进世界。** `Pal.Handle:spawn` 不会在任何地方放出生物。能用的是对游戏自己生成的
+  生物做出反应：捕捉、伤害、死亡和定期巡检全都在跑。
+- **单个声音没有自己的音量。** `Audio.Handle:setVolume` 什么都不改，而游戏也没有提供按声音调节的
+  音量。请改从目录里挑一个更安静的声音。
+
+本页其余内容今天都能用。
+</Callout>
 
 <Callout type="warn">
 下面这些可以写在定义里，你的代码不会因此出错，但今天没有任何东西会运行它们。把逻辑放到真正会
@@ -276,8 +288,7 @@ flowchart LR
 - 技能的处理函数 —— 游戏里没有任何东西会触发技能。请从你自己的代码里调用 `:activate(owner)`、
   `:hit(target)`、`:equip(owner)` 或 `:unequip(owner)`，比如在帕鲁的处理函数里、建筑物的
   `onRightClick` 里，或者一个按键绑定里。冷却由 Lua 计时，冷却期间 `:activate` 返回 `false`。
-- `Audio.Handle:setVolume` 只会返回 `false`，什么都不改；你自己准备的 `soundFile` 能被解析，但
-  不会发出声音。请改用游戏内的声音 id。
+- 你自己准备的 `soundFile` 能被解析，但不会发出声音。请改用游戏内的声音 id。
 - 没有东西会替你刷新界面元素。状态变了就自己调用 `:refresh()`，或者用 `:autoRefresh(ms)` 定时
   轮询。
 </Callout>
@@ -325,7 +336,7 @@ local Whistle = Skill{
     cooldown = 30.0,
     events = {
         onActivate = function(skill, owner, ctx)
-            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))
+            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))   -- no pal appears
         end,
     },
 }
@@ -382,6 +393,8 @@ Building{
 - `self:save()` 把建筑物的 `state` 表写进按世界分开的状态文件。
 - `onRightClick` 里的 `ctx.player` 是发起交互的角色，`ctx.actor` 是建筑物的 actor。
 - `Audio.Handle:stop(actor)` 不是按单个声音来的。它会把那个 actor 上正在播放的一切都停掉。
+- `Item.Handle:give` 返回的是背包实测到的变化，所以它给出 `false` 就意味着什么都没到位。`:spawn`
+  那一行在这个版本里什么都不会放下；其余部分都能用。
 
 <Callout type="info">
 `CampFire`、`Wood`、`Berries` 和 `ChickenPal` 都是 `Scripts/palforge/native/*.lua` 里真实存在的

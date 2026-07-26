@@ -867,7 +867,7 @@ return Building{
                 return
             end
             local at = { x = self.pos.x, y = self.pos.y + 300, z = self.pos.z + 100 }
-            if Pal.get("ChickenPal"):spawn(at) then
+            if Pal.get("ChickenPal"):spawn(at) then   -- false in this version: no pal appears
                 self.state.summons  = self.state.summons + 1
                 self.state.cooldown = COOLDOWN_TICKS
                 self:save()
@@ -878,7 +878,9 @@ return Building{
 }
 ```
 
-`PalBoxV2` を定義し直すと `native/buildings.lua` の用意済み定義を置き換えるため、mesh をここで
+`:spawn` はこのバージョンでは何も配置しないので、`if` の中身は実行されず、この台はチャージを保った
+ままになります。建築物・クールダウン・保存されるカウンターはすべて動き、召喚だけが
+[Pal](/docs/api/pal) 待ちです。`PalBoxV2` を定義し直すと `native/buildings.lua` の用意済み定義を置き換えるため、mesh をここで
 書き直しています。バニラのパルボックス UI はそのまま開きます。インタラクトフックは呼び出しを
 見ているだけで、飲み込みはしません。
 

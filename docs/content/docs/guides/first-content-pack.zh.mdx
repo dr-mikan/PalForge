@@ -7,7 +7,8 @@ description: 从一个空的模组文件夹开始，做出一个能放下、能�
 
 - 把自己的模组文件夹放进 Palworld，看着它被加载
 - 让建造菜单里的一个建筑物，在你交互时做点什么
-- 一次交互就播放音效、给出增益、召唤帕鲁、发放道具
+- 一次交互就播放音效、给出增益、发放道具
+- 弄清这几步里哪些在这个版本能做到，以及每一步是怎么汇报自己的
 - 给你放下的每个建筑物一个计数器，下次进游戏时它还在
 - 读游戏日志，找出某件事没发生的原因
 
@@ -18,9 +19,12 @@ description: 从一个空的模组文件夹开始，做出一个能放下、能�
 - 与信标交互会发动一个冷却 30 秒的技能，
 - 技能在交互的那个角色身上播放音效，
 - 给他一个 12 秒、最多叠 3 层的增益，
-- 并在信标的位置召唤一只守护帕鲁，
+- 并试着在信标的位置召唤一只守护帕鲁，
 - 信标本身发放一件道具、数一次使用次数、消耗一次充能，并把这个次数写进世界存档，
 - 一个反复运行的处理函数，会在你不在它旁边时把充能补回来。
+
+音效、增益、发放、冷却、计数和存档状态，都会在游戏里真的发生。这个版本做不到的只有守护帕鲁
+这一步，到了那个位置会再说一次。
 
 这样 Building、Skill、Audio、Effect、Pal 和 Item 就都在一个包里了。这个包自己就是一个模组
 文件夹，复用同一次会话里已经加载好的 PalForge。
@@ -30,9 +34,12 @@ description: 从一个空的模组文件夹开始，做出一个能放下、能�
 - PalForge 已安装并正常加载。`ue4ss/Mods/PalForge/Scripts/main.lua` 在跑，UE4SS 控制台里
   能看到 `[PalForge.main][info] ready`。
 - 召唤帕鲁要经过 `UPalCheatManager`，也就是游戏自己的管理对象。PalForge 会去找一个，找不到
-  就在玩家控制器上自己造一个，所以你只要在世界里就够了。还没有控制器时，生成会记一条警告并
-  返回 `false`，包里其他部分照常运行。
-- 发放道具不需要这些。`Item.Handle:give` 走的是背包自己的 `AddItem_ServerInternal`。
+  就在玩家控制器上自己造一个，所以你只要在世界里就够了。
+- 发放道具走的是同一个管理对象，并且返回它实测到的结果：`Item.Handle:give` 在前后各读一次
+  背包，只有数量真的上升了才返回 `true`。
+- 这个包里有一步在这个版本做不到，而且它是软失败的。`Pal.Handle:spawn` 不会在世界里放出生物：
+  它返回 `false`，往日志里写一行，处理函数剩下的部分照常往下走。它仍然写在包里，因为形状是对
+  的，也因为“每个调用都检查结果”的包才是不会坏的包。见 [Pal](/docs/api/pal)。
 
 <Callout type="info">
 下面这个信标接管的是游戏里已经有的建筑物、道具和生物。Lua 可以给一个已有的 id 加上行为和
@@ -227,8 +234,8 @@ return M
 同一个播放调用。
 
 <Callout type="warn">
-这里有两样东西还不能用，请绕开它们。`Handle:setVolume` 返回 `false`，什么也不改——请直接挑一个
-本身响度就合适的音效事件。`soundFile`（你自己的音频文件）能被接受，然后什么也不做，所以请改用
+这里有两样东西不能用，请绕开它们。`Handle:setVolume` 返回 `false`，什么也不改，而游戏也没有提供
+按声音调节的音量——请直接挑一个本身响度就合适的音效事件。`soundFile`（你自己的音频文件）能被接受，然后什么也不做，所以请改用
 目录里游戏自带的 `AkAudioEvent`。`Handle:stop` 也不是按单个声音停的：它会停掉那个 actor 上
 正在播放的一切。
 </Callout>
@@ -291,9 +298,8 @@ return M
 `stacks`，结束时还有 `reason`。
 
 <Callout type="warn">
-PalForge 的效果不会点亮游戏本身的状态图标。`EPalStatusEffectType` 是游戏内部的一份列表，
-目前没有确认过任何能应用它的调用，所以 `nativeStatus` 只是一个你能读回来的标签，它本身不
-做事。效果实际要做的事情，请写进 `onTick`。
+定义里的 `nativeStatus` 会在效果运行期间点亮游戏本身的状态图标，结束时再熄灭。它并不会顺带把玩法
+一起带来，所以效果实际要做的事情，请写进 `onTick` —— 图标和伤害是两回事。
 </Callout>
 
 </Step>
@@ -426,7 +432,7 @@ M.Flare = Skill{
         onActivate = function(skill, owner, ctx)
             audio.Signal:play(owner)                                -- on the interacting character
             effects.Blessing:apply(owner, { source = ctx.beacon })  -- 12s, stacks to 3
-            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- at the beacon
+            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- false: no pal appears
             log.info("flare fired from " .. tostring(ctx.beacon))
         end,
     },
@@ -545,15 +551,18 @@ return M
 [PalForge.beacon.buildings][info] beacon placed at 12345/-6789/420
 [PalForge.beacon.buildings][info] beacon tracked fresh: 0 use(s), 3 charge(s)
 [PalForge.beacon.effects][info] blessing applied by Altar@123,-68,4
-[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) accepted; relocation to (12345,-6789,420) scheduled (SpawnMonster+teleport)
+[PalForge.spawn][warn] spawn.palAt: SpawnMonster(Kitsunebi, lv 5) ran and NOTHING spawned, so there is nothing to move to (12345,-6789,420)
 [PalForge.beacon.skills][info] flare fired from Altar@123,-68,4
-[PalForge.items][info] give Ruby x3
+[PalForge.items][info] give Ruby x3: 0 -> 3 [evidence declared]
 [PalForge.beacon.effects][info] blessing tick at 3.0s
 ```
 
-注册类的数量和实例键取决于你这次会话，行的顺序则不会变。`onActivate` 先跑音效、效果和生成，
-再打印自己那一行，所以增益和生成先被报出来——而 `give Ruby x3` 只会在 `:activate` 返回之后
-出现。
+注册类的数量和实例键取决于你这次会话，行的顺序则不会变。`onActivate` 先跑音效、效果和生成尝试，
+再打印自己那一行，所以增益和生成先被报出来——而 `give` 那一行只会在 `:activate` 返回之后出现。
+
+其中一行就是这个版本做不到的那一步，它是被如实报告出来的：没有生物被放下。其余每一行都是包在
+正常工作，而 `give` 那一行写出了背包前后的数量，因为它的 `true` 就是从那里实测出来的。正因为
+处理函数在拿到 `false` 之后还会往下走，你才能这样读日志：哪一步没成，一眼就看得见。
 
 </Step>
 
@@ -624,10 +633,10 @@ flowchart LR
 | 领域 | 游戏调用 | 你调用 |
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
-| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`, `:renderOn(actor)`, `:skillsOf()` |
-| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()`, `:recipeOf()` |
+| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`（这个版本什么都放不下）、`:renderOn(actor)`、`:skillsOf()`、`:teachAll(actor)` |
+| Item | `onObtain`, `onUse` | `:count()`、`:give(n)`、`:take(n)`（拿走的东西会掉在玩家脚边）、`:iconOf()`、`:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`（按 PalForge 自己的时间表） | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
-| Skill | 没有 | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()` |
+| Skill | 没有 | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | 没有 | `:play()`, `:stop()` |
 
 有四个处理函数可以声明，但目前不会运行，因为游戏里没有东西宣告它们：
@@ -789,11 +798,14 @@ print(schema.help("Building.Spec.Events"))
 然后确认建筑物有没有被跟踪：`#Building.get("Altar"):instances()`。空列表说明扫描没能把 actor
 和你的定义对上，通常是因为 `Building{ id = ... }` 里的 id 不是游戏给那个建筑物用的 id。
 
-**帕鲁没有出现。** 按坐标生成需要会话里有玩家控制器。没有的话它会记下
+**帕鲁没有出现。** 这个版本里 `:spawn` 不会有帕鲁出现，所以这是预料之中的结果，不是你哪里配错了
+—— 细节见 [Pal](/docs/api/pal)。另外还有更早的一种失败值得排除：按坐标生成需要会话里有玩家控制器。
+没有的话它连游戏都够不到，并记下
 `spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`
-并返回 `false`；不带 `at` 的 `:spawn()` 报的是同一件事，前缀是 `spawn.pal:`。返回 `true`
-表示生成被接受、移动到你给的坐标已经排上了——不表示已经有一只帕鲁站在那里。剩下的都会写进
-日志。
+。不带 `at` 的 `:spawn()` 报的是同一件事，前缀是 `spawn.pal:`。
+
+**奖励没有到手。** `:give` 在没有观察到背包数量上升时返回 `false`，它的日志行会说明是哪一步停下的：
+根本没有管理对象（打开 `CheatManagerEnablerMod`）、游戏不认识这个道具 ID，或者背包已经放不下。
 
 **技能永远只发动一次。** 那是 `cooldown` 在干活。冷却期间 `:activate` 返回 `false`。`kind`
 是 `"passive"` 的技能也返回 `false`，你自己的处理函数报错时同样返回 `false`。

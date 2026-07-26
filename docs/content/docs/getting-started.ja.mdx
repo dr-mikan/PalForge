@@ -68,9 +68,10 @@ ConsoleEnablerMod : 1
 PalForge : 1
 ```
 
-パルをスポーンさせたい場合は `CheatManagerEnablerMod` を有効なままにしてください。`Pal.Handle:spawn`
-はゲーム本体の `UPalCheatManager` を経由するため、この Mod がないと `core/spawn` は次の行を出して
-`false` を返し、何もしません。
+`CheatManagerEnablerMod` は、ゲーム本体の管理オブジェクト `UPalCheatManager` を PalForge に
+使わせるための Mod です。有効なままにしてください。`Item.Handle:give`、`Item.Handle:take`、
+`Pal.Handle:spawn` はいずれもこのオブジェクトを通るので、無いとどれもゲームに届く前に断られて
+`false` になります。スポーンの経路は次の行を出して諦めます。
 
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
@@ -153,7 +154,7 @@ _G.PalForge = {
 ```text
 [PalForge.main][info] PalForge v0.3.0 starting (dev=true)
 [PalForge.event][info] tick source live
-[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard TODO(dump)) + dispatch
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard have no native source) + dispatch
 [PalForge.keyboard][info] bound F4
 [PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
 [PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
@@ -203,7 +204,7 @@ return {
   決して動きません。
 - `palforge.tests` のヘッドレステスト一式を実行します。`tests: ...` の行はこれによるものです。
 - ゲーム内テストスイート `palforge.test` を読み込み、**F1** に割り当てます。キーを押すまで何も実行され
-  ません。これらのテストはパルをスポーンさせたりアイテムを配ったりするからです。
+  ません。これらのテストは動いているワールドに触れるからです。
 
 コンテンツカタログだけを登録する静かなリリースビルドにするには `dev = false` にします。
 
@@ -309,13 +310,15 @@ api.Building{
 `PalBoxV2`、`native/items` は `Wood` / `Berries` / `Arrow`、`native/pals` は `ChickenPal` と `SheepBall`
 を同梱しています。置き換えたい場合を除いて、別の ID を選んでください。
 
-パルの例では、ハンドラではなくアクションを見てみます。
+パルの例では、ハンドラではなくアクションを見てみます。`:spawn` はこのバージョンでは何も配置しない
+ので（下の行はどちらも `false` を返します）、確認できるのは定義そのものです。ゲーム自身のチキンが、
+あなたのメッシュとハンドラを持つようになります。
 
 ```lua
 local api = require("palforge.api")
 
 -- Pal.get works for any game CharacterID, defined or not.
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- false: no creature appears
 
 -- Defining the same id attaches your own mesh and handlers to it. This replaces
 -- native/pals' curated ChickenPal demo definition.
@@ -335,7 +338,7 @@ local chicken = api.Pal{
     },
 }
 
-chicken:spawn(api.Player.coordinateOffset(300, 0, 0))
+chicken:spawn(api.Player.coordinateOffset(300, 0, 0))     -- false: no creature appears
 ```
 
 ## ゲーム内で確認する
@@ -435,7 +438,7 @@ end
 local api = require("palforge.api")
 
 api.Item.get("Wood"):give(10)
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- :spawn places nothing in this version
 ```
 
 </Tab>
@@ -663,11 +666,16 @@ events = {
 
 ### スポーンしても何も起きない
 
+このバージョンでは、何を渡しても `:spawn` からクリーチャーは現れません。[Pal](/docs/api/pal) を
+参照してください。パルの定義が今も何をしてくれるかもそこに書いてあります。次の警告はそれより手前の
+別の問題で、こちらは直す価値があります。
+
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
 ```
 
-`:spawn` は `UPalCheatManager` を経由します。`mods.txt` で `CheatManagerEnablerMod` を有効にしてください。
+これは、呼び出しがゲームに届く前に拒否されたという意味です。`:spawn` には `UPalCheatManager` が
+必要なので、`mods.txt` で `CheatManagerEnablerMod` を有効にしてください。
 
 ## 次に読むもの
 

@@ -104,7 +104,7 @@ Item{
 ```lua
 require("palforge.api")
 
-Pal.get("ChickenPal"):spawn(Player.coordinate())
+Pal.get("ChickenPal"):spawn(Player.coordinate())   -- :spawn places nothing in this version
 Item.get("Wood"):give(10)
 ```
 
@@ -276,11 +276,24 @@ flowchart LR
 - **Item** — `onObtain` と `onUse` が走ります。`ctx.itemId`、`ctx.count`、`ctx.actor` が
   付いてきます。
 - **Effect** — `onApply`、`onTick`、`onStack`、`onExpire` がすべて走ります。時間の管理は
-  PalForge 自身が 0.5 秒間隔の鼓動で行います。ゲーム本体の状態異常アイコン（毒・炎上・氷結）は
-  切り替えません。対象に何をするかは、あなたのハンドラーが決めます。
+  PalForge 自身が 0.5 秒間隔の鼓動で行います。定義に `nativeStatus` を書けば、エフェクトが動いて
+  いるあいだゲーム本体の状態異常が点灯します。それ以外に対象へ何が起きるかは、あなたの
+  ハンドラーが決めます。
 - **Audio / Mesh / UI** — ライフサイクルのイベントはありません。サウンドは自分で鳴らし、メッシュは
   身に着けさせ、UI 要素はマウント・更新・アンマウントを自分で行います。`Audio.Handle:stop(actor)` は
   サウンド単位ではなく、そのアクターで鳴っているものをすべて止めます。
+
+<Callout type="error" title="このバージョンでできない 2 つのこと">
+パックを設計する前に、この 2 つを前提にしてください。どちらも書くこと自体はできます。途中で
+失敗するのではなく、`false` を返して何も変えません。
+
+- **パルをワールドに置けません。** `Pal.Handle:spawn` はどこにもクリーチャーを出しません。動くのは、
+  ゲーム自身が出したクリーチャーへの反応です。捕獲・ダメージ・死亡と定期巡回はすべて走ります。
+- **サウンドごとの音量はありません。** `Audio.Handle:setVolume` は何も変えず、ゲーム側にも
+  サウンド単位の音量が存在しません。カタログから静かなサウンドを選んでください。
+
+このページの残りは今日から動きます。
+</Callout>
 
 <Callout type="warn">
 次のものは宣言できるので書いても壊れませんが、いまは何も動かしません。実際に走る場所に処理を
@@ -292,8 +305,8 @@ flowchart LR
   `:hit(target)`、`:equip(owner)`、`:unequip(owner)` を自分のコードから呼んでください。パルの
   ハンドラー、建築物の `onRightClick`、キーバインドなどが呼び出し元になります。クールダウンは
   Lua が数えていて、冷却中の `:activate` は `false` を返します。
-- `Audio.Handle:setVolume` は `false` を返すだけで何も変わりません。自分で用意した `soundFile` も
-  解決はされますが再生されません。ゲーム内のサウンド id を指定してください。
+- 自分で用意した `soundFile` は解決はされますが再生されません。ゲーム内のサウンド id を
+  指定してください。
 - UI 要素を代わりに更新してくれるものはありません。状態が変わったら自分で `:refresh()` を呼ぶか、
   `:autoRefresh(ms)` で定期的に更新してください。
 </Callout>
@@ -341,7 +354,7 @@ local Whistle = Skill{
     cooldown = 30.0,
     events = {
         onActivate = function(skill, owner, ctx)
-            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))
+            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))   -- no pal appears
         end,
     },
 }
@@ -400,6 +413,8 @@ Building{
 - `onRightClick` の `ctx.player` は操作したキャラクター、`ctx.actor` は建築物のアクターです。
 - `Audio.Handle:stop(actor)` はサウンド単位ではありません。そのアクターで鳴っているものを
   すべて止めます。
+- `Item.Handle:give` はインベントリが実測でどう動いたかを返すので、`false` は「何も届かなかった」
+  という意味です。`:spawn` の行はこのバージョンでは何も配置しません。それ以外はすべて動きます。
 
 <Callout type="info">
 `CampFire`、`Wood`、`Berries`、`ChickenPal` は `Scripts/palforge/native/*.lua` にある実在の id で、

@@ -10,6 +10,7 @@ description: Pal に持たせる攻撃や特性と、それを発動させる自
 - 秒数でクールダウンを決めて、連発できないようにする
 - 持っている間ずっと効き続ける特性を作る
 - Pal が持っているスキルの一覧を読み出す
+- 生きている Pal やプレイヤーにスキルを載せて、ゲーム自身に持たせる
 
 スキルは攻撃や特性のことです。`Skill{ ... }` で一度書くと、アクションを持ったオブジェクトが返ります。
 ゲームが勝手にスキルを発動させることはないので、発動させる行は自分のコードに書きます。次の例では
@@ -255,6 +256,9 @@ skill:unequip(owner, ctx)     --> boolean
 skill:cooldownLeft(owner)     --> number, seconds until ready, 0 when ready
 ```
 
+この 5 つは自分側の帳簿で、ゲームには何も伝えません。もう 3 つ — `:teach`、`:forget`、
+`:skillsOn` — は逆に、実在するキャラクターに書き込み、読み戻します。専用の節が下にあります。
+
 - `owner` と `target` は渡したものがそのまま届きます。Pal のポーン、プレイヤーキャラクター、ただの
   テーブルでも構いません。`owner` を見るのはクールダウンの記録だけで、識別子としてしか使いません。
 - `ctx` は自分で用意するコンテキストテーブルです。中身を入れてくれるものはありませんし、省略もできます。
@@ -365,6 +369,75 @@ Ember:iconOf()   --> the declared icon, since "example:Ember" has no row in that
 Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall back to
 ```
 
+## 生きているキャラクターにスキルを載せる
+
+上の 5 つのアクションは自分側の帳簿で、自分のハンドラを走らせるだけでゲームには何も伝えません。
+この 3 つは逆です。**生きている** Pal やプレイヤーにスキルを載せてゲーム自身に持たせ、そのキャラクターが
+何を持っているかを読み戻します。
+
+```lua
+skill:teach(actor)      --> boolean, true only when the skill is on the character afterwards
+skill:forget(actor)     --> boolean, true only when it is gone afterwards
+skill:skillsOn(actor)   --> { active = { ... }, passive = { ... } } | nil
+```
+
+`actor` は実在するキャラクターでなければなりません。ワールドに立っている Pal か、
+`Player.character()` が返すプレイヤー自身のポーンです。それ以外は `false` で断られます。
+
+```lua
+local pawn = Player.character()
+
+Skill.get("FireBlast"):teach(pawn)    -- one of the game's own moves
+Skill.get("Legend"):teach(pawn)       -- not a move: added as a passive trait
+Skill.get("FireBlast"):skillsOn(pawn) --> { active = { "FireBlast" }, passive = { "Legend" } }
+Skill.get("FireBlast"):forget(pawn)
+```
+
+### どちらの種類としてゲームに頼むかは id が決めます
+
+Palworld はアクティブな技とパッシブな特性を別々の場所に持っているので、`:teach` はどちらかを選ぶ
+必要があります。選ぶ根拠は **id** であって、`kind` フィールドではありません。
+
+- ゲーム自身のアクティブな技として知られている id — `"FireBlast"`、`"Psychokinesis"` など 309 種類 —
+  は、そのキャラクターの装備技に追加されます。
+- **それ以外の id** は、その名前のパッシブスキルとして追加されます。
+
+<Callout type="warn">
+`kind` は、自分のコードが発動したときに「自分のスキル」が何をするかの説明です。`:teach` が頼むのは
+ゲーム自身のスキルなので、`kind` はまったく読みません。id が `"FireBlast"` のスキルに
+`kind = "passive"` と書いてあっても、載るのはゲームのアクティブ技です。逆に `"example:Ember"` の
+ようなパック独自の id は、何を宣言していてもその名前のパッシブとして渡されます。ゲームにその名前の
+技は無いからです。
+</Callout>
+
+大文字・小文字は区別されないので、`"fireblast"` でも同じ技になります。id を書く前に確かめたいときは、
+`require("palforge.core.character").wazaNames()` がこのビルドのアクティブ技名をすべてソートして返します。
+
+### 戻り値の意味
+
+書き込みは必ずキャラクターを読み戻して確認するので、`true` は「そのスキルがキャラクター上に
+**見えた**」という意味です。呼び出しが例外を出さなかった、ではありません。`false` は載らなかったと
+いう意味で、対象がキャラクターでない、ゲームがその id を受け付けない、書き込みが断られた、の
+いずれかです。
+
+`:skillsOn(actor)` は `{ active = {...}, passive = {...} }` を返します。空のリストは「読めたうえで
+何も持っていない」です。テーブルごと `nil` の場合は、そのキャラクターをまったく読めなかったという
+意味で、「持っていない」ではありません。添字を引く前に `nil` を確かめてください。
+
+```lua
+local carried = Skill.get("FireBlast"):skillsOn(pawn)
+if carried then
+    print(#carried.active .. " moves, " .. #carried.passive .. " traits")
+end
+```
+
+<Callout type="info">
+`:teach` と `:equip` は意図的に別物で、どちらにも使い道があります。`:equip` は好きな値に対して自分の
+`onEquip` ハンドラを走らせるだけでゲームには何も伝えません。`:teach` は実在するキャラクターに書き込み、
+そのあとゲームが何を見せているかを返します。自前で「装備中」の集合を管理するパックは、これまでどおり
+`:equip` を使ってください。
+</Callout>
+
 ## Pal にスキルを持たせる
 
 Pal は自分が持つスキルを id の配列で並べます。
@@ -386,10 +459,11 @@ PalForge: Pal: field "skills[2]" expects string, got number
 ```
 
 <Callout type="warn">
-この配列はただのリストです。PalForge は id を解決しませんし、パッシブを装備することも、アクティブを
-発動することもありません。リストを保持して `pal:skillsOf()` で返すだけです。続きはハンドラで書きます。
-下のループだけで足ります。
+この配列はただのリストです。宣言しただけではどのクリーチャーにも何も載りませんし、アクティブを
+ゲームが発動してくれることもありません。保持して `pal:skillsOf()` で返すだけです。
 </Callout>
+
+使い道は 2 つあります。ひとつは、自分側の帳簿としてループを書くこと。
 
 ```lua
 for _, id in ipairs(Blaze:skillsOf()) do
@@ -399,6 +473,17 @@ for _, id in ipairs(Blaze:skillsOf()) do
     end
 end
 ```
+
+もうひとつは、リスト全体を生きているクリーチャーに 1 回で渡すことです。
+[`Pal.Handle:teachAll`](/docs/api/pal) を使います。
+
+```lua
+local taught, asked = Blaze:teachAll(somePalActor)
+-- 2, 2 when both landed; 1, 2 when one did not
+```
+
+`teachAll` は各 id を `:teach` とまったく同じ規則で振り分け、1 つ失敗しても残りを続け、数値を 2 つ
+返します。`true` / `false` に潰さないので、一部だけ成功したことがそのまま見えます。
 
 ## Palworld 既存のスキル id
 
@@ -665,6 +750,8 @@ PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated"
 - `cooldown` は秒数で、owner ごとに数えられ、見るのは `:activate` だけです。
 - `kind = "passive"` にすると `:activate` は `false` を返します。`:equip` と `:unequip` を使ってください。
 - ハンドラが落ちても戻り値が `false` になるだけでログには出ないので、ログはハンドラの中で出します。
-- `pal:skillsOf()` で Pal が持つ id が読めます。そこから回すのは自分の仕事です。
+- `pal:skillsOf()` で読めるのは Pal が*宣言した* id です。`skill:teach(actor)` は生きている
+  キャラクターに載せ、`skill:skillsOn(actor)` はそのキャラクターが実際に持っているものを読み戻し、
+  `pal:teachAll(actor)` は宣言済みリストをまとめて載せます。
 
 次は [Effect](/docs/api/effect) を読むと、パッシブが効き続けるためのタイマーが手に入ります。

@@ -7,7 +7,8 @@ description: 空のモッドフォルダーから、設置して調べると動�
 
 - 自分のモッドフォルダーを Palworld に置いて、読み込ませる
 - ビルドメニューの構造物に、調べたときの動きを付ける
-- その 1 回の操作で、音を鳴らし、強化を付け、パルを呼び、アイテムを配る
+- その 1 回の操作で、音を鳴らし、強化を付け、アイテムを配る
+- そのうちどれがこのバージョンで実行でき、それぞれがどう結果を報告するかを把握する
 - 置いた構造物ごとにカウンターを持たせ、次に遊ぶときも残す
 - 何かが起きなかったとき、ログを読んで理由を突き止める
 
@@ -19,10 +20,13 @@ description: 空のモッドフォルダーから、設置して調べると動�
 - ビーコンを調べるとクールダウン 30 秒のスキルが発動し、
 - スキルは調べたキャラクターに効果音を鳴らし、
 - 12 秒間・最大 3 回まで重なる強化を付け、
-- ビーコンの位置に守護パルを呼び出します。
+- ビーコンの位置に守護パルを呼び出そうとします。
 - ビーコン自身はアイテムを配り、使用回数を数え、チャージを 1 消費し、その値をワールド
   ファイルに保存します。
 - 一定間隔で動くハンドラーが、離れているあいだにチャージを回復させます。
+
+効果音・強化・払い出し・クールダウン・カウンター・保存される状態は、いずれもゲーム内で本当に
+起こります。このバージョンで実行できないのは守護パルの 1 つだけで、その箇所でもう一度断ります。
 
 これで Building・Skill・Audio・Effect・Pal・Item のすべてに触れます。パック自体は独立した
 モッドフォルダーで、同じセッションに読み込まれている PalForge を再利用します。
@@ -33,10 +37,14 @@ description: 空のモッドフォルダーから、設置して調べると動�
   が動き、UE4SS コンソールに `[PalForge.main][info] ready` が出ていれば問題ありません。
 - パルを呼ぶ処理は、ゲーム自身の管理用オブジェクト `UPalCheatManager` を通ります。PalForge
   はそれを探し、無ければプレイヤーコントローラー上に自分で作るので、ワールドに入ってさえ
-  いれば動きます。コントローラーがまだ無い場合は警告をログに出して `false` を返すだけで、
-  パックの他の部分はそのまま動きます。
-- アイテムを配るのにそれは不要です。`Item.Handle:give` はインベントリー自身の
-  `AddItem_ServerInternal` を通ります。
+  いれば呼び出しは発行されます。
+- アイテムを配る処理も同じ管理用オブジェクトを通り、実測した結果を返します。
+  `Item.Handle:give` は前後でインベントリーを読み、所持数が本当に増えたときだけ `true` です。
+- このパックがすることのうち 1 つは、このバージョンでは実行できません。fail-soft です。
+  `Pal.Handle:spawn` はワールドにクリーチャーを出しません。`false` を返し、ログに 1 行書き、
+  ハンドラーの残りはそのまま進みます。それでもパックに書いておくのは、形が正しいからであり、
+  すべての呼び出しの結果を確かめるパックこそ壊れないからです。[Pal](/docs/api/pal) を参照して
+  ください。
 
 <Callout type="info">
 以下のビーコンは、ゲームにすでにある構造物・アイテム・生物を受け持ちます。Lua は既存の id に
@@ -235,8 +243,9 @@ return M
 BGM も効果音も再生の呼び出しは同じです。
 
 <Callout type="warn">
-このドメインには、まだ動かないものが 2 つあります。`Handle:setVolume` は `false` を返すだけで
-何も変わらないので、音量は最初から目的に近いサウンドイベントを選んで合わせてください。
+このドメインには、動かないものが 2 つあります。`Handle:setVolume` は `false` を返すだけで何も
+変わらず、ゲーム側にもサウンド単位の音量が存在しないので、音量は最初から目的に近いサウンド
+イベントを選んで合わせてください。
 `soundFile`（独自の音声ファイル）は受け付けられますが何もしないので、カタログにある
 `AkAudioEvent` を使ってください。`Handle:stop` も音単位ではなく、そのアクターで再生中のものを
 すべて止めます。
@@ -300,10 +309,9 @@ return M
 context です（`effect`、`elapsed`、`stacks`、終了時は `reason`）。
 
 <Callout type="warn">
-PalForge のエフェクトは、ゲーム本来の状態異常アイコンを点けません。`EPalStatusEffectType`
-はゲーム内部の一覧で、それを適用する呼び出しは確認できていないため、`nativeStatus` は
-読み返せる目印であって、それ自体は何もしません。エフェクトが実際にすることは `onTick` に
-書いてください。
+定義の `nativeStatus` は、エフェクトが動いているあいだゲーム本来の状態異常アイコンを点け、終了
+すると消します。ゲームプレイまで一緒に付いてくるわけではないので、エフェクトが実際にすることは
+`onTick` に書いてください。アイコンとダメージは別の話です。
 </Callout>
 
 </Step>
@@ -441,7 +449,7 @@ M.Flare = Skill{
         onActivate = function(skill, owner, ctx)
             audio.Signal:play(owner)                                -- on the interacting character
             effects.Blessing:apply(owner, { source = ctx.beacon })  -- 12s, stacks to 3
-            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- at the beacon
+            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- false: no pal appears
             log.info("flare fired from " .. tostring(ctx.beacon))
         end,
     },
@@ -565,15 +573,20 @@ UE4SS のコンソールに一部始終が出ます。
 [PalForge.beacon.buildings][info] beacon placed at 12345/-6789/420
 [PalForge.beacon.buildings][info] beacon tracked fresh: 0 use(s), 3 charge(s)
 [PalForge.beacon.effects][info] blessing applied by Altar@123,-68,4
-[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) accepted; relocation to (12345,-6789,420) scheduled (SpawnMonster+teleport)
+[PalForge.spawn][warn] spawn.palAt: SpawnMonster(Kitsunebi, lv 5) ran and NOTHING spawned, so there is nothing to move to (12345,-6789,420)
 [PalForge.beacon.skills][info] flare fired from Altar@123,-68,4
-[PalForge.items][info] give Ruby x3
+[PalForge.items][info] give Ruby x3: 0 -> 3 [evidence declared]
 [PalForge.beacon.effects][info] blessing tick at 3.0s
 ```
 
 登録クラス数とインスタンスキーはセッション次第で変わりますが、行の順番は変わりません。
-`onActivate` は自分のログを出す前に効果音・エフェクト・スポーンを実行するので、先に
-エフェクトとスポーンの行が出ます。`give Ruby x3` が出るのは `:activate` が返ってからです。
+`onActivate` は自分のログを出す前に効果音・エフェクト・スポーン試行を実行するので、先に
+エフェクトとスポーンの行が出ます。`give` の行が出るのは `:activate` が返ってからです。
+
+このうち 1 行が、隠されずに報告された「このバージョンで実行できないこと」です。クリーチャーは
+配置されませんでした。それ以外の行はパックが動いている証拠で、`give` の行が前後の所持数を出して
+いるのは、その `true` がそこから実測されたものだからです。`false` のあとも処理を続けるハンドラー
+だからこそ、ログをこう読めます。どの段階が成立しなかったかがそのまま見えます。
 
 </Step>
 
@@ -650,10 +663,10 @@ state の保存には 2 つのやり方があります。`self:save()` は変更
 | ドメイン | ゲームが呼ぶもの | 自分で呼ぶもの |
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
-| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`, `:renderOn(actor)`, `:skillsOf()` |
-| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()`, `:recipeOf()` |
+| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`（このバージョンでは何も配置しません）、`:renderOn(actor)`、`:skillsOf()`、`:teachAll(actor)` |
+| Item | `onObtain`, `onUse` | `:count()`、`:give(n)`、`:take(n)`（取り除いた分はプレイヤーの足元に落ちます）、`:iconOf()`、`:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`（PalForge 自身のスケジュール） | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
-| Skill | なし | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()` |
+| Skill | なし | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | なし | `:play()`, `:stop()` |
 
 書けるけれどまだ動かないハンドラーが 4 つあります。ゲーム側に知らせる仕組みが無いためです。
@@ -827,12 +840,17 @@ print(schema.help("Building.Spec.Events"))
 れていません。たいていは `Building{ id = ... }` の id が、そのゲーム内構造物の id と違うのが
 原因です。
 
-**パルが出てこない。** 座標指定のスポーンにはセッション内にプレイヤーコントローラーが必要
-です。無い場合は
+**パルが出てこない。** このバージョンでは `:spawn` からパルは現れません。設定を間違えたわけでは
+なく、これが想定どおりの結果です。詳細は [Pal](/docs/api/pal) にあります。それとは別に、もっと
+手前で失敗している可能性も潰しておいてください。スポーンにはセッション内にプレイヤー
+コントローラーが必要で、無い場合はゲームに届く前に
 `spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`
-をログに出して `false` を返します。`at` を渡さない `:spawn()` は同じ内容を `spawn.pal:` と
-して出します。`true` はスポーンが受け付けられ、指定座標への移動が予約されたという意味で、
-パルがそこに立っている保証ではありません。その先はログに出ます。
+をログに出します。
+
+**ごほうびが届かない。** `:give` は所持数が増えたのを観測できなかったときに `false` を返し、
+どこで止まったかをログ行が教えてくれます。管理用オブジェクトがそもそも無い（`CheatManagerEnablerMod`
+を有効にしてください）、ゲームが知らないアイテム ID だった、インベントリーに空きが無かった、の
+いずれかです。
 
 **スキルが 2 回目から発動しない。** `cooldown` が働いています。`:activate` はクールダウン中
 に `false` を返します。`kind` が `"passive"` のスキル、そしてハンドラー自身が例外を投げた

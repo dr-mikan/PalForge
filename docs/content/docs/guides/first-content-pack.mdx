@@ -7,7 +7,8 @@ description: A walkthrough from an empty mod folder to a beacon you can place, i
 
 - Put your own mod folder into Palworld and watch it load
 - Make a structure in the build menu do something when you interact with it
-- Play a sound, hand out a buff, call a pal and pay out an item from that one interaction
+- Play a sound, hand out a buff and pay out an item from that one interaction
+- Know which of those steps this version can carry out, and how each one reports itself
 - Give every structure you place a counter that is still there the next time you play
 - Read the game's log to find out why something did not happen
 
@@ -19,10 +20,14 @@ gives it something to do:
 - interacting with the beacon fires a skill with a 30 second cooldown,
 - the skill plays a sound on the character who interacted,
 - gives them a 12 second buff that can stack up to three times,
-- and calls a guardian pal at the beacon's position,
+- and asks for a guardian pal at the beacon's position,
 - the beacon itself pays out an item, counts its uses, spends a charge, and saves that
   count into the world file,
 - a repeating handler recharges it while you are away from it.
+
+The sound, the buff, the payout, the cooldown, the counter and the saved state all happen in
+game. The guardian pal is the one step this version cannot carry out, and the guide says so
+again where it appears.
 
 That is Building, Skill, Audio, Effect, Pal and Item in one pack, and the pack is its own
 mod folder that reuses the PalForge already loaded in the session.
@@ -32,11 +37,15 @@ Before you start:
 - PalForge is installed and loading. `ue4ss/Mods/PalForge/Scripts/main.lua` runs, and the
   UE4SS console shows `[PalForge.main][info] ready`.
 - Calling a pal goes through `UPalCheatManager`, the game's own admin object. PalForge finds
-  one, or builds one on the player controller itself, so you only need to be in a world. With
-  no controller yet the spawn logs a warning and returns `false`, and everything else in the
-  pack still runs.
-- Handing out an item needs none of that. `Item.Handle:give` goes through the inventory's own
-  `AddItem_ServerInternal` call.
+  one, or builds one on the player controller itself, so you only need to be in a world.
+- Handing out an item goes through the same admin object, and reports what it measured:
+  `Item.Handle:give` reads the inventory before and after, and answers `true` only when the
+  count really rose.
+- One step in this pack cannot happen in this version, and it fails softly. `Pal.Handle:spawn`
+  puts no creature in the world: it answers `false`, writes a line to the log, and the rest of
+  the handler carries straight on. It is written into the pack anyway, because the shape is
+  right and because a pack that checks the result of every call is the pack that keeps working.
+  See [Pal](/docs/api/pal).
 
 <Callout type="info">
 The beacon below takes over structures, items and creatures the game already has. Lua can
@@ -235,11 +244,11 @@ return M
 music and sound effects both play through the same call.
 
 <Callout type="warn">
-Two things here do not work yet, so plan around them. `Handle:setVolume` returns `false` and
-changes nothing — pick a sound event that is already the loudness you want. A `soundFile`
-(your own audio file) is accepted and then does nothing, so use a game `AkAudioEvent` from
-the catalog instead. `Handle:stop` is not per sound either: it stops everything playing on
-that actor.
+Two things here do not work, so plan around them. `Handle:setVolume` returns `false` and changes
+nothing, and the game offers no per-sound volume for it to change — pick a sound event that is
+already the loudness you want. A `soundFile` (your own audio file) is accepted and then does
+nothing, so use a game `AkAudioEvent` from the catalog instead. `Handle:stop` is not per sound
+either: it stops everything playing on that actor.
 </Callout>
 
 </Step>
@@ -300,10 +309,9 @@ readable in `onApply` and `onStack`. `onTick` and `onExpire` get the runtime's o
 instead: `effect`, `elapsed`, `stacks`, and `reason` when it ends.
 
 <Callout type="warn">
-A PalForge effect does not switch on the game's own status icons. `EPalStatusEffectType` is
-one of the game's internal lists, and no call to apply one is confirmed, so `nativeStatus` is
-a label you can read back rather than something that acts. Put whatever the effect should
-actually do into `onTick`.
+`nativeStatus` on a definition switches one of the game's own status icons on while the effect
+runs, and off again when it ends. It does not carry gameplay with it, so put whatever the effect
+should actually do into `onTick` — the icon and the damage are two separate things.
 </Callout>
 
 </Step>
@@ -441,7 +449,7 @@ M.Flare = Skill{
         onActivate = function(skill, owner, ctx)
             audio.Signal:play(owner)                                -- on the interacting character
             effects.Blessing:apply(owner, { source = ctx.beacon })  -- 12s, stacks to 3
-            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- at the beacon
+            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- false: no pal appears
             log.info("flare fired from " .. tostring(ctx.beacon))
         end,
     },
@@ -565,16 +573,22 @@ UE4SS console tells the whole story:
 [PalForge.beacon.buildings][info] beacon placed at 12345/-6789/420
 [PalForge.beacon.buildings][info] beacon tracked fresh: 0 use(s), 3 charge(s)
 [PalForge.beacon.effects][info] blessing applied by Altar@123,-68,4
-[PalForge.spawn][info] spawn.palAt Kitsunebi (lv 5) accepted; relocation to (12345,-6789,420) scheduled (SpawnMonster+teleport)
+[PalForge.spawn][warn] spawn.palAt: SpawnMonster(Kitsunebi, lv 5) ran and NOTHING spawned, so there is nothing to move to (12345,-6789,420)
 [PalForge.beacon.skills][info] flare fired from Altar@123,-68,4
-[PalForge.items][info] give Ruby x3
+[PalForge.items][info] give Ruby x3: 0 -> 3 [evidence declared]
 [PalForge.beacon.effects][info] blessing tick at 3.0s
 ```
 
 The registered-class count and the instance key are whatever your session produces. The order
-of the lines is not. `onActivate` runs the sound, the effect and the spawn before it logs its
-own line, so the blessing and the spawn are reported first — and `give Ruby x3` only after
+of the lines is not. `onActivate` runs the sound, the effect and the spawn attempt before it logs
+its own line, so the blessing and the spawn are reported first — and the `give` line only after
 `:activate` has returned.
+
+One of those lines is the one step this version cannot carry out, reported rather than hidden:
+no creature was placed. Every other line is the pack working, and the `give` line names the
+inventory count before and after, because that is what its `true` was measured from. A handler
+that carries on after a `false` is what lets you read the log this way — you can see exactly
+which step did not land.
 
 </Step>
 
@@ -651,10 +665,10 @@ Check this before you design around a handler.
 | Domain | The game calls it | You call it |
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
-| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`, `:renderOn(actor)`, `:skillsOf()` |
-| Item | `onObtain`, `onUse` | `:give(n)`, `:take(n)`, `:iconOf()`, `:recipeOf()` |
+| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()` (places nothing in this version), `:renderOn(actor)`, `:skillsOf()`, `:teachAll(actor)` |
+| Item | `onObtain`, `onUse` | `:count()`, `:give(n)`, `:take(n)` (drops what it removes at the player's feet), `:iconOf()`, `:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`, on PalForge's own schedule | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
-| Skill | nothing | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()` |
+| Skill | nothing | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | nothing | `:play()`, `:stop()` |
 
 Four handlers can be declared but never run yet, because nothing in the game announces them:
@@ -825,12 +839,15 @@ the building runtime waits for it. Then check that the structure is being tracke
 to your definition, usually because the id in `Building{ id = ... }` is not the id the game
 uses for that structure.
 
-**The pal does not appear.** A coordinate spawn needs a player controller in the session.
-Without one it logs
-`spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`
-and returns `false`; a `:spawn()` with no `at` reports the same thing as `spawn.pal:`. A
-`true` means the spawn was accepted and the move to your coordinate was scheduled — not that
-a pal is standing there yet. The rest is reported in the log.
+**The pal does not appear.** No pal appears from `:spawn` in this version, so this is expected
+rather than something you have misconfigured — [Pal](/docs/api/pal) has the detail. There is a
+second, earlier failure worth ruling out anyway: a spawn needs a player controller in the
+session, and without one it never reaches the game at all and logs
+`spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`.
+
+**The reward does not arrive.** `:give` answers `false` when the inventory count was not seen to
+rise, and its log line says which step stopped: no admin object at all (turn on
+`CheatManagerEnablerMod`), an item id the game does not know, or an inventory with no room.
 
 **The skill never fires twice.** That is `cooldown` doing its job. `:activate` returns `false`
 while cooling down. It also returns `false` for a skill whose `kind` is `"passive"`, and if

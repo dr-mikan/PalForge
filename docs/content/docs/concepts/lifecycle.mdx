@@ -424,10 +424,9 @@ and `world.left` ends.
 | `onExpire` | LIVE | `duration` reaching zero, `:remove(target)`, the target going invalid, or the world unloading |
 
 <Callout type="warn">
-A PalForge effect does not touch the game's own ailments. `EPalStatusEffectType` is a
-native enum and no native call to apply one was confirmed, so `nativeStatus` is metadata
-only and the status icon never changes. Put the gameplay in your handlers: drain health,
-give an item, spawn something.
+A `nativeStatus` on the definition switches one of the game's own ailments on while the effect
+runs, and off again when it ends — the icon really does change. Everything else is still yours:
+put the gameplay in your handlers, whether that is draining health or giving an item.
 </Callout>
 
 ### Skill

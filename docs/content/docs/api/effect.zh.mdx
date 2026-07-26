@@ -10,6 +10,7 @@ description: 给角色附加的状态。持续回复、持续伤害，或者会�
 - 给出一个临时增益，时间到了自己消失
 - 让同一个状态叠成多层，每次重新命中都刷新时间
 - 提前清掉一个状态，或者查它还剩多少时间
+- 在你的效果运行期间，点亮游戏自己的状态异常 —— 真正的中毒或燃烧图标
 
 效果是你给角色附加的状态，对象是玩家或者帕鲁。增益、减益、持续伤害、护盾都算。
 你只要写清楚它持续多久、每隔多久做一次事，计时交给 PalForge。
@@ -32,12 +33,11 @@ Regen:apply(Player.character())
 
 十秒后它从玩家身上消失，期间 `onTick` 执行了十次。
 
-<Callout type="warn">
-你自己写的效果**不会**点亮游戏本体的状态图标，也就是 Palworld 在血条上显示的中毒、燃烧
-那些小符号。它们属于游戏自己的列表（`EPalStatusEffectType`），目前还没有确认可以从 Lua
-点亮它们的办法。`nativeStatus` 字段会存在你的定义上，但没有任何地方读回它。所以，效果实际
-要*做*的事请写进处理函数：回复、伤害、增益或者打日志，都放进 `onApply`、`onTick` 和
-`onExpire`。围绕它们的计时今天就能用。
+<Callout type="info">
+效果还可以点亮**游戏自己的状态异常** —— 就是 Palworld 在血条上显示的中毒、燃烧、冰冻那些小符号。
+在 `nativeStatus` 里写上一个名字，效果被施加时它就亮起来，效果结束时它就熄灭。除此之外效果实际
+要*做*的事，仍然写进处理函数：回复、伤害、增益或者打日志，都放进 `onApply`、`onTick` 和
+`onExpire`。名字清单和相关规则见下面的 **游戏自己的状态异常**。
 </Callout>
 
 ## 定义一个效果
@@ -95,7 +95,7 @@ schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
     stackable: { description: '同一个目标上能不能叠好几层', type: 'boolean', default: 'false' },
     maxStacks: { description: 'stackable 为 true 时的层数上限', type: 'number', default: '1' },
     icon: { description: '状态栏图标。存在定义上，由 :iconOf 返回', type: 'any' },
-    nativeStatus: { description: '它对应的 EPalStatusEffectType。只是存着，没有任何东西会应用它', type: 'string' },
+    nativeStatus: { description: '它镜像的那个游戏自带状态异常，比如 "Poison"。效果运行期间它是亮着的。你定义的那一刻就会拿游戏的清单校验', type: 'string' },
     events: { description: '生命周期处理函数，归在一起: Effect.Spec.Events', type: 'table' },
     data: { description: '你自己的任意数据，跟着定义走', type: 'table' },
   }}
@@ -104,6 +104,49 @@ schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
 `duration` 和 `interval` 的单位都是**秒**，可以带小数。`data` 只在定义上存一份，所以每个
 目标共用同一张表；想为每个目标单独记点什么，见
 [为每个目标保存自己的数据](#为每个目标保存自己的数据)。
+
+## 游戏自己的状态异常
+
+`nativeStatus` 写的是 Palworld 自己的一个状态异常的名字。声明了它，效果被施加时 PalForge 就会点亮
+那个真正的状态异常，效果被移除或到期时再把它熄灭 —— 血条上出现的就是游戏自己会放上去的那个符号，
+行为也完全按游戏的规则来。
+
+```lua title="content/venom.lua"
+local Venom = Effect{
+    id           = "example:Venom",
+    name         = "Venom",
+    nativeStatus = "Poison",   -- the game's real poison, on for as long as this effect lasts
+    duration     = 8.0,
+    interval     = 1.0,
+    events = {
+        onTick = function(effect, target, ctx)
+            -- your own gameplay, on top of the ailment
+        end,
+    },
+}
+
+Venom:apply(Player.character())
+```
+
+它是**镜像，不是替代**。状态异常按游戏的规则运行，它有多强不由 PalForge 决定。PalForge 决定的是
+*什么时候*：把它摘掉的，是你写的 `duration`。
+
+名字用的是游戏自己的拼写，不区分大小写。整合包最常用的是 `Poison`、`Stun`、`Sleep`、`Burn`、
+`Freeze`、`Electrical`、`Darkness`、`Wetness`、`AttackUp` 和 `DefenseUp`。一共有 38 个，
+`require("palforge.core.status").names()` 会返回排好序的完整清单。
+
+游戏里没有的名字，会**在你写定义的那一刻**就被拒绝，而不是过后悄悄被忽略，而且消息里会列出你可能
+想写的每一个名字：
+
+```text
+PalForge: Effect: field "nativeStatus" not an ailment this build has; the names are AttackUp, Burn, CollectItem, Coma, ControlSP, Darkness, DefenseUp, Drown, DrownCheck, Dying, ...
+```
+
+<Callout type="info">
+如果状态异常点不亮 —— 目标不是角色，或者游戏不接受这个调用 —— **效果依然会正常施加**，你的处理函数
+也照样运行，原因会写进日志。整合包真正依赖的是 PalForge 自己的计时、叠层和处理函数，这些都不依赖
+那个图标。
+</Callout>
 
 ## 计时是怎么走的
 
@@ -504,20 +547,31 @@ local function cleanse(target)
 end
 ```
 
-## 三个现成的状态异常
+## 现成的状态异常
 
-`native/effects.lua` 里带了三份定义，加载时由 `registry.initialize` 帮你注册好。走模块或者
-走 `Effect.get` 都能拿到，两边给你的是同一份定义。
+`native/effects.lua` 把游戏声明的每一个状态异常都变成了可以直接施加的效果。没有另一份需要维护的
+名单：这份目录就是 `nativeStatus` 接受的那 38 个名字。
 
 ```lua
 local effects = require("palforge.native.effects")
 
-effects.CATALOG            --> { "Poison", "Burn", "Freeze" }
-effects.Poison             -- the curated handle
-effects.get("Burn")        -- the same handle, by id
-effects.get("Sleep")       --> nil, not a known ailment name
-Effect.get("Freeze")       -- also the same definition
+effects.CATALOG            --> all 38 names, sorted: { "AttackUp", "Burn", "CollectItem", ... }
+effects.get("Sleep")       -- an Effect handle for any of them, built the first time you ask
+effects.get("Sleep"):apply(pawn)
+effects.get("Nonsense")    --> nil, not a name this build declares
 ```
+
+`effects.get` 返回的句柄带着 `nativeStatus`，但**没有 `duration`** —— 这是它唯一让人意外的地方：
+施加之后状态异常就亮着，而且一直亮着。没有任何东西会替你把它摘掉，所以要自己摘。
+
+```lua
+local sleep = effects.get("Sleep")
+
+sleep:apply(pawn)      -- the game's sleep, on, and staying on
+sleep:remove(pawn)     -- off again
+```
+
+其中三个不一样，值得知道是哪三个：`Poison`、`Burn` 和 `Freeze` 写好了计时，所以它们会自己结束。
 
 | id | `duration` | `interval` | `nativeStatus` |
 | --- | --- | --- | --- |
@@ -530,15 +584,18 @@ effects.Burn:apply(pawn)
 effects.Burn:timeLeft(pawn)   --> 5.0
 ```
 
-这三个跑的时间表是真的：施加 `Poison`，它会存活按心跳对齐的十秒，每秒触发一次。缺的是内容
-本身。`native/effects.lua` 里 `onApply` 和 `onExpire` 的函数体只是 `-- TODO:` 标记，本该在
-那里调用原生状态，而且根本没有 `onTick`。今天施加 `Burn`，游戏里什么都不会变。把它们当成
-三个已经声明好合理计时的 id，玩法要么写进你自己的定义，要么从你自己的处理函数里驱动它们。
+`effects.get("Burn")` 给你的就是这个带计时的句柄，而不是另造一个没有 `duration` 的。这三个是用自己的
+id 注册好的，所以 `Burn` 只有一个，就是带着那五秒的那个。`Effect.get("Burn")` 找到的也是同一份定义。
 
-<Callout type="warn">
-`effects.get` 只认识 `Poison`、`Burn` 和 `Freeze`，别的名字一律返回 `nil`。
-`Effect.get("Sleep")` 还是能用，但你拿到的是一份全新的空定义，不是游戏里的状态异常。这三个
-名字之外的东西，请自己定义效果。
+三个都没有声明处理函数，因为不需要：状态异常本来就按游戏说的那样起作用，而一个空的处理函数只会在
+每次 tick 上白花一点力气。想在它之上加自己的东西 —— 伤害、提示、计数 —— 就用同样的 `nativeStatus`
+配上 `onTick`，自己声明一个效果，下面的 **持续伤害** 就是这个写法。
+
+<Callout type="info">
+`CATALOG` 里的名字并不是每一个都是整合包想要的状态异常。这份清单是游戏自己的，所以它也包含内部的
+计时器和记账项 —— `ControlSP`、`DrownCheck`、`UNKOTimer`、`Moratorium`，以及 `PalEnhancement` 系列。
+它们全都照原样提供，而不是被悄悄剔掉：剔掉反而会让人以为不支持，其实只是它们比较古怪而已。整合包
+最常用的，是上面 **游戏自己的状态异常** 里列出的那十个。
 </Callout>
 
 ## 为每个目标保存自己的数据
@@ -627,9 +684,9 @@ return Regen
 
 ### 持续伤害
 
-`Poison` 已经声明了计时，10 秒、每 1 秒一次，但它没有 `onTick`。在它旁边定义一个你自己的
-效果，给 tick 补上内容，然后两个一起施加，这样等以后游戏自己的状态异常接通了，你的内容包
-照样能用。
+`Poison` 已经声明了计时，10 秒、每 1 秒一次，也会点亮游戏自己的中毒，但它没有 `onTick`，所以
+不会自己造成伤害。在它旁边定义一个你自己的效果，给 tick 补上内容，然后两个一起施加：游戏负责
+显示状态异常，你的效果负责伤害。
 
 ```lua title="content/poison_bite.lua"
 local effects = require("palforge.native.effects")
@@ -666,7 +723,7 @@ local Venom = Effect{
     },
 }
 
----Poison a pawn: the native ailment id plus the effect that carries the damage.
+---Poison a pawn: the game's own ailment plus the effect that carries the damage.
 local function poison(pawn)
     if not pawn then return false end
     effects.Poison:apply(pawn)
@@ -808,7 +865,7 @@ Pal{
     name = "Sheepball",
     events = {
         onCaptured = function(pal, ctx)
-            effects.Freeze:apply(ctx.actor)      -- 3s, the native ailment id
+            effects.Freeze:apply(ctx.actor)      -- 3s of the game's own freeze
             Frostbite:apply(ctx.actor, { source = "sphere" })
         end,
     },
@@ -842,7 +899,8 @@ return Frostbite
 - `duration` 是持续多久，`interval` 是 `onTick` 多久跑一次。都是秒，都会被对齐到 0.5 秒的心跳上。
 - `:apply(target)` 开始，`:remove(target)` 提前结束。`:isActive`、`:timeLeft` 和 `:stacksOn` 告诉你它现在到哪一步了。
 - 再施加一次会刷新计时；`stackable` 和 `maxStacks` 都写了的话，还会加一层。
-- 效果对角色做了什么，是你写在 `onApply`、`onTick` 和 `onExpire` 里的代码。
+- `nativeStatus` 会在效果运行期间点亮游戏自己的状态异常；除此之外效果对角色做了什么，是你写在
+  `onApply`、`onTick` 和 `onExpire` 里的代码。
 - 想为每个目标记住的东西，放进你自己的弱引用键表，在 `onExpire` 里清掉。
 
 接下来读 [Skill](/docs/api/skill)，你就能自己发动一个技能，并给它命中的对象附上效果。

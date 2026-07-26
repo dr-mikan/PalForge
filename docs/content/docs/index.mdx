@@ -106,7 +106,7 @@ on it. Both spellings work:
 ```lua
 require("palforge.api")
 
-Pal.get("ChickenPal"):spawn(Player.coordinate())
+Pal.get("ChickenPal"):spawn(Player.coordinate())   -- :spawn places nothing in this version
 Item.get("Wood"):give(10)
 ```
 
@@ -278,12 +278,25 @@ How much of that happens by itself depends on the domain:
   driven by a sweep over the pals in the world, roughly every three seconds.
 - **Item** — `onObtain` and `onUse` run, with `ctx.itemId`, `ctx.count` and `ctx.actor`.
 - **Effect** — `onApply`, `onTick`, `onStack` and `onExpire` all run. PalForge keeps the
-  clock itself, off its own half-second heartbeat. It does not switch on the game's own
-  ailment icons (Poison, Burn, Freeze), so whatever the effect does to the target, your
-  handlers do.
+  clock itself, off its own half-second heartbeat. A `nativeStatus` on the definition switches
+  one of the game's own ailments on while the effect runs; whatever else happens to the target,
+  your handlers do.
 - **Audio, Mesh and UI** — no lifecycle events at all. You play a sound, a mesh is worn, and
   a UI element is mounted, refreshed and unmounted by you. `Audio.Handle:stop(actor)` is not
   per-sound: it silences everything playing on that actor.
+
+<Callout type="error" title="Two things this version cannot do">
+Plan around these before you design a pack. Both are calls you can still write — they answer
+`false` and change nothing, rather than failing halfway.
+
+- **Pals cannot be placed in the world.** `Pal.Handle:spawn` puts no creature anywhere. What
+  does work is reacting to the creatures the game itself spawns — capture, damage, death and
+  the periodic sweep all run.
+- **A sound has no volume of its own.** `Audio.Handle:setVolume` changes nothing, and the game
+  offers no per-sound volume to change. Pick a quieter sound from the catalog instead.
+
+Everything else on this page runs today.
+</Callout>
 
 <Callout type="warn">
 These are declarable, so your code stays valid, but nothing runs them today. Put the work
@@ -295,8 +308,7 @@ somewhere that does run:
   `:hit(target)`, `:equip(owner)` or `:unequip(owner)` from your own code, such as a pal's
   handler, a building's `onRightClick` or a keybind. The cooldown is counted in Lua, and
   `:activate` returns `false` while it is still cooling down.
-- `Audio.Handle:setVolume` returns `false` and changes nothing, and a `soundFile` of your
-  own resolves but plays nothing. Name a game sound id instead.
+- A `soundFile` of your own resolves but plays nothing. Name a game sound id instead.
 - Nothing refreshes a UI element for you. Call `:refresh()` when your state changes, or
   `:autoRefresh(ms)` to poll.
 </Callout>
@@ -344,7 +356,7 @@ local Whistle = Skill{
     cooldown = 30.0,
     events = {
         onActivate = function(skill, owner, ctx)
-            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))
+            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))   -- no pal appears
         end,
     },
 }
@@ -403,6 +415,8 @@ What each piece does:
 - `ctx.player` on `onRightClick` is the character that interacted; `ctx.actor` is the
   building actor.
 - `Audio.Handle:stop(actor)` is not per-sound. It stops everything playing on that actor.
+- `Item.Handle:give` reports what the inventory was measured to do, so a `false` from it means
+  nothing arrived. The `:spawn` line places nothing in this version; everything else here runs.
 
 <Callout type="info">
 `CampFire`, `Wood`, `Berries` and `ChickenPal` are real ids from

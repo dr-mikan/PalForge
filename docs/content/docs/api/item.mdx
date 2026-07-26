@@ -5,10 +5,10 @@ description: Put items into the player inventory, take them back out, and run yo
 
 ## What you can do after this page
 
+- Read how many of an item the player is carrying right now
 - Put items into the player inventory from your own code, and take them back out
 - Run your own code the moment the player picks something up
 - Run your own code the moment the player eats or uses something
-- Hand out a reward once the player has collected enough of a material
 - Give a game item your own name, description and recipe numbers
 
 An item is anything that sits in the inventory: materials, food, equipment, ammo. Write
@@ -334,8 +334,8 @@ Item{
 <Callout type="info">
 The two calls are two views of one pickup, so a repeat of the same item id within half a
 second is dropped and your handler runs once. The cost is real: a genuine second pickup of
-the same item inside that window is lost. A negative count is a removal, not a pickup, so a
-`:take` is skipped rather than reported as an obtain.
+the same item inside that window is lost. A negative count is a removal rather than a pickup,
+so it is skipped instead of being reported as an obtain.
 </Callout>
 
 ### onUse
@@ -395,8 +395,8 @@ anything you need today in `onObtain`, in `onUse`, or in your own code.
 - Your handler runs inside a `pcall`. If it raises, the error is logged with the channel and
   the hook that failed, and the event keeps going for everyone else. The error is not
   re-thrown, so your handler cannot stop the event.
-- The first argument is the handle, not the definition. `:give`, `:take` and the queries are
-  right there on it.
+- The first argument is the handle, not the definition. `:give`, `:take`, `:count` and the
+  queries are right there on it.
 - Describing a second item under an id you already used replaces the first, and only the
   newest one gets events.
 
@@ -435,8 +435,9 @@ vanilla item can be given, taken and queried without being described first.
 | Member | Returns | What it does |
 | --- | --- | --- |
 | `.id` | string | The item's game item id. A plain field. |
-| `:give(count)` | boolean | Adds `count` (default 1) to the local player's inventory. |
-| `:take(count)` | boolean | Tries to remove `count` (default 1); `count` is treated as a magnitude. `true` only when the inventory count was seen to fall. |
+| `:count()` | number \| nil | How many of this item the local player is carrying right now. `nil` means the count could not be read, never that the player has none. |
+| `:give(count)` | boolean | Adds `count` (default 1) to the local player's inventory. `true` only when the inventory count was seen to rise. |
+| `:take(count)` | boolean | Removes `count` (default 1) by dropping it on the ground at the player's feet. `count` is treated as a magnitude. `true` only when the count was seen to fall. |
 | `:recipeOf()` | table \| nil | The declared recipe, or `nil` when the item has none. |
 | `:iconOf()` | any \| nil | Texture ref from the item icon DataTable, else the declared `icon`. |
 | `:name()` | string | The declared name, else the id. |
@@ -450,14 +451,16 @@ vanilla item can be given, taken and queried without being described first.
 
 ### give
 
-`:give` puts items in the player's inventory through the game's own server call. PalForge
-resolves the id, finds the local player's inventory, and calls `AddItem_ServerInternal`.
+`:give` puts items in the player's inventory through the game's own admin object, and then
+checks that they arrived. The inventory count is read before the call and again after it, and
+`true` means the count was seen to **rise**.
 
 ```mermaid
 flowchart LR
-  A["Item.Handle:give"] --> B["utils.items.give"]
-  B --> C["object_manager.resolve"]
-  C --> D["AddItem_ServerInternal"]
+  A["Item.Handle:give"] --> B["read the count"]
+  B --> C["the game's GetItem cheat"]
+  C --> D["read the count again"]
+  D --> E["true only when it rose"]
 ```
 
 ```lua
@@ -465,60 +468,88 @@ Item.get("Wood"):give(10)        -- 10 Wood into the local player inventory
 Item.get("Arrow"):give()         -- count defaults to 1
 
 if not Item.get("Berries"):give(5) then
-    -- false means a step failed: no world yet, no player state, no inventory
+    -- nothing was measured to arrive; the log line says which step stopped
 end
 ```
 
-Every engine call is wrapped so the helper returns a boolean and never throws; the reason for
-a `false` goes to the log. A namespaced id is resolved first, so
-`Item.get("example:Potion"):give(1)` hands the name `example_Potion` to the engine — PalForge
-does not check that a matching data row exists. A `true` means the native call ran without
-raising, which is as far as the game lets Lua see. It is not a report of what the inventory
-now holds.
+<Callout type="warn">
+`:give` and `:take` go through the game's admin object, which the companion mod
+`CheatManagerEnablerMod` switches on. Without it there is no admin object to call, so both are
+refused before they reach the game and answer `false`.
+[Getting started](/docs/getting-started) has the `mods.txt` line that turns it on.
+</Callout>
+
+The boolean is the measurement, never the call. A `false` means nothing was seen to arrive, and
+that has several causes — no admin object, an item id the game does not know, or an inventory
+with no room for it. Every outcome is logged with the item, the count and what the inventory
+did, so the log separates the cases the boolean cannot:
+
+```text
+[PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
+[PalForge.items][warn] give Wood x10: GetItem executed [evidence declared] and the count did not rise (135 -> 135) — unknown item id, or the inventory had no room
+[PalForge.items][err] give Wood x10 failed: no PalCheatManager on this session (needs CheatManagerEnabler)
+```
+
+The `[evidence ...]` tag at the end records how PalForge checked the call against the running
+game before making it. You do not have to act on it; it is there to make a surprising `false`
+readable.
+
+A namespaced id is resolved first, so `Item.get("example:Potion"):give(1)` hands the name
+`example_Potion` to the game. PalForge does not check that a matching data row exists — an id
+the game does not know is accepted, adds nothing, and comes back as a `false`.
 
 <Callout type="info">
-`AddItem_ServerInternal` is also one of the calls that reports a pickup, so a `:give` you make
-from ordinary code normally reaches `onObtain` as well. Inside an `onObtain` handler it does
-not: a guard stops a handler from setting itself off again.
+Do not count on your own `:give` reaching your own `onObtain`. `onObtain` follows the game's own
+pickup reporting, and inside an `onObtain` handler a guard stops a handler from setting itself
+off again. Log what you hand out at the point you hand it out.
 </Callout>
 
 ### take
 
-`:take` is less certain than `:give`. No removal call has ever been confirmed on this build,
-so `:take` pushes a NEGATIVE amount through the same `AddItem_ServerInternal`, hoping the game
-accepts it. Because that is a hope, the result is measured rather than assumed: the inventory
-count is read before and after, and `:take` returns whether it really fell.
+`:take` is the same measurement in the other direction: the count is read before and after, and
+`true` means it was seen to **fall**.
+
+<Callout type="warn" title="Taking items drops them at the player's feet">
+Nothing in this version makes an item vanish, so `:take` uses the call that takes it out of the
+inventory: the items land on the ground where the player is standing. The inventory really has
+lost them — that is what `:take` means, and the count check proves it — but a pile appears next
+to the player, and anyone can walk over it and pick it back up.
+
+Plan for the pile. `:take` fits "hand this over" well and "this is consumed" badly, so charge a
+price with it only where the player picking it straight back up does not break your design.
+</Callout>
 
 ```mermaid
 flowchart LR
-  A["Item.Handle:take"] --> B["read CountItemNum"]
-  B --> C["AddItem_ServerInternal with a negative delta"]
-  C --> D["read CountItemNum again"]
-  D --> E[true only when the count dropped]
+  A["Item.Handle:take"] --> B["read the count"]
+  B --> C["clamp to what is held"]
+  C --> D["the game's DropItem cheat"]
+  D --> E["read the count again"]
+  E --> F["true only when it fell"]
 ```
 
 ```lua
 if Item.get("Wood"):take(3) then
-    -- the inventory count really fell
+    -- three Wood left the inventory, and are lying at the player's feet
 else
-    -- nothing was observed to leave: the negative delta did nothing on this build,
-    -- or the count could not be read at all
+    -- nothing was measured to leave
 end
 ```
 
-Every outcome is logged, so the log separates the cases the boolean cannot:
+Asking for more than the player is carrying is not an error: the request is clamped to what the
+inventory holds. Asking when they hold none skips the call altogether. Both outcomes are logged,
+so the log separates the cases the boolean cannot:
 
 ```text
-[PalForge.items][info] take Wood x3 (12 -> 9)
-[PalForge.items][warn] take Wood x3: only 2 removed (12 -> 10)
-[PalForge.items][warn] take Wood x3: count unchanged at 12 (the negative delta removed nothing)
-[PalForge.items][warn] take Wood x3: CountItemNum unreadable, removal unconfirmed
+[PalForge.items][info] take Wood x3: 12 -> 9, dropped on the ground at the player's feet [evidence declared]
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, dropping that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is dropped
 ```
 
 <Callout type="warn">
-A partial removal still returns `true` — the second line above returns `true` with 2 of 3
-gone. `true` means "something was seen to leave", not "exactly `count` left". When the amount
-has to be exact, read the count yourself before and after.
+A clamped removal still returns `true` — the second line above drops 2 of the 5 asked for and
+answers `true`. `true` means "the count was seen to fall", not "exactly `count` left". When the
+amount has to be exact, read `:count()` yourself before and after.
 </Callout>
 
 ### Queries
@@ -528,12 +559,18 @@ The handle answers questions about the item without you keeping the definition a
 ```lua
 local wood = Item.get("Wood")
 
+print(wood:count())       -- how many the player is carrying right now, or nil
 print(wood:name())        -- "Wood" for the curated definition
 print(wood:category())    -- "material"
 print(wood:maxStack())    -- 9999 for the curated definition, 1 for a bare handle
 
 local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 ```
+
+`count` is the one inventory action that works. It asks the game how many of that id the local
+player is carrying and hands back a plain number. `nil` means the count could not be read at
+all — no world loaded, no player found — and never that the player has none, so test for `nil`
+before you compare.
 
 `iconOf` looks the id up in `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` and reads the
 texture off the row. Every step is fail-soft: a missing table, row or column gives you the
@@ -600,9 +637,10 @@ Describe the effect once, at load, and call `:apply` from the handler. Describin
 the handler would register it again on every single use.
 
 <Callout type="warn">
-A PalForge effect does not touch the game's own status system. `EPalStatusEffectType` is a
-native enum and no call to apply one has been confirmed, so nothing appears on the status bar
-and no HP moves on its own. Whatever the effect is meant to do belongs in `onTick`.
+A PalForge effect keeps its own clock, and no HP moves on its own — whatever the effect is meant
+to do belongs in `onTick`. Naming a `nativeStatus` on the definition does switch one of the
+game's own ailments on for as long as the effect runs, so the status bar can change; the damage
+or healing behind it is still yours to write.
 </Callout>
 
 Check a running effect from anywhere:
@@ -688,7 +726,7 @@ Building{
     events = {
         onRightClick = function(self, ctx)
             -- ctx.actor = the build object, ctx.player = who interacted, ctx.buildId
-            local ok = Item.get("Wood"):take(5)
+            local ok = Item.get("Wood"):take(5)   -- the 5 Wood land on the ground, not in a bin
             if not ok then
                 log.warn("could not take the wood")
                 return
@@ -713,10 +751,12 @@ description wins, so the mesh block is repeated here to keep the vanilla look. U
 namespaced id for content of your own.
 </Callout>
 
-Because `take` measures what happened, the `false` branch above really does mean no wood was
-seen to leave, and the arrows are not handed out. What a `true` does not promise is that all
-5 left — a partial removal returns `true` too — so a trade that has to be exact still needs
-its own count check.
+Take first and hand over only when the take succeeded: that order is what stops the bench
+paying out for free, because `:take` returns `false` when nothing was seen to leave. Two things
+it does not promise. The wood does not disappear — it is on the floor next to the player, who
+can pick it straight back up, so this bench is a trade of convenience rather than a real price.
+And `true` does not mean all 5 left, because a request is clamped to what the player is
+carrying, so an exact trade still needs its own `:count()` check.
 
 ## What to watch out for
 
@@ -735,9 +775,9 @@ search over your registered ids is what finds it. The search reads a snapshot in
 particular order and returns the first id that matches, so two pack ids resolving to the same
 row name are ambiguous.
 
-**Removal is unconfirmed.** No removal call is known on this build. `:take` pushes a negative
-amount through the add call and reports what the inventory count did, so `true` means
-"something was seen to leave" and never "exactly `count` left".
+**Taking an item drops it at the player's feet.** `:take` moves items out of the inventory and
+into the world, because nothing in this version destroys one. The removal is real and measured,
+and so is the pile on the floor.
 
 **`onUse` does not name the target directly.** `ctx.actor` is the local player pawn, the one
 who used the item. The character it was used on is in `ctx.targetId` as a raw instance id,
@@ -756,13 +796,16 @@ back.
 channel and the hook, for example `item.use -> onUse handler failed: ...`. Your handler still
 cannot stop the event.
 
-**`give` and `take` work on the local player only.** They find `PalPlayerCharacter` and act
-on that inventory. Both return `false` when a step fails and log the reason; `:take` also
-returns `false` when every step worked but the count did not fall.
+**`give`, `take` and `count` work on the local player only.** They find `PalPlayerCharacter`
+and act on that inventory, so on a shared server they answer for whichever player pawn is found
+first. `count` answering `nil` means the read failed, not that the bag is empty.
 
-**A `:give` normally fires `onObtain` too.** It goes through the same call the game uses for
-a pickup. Inside an `onObtain` handler a guard prevents that, so a handler cannot set itself
-off; anywhere else, expect your own give to come back around.
+**`give` and `take` need the admin object.** Both go through the one
+`CheatManagerEnablerMod` switches on. Without that companion mod they are refused before they
+reach the game and answer `false`. `count` does not need it.
+
+**Do not count on a `:give` reaching your `onObtain`.** Log what your own code hands out at the
+point you call it, rather than waiting for the event to come back around.
 
 **Repeat pickups inside half a second are dropped.** Two of the game's calls report one
 pickup, and PalForge drops a repeat of the same item id within that window so your handler
@@ -772,8 +815,9 @@ runs once. A genuine second pickup of the same item that fast is lost.
 
 - Write `Item{ ... }` to describe an item. Only `id` is required, and the id must be one the
   game already has.
-- `Item.get("Wood")` gives you a handle for any item. `:give` adds to the player inventory;
-  `:take` tries to remove and tells you whether the count really fell.
+- `Item.get("Wood")` gives you a handle for any item. `:count()` reads how many the player is
+  carrying, `:give` adds and `:take` removes — and each of the three tells you what it measured,
+  not what it attempted. `:take` drops what it removes on the ground.
 - Put your code in `events`. `onObtain` runs on pickup, `onUse` runs when the item is used.
   `onCraft` and `onDiscard` do not run yet.
 - In `onUse`, `ctx.actor` is the player who used the item — the right target for food and

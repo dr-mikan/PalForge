@@ -10,6 +10,7 @@ description: キャラクターに付けるステータス。継続回復、継�
 - 時間がたつと自然に切れる一時的なバフを付ける
 - 同じステータスを重ねがけして、かかり直すたびに時間をリセットする
 - ステータスを途中で消したり、残り時間を調べたりする
+- 自分のエフェクトが動いている間、ゲーム本体の状態異常（本物の毒や炎のアイコン）を点灯させる
 
 エフェクトは、キャラクター（プレイヤーやパル）に付けるステータスです。バフ、デバフ、
 継続ダメージ、シールドなどがこれにあたります。どれだけ続くか、どれくらいの間隔で何かを
@@ -33,13 +34,12 @@ Regen:apply(Player.character())
 
 10 秒後、`onTick` を 10 回実行したうえでプレイヤーから外れます。
 
-<Callout type="warn">
-自分で書いたエフェクトは、ゲーム本体のステータスアイコン（体力バーの横に出る毒や炎のマーク）を
-**点灯させません**。あれはゲーム側のリスト（`EPalStatusEffectType`）にあるもので、Lua から
-点灯させる方法はまだ確認できていません。`nativeStatus` フィールドは定義に保持されますが、
-読み返す仕組みはありません。エフェクトが実際に*何をするか*はハンドラに書いてください。
-回復・ダメージ・バフ・ログ出力は `onApply` / `onTick` / `onExpire` の中で行います。
-その周りの時間管理は今のまま動きます。
+<Callout type="info">
+エフェクトは、**ゲーム本体の状態異常**（Palworld が体力バーに出す毒・炎・氷のマーク）を点灯させる
+こともできます。`nativeStatus` にその名前を書くと、エフェクトが適用された時点で点灯し、
+終了した時点で消えます。それ以外にエフェクトが実際に*何をするか*は、これまでどおりハンドラに
+書いてください。回復・ダメージ・バフ・ログ出力は `onApply` / `onTick` / `onExpire` の中です。
+名前の一覧と決まりごとは、下の **ゲーム本体の状態異常** にあります。
 </Callout>
 
 ## エフェクトを定義する
@@ -98,7 +98,7 @@ schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
     stackable: { description: '1 つの対象に複数を重ねられるかどうか', type: 'boolean', default: 'false' },
     maxStacks: { description: 'stackable が true のときのスタック上限', type: 'number', default: '1' },
     icon: { description: 'ステータスバー用アイコン。定義に保持され :iconOf が返します', type: 'any' },
-    nativeStatus: { description: '対応する EPalStatusEffectType。保持されるだけで、何も適用しません', type: 'string' },
+    nativeStatus: { description: '対応するゲーム本体の状態異常 (例: "Poison")。エフェクトが動いている間だけ点灯します。定義した瞬間にゲームの一覧と照合されます', type: 'string' },
     events: { description: 'ライフサイクルハンドラをまとめたもの: Effect.Spec.Events', type: 'table' },
     data: { description: '自由に使えるペイロード。定義に載ります', type: 'table' },
   }}
@@ -107,6 +107,50 @@ schema.get("Effect.Spec").fields   -- the same, as a table, for tooling
 `duration` と `interval` の単位は**秒**で、小数点も使えます。`data` は定義に 1 つだけ
 置かれるため、すべての対象で同じテーブルを共有します。対象ごとに覚えておきたいものは
 [対象ごとのデータを自分で持つ](#対象ごとのデータを自分で持つ)を参照してください。
+
+## ゲーム本体の状態異常
+
+`nativeStatus` には、Palworld 自身の状態異常の名前を書きます。宣言しておくと、エフェクトが
+適用された時点で PalForge が本物の状態異常を点灯させ、解除されたときや期限が切れたときに消します。
+体力バーに出るマークはゲームが自分で出しているものと同じで、挙動もゲームが決めたとおりです。
+
+```lua title="content/venom.lua"
+local Venom = Effect{
+    id           = "example:Venom",
+    name         = "Venom",
+    nativeStatus = "Poison",   -- the game's real poison, on for as long as this effect lasts
+    duration     = 8.0,
+    interval     = 1.0,
+    events = {
+        onTick = function(effect, target, ctx)
+            -- your own gameplay, on top of the ailment
+        end,
+    },
+}
+
+Venom:apply(Player.character())
+```
+
+これは**置き換えではなく、鏡です**。状態異常はゲームの決まりで動き、その強さを PalForge は設定
+しません。PalForge が決めるのは*いつ*かだけで、外すタイミングを決めるのはあなたの `duration` です。
+
+名前はゲーム本体の綴りで、大文字・小文字は区別されません。パックがよく使うのは `Poison`、`Stun`、
+`Sleep`、`Burn`、`Freeze`、`Electrical`、`Darkness`、`Wetness`、`AttackUp`、`DefenseUp` です。
+全部で 38 種類あり、`require("palforge.core.status").names()` がソート済みの全一覧を返します。
+
+ゲームに無い名前は、あとから静かに無視されるのではなく、**定義を書いたその瞬間に**拒否されます。
+メッセージには、書けたはずの名前がすべて並びます。
+
+```text
+PalForge: Effect: field "nativeStatus" not an ailment this build has; the names are AttackUp, Burn, CollectItem, Coma, ControlSP, Darkness, DefenseUp, Drown, DrownCheck, Dying, ...
+```
+
+<Callout type="info">
+状態異常を点灯できなかった場合（対象がキャラクターでない、ゲームが呼び出しを受け付けないなど）でも、
+**エフェクト自体は通常どおり適用され**、ハンドラも動きます。理由はログに出ます。パックが実際に
+相手にしているのは PalForge 側のタイミング・スタック・ハンドラであり、そのどれもアイコンには
+依存していません。
+</Callout>
 
 ## タイミングの仕組み
 
@@ -532,20 +576,34 @@ local function cleanse(target)
 end
 ```
 
-## 用意済みの 3 つの状態異常
+## 用意済みの状態異常
 
-`native/effects.lua` には 3 つの定義が入っていて、読み込み時に `registry.initialize` が
-登録します。モジュール経由でも `Effect.get` 経由でも到達でき、どちらも同じ定義を返します。
+`native/effects.lua` は、ゲームが宣言している状態異常すべてを、そのまま適用できるエフェクトに
+しています。別途メンテナンスする一覧はありません。カタログは `nativeStatus` が受け付けるのと同じ
+38 個の名前です。
 
 ```lua
 local effects = require("palforge.native.effects")
 
-effects.CATALOG            --> { "Poison", "Burn", "Freeze" }
-effects.Poison             -- the curated handle
-effects.get("Burn")        -- the same handle, by id
-effects.get("Sleep")       --> nil, not a known ailment name
-Effect.get("Freeze")       -- also the same definition
+effects.CATALOG            --> all 38 names, sorted: { "AttackUp", "Burn", "CollectItem", ... }
+effects.get("Sleep")       -- an Effect handle for any of them, built the first time you ask
+effects.get("Sleep"):apply(pawn)
+effects.get("Nonsense")    --> nil, not a name this build declares
 ```
+
+`effects.get` が返すハンドルは `nativeStatus` を持ちますが、**`duration` を持ちません**。ここが唯一
+意外な点です。適用すると状態異常が点灯し、そのまま点きっぱなしになります。外してくれるものは無いので、
+自分で外してください。
+
+```lua
+local sleep = effects.get("Sleep")
+
+sleep:apply(pawn)      -- the game's sleep, on, and staying on
+sleep:remove(pawn)     -- off again
+```
+
+そのうち 3 つだけは別で、どれかを知っておく価値があります。`Poison`、`Burn`、`Freeze` には手書きの
+タイミングが入っているので、自分で切れます。
 
 | id | `duration` | `interval` | `nativeStatus` |
 | --- | --- | --- | --- |
@@ -558,17 +616,21 @@ effects.Burn:apply(pawn)
 effects.Burn:timeLeft(pawn)   --> 5.0
 ```
 
-この 3 つが動かすスケジュールは本物です。`Poison` を適用すれば、ハートビートに丸められた
-10 秒間動き続け、1 秒ごとに発火します。欠けているのは中身のほうです。`native/effects.lua` の
-`onApply` と `onExpire` の本体は、ネイティブのステータス呼び出しが入るはずの `-- TODO:`
-マーカーであり、`onTick` はありません。現状 `Burn` を適用してもゲーム内では何も変わりません。
-適切なタイミングが宣言済みの 3 つの id だと考えて、ゲームプレイは自分の定義に書くか、
-自分のハンドラからこれらを動かす形で足してください。
+`effects.get("Burn")` が返すのはこの時間付きのハンドルであって、`duration` の無い 2 つ目ではありません。
+3 つはそれぞれ自分の id で登録済みなので、`Burn` はひとつだけ、5 秒が入っているものだけです。
+`Effect.get("Burn")` も同じ定義を返します。
 
-<Callout type="warn">
-`effects.get` が知っているのは `Poison`、`Burn`、`Freeze` の 3 つだけで、それ以外には `nil` を
-返します。`Effect.get("Sleep")` は動きますが、返るのはゲームの状態異常ではなく、まっさらな
-空の定義です。この 3 つ以外の名前が必要なときは、自分でエフェクトを定義してください。
+3 つともハンドラを宣言していません。必要ないからです。状態異常はゲームが決めたとおりに働きますし、
+空のハンドラはティックごとにわずかな処理を増やすだけです。その上に自分のもの — ダメージ、メッセージ、
+カウンタ — を載せたいときは、同じ `nativeStatus` と `onTick` を持つエフェクトを自分で宣言してください。
+下の **継続ダメージ** がその形です。
+
+<Callout type="info">
+`CATALOG` に並ぶ名前のすべてが、パックの使いたい状態異常というわけではありません。この一覧はゲーム
+自身のものなので、内部のタイマーや管理用の値 — `ControlSP`、`DrownCheck`、`UNKOTimer`、`Moratorium`、
+`PalEnhancement` 系 — も含まれます。黙って落とさずすべて出しているのは、外してしまうと「使えない」
+ように見えてしまうからで、実際は「風変わり」なだけです。パックがよく使うのは、上の
+**ゲーム本体の状態異常** に挙げた 10 個です。
 </Callout>
 
 ## 対象ごとのデータを自分で持つ
@@ -663,9 +725,9 @@ return Regen
 
 ### 継続ダメージ
 
-`Poison` はタイミング（10 秒・1 秒間隔）をすでに宣言していますが、`onTick` を持っていません。
-その隣に自分のエフェクトを定義して tick に中身を与え、両方を適用しておけば、後日ゲーム側の
-状態異常が繋がったときにもパックはそのまま動きます。
+`Poison` はタイミング（10 秒・1 秒間隔）を宣言済みで、ゲーム本体の毒も点灯させますが、`onTick` を
+持っていないので自前のダメージは出しません。その隣に自分のエフェクトを定義して tick に中身を与え、
+両方を適用してください。ゲームは状態異常を表示し、自分のエフェクトがダメージを担当します。
 
 ```lua title="content/poison_bite.lua"
 local effects = require("palforge.native.effects")
@@ -702,7 +764,7 @@ local Venom = Effect{
     },
 }
 
----Poison a pawn: the native ailment id plus the effect that carries the damage.
+---Poison a pawn: the game's own ailment plus the effect that carries the damage.
 local function poison(pawn)
     if not pawn then return false end
     effects.Poison:apply(pawn)
@@ -849,7 +911,7 @@ Pal{
     name = "Sheepball",
     events = {
         onCaptured = function(pal, ctx)
-            effects.Freeze:apply(ctx.actor)      -- 3s, the native ailment id
+            effects.Freeze:apply(ctx.actor)      -- 3s of the game's own freeze
             Frostbite:apply(ctx.actor, { source = "sphere" })
         end,
     },
@@ -884,7 +946,8 @@ return Frostbite
 - `duration` が続く長さ、`interval` が `onTick` の間隔です。どちらも秒で、0.5 秒のハートビートに丸められます。
 - `:apply(target)` で開始し、`:remove(target)` で早めに終わらせます。`:isActive`、`:timeLeft`、`:stacksOn` で状態を調べられます。
 - もう一度 `:apply` すると残り時間がリセットされ、`stackable` と `maxStacks` を両方書いていればスタックも 1 増えます。
-- キャラクターに何をするかは、`onApply` / `onTick` / `onExpire` に書く自分のコードです。
+- `nativeStatus` は、エフェクトが動いている間だけゲーム本体の状態異常を点灯させます。それ以外に
+  キャラクターへ何をするかは、`onApply` / `onTick` / `onExpire` に書く自分のコードです。
 - 対象ごとに覚えておきたいものは、自分の弱参照テーブルに入れて `onExpire` で消します。
 
 次は [Skill](/docs/api/skill) を読むと、自分でアビリティを発動して、当たった相手に

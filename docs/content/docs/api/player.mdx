@@ -231,7 +231,7 @@ local function spawnHere(charId, level)
         log.warn("no world yet - nothing spawned")
         return false
     end
-    return Pal.get(charId):spawn{ at = at, level = level or 5 }
+    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- false in this version
 end
 
 event.on("world.ready", function()
@@ -240,12 +240,16 @@ end)
 ```
 
 <Callout type="warn">
-Coordinate spawning is not instant. `:spawn{ at = ... }` calls
-`PalCheatManager:SpawnMonster`, which drops the pal next to the player, and PalForge then
-relocates that one actor to your coordinate, retrying every 400 ms up to six times because
-the actor materializes a few frames after the call. You will see it appear beside you and
-then move. With the `CheatManagerEnabler` mod absent there is no cheat manager at all and
-`:spawn` returns `false`.
+`Pal.Handle:spawn` places no creature in the world in this version, so a coordinate you work out
+here does not put anything anywhere — see [Pal](/docs/api/pal). The coordinate itself is real,
+and everything else on this page works: use it for your own distance maths, for a structure's
+position, or for anything you place yourself.
+
+The route it takes is a spawn followed by a move. The game's own call drops a pal beside the
+player, and PalForge relocates that one actor to your coordinate, retrying every 400 ms up to
+six times because a creature takes a few frames to appear. It also needs the
+`CheatManagerEnabler` mod: without it there is no admin object at all, and `:spawn` answers
+`false` before it reaches the game.
 </Callout>
 
 ### Spawn in front of the player
@@ -272,7 +276,7 @@ end
 
 local at = inFront(600)   -- 6 m ahead
 if at then
-    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }
+    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- false in this version
 end
 ```
 

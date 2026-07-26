@@ -10,6 +10,7 @@ description: 可以给帕鲁的攻击和特性，以及在你自己的代码里�
 - 用秒数设置冷却，避免连发
 - 添加一个特性，只要帕鲁带着它就一直生效
 - 读出一只帕鲁身上的技能列表
+- 把技能装到活着的帕鲁或玩家身上，让游戏自己带着它
 
 技能就是攻击或特性。用 `Skill{ ... }` 描述一次，你会拿到一个带着各种动作的对象。游戏本身不会自己
 发动技能，所以发动它的那一行要写在你自己的代码里 —— 下面这段的最后一行就是：
@@ -249,6 +250,9 @@ skill:unequip(owner, ctx)     --> boolean
 skill:cooldownLeft(owner)     --> number, seconds until ready, 0 when ready
 ```
 
+这五个都是你自己的记账，不会告诉游戏任何事。另外三个 —— `:teach`、`:forget` 和 `:skillsOn` ——
+正好相反：它们往真正的角色上写，也从角色上读回来。下面有专门的一节。
+
 - `owner` 和 `target` 是你传什么就是什么 —— 帕鲁的 pawn、玩家角色，或者一个普通的表。只有冷却的
   记账会看 `owner`，而且只把它当身份标识用。
 - `ctx` 是你自己的上下文表。没有任何东西会替你填它，你也可以不传：四个动作都会放一个空表进去，
@@ -356,6 +360,70 @@ Ember:iconOf()   --> the declared icon, since "example:Ember" has no row in that
 Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall back to
 ```
 
+## 装到活着的角色身上
+
+上面那五个动作是你自己的记账：它们只运行你的处理函数，不会告诉游戏任何事。下面这三个正相反 ——
+它们把技能装到**活着的**帕鲁或玩家身上，让游戏自己带着它，并读回那个角色现在有什么。
+
+```lua
+skill:teach(actor)      --> boolean, true only when the skill is on the character afterwards
+skill:forget(actor)     --> boolean, true only when it is gone afterwards
+skill:skillsOn(actor)   --> { active = { ... }, passive = { ... } } | nil
+```
+
+`actor` 必须是一个真正的角色：站在世界里的帕鲁，或者 `Player.character()` 返回的玩家自己的 pawn。
+别的东西一律以 `false` 拒绝。
+
+```lua
+local pawn = Player.character()
+
+Skill.get("FireBlast"):teach(pawn)    -- one of the game's own moves
+Skill.get("Legend"):teach(pawn)       -- not a move: added as a passive trait
+Skill.get("FireBlast"):skillsOn(pawn) --> { active = { "FireBlast" }, passive = { "Legend" } }
+Skill.get("FireBlast"):forget(pawn)
+```
+
+### 向游戏要哪一类，由 id 决定
+
+Palworld 把主动技能和被动技能分开存放，所以 `:teach` 必须二选一 —— 而它是按 **id** 来选的，不是按
+你的 `kind` 字段：
+
+- 游戏认得、属于它自己主动技能的 id —— `"FireBlast"`、`"Psychokinesis"`，一共 309 个 —— 会被加进
+  这个角色的装备技能里；
+- **其余任何 id**，都会以那个名字作为被动技能加上去。
+
+<Callout type="warn">
+`kind` 描述的是你自己的代码发动时，**你的**技能会做什么。`:teach` 要的是游戏自己的技能，所以它
+根本不看 `kind`。一个 id 是 `"FireBlast"` 的技能，就算写了 `kind = "passive"`，装上去的仍是游戏的
+主动技能；而 `"example:Ember"` 这种整合包自己的 id，不管你声明了什么，都会按那个名字当被动交出去
+—— 游戏里没有叫这个名字的主动技能。
+</Callout>
+
+大小写不影响结果，`"fireblast"` 找到的是同一个技能。想在写下 id 之前先确认，
+`require("palforge.core.character").wazaNames()` 会返回这个版本里全部主动技能的名字，已排好序。
+
+### 那个布尔值是什么意思
+
+每一次写入之后都会把角色读回来核对，所以 `true` 表示这个技能**在角色身上被看到了** —— 绝不是“调用
+没报错”。`false` 表示它没有装上：目标不是角色、游戏不接受这个 id，或者写入被拒绝了。
+
+`:skillsOn(actor)` 返回 `{ active = {...}, passive = {...} }`。空列表表示读成功了、这个角色一个都
+没有。整张表是 `nil` 则表示这个角色根本读不出来 —— 是“未知”，不是“没有” —— 所以取下标之前先判断
+`nil`。
+
+```lua
+local carried = Skill.get("FireBlast"):skillsOn(pawn)
+if carried then
+    print(#carried.active .. " moves, " .. #carried.passive .. " traits")
+end
+```
+
+<Callout type="info">
+`:teach` 和 `:equip` 是有意分开的两件事，而且两个都有用。`:equip` 对任何值都能跑你自己的 `onEquip`
+处理函数，且不告诉游戏任何事；`:teach` 往真正的角色上写，并把游戏之后显示的结果告诉你。自己维护
+一份“已装备”集合的整合包，继续用 `:equip` 就好。
+</Callout>
+
 ## 帕鲁身上的技能
 
 帕鲁用一个字符串数组，按 id 列出自己拥有的技能：
@@ -377,9 +445,11 @@ PalForge: Pal: field "skills[2]" expects string, got number
 ```
 
 <Callout type="warn">
-这个数组就只是一个列表。PalForge 不会去解析这些 id，不会装备被动技能，也不会发动主动技能。它只是
-把列表存下来，通过 `pal:skillsOf()` 交还给你。剩下的在处理函数里自己做 —— 下面这个循环就够了。
+这个数组就只是一个列表。光是声明它，不会往任何生物身上装上什么，游戏也不会替你发动那些主动技能。
+它只是被存下来，通过 `pal:skillsOf()` 交还给你。
 </Callout>
+
+它有两种用法。一种是自己写循环，做你自己的记账：
 
 ```lua
 for _, id in ipairs(Blaze:skillsOf()) do
@@ -389,6 +459,17 @@ for _, id in ipairs(Blaze:skillsOf()) do
     end
 end
 ```
+
+另一种是一次性把整份列表交给一只活着的生物，用
+[`Pal.Handle:teachAll`](/docs/api/pal)：
+
+```lua
+local taught, asked = Blaze:teachAll(somePalActor)
+-- 2, 2 when both landed; 1, 2 when one did not
+```
+
+`teachAll` 对每个 id 的分流规则和 `:teach` 完全一样，其中一个失败也会继续做完剩下的，并返回两个
+数字，所以“只成了一部分”看得见，而不会被压成一个 `true` 或 `false`。
 
 ## Palworld 自带的技能 id
 
@@ -652,6 +733,7 @@ PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated"
 - `cooldown` 以秒为单位，按 owner 分别计数，只有 `:activate` 会检查它。
 - `kind = "passive"` 会让 `:activate` 返回 `false`；这类技能请用 `:equip` 和 `:unequip`。
 - 处理函数崩溃只会得到 `false`，日志里什么都没有，所以要在里面自己打日志。
-- `pal:skillsOf()` 给出一只帕鲁携带的 id；遍历它们是你的活。
+- `pal:skillsOf()` 给出的是一只帕鲁*声明*的 id。`skill:teach(actor)` 把一个技能装到活着的角色身上，
+  `skill:skillsOn(actor)` 读回那个角色真正带着什么，`pal:teachAll(actor)` 一次装上整份声明列表。
 
 接下来读 [Effect](/docs/api/effect) —— 被动技能要持续做事，需要的计时器就在那里。

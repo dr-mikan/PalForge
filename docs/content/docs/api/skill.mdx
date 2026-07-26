@@ -10,6 +10,7 @@ description: Attacks and traits you can give a pal, and the line in your own cod
 - Stop it going off too often, with a cooldown you set in seconds
 - Add a trait that keeps doing something while a pal has it on
 - Read back the list of skills a pal carries
+- Put a skill onto a live pal or the player, so the game itself carries it
 
 A skill is an attack or a trait. You describe it once with `Skill{ ... }`, and you get back an
 object with the actions on it. Nothing in the game sets a skill off by itself, so the line that
@@ -259,6 +260,10 @@ skill:unequip(owner, ctx)     --> boolean
 skill:cooldownLeft(owner)     --> number, seconds until ready, 0 when ready
 ```
 
+These five are your own bookkeeping and never tell the game anything. Three more —
+`:teach`, `:forget` and `:skillsOn` — write to and read from a real character; they have their
+own section below.
+
 - `owner` and `target` are whatever you pass — a pal pawn, the player character, a plain table.
   The only thing that looks at `owner` is the cooldown bookkeeping, and only as an identity.
 - `ctx` is a context table of your own. Nothing fills it in for you, and you can leave it out:
@@ -372,6 +377,74 @@ Ember:iconOf()   --> the declared icon, since "example:Ember" has no row in that
 Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall back to
 ```
 
+## Teaching a live character
+
+The five actions above are your own bookkeeping: they run your handlers and tell the game
+nothing. These three do the opposite — they put a skill on a **live** pal or player so the game
+itself carries it, and read back what that character has.
+
+```lua
+skill:teach(actor)      --> boolean, true only when the skill is on the character afterwards
+skill:forget(actor)     --> boolean, true only when it is gone afterwards
+skill:skillsOn(actor)   --> { active = { ... }, passive = { ... } } | nil
+```
+
+`actor` has to be a real character — a pal standing in the world, or the player's own pawn from
+`Player.character()`. Anything else is refused with a `false`.
+
+```lua
+local pawn = Player.character()
+
+Skill.get("FireBlast"):teach(pawn)    -- one of the game's own moves
+Skill.get("Legend"):teach(pawn)       -- not a move: added as a passive trait
+Skill.get("FireBlast"):skillsOn(pawn) --> { active = { "FireBlast" }, passive = { "Legend" } }
+Skill.get("FireBlast"):forget(pawn)
+```
+
+### The id decides which kind the game is asked for
+
+Palworld keeps active moves and passive traits in two separate places, so `:teach` has to pick
+one — and it picks on **the id**, not on your `kind` field:
+
+- an id the game knows as one of its own active moves — `"FireBlast"`, `"Psychokinesis"`, 309 of
+  them — is added to the character's equipped moves;
+- **any other id** is added as a passive skill under that name.
+
+<Callout type="warn">
+`kind` describes what YOUR skill does when your code fires it. `:teach` asks the GAME for one of
+its own, so it does not read `kind` at all. Declaring `kind = "passive"` on a skill whose id is
+`"FireBlast"` still teaches the game's active move, and a pack id like `"example:Ember"` is
+handed over as a passive name whatever you declared — the game has no move by that name.
+</Callout>
+
+Case does not matter, so `"fireblast"` finds the same move.
+`require("palforge.core.character").wazaNames()` returns every active-move name this build has,
+sorted, if you want to check an id before you write it.
+
+### What the boolean means
+
+Every write is checked by reading the character back afterwards, so `true` means the skill was
+**seen on the character** — never that a call ran without complaining. `false` means it did not
+land: the target is not a character, the game will not take the id, or the write was refused.
+
+`:skillsOn(actor)` answers `{ active = {...}, passive = {...} }`. Empty lists mean the read
+worked and the character carries none. `nil` for the whole table means the character could not
+be read at all — unknown, never "has none" — so check for `nil` before you index it.
+
+```lua
+local carried = Skill.get("FireBlast"):skillsOn(pawn)
+if carried then
+    print(#carried.active .. " moves, " .. #carried.passive .. " traits")
+end
+```
+
+<Callout type="info">
+`:teach` and `:equip` are different on purpose, and both are worth having. `:equip` runs your
+own `onEquip` handler on any value you like and tells the game nothing; `:teach` writes to a
+real character and tells you what the game shows afterwards. A pack that tracks its own
+"equipped" set keeps using `:equip`.
+</Callout>
+
 ## Skills on a pal
 
 A pal lists the skills it owns by id, as an array of strings:
@@ -393,10 +466,11 @@ PalForge: Pal: field "skills[2]" expects string, got number
 ```
 
 <Callout type="warn">
-That list is only a list. PalForge does not look the ids up, does not equip the passives and does
-not fire the actives. It stores the list and hands it back through `pal:skillsOf()`. Do the rest
-in a handler — the loop below is all it takes.
+That list is only a list. Declaring it does not put anything on any creature, and nothing in the
+game fires the actives for you. It is stored and handed back through `pal:skillsOf()`.
 </Callout>
+
+Two things you can do with it. Write the loop yourself, for your own bookkeeping:
 
 ```lua
 for _, id in ipairs(Blaze:skillsOf()) do
@@ -406,6 +480,17 @@ for _, id in ipairs(Blaze:skillsOf()) do
     end
 end
 ```
+
+Or hand the whole list to a live creature in one call, with
+[`Pal.Handle:teachAll`](/docs/api/pal):
+
+```lua
+local taught, asked = Blaze:teachAll(somePalActor)
+-- 2, 2 when both landed; 1, 2 when one did not
+```
+
+`teachAll` routes each id exactly as `:teach` does, keeps going after one fails, and returns two
+numbers so a partial result is visible instead of being flattened into a `true` or a `false`.
 
 ## Palworld's own skill ids
 
@@ -676,7 +761,9 @@ you at once, instead of leaving you with a skill that silently never runs.
 - `cooldown` is in seconds, counted per owner, and only `:activate` checks it.
 - `kind = "passive"` makes `:activate` return `false`; use `:equip` and `:unequip` for those.
 - A handler that crashes comes back as `false` with nothing in the log, so log inside it.
-- `pal:skillsOf()` gives you the ids a pal carries; looping over them is your job.
+- `pal:skillsOf()` gives you the ids a pal *declares*. `skill:teach(actor)` puts one on a live
+  character, `skill:skillsOn(actor)` reads back what that character really has, and
+  `pal:teachAll(actor)` does the whole declared list at once.
 
 Next, read [Effect](/docs/api/effect) — it has the timer a passive skill needs to keep doing
 something.

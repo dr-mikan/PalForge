@@ -10,6 +10,7 @@ description: A status you put on a character - healing over time, damage over ti
 - Give a temporary buff that wears off on its own
 - Let a status pile up in stacks and refresh every time it lands again
 - Clear a status early, or check how much time is left on it
+- Switch on one of the game's own ailments — the real poison or burn icon — while yours runs
 
 An effect is a status you put on a character — the player, or a pal. A buff, a debuff,
 damage over time, a shield. You say how long it lasts and how often it should do
@@ -33,13 +34,12 @@ Regen:apply(Player.character())
 
 Ten seconds later it is off the player again, having run `onTick` ten times.
 
-<Callout type="warn">
-An effect you write does **not** switch on the game's own status icon — the little poison
-or burn symbol Palworld shows on a health bar. Those live in the game's own list
-(`EPalStatusEffectType`), and there is no confirmed way to turn one on from Lua yet. The
-`nativeStatus` field is stored on your definition, and nothing reads it back. So put
-whatever the effect is meant to *do* in your handlers: heal, damage, buff or log inside
-`onApply`, `onTick` and `onExpire`. The timing around them works today.
+<Callout type="info">
+An effect can also switch on one of **the game's own ailments** — the poison, burn or freeze
+symbol Palworld puts on a health bar. Name one in `nativeStatus` and it goes on when the effect
+is applied and comes off when the effect ends. Everything the effect is meant to *do* beyond
+that still belongs in your handlers: heal, damage, buff or log inside `onApply`, `onTick` and
+`onExpire`. The section **The game's own ailments** below has the names and the rules.
 </Callout>
 
 ## Defining an effect
@@ -98,7 +98,7 @@ should happen repeatedly. Everything you may pass is below.
     stackable: { description: 'may several copies pile up on one target', type: 'boolean', default: 'false' },
     maxStacks: { description: 'stack ceiling when stackable is true', type: 'number', default: '1' },
     icon: { description: 'status-bar icon. Stored on the definition and returned by :iconOf', type: 'any' },
-    nativeStatus: { description: 'the EPalStatusEffectType this mirrors. Stored only; nothing applies it', type: 'string' },
+    nativeStatus: { description: "the game's own ailment this mirrors, such as \"Poison\". Switched on while the effect runs. Checked against the game's list the moment you define it", type: 'string' },
     events: { description: 'lifecycle handlers, grouped: Effect.Spec.Events', type: 'table' },
     data: { description: 'free-form payload of your own, carried onto the definition', type: 'table' },
   }}
@@ -108,6 +108,53 @@ should happen repeatedly. Everything you may pass is below.
 stored once on the definition, so every target shares the same table — for anything you
 want to remember per target, see
 [Keeping your own data per target](#keeping-your-own-data-per-target).
+
+## The game's own ailments
+
+`nativeStatus` names one of Palworld's own status effects. Declare one and PalForge switches the
+real ailment on when your effect is applied, and off again when it is removed or when it
+expires — the same symbol on the health bar the game puts there itself, behaving the way the
+game makes it behave.
+
+```lua title="content/venom.lua"
+local Venom = Effect{
+    id           = "example:Venom",
+    name         = "Venom",
+    nativeStatus = "Poison",   -- the game's real poison, on for as long as this effect lasts
+    duration     = 8.0,
+    interval     = 1.0,
+    events = {
+        onTick = function(effect, target, ctx)
+            -- your own gameplay, on top of the ailment
+        end,
+    },
+}
+
+Venom:apply(Player.character())
+```
+
+It is a **mirror, not a replacement**. The ailment runs on the game's rules and PalForge does not
+set how strong it is. What PalForge decides is *when*: your `duration` is what takes it off
+again.
+
+The names are the game's own spelling, and upper and lower case do not matter. The ones a pack
+usually reaches for are `Poison`, `Stun`, `Sleep`, `Burn`, `Freeze`, `Electrical`, `Darkness`,
+`Wetness`, `AttackUp` and `DefenseUp`. There are 38 in all, and
+`require("palforge.core.status").names()` hands back the whole list, sorted.
+
+A name the game does not have is refused **the moment you write the definition**, rather than
+quietly at some later point, and the message carries every name you could have meant:
+
+```text
+PalForge: Effect: field "nativeStatus" not an ailment this build has; the names are AttackUp, Burn, CollectItem, Coma, ControlSP, Darkness, DefenseUp, Drown, DrownCheck, Dying, ...
+```
+
+<Callout type="info">
+If the ailment cannot be switched on — the target is not a character, or the game will not take
+the call — **the effect still applies normally** and your handlers still run, with the reason in
+the log. PalForge's own timing, stacking and handlers are what a pack programmes against, and
+none of it depends on the icon.
+</Callout>
 
 ## How the timing works
 
@@ -531,21 +578,33 @@ local function cleanse(target)
 end
 ```
 
-## The three ready-made ailments
+## The ready-made ailments
 
-`native/effects.lua` ships three definitions, registered for you at load by
-`registry.initialize`. Reach them through the module or through `Effect.get` — both give
-you the same definition.
+`native/effects.lua` turns every ailment the game declares into an effect you can apply. There
+is no separate list to keep up to date: the catalog is the same 38 names `nativeStatus` accepts.
 
 ```lua
 local effects = require("palforge.native.effects")
 
-effects.CATALOG            --> { "Poison", "Burn", "Freeze" }
-effects.Poison             -- the curated handle
-effects.get("Burn")        -- the same handle, by id
-effects.get("Sleep")       --> nil, not a known ailment name
-Effect.get("Freeze")       -- also the same definition
+effects.CATALOG            --> all 38 names, sorted: { "AttackUp", "Burn", "CollectItem", ... }
+effects.get("Sleep")       -- an Effect handle for any of them, built the first time you ask
+effects.get("Sleep"):apply(pawn)
+effects.get("Nonsense")    --> nil, not a name this build declares
 ```
+
+A handle from `effects.get` carries a `nativeStatus` and **no `duration`**, and that is the one
+surprising thing about it: applying it switches the ailment on and leaves it on. Nothing takes
+it off for you, so take it off yourself.
+
+```lua
+local sleep = effects.get("Sleep")
+
+sleep:apply(pawn)      -- the game's sleep, on, and staying on
+sleep:remove(pawn)     -- off again
+```
+
+Three of them are different, and it is worth knowing which: `Poison`, `Burn` and `Freeze` have
+hand-written timings, so they come off on their own.
 
 | Id | `duration` | `interval` | `nativeStatus` |
 | --- | --- | --- | --- |
@@ -558,17 +617,22 @@ effects.Burn:apply(pawn)
 effects.Burn:timeLeft(pawn)   --> 5.0
 ```
 
-The schedule these three run is real: apply `Poison` and it lives for ten
-heartbeat-rounded seconds, firing every second. What is missing is the payload — the
-`onApply` and `onExpire` bodies in `native/effects.lua` are `-- TODO:` markers where the
-native status call would go, and there is no `onTick`. Applying `Burn` today changes
-nothing in the game. Treat them as three pre-declared ids with sensible timings, and add
-the gameplay in your own definition or by driving them from your own handlers.
+`effects.get("Burn")` hands you that timed handle, not a second durationless one — the three are
+registered under their own ids, so there is one `Burn` and it is the one with the five seconds
+on it. `Effect.get("Burn")` finds the same definition again.
 
-<Callout type="warn">
-`effects.get` only knows `Poison`, `Burn` and `Freeze`; anything else comes back `nil`.
-`Effect.get("Sleep")` still works, but what you get is a fresh empty definition, not one of
-the game's ailments. For anything outside those three names, define your own effect.
+None of the three declares a handler. It does not need one: the ailment already does whatever
+the game says it does, and an empty handler would only cost a little work on every tick. When
+you want something of your own on top — damage, a message, a counter — declare your own effect
+with the same `nativeStatus` and an `onTick`, as
+[Damage over time](#damage-over-time) does below.
+
+<Callout type="info">
+Not every name in `CATALOG` is an ailment a pack would want. The list is the game's own, so it
+includes its internal timers and bookkeeping — `ControlSP`, `DrownCheck`, `UNKOTimer`,
+`Moratorium`, the `PalEnhancement` series. They are all offered rather than quietly dropped,
+because leaving one out would make it look unsupported when it is only strange. The ones a pack
+usually reaches for are the ten named in **The game's own ailments** above.
 </Callout>
 
 ## Keeping your own data per target
@@ -662,9 +726,10 @@ never drift apart.
 
 ### Damage over time
 
-`Poison` already declares the timing — 10 s at 1 s intervals — but has no `onTick`. Give
-the tick a body by defining your own effect next to it, and apply both, so the pack keeps
-working when the game's own ailment gets wired up later.
+`Poison` already declares the timing — 10 s at 1 s intervals — and switches the game's own
+poison on, but it has no `onTick`, so it deals no damage of its own. Give the tick a body by
+defining your own effect next to it and applying both: the game shows its ailment, and your
+effect does the damage.
 
 ```lua title="content/poison_bite.lua"
 local effects = require("palforge.native.effects")
@@ -701,7 +766,7 @@ local Venom = Effect{
     },
 }
 
----Poison a pawn: the native ailment id plus the effect that carries the damage.
+---Poison a pawn: the game's own ailment plus the effect that carries the damage.
 local function poison(pawn)
     if not pawn then return false end
     effects.Poison:apply(pawn)
@@ -848,7 +913,7 @@ Pal{
     name = "Sheepball",
     events = {
         onCaptured = function(pal, ctx)
-            effects.Freeze:apply(ctx.actor)      -- 3s, the native ailment id
+            effects.Freeze:apply(ctx.actor)      -- 3s of the game's own freeze
             Frostbite:apply(ctx.actor, { source = "sphere" })
         end,
     },
@@ -883,7 +948,8 @@ despawn and the effect ends on its own within a heartbeat, with `reason = "targe
 - `duration` is how long it lasts, `interval` is how often `onTick` runs. Both in seconds, both rounded to the 0.5 s heartbeat.
 - `:apply(target)` starts it and `:remove(target)` ends it early. `:isActive`, `:timeLeft` and `:stacksOn` tell you where it is.
 - Applying it again refreshes the timer, and adds a stack when you set both `stackable` and `maxStacks`.
-- What the effect does to the character is your code, inside `onApply`, `onTick` and `onExpire`.
+- `nativeStatus` switches one of the game's own ailments on while your effect runs; what the
+  effect *does* beyond that is your code, inside `onApply`, `onTick` and `onExpire`.
 - Anything you want to remember per target goes in your own weak-keyed table, cleared in `onExpire`.
 
 Next, read [Skill](/docs/api/skill) to trigger an ability yourself and put an effect on

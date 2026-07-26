@@ -5,10 +5,10 @@ description: 往玩家背包里放道具、再取回来，并在道具被拾取�
 
 ## 读完本页你可以做到
 
-- 从自己的代码往玩家背包里加道具，也能再取回来
+- 读出玩家现在身上带着多少个这种道具
+- 从自己的代码往玩家背包里加道具，也能再取出来
 - 在玩家捡到东西的那一刻运行你自己的代码
 - 在玩家吃下或用掉东西的那一刻运行你自己的代码
-- 玩家攒够某种材料后发一份奖励
 - 给游戏里的道具写上自己的名字、说明和配方数值
 
 道具就是待在背包里的东西：材料、食物、装备、弹药。写 `Item{ ... }` 描述一个道具。你会拿回一个**句柄** —— 一个带着这个道具各种操作的小对象，比如 `:give`。
@@ -301,7 +301,7 @@ Item{
 ```
 
 <Callout type="info">
-这两个调用是同一次拾取的两个视角，所以同一个道具 ID 在半秒内重复出现时会被丢掉，你的处理函数只运行一次。代价是实打实的：同一个道具在这半秒内真的被第二次拾取，那一次就丢了。数量为负是移除而不是拾取，所以 `:take` 会被跳过，不会当成获得来报告。
+这两个调用是同一次拾取的两个视角，所以同一个道具 ID 在半秒内重复出现时会被丢掉，你的处理函数只运行一次。代价是实打实的：同一个道具在这半秒内真的被第二次拾取，那一次就丢了。数量为负是移除而不是拾取，会被跳过，不会当成获得来报告。
 </Callout>
 
 ### onUse
@@ -348,7 +348,7 @@ Item{
 
 - 处理函数只在世界加载之后才运行。在那之前，每个来源都会直接返回。
 - 你的处理函数跑在 `pcall` 里。如果它抛错，错误会连同频道名和出问题的钩子一起写进日志，事件继续发给其他人。错误不会被重新抛出，所以你的处理函数拦不住事件。
-- 第一个参数是句柄，不是定义。`:give`、`:take` 和各种查询就在它上面。
+- 第一个参数是句柄，不是定义。`:give`、`:take`、`:count` 和各种查询就在它上面。
 - 用一个已经用过的 ID 再描述一个道具，会替换掉前一个，只有最新的那个能收到事件。
 
 抛错的处理函数在日志里长这样：
@@ -382,8 +382,9 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 | 成员 | 返回 | 作用 |
 | --- | --- | --- |
 | `.id` | string | 这个道具的游戏道具 ID。就是一个普通字段。 |
-| `:give(count)` | boolean | 往本地玩家的背包里加 `count` 个（默认 1）。 |
-| `:take(count)` | boolean | 尝试移除 `count` 个（默认 1）；`count` 按绝对值处理。只有观察到背包数量确实下降时才是 `true`。 |
+| `:count()` | number \| nil | 本地玩家现在身上带着多少个。`nil` 的意思是读不出来，绝不是“一个都没有”。 |
+| `:give(count)` | boolean | 往本地玩家的背包里加 `count` 个（默认 1）。只有观察到背包数量确实上升时才是 `true`。 |
+| `:take(count)` | boolean | 把 `count` 个（默认 1）丢在玩家脚边，从背包里移除；`count` 按绝对值处理。只有观察到数量确实下降时才是 `true`。 |
 | `:recipeOf()` | table \| nil | 声明过的配方；没有配方时为 `nil`。 |
 | `:iconOf()` | any \| nil | 道具图标 DataTable 里的贴图引用，查不到就用声明的 `icon`。 |
 | `:name()` | string | 声明的名字，没有就用 ID。 |
@@ -397,13 +398,14 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 
 ### give
 
-`:give` 通过游戏自己的服务器调用把道具放进玩家背包。PalForge 解析 ID，找到本地玩家的背包，然后调用 `AddItem_ServerInternal`。
+`:give` 通过游戏自己的管理对象把道具放进玩家背包，然后核对它们是不是真的到了：调用之前读一次背包数量，调用之后再读一次，`true` 表示看到数量**上升**了。
 
 ```mermaid
 flowchart LR
-  A["Item.Handle:give"] --> B["utils.items.give"]
-  B --> C["object_manager.resolve"]
-  C --> D["AddItem_ServerInternal"]
+  A["Item.Handle:give"] --> B["read the count"]
+  B --> C["the game's GetItem cheat"]
+  C --> D["read the count again"]
+  D --> E["true only when it rose"]
 ```
 
 ```lua
@@ -411,48 +413,67 @@ Item.get("Wood"):give(10)        -- 10 Wood into the local player inventory
 Item.get("Arrow"):give()         -- count defaults to 1
 
 if not Item.get("Berries"):give(5) then
-    -- false means a step failed: no world yet, no player state, no inventory
+    -- nothing was measured to arrive; the log line says which step stopped
 end
 ```
 
-每一次引擎调用都被包住了，所以这个辅助函数只返回布尔值，永远不抛错；`false` 的原因会写进日志。带命名空间的 ID 会先被解析，所以 `Item.get("example:Potion"):give(1)` 交给引擎的名字是 `example_Potion` —— PalForge 不会检查对应的数据行是否存在。`true` 表示原生调用跑完了没抛错，游戏让 Lua 看到的就到此为止。它不是背包现在装了什么的报告。
+<Callout type="warn">
+`:give` 和 `:take` 都要走游戏的管理对象，而打开它的是配套模组 `CheatManagerEnablerMod`。没有它就没有可调用的对象，两者都会在够到游戏之前被拒绝并返回 `false`。要写进 `mods.txt` 的那一行见 [快速开始](/docs/getting-started)。
+</Callout>
+
+这个布尔值是实测结果，不是“调用成功了没有”。`false` 表示没有观察到东西到位，原因可能有好几个：没有管理对象、游戏不认识这个道具 ID、背包已经放不下。每一种结果都会连同道具名、数量和背包的变化写进日志，所以布尔值分不出来的情况，日志能分出来：
+
+```text
+[PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
+[PalForge.items][warn] give Wood x10: GetItem executed [evidence declared] and the count did not rise (135 -> 135) — unknown item id, or the inventory had no room
+[PalForge.items][err] give Wood x10 failed: no PalCheatManager on this session (needs CheatManagerEnabler)
+```
+
+行尾的 `[evidence ...]` 记的是 PalForge 在发出调用之前，是怎么拿正在运行的游戏核对过的。你不需要为它做什么；它只是让一个出乎意料的 `false` 变得看得懂。
+
+带命名空间的 ID 会先被解析，所以 `Item.get("example:Potion"):give(1)` 交给游戏的名字是 `example_Potion`。PalForge 不会检查对应的数据行是否存在 —— 游戏不认识的 ID 也照样被接受、什么都没加，然后以 `false` 的形式回来。
 
 <Callout type="info">
-`AddItem_ServerInternal` 也是报告拾取的调用之一，所以你在普通代码里做的 `:give` 通常也会走到 `onObtain`。在 `onObtain` 处理函数里面则不会：有一道保护拦着，不让处理函数把自己再触发一遍。
+别指望自己调用的 `:give` 会回到自己的 `onObtain`。`onObtain` 跟的是游戏自己的拾取汇报，而且在 `onObtain` 处理函数里面还有一道保护，不让处理函数把自己再触发一遍。你自己发出了什么，就在发出的那个位置写进日志。
 </Callout>
 
 ### take
 
-`:take` 不像 `:give` 那么有把握。这个版本上从来没确认过用于移除的调用，所以 `:take` 是往同一个 `AddItem_ServerInternal` 推一个负数，指望游戏能接受。既然只是指望，结果就不能假定，只能实测：写入前后各读一次背包数量，`:take` 返回它是不是真的降了。
+`:take` 是同一套实测，方向相反：前后各读一次数量，`true` 表示看到数量**下降**了。
+
+<Callout type="warn" title="take 会把道具丢在玩家脚边">
+这个版本上没有任何调用能让道具凭空消失，所以 `:take` 用的是把它从背包里取出来的那个调用：道具会掉在玩家站着的地面上。背包确实少了它们 —— 这正是 `:take` 的含义，数量核对也证实了 —— 但玩家旁边会出现一堆东西，谁都能走过去把它捡回来。
+
+请按“会留下一堆”来设计。`:take` 适合“把东西交出来”，不适合“把东西消耗掉”，所以只有在玩家原地捡回去也不会破坏设计时，才用它来收取代价。
+</Callout>
 
 ```mermaid
 flowchart LR
-  A["Item.Handle:take"] --> B["read CountItemNum"]
-  B --> C["AddItem_ServerInternal with a negative delta"]
-  C --> D["read CountItemNum again"]
-  D --> E[true only when the count dropped]
+  A["Item.Handle:take"] --> B["read the count"]
+  B --> C["clamp to what is held"]
+  C --> D["the game's DropItem cheat"]
+  D --> E["read the count again"]
+  E --> F["true only when it fell"]
 ```
 
 ```lua
 if Item.get("Wood"):take(3) then
-    -- the inventory count really fell
+    -- three Wood left the inventory, and are lying at the player's feet
 else
-    -- nothing was observed to leave: the negative delta did nothing on this build,
-    -- or the count could not be read at all
+    -- nothing was measured to leave
 end
 ```
 
-每一种结果都会写进日志，所以布尔值分不出来的情况，日志能分出来：
+要的比玩家带着的多，不算错误：请求会被夹到背包实际持有的数量。一个都没有时，这个调用干脆就不发出去。两种情况都会写进日志，所以布尔值分不出来的情况，日志能分出来：
 
 ```text
-[PalForge.items][info] take Wood x3 (12 -> 9)
-[PalForge.items][warn] take Wood x3: only 2 removed (12 -> 10)
-[PalForge.items][warn] take Wood x3: count unchanged at 12 (the negative delta removed nothing)
-[PalForge.items][warn] take Wood x3: CountItemNum unreadable, removal unconfirmed
+[PalForge.items][info] take Wood x3: 12 -> 9, dropped on the ground at the player's feet [evidence declared]
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, dropping that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is dropped
 ```
 
 <Callout type="warn">
-只移除了一部分也照样返回 `true` —— 上面第二行就是 3 个里走了 2 个，返回 `true`。`true` 的意思是“看到有东西离开了”，不是“正好走了 `count` 个”。数量必须精确时，自己在前后各读一次数量。
+被夹过的移除照样返回 `true` —— 上面第二行要 5 个、只丢了 2 个，返回的仍是 `true`。`true` 的意思是“看到数量下降了”，不是“正好走了 `count` 个”。数量必须精确时，自己在前后各读一次 `:count()`。
 </Callout>
 
 ### 查询
@@ -462,12 +483,15 @@ end
 ```lua
 local wood = Item.get("Wood")
 
+print(wood:count())       -- how many the player is carrying right now, or nil
 print(wood:name())        -- "Wood" for the curated definition
 print(wood:category())    -- "material"
 print(wood:maxStack())    -- 9999 for the curated definition, 1 for a bare handle
 
 local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 ```
+
+`count` 是背包这边唯一能用的操作。它问游戏本地玩家带着多少个这个 ID，返回一个普通数字。`nil` 表示根本读不出来（世界还没加载、找不到玩家），而不是“一个都没有”，所以比较之前先判断 `nil`。
 
 `iconOf` 会去 `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` 里查这个 ID，读出那一行上的贴图。每一步都是容错的：表、行或列缺了任何一个，返回的就是你声明的 `icon`，而你没设过的话它是 `nil`。
 
@@ -528,7 +552,7 @@ Item{
 效果在加载时描述一次就够了，处理函数里只调用 `:apply`。写在处理函数里面的话，每用一次就会重新注册一遍。
 
 <Callout type="warn">
-PalForge 的效果不碰游戏自己的状态系统。`EPalStatusEffectType` 是一个原生枚举，施加它的调用还没被确认过，所以状态栏上不会出现任何东西，HP 也不会自己变。效果实际要做的事，写在 `onTick` 里。
+PalForge 的效果按自己的时钟走，HP 不会自己变，效果实际要做的事写在 `onTick` 里。不过在定义里写上 `nativeStatus`，就会在效果运行期间点亮游戏自己的状态异常，所以状态栏是会变的；背后的伤害或回复仍然要你自己写。
 </Callout>
 
 在任何地方都能查看正在运行的效果：
@@ -607,7 +631,7 @@ Building{
     events = {
         onRightClick = function(self, ctx)
             -- ctx.actor = the build object, ctx.player = who interacted, ctx.buildId
-            local ok = Item.get("Wood"):take(5)
+            local ok = Item.get("Wood"):take(5)   -- the 5 Wood land on the ground, not in a bin
             if not ok then
                 log.warn("could not take the wood")
                 return
@@ -630,7 +654,7 @@ Building{
 这个例子接管了 ID `"WorkBench"`，而 PalForge 已经描述过它。最新的描述胜出，所以这里把 mesh 那一块又写了一遍，好保住原版的外观。你自己的内容请用带命名空间的 ID。
 </Callout>
 
-因为 `take` 会实测发生了什么，上面的 `false` 分支确实表示没看到木头离开，箭也就不会发出去。而 `true` 不保证 5 个全走了 —— 只移除一部分同样返回 `true` —— 所以必须精确的交易还是得自己查一次数量。
+先扣、扣成功了才给：这个顺序才能让补给台不至于白发东西，因为没看到东西离开时 `:take` 会返回 `false`。但有两点它不保证。木头不会消失 —— 它就在玩家旁边的地上，可以直接捡回去，所以这个台子是图省事的交换，而不是真正的代价。另外 `true` 也不表示 5 个全走了：请求会被夹到玩家实际带着的数量，所以必须精确的交易还是得自己查一次 `:count()`。
 
 ## 注意事项
 
@@ -642,7 +666,7 @@ Building{
 
 **带命名空间的 ID 是靠兜底搜索匹配到的。** 事件带的是游戏的数据行名，所以注册成 `"example:Potion"` 的道具精确查找找不到，是在你注册过的 ID 上做的搜索找到它的。这个搜索读的是一份快照，顺序不定，返回第一个匹配的 ID，所以两个解析后行名相同的内容包 ID 是有歧义的。
 
-**移除还没被确认过。** 这个版本上没有已知的移除调用。`:take` 把一个负数推进添加用的调用，然后报告背包数量发生了什么，所以 `true` 的意思是“看到有东西离开了”，绝不是“正好走了 `count` 个”。
+**拿走的道具会掉在玩家脚边。** 这个版本上没有销毁道具的手段，所以 `:take` 是把它们从背包移到世界里。移除本身是真的，也是实测过的；地上那一堆同样是真的。
 
 **`onUse` 不会直接告诉你目标是谁。** `ctx.actor` 是本地玩家的 pawn，也就是使用道具的那个。被用上的角色在 `ctx.targetId` 里，是一个原始实例 ID，这里没有东西会把它变成 actor。食物和药水两者相同，喂帕鲁时就不同。
 
@@ -652,16 +676,18 @@ Building{
 
 **处理函数的错误只写日志，不抛出。** 失败会通过 `utils.log` 报告，带上频道名和钩子名，例如 `item.use -> onUse handler failed: ...`。你的处理函数还是拦不住事件。
 
-**`give` 和 `take` 只作用于本地玩家。** 它们找到 `PalPlayerCharacter`，然后作用在那个背包上。任何一步失败时两者都返回 `false` 并把原因写进日志；`:take` 还会在每一步都成功但数量没降时返回 `false`。
+**`give`、`take` 和 `count` 只作用于本地玩家。** 它们找到 `PalPlayerCharacter` 并作用在那个背包上，所以在共享服务器上，它们回答的是第一个被找到的玩家 pawn。`count` 返回 `nil` 表示读取失败，不是背包空了。
 
-**一次 `:give` 通常也会触发 `onObtain`。** 它走的是游戏拾取时用的同一个调用。在 `onObtain` 处理函数里面有保护拦着，处理函数不会把自己再触发一遍；在别的地方，就要预料到自己的 give 会绕回来。
+**`give` 和 `take` 需要管理对象。** 两者都要走 `CheatManagerEnablerMod` 打开的那个对象。没有这个配套模组，它们在够到游戏之前就被拒绝，返回 `false`。`count` 不需要它。
+
+**别指望一次 `:give` 会回到你的 `onObtain`。** 你自己的代码发出了什么，就在调用的那个位置写进日志，别等事件绕回来。
 
 **半秒内的重复拾取会被丢掉。** 游戏的两个调用报告的是同一次拾取，PalForge 会在这个时间窗内丢掉同一个道具 ID 的重复，好让你的处理函数只运行一次。同一个道具真的在这么短时间内被第二次拾取，那一次就丢了。
 
 ## 小结
 
 - 写 `Item{ ... }` 描述一个道具。只有 `id` 是必须的，而且这个 ID 必须是游戏里已经有的。
-- `Item.get("Wood")` 会给你任意道具的句柄。`:give` 往玩家背包里加；`:take` 尝试移除，并告诉你数量是不是真的降了。
+- `Item.get("Wood")` 会给你任意道具的句柄。`:count()` 读出玩家现在带着多少，`:give` 往里加，`:take` 往外拿 —— 三者返回的都是“实测到了什么”，而不是“试着做了什么”。`:take` 拿走的东西会掉在地上。
 - 把你的代码放进 `events`。`onObtain` 在拾取时运行，`onUse` 在道具被使用时运行。`onCraft` 和 `onDiscard` 还不会运行。
 - 在 `onUse` 里，`ctx.actor` 是使用道具的玩家 —— 食物和药水要作用的正是他。
 - `category`、`maxStack`、`icon` 和 `recipe` 是给你自己代码用的记录。游戏不会读它们。

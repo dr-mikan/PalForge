@@ -68,9 +68,10 @@ ConsoleEnablerMod : 1
 PalForge : 1
 ```
 
-Keep `CheatManagerEnablerMod` on if you want to spawn pals. `Pal.Handle:spawn` goes through the
-game's own `UPalCheatManager`, so without that mod `core/spawn` writes this line and gives up,
-returning `false`:
+`CheatManagerEnablerMod` is what gives PalForge the game's own admin object, `UPalCheatManager`.
+Keep it on: `Item.Handle:give`, `Item.Handle:take` and `Pal.Handle:spawn` all go through it, and
+without it each of them is refused before it reaches the game and answers `false` — the spawn
+route writes this line and gives up:
 
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
@@ -154,7 +155,7 @@ _G.PalForge = {
 ```text
 [PalForge.main][info] PalForge v0.3.0 starting (dev=true)
 [PalForge.event][info] tick source live
-[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard TODO(dump)) + dispatch
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard have no native source) + dispatch
 [PalForge.keyboard][info] bound F4
 [PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
 [PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
@@ -206,7 +207,7 @@ When `dev` is true, `registry.initialize()` also:
 - runs the headless test bundle in `palforge.tests`, which is where the `tests: ...` line comes
   from;
 - loads `palforge.test`, the in-game test suite, and puts it on **F1**. Nothing there runs until
-  you press the key, because those tests spawn pals and hand out items.
+  you press the key, because those tests touch the live world.
 
 Set `dev = false` for a quiet release build with only the content catalogs registered:
 
@@ -313,13 +314,15 @@ already ships a definition for replaces that one. `native/buildings` ships `Work
 `PalBoxV2`, `native/items` ships `Wood`, `Berries` and `Arrow`, and `native/pals` ships
 `ChickenPal` and `SheepBall`. Pick another id unless replacing one is what you want.
 
-And a pal, to see an action rather than a handler:
+And a pal, to see an action rather than a handler. `:spawn` places nothing in this version — the
+lines below answer `false` — so what you can watch is the definition itself: the game's own
+chickens now carry your mesh and your handlers.
 
 ```lua
 local api = require("palforge.api")
 
 -- Pal.get works for any game CharacterID, defined or not.
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- false: no creature appears
 
 -- Defining the same id attaches your own mesh and handlers to it. This replaces
 -- native/pals' curated ChickenPal demo definition.
@@ -339,7 +342,7 @@ local chicken = api.Pal{
     },
 }
 
-chicken:spawn(api.Player.coordinateOffset(300, 0, 0))
+chicken:spawn(api.Player.coordinateOffset(300, 0, 0))     -- false: no creature appears
 ```
 
 ## Check it in game
@@ -440,7 +443,7 @@ and it also creates plain global names you can use directly. Both point at the s
 local api = require("palforge.api")
 
 api.Item.get("Wood"):give(10)
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- :spawn places nothing in this version
 ```
 
 </Tab>
@@ -674,11 +677,16 @@ events = {
 
 ### Spawning does nothing
 
+No creature appears from `:spawn` in this version, whatever you pass it — see
+[Pal](/docs/api/pal), which also covers what a pal definition still does for you. This warning is
+a separate, earlier problem, and worth fixing anyway:
+
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
 ```
 
-`:spawn` goes through `UPalCheatManager`. Turn on `CheatManagerEnablerMod` in `mods.txt`.
+It means the call was refused before it reached the game. `:spawn` needs `UPalCheatManager`, so
+turn on `CheatManagerEnablerMod` in `mods.txt`.
 
 ## Where to go next
 

@@ -399,9 +399,8 @@ Item{
 | `onExpire` | LIVE | `duration` 归零、`:remove(target)`、目标失效，或者世界卸载 |
 
 <Callout type="warn">
-PalForge 的效果不会碰游戏自己的状态异常。`EPalStatusEffectType` 是一个原生枚举，而且没有确认过
-任何用来施加它的原生调用，所以 `nativeStatus` 只是元数据，状态图标不会变化。玩法请写在你的
-处理函数里：扣血、给道具、生成东西。
+在定义里写上 `nativeStatus`，效果运行期间就会点亮游戏自己的状态异常，结束时再熄灭 —— 图标是真的
+会变。除此之外仍然归你管：扣血、给道具这类玩法，请写在你的处理函数里。
 </Callout>
 
 ### Skill

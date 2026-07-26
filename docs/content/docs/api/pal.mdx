@@ -6,15 +6,15 @@ description: Add a creature that reacts when it spawns, takes damage or is caugh
 ## What you can do after this page
 
 - Make a creature react the moment you catch it, hit it or kill it
-- Hand the player an item, or play a sound, when a pal dies
+- Play a sound, or start a timed effect, when a pal dies
 - Give a pal a different body, a different colour and a different size
-- Drop a pal into the world where you are standing, at the level you pick
 - Run your own code on every one of your pals, over and over, while the game is playing
+- Know what `:spawn` can and cannot do in this version
 
 ## Make a pal
 
-A pal is a creature you can spawn. Write `Pal{ ... }` with the game's own name for that
-creature, and you get back an object you can spawn, look up later and hang behaviour on.
+A pal is one of the game's creatures. Write `Pal{ ... }` with the game's own name for it, and
+you get back an object you can look up later, hang behaviour on and act through.
 
 ```lua title="content/pals.lua"
 local pal = Pal{
@@ -28,7 +28,7 @@ local pal = Pal{
     },
 }
 
-pal:spawn(Player.coordinate())
+pal:spawn(Player.coordinate())   -- no creature appears in this version; see :spawn below
 ```
 
 Catch a Chicken Pal in your game and the victory jingle plays. That is the whole loop:
@@ -42,8 +42,8 @@ Pal.get("SheepBall")        -- a handle for an existing id; never nil
 Pal.get_all()               -- every PalForge-registered pal, as handles
 ```
 
-`Pal.get` never returns nil. An id nobody defined gets a thin definition — enough to
-`:spawn` it, but with no handlers on it. Only `Pal{ ... }` registers a pal, and only a
+`Pal.get` never returns nil. An id nobody defined gets a thin definition — enough to call the
+actions on, but with no handlers on it. Only `Pal{ ... }` registers a pal, and only a
 registered pal ever gets its handlers called.
 
 Palworld's own creature list lives in `native/pals`:
@@ -84,7 +84,7 @@ instead of being quietly ignored. The same list is readable while the game runs,
       type: 'string',
     },
     skills: {
-      description: 'skill ids this pal owns',
+      description: 'skill ids this pal owns. Read them back with :skillsOf, or put the whole list on a live creature with :teachAll',
       type: 'string[]',
     },
     mesh: {
@@ -235,9 +235,9 @@ was swapped, not that it was painted. The backend table is on [Mesh](/docs/api/m
 
 ### skills
 
-`skills` is a list of ids and nothing more. PalForge does not equip them, and nothing in the
-game fires them. Read the list back with `:skillsOf()` and run each skill yourself through
-[`Skill`](/docs/api/skill).
+`skills` is a list of ids that this definition declares. Declaring it does not put anything on a
+creature by itself, and nothing in the game fires the skills for you. Read the list back with
+`:skillsOf()` and run each one yourself through [`Skill`](/docs/api/skill).
 
 ```lua
 local boss = Pal{
@@ -251,6 +251,9 @@ for _, id in ipairs(boss:skillsOf()) do
     Skill.get(id):activate(Player.character())
 end
 ```
+
+To put the declared list onto a creature standing in the world, so the game itself carries the
+skills, use `:teachAll(actor)` — see [teachAll](#teachall) below.
 
 ### icon
 
@@ -289,7 +292,7 @@ local pal = Pal{
 
 This is where a pal gets its behaviour. Put your handlers under `events`. Each one is
 `function(pal, ctx)`, where `pal` is **this definition's handle** — the same object
-`Pal{ ... }` returned, so `:spawn`, `:renderOn` and the queries are right there — and `ctx`
+`Pal{ ... }` returned, so `:renderOn` and the queries are right there — and `ctx`
 is a table describing what just happened. An event name that is not in the list below is an
 error at define time, not a silent no-op.
 
@@ -440,9 +443,26 @@ actions, five event forwarders and five queries.
 
 ### spawn
 
+<Callout type="error" title="Putting a pal in the world is not available in this version">
+`:spawn` does not make a creature appear. The game's own spawn call runs without complaining
+and nothing arrives — not in that instant, and not a second later either — so `:spawn` reports
+what it saw rather than what it asked for, and answers `false`.
+
+What does work is everything about a pal that is **already** in the world.  `onCaptured`,
+`onDamaged`, `onDeath`, `onSpawned` and `onTick` all fire for the game's own creatures, and
+`:renderOn` still changes what one looks like. Build on the pals the game puts there for you —
+the wild ones, the one the player just caught — rather than on creatures you place yourself.
+
+The `toPlayer` route hands the creature to the player's party or box, and nothing in Lua can
+look inside either, so it answers `true` for "the call was issued" and cannot promise more than
+that. Do not read it as a pal in the box.
+
+The shape below does not change, so code written against it stays correct.
+</Callout>
+
 ```lua
 ---@param arg Coord|table|nil
----@return boolean accepted
+---@return boolean appeared
 pal:spawn(arg)
 ```
 
@@ -478,17 +498,18 @@ flowchart TD
   F --> H["teleport the new actor - palAt only"]
 ```
 
-Every route goes through `UPalCheatManager`, the game's server-checked admin API. `true` means
-the spawn call was **accepted**, not that a pal is standing anywhere: the creature appears a
-few frames later, and the coordinate route then moves it in a pass that finishes long after
-`:spawn` has returned. That pass reports to the log, never to your caller. `false` is
-definite — nothing was attempted, because the id was empty, a coordinate was not a number, or
-no cheat manager could be reached.
+Every route goes through `UPalCheatManager`, the game's server-checked admin API. For the two
+world routes the result is checked instead of assumed: PalForge counts the creatures in the
+world immediately before the call and immediately after it, and answers `true` only when one
+that was not there a moment ago is there now. That check is why `:spawn` answers `false` — the
+call runs, and no creature is ever there afterwards. A `false` also covers the plain refusals:
+an empty id, a coordinate that is not a number, or no cheat manager to reach.
 
-On the coordinate route the game drops the pal near the player and ignores the position you
-asked for. So PalForge takes a snapshot of the pals first, then moves the single new one
-nearest the player — retried every 400 ms, up to six times, because the creature takes a few
-frames to appear.
+A coordinate is a spawn followed by a move, because the game's own call drops the pal near the
+player and ignores the position you asked for. PalForge looks for a creature that was not in
+the world before, and teleports that one — retrying every 400 ms, up to six times, since a
+creature would take a few frames to appear. With nothing appearing, the pass finds nothing to
+move and says so in the log.
 
 #### The cheat manager
 
@@ -499,12 +520,12 @@ itself when the session has none: it constructs the `PalPlayerController`'s own 
 with `StaticConstructObject` — falling back to `/Script/Pal.PalCheatManager` and then
 `/Script/Engine.CheatManager` when that class is null — and attaches the result to the
 controller. The object stays there, so this happens once per session rather than once per
-spawn, and the log records the one time it runs. That is what makes `:spawn` work on a
-dedicated server.
+spawn, and the log records the one time it runs. That is what gives a dedicated server the same
+route as a client.
 
-What is left to fail is having no player controller at all: no world loaded, or not connected
-yet. Every route then returns `false` and warns that no cheat manager was found and none could
-be built. Spawning from `world.ready` avoids that window:
+The earliest failure is having no player controller at all: no world loaded, or not connected
+yet. Every route then returns `false` without reaching the game, and warns that no cheat
+manager was found and none could be built. Calling from `world.ready` avoids that window:
 
 ```lua
 local event = require("palforge.core.event")
@@ -512,7 +533,7 @@ local log   = require("palforge.utils.log").scope("example")
 
 event.on("world.ready", function()
     if not Pal.get("ChickenPal"):spawn{ level = 10 } then
-        log.warn("spawn not attempted - no player controller yet")
+        log.warn("no pal appeared")
     end
 end)
 ```
@@ -570,10 +591,42 @@ Pal{
 A `true` says the backend's setter ran — for the skeletal backend, that the model was set on
 the creature's own component. What it ends up drawing is not something the call can report.
 
+### teachAll
+
+```lua
+---@param actor any   # a live pal or player character
+---@return integer taught, integer asked
+pal:teachAll(actor)
+```
+
+Puts every skill this definition **declares** onto a live character, so the game itself carries
+them. `:skillsOf()` is what the author wrote; this is how that list reaches a real creature.
+
+```lua
+local Blaze = Pal{
+    id     = "FoxMage",
+    skills = { "FireBlast", "Legend" },
+}
+
+local taught, asked = Blaze:teachAll(somePalActor)
+-- 2, 2 when both landed; 1, 2 when only one did
+```
+
+Each id routes on what the **game** knows it as, not on anything you declared: an id that is one
+of the game's own active moves is added to the creature's equipped moves, and any other id is
+added as a passive skill under that name. [Skill](/docs/api/skill) has the full rule and the
+list of names.
+
+Two numbers come back rather than a boolean, so a partial result stays visible. Skills go on in
+declared order, each write is checked by reading the character back, and a failure does not stop
+the rest — one unknown id should not cost a pal its other four moves. Both numbers zero means
+the definition declared no skills at all.
+
 ### Queries
 
 ```lua
 pal:skillsOf()      --> string[]   the declared skill ids, an empty table when none
+pal:teachAll(actor) --> integer, integer   how many landed, how many were asked for
 pal:mesh()          --> table?     the validated mesh declaration, nil when none
 pal:iconOf()        --> any?       DataTable texture ref, else the declared icon, else nil
 pal:name()          --> string     the declared name, else the id
@@ -665,10 +718,10 @@ Pal{
 }
 ```
 
-`Item.get(...):give(n)` adds to the local player's inventory through the game's own
-`AddItem_ServerInternal` path. PalForge has no call for dropping something on the ground, so
-this is a reward the player receives, not a bag you walk over. See
-[Item](/docs/api/item) for everything else you can do with items.
+`Item.get(...):give(n)` adds to the local player's inventory and reports what the inventory was
+measured to do, so check the boolean rather than assuming the drop landed. PalForge has no call
+for leaving loot on the ground where the pal died, so this is a reward the player receives
+directly. See [Item](/docs/api/item) for everything else you can do with items.
 
 ### A pal that catches fire when it is hit
 
@@ -743,6 +796,7 @@ local function summonSquad(n, level)
         return false
     end
     for i = 1, n do
+        -- false in this version: no member appears
         Squad:spawn{ at = { x = at.x + i * 250, y = at.y + 250, z = at.z }, level = level }
     end
     return true
@@ -754,17 +808,20 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-Every member spawns through its own `SpawnMonster` call, and each one's `onSpawned` attaches
-the mesh to its own creature.
+Each member takes its own `SpawnMonster` call, and each one's `onSpawned` would attach the mesh
+to its own creature. No member appears in this version, so nothing is placed and no `onSpawned`
+follows — the same code is what summons the squad once the world route works.
 
 ## Limits
 
 <Callout type="warn">
 
+- **Putting a pal in the world does not work.** `:spawn` returns `false` on every route that
+  places a creature in the world, and none appears. Everything else on this page is about pals
+  the game itself put there, and all of that works.
 - **Lua cannot add a brand-new creature.** `Pal{ id = ... }` gives behaviour, visuals and
   metadata to a creature the game already has; creating the data row itself is PalSchema's
-  job. An id with no matching `BP_<Id>_C` in the game never gets its handlers called, and
-  `:spawn` has nothing to spawn.
+  job. An id with no matching `BP_<Id>_C` in the game never gets its handlers called.
 - **`onTick` is a sweep, not a game event.** `core/event` walks the live pals every
   `core.event.PAL_SCAN_MS` — 3000 ms by default — and calls `onTick` once per live creature.
   Set `require("palforge.core.event").PAL_SCAN_MS = 5000` to slow it down, or `0` to switch it
@@ -790,18 +847,16 @@ the mesh to its own creature.
 - **A handler error ends that handler.** PalForge calls your hook inside `pcall` and logs the
   failure with its channel and hook name, so the bug is visible in the log — but the rest of
   the handler does not run, and neither the channel nor the game notices.
-- **`:spawn` needs a player controller.** It needs `PalCheatManager` too, but nothing else has
-  to create that first: when the session has none, `core/spawn` builds one from the
-  controller's `CheatClass` and attaches it, which is what makes `:spawn` work on a dedicated
-  server, where CheatManagerEnabler's `ClientRestart` hook never runs. With no
-  `PalPlayerController` to build it on, every route returns `false` and warns.
+- **`:spawn` needs a player controller before it can even try.** It needs `PalCheatManager`
+  too, but nothing else has to create that first: when the session has none, `core/spawn`
+  builds one from the controller's `CheatClass` and attaches it, so a dedicated server takes
+  the same route as a client even though CheatManagerEnabler's `ClientRestart` hook never runs
+  there. With no `PalPlayerController` to build it on, every route returns `false` without
+  reaching the game.
 - **A coordinate is a move after the spawn, not a spawn location.** The game's own call ignores
-  the position you asked for, so PalForge teleports the newly-spawned creature afterwards,
-  retrying every 400 ms up to six times. `:spawn` returns `true` for the spawn call itself; the
-  move only ever reports to the log — a warning when no new creature appears, and another when
-  one was found but every move call failed and it stays where it spawned. Without `LoopAsync`
-  and `ExecuteInGameThread` there is no deferred pass at all, and the pal simply stays next to
-  the player.
+  the position you asked for, so PalForge looks for the creature that just appeared and
+  teleports it, retrying every 400 ms up to six times. That pass only ever reports to the log,
+  and what it reports today is that there was no new creature to move.
 - **A mesh is never attached for you.** Call `:renderOn(actor)` from a handler.
   `core.mesh.ENABLED` is a global kill switch that turns every attach into a no-op, and the
   material fields reach a backend that paints only when `kind` is `procedural` or `obj`.
@@ -817,8 +872,8 @@ the mesh to its own creature.
   the only field you have to fill in.
 - What happens to a pal goes under `events`: `onSpawned`, `onDamaged`, `onDeath`,
   `onCaptured` and `onTick`. Every one of them is live.
-- `pal:spawn()` puts a pal in the world. Pass a coordinate for a place, or
-  `{ toPlayer = true, num = 3 }` to send them straight to the player.
+- `pal:spawn()` is how a pal would be placed, but it cannot place one in this version: it
+  answers `false` and nothing appears. Work with the creatures the game spawns itself.
 - A `mesh` changes what a pal looks like, but you attach it yourself with
   `pal:renderOn(ctx.actor)` from `onSpawned`.
 - Only ids you defined with `Pal{ ... }` get their handlers called; `Pal.get` gives you the

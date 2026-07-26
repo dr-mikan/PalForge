@@ -282,7 +282,7 @@ end
 ```lua
 Handle:play(actor)        --> boolean
 Handle:stop(actor)        --> boolean
-Handle:setVolume(volume)  --> false, always
+Handle:setVolume(volume)  --> false, always -- see the note below
 ```
 
 `actor` は省略できます。省略した場合、`play` も `stop` も、`FindFirstOf("PalPlayerCharacter")`
@@ -324,15 +324,14 @@ end
 1 つだけ止めて他を鳴らし続けるには、サウンド側が保持していない Wwise の `PlayingID` が必要です。
 </Callout>
 
-<Callout type="warn">
-`:setVolume` は**未実装**です。何もしなかったと呼び出し側が判別できるよう `false` を返します。
-現時点の PalForge にサウンド単位の音量調整はありません。より静かなイベントを選ぶか、音量は
-プレイヤー自身の設定に任せてください。経路自体は製品版のゲームに存在します。
-`UPalSoundUtility::SetRTPCValueByActor`、`UAkGameplayStatics::SetRTPCValue`、そしてアクターの
-エミッターに対する `UAkComponent::SetOutputBusVolume` です。ただしどれもサウンド単位ではなく、
-引数リストもまだ判明しておらず、Palworld が宣言している RTPC は `Field_Time` と `Sliding_Speed`
-だけで、音量用の名前は分かっていません。実装するとシグネチャは `setVolume(volume, actor)` に
-変わるか、バス単位の呼び出しに移る可能性が高いです。
+<Callout type="error" title="サウンドの音量を変える機能はこのバージョンでは使えません">
+`:setVolume` は何も変えず、常に `false` を返します。回すべき「サウンド単位の音量つまみ」がそもそも
+存在しないからです。Palworld が使っているサウンドシステム Wwise では、Mod から名前付きの
+パラメータを設定できますが、このビルドのゲームが宣言しているのは 3 つだけで、そのどれも音量では
+なく、ミキシング用のバスも一切ありません。
+
+**イベントを選ぶことが音量調整です。** カタログには同じ場面向けの大きい音と静かな音が揃っている
+ので、最初から狙った大きさのものを選んでください。全体の音量はプレイヤー自身の音声設定に任せます。
 </Callout>
 
 ### クエリ
@@ -477,8 +476,9 @@ end
 鳴らす、といった具合です。
 </Callout>
 
-3 つ目の欠落は上で触れた `:setVolume` です。`false` を返して何もしないので、まだこれを土台に
-音量スライダーを作らないでください。
+3 つ目の欠落は上で触れた `:setVolume` です。`false` を返して何も変えず、このビルドには設定できる
+音量そのものが無いので、音量スライダーには動かす対象がありません。代わりに静かなイベントを
+選んでください。
 
 ## レシピ
 
@@ -640,7 +640,8 @@ Audio.get: id (string) is required
 - 再生は `handle:play(actor)` です。`actor` を省くとプレイヤーのキャラクターで鳴ります。
 - `:play()` の `true` は呼び出しが出たという意味で、聞こえた保証ではありません。無音のときは
   `:source().path` を確認します。
-- `:stop(actor)` はそのアクター上のすべてを止め、`:setVolume` はまだ何もしません。
+- `:stop(actor)` はそのアクター上のすべてを止めます。`:setVolume` は何もしないので、代わりに
+  静かなイベントを選びます。
 - サウンドの定義はパックのロード時に 1 回だけ行い、ハンドラーでは `:play()` だけを呼びます。
 
 次は [Item](/docs/api/item) を読むと、プレイヤーが拾ったり使ったりしたものに音を付けられます。

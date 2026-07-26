@@ -121,7 +121,7 @@ env.dev = false     -- set this BEFORE registry.initialize()
 ```text
 [PalForge] tests: running 13 suite(s)
 [PalForge] tests: 276 passed, 0 failed, 18 skipped
-[PalForge] FAIL [item] give hands the player a few Wood: give Wood x3 should execute
+[PalForge] FAIL [item] give adds to the live inventory and take drops it back out, both measured: the Wood count must RISE across a give (135 -> 135)
 ```
 
 失敗はすべて 1 件ずつ画面に繰り返されます。`3 failed` としか言わないサマリでは、結局ログに戻る
@@ -233,7 +233,7 @@ api のほとんどはロード済みのワールドを必要とします。ワ�
 s:test(":give hands the player three Wood", function(t)
     local pawn = support.needWorld(t)     -- returns the pawn, or skips out of the test
     local wood = Item.get("Wood")
-    t:eq(wood:give(3), true, "give runs through AddItem_ServerInternal")
+    t:eq(wood:give(3), true, "give reads the count before and after, so true means it rose")
 end)
 ```
 
@@ -266,16 +266,23 @@ support.needGlobal(t, "FindAllOf")   -- skip unless that engine global is a func
 テストは自分の判断で、どの深さからでも、前提条件が揃っていないと分かった時点でスキップできます。
 
 ```lua
-s:test("a coordinate spawn in front of the player is accepted", function(t)
+s:test("a coordinate spawn reports what it observed", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
 
     local ok = Pal.get("ChickenPal"):spawn(coord)
     t:type(ok, "boolean", ":spawn reports a boolean verdict")
-    if not ok then t:skip("no PalCheatManager this session — the spawn route is unavailable") end
+    t:eq(ok, false, "a coordinate spawn reports false while nothing appears; a true here "
+        .. "means a pal was observed to arrive, and this test is what needs updating")
 end)
 ```
+
+最後の行は習慣として真似する価値があります。このバージョンでは `:spawn` は何も配置しないので、
+チェックはまさにそのとおりを主張します。もしパルが現れるようになれば、このテストが赤くなり、
+それが知らせになります。`t:type(ok, "boolean")` だけならどちらの世界でも通ってしまい、何も
+教えてくれません。ゲームが今日していることを、足りない部分も含めてそのまま主張し、変化には
+意図的にテストを壊させてください。
 
 スキップは双方向に働きます。*ワールドがない*場合の経路を確かめるチェック（閉じたままの ready ゲート、
 オーナーのないウィジェットの `:screen()`）がいくつかあり、それらはワールドを見つけると
@@ -363,8 +370,13 @@ s:test("a beacon pays out wood when it is interacted with", function(t)
     support.needWorld(t)
 
     local wood = Item.get("Wood")
-    t:eq(wood:give(3), true, "give runs through AddItem_ServerInternal")
-    t:type(wood:take(3), "boolean", "take reports what it measured")
+    local before = wood:count()
+    if before == nil then t:skip("the inventory count could not be read") end
+
+    t:eq(wood:give(3), true, "give answers the before/after delta, so true means the count rose")
+
+    local after = wood:count()
+    if after then t:eq(after - before, 3, "and it rose by exactly what was asked for") end
 end)
 
 return s
@@ -456,7 +468,7 @@ local removed = support.sweep()   -- 217
 
 ```lua
 support.announce("half way through")   -- on screen via SendSystemAnnounce, prefixed [PalForge]
-support.log("give Wood x3 -> false")   -- UE4SS.log under [PalForge.test]
+support.log("give Wood x3 -> 135 -> 138")   -- UE4SS.log under [PalForge.test]
 ```
 
 `announce` は `pcall` で包まれており、`PalUtility` と有効な `PalPlayerCharacter` の両方を必要と
@@ -477,9 +489,9 @@ support.nearestPal(coord)    -- { actor, pos, dist, count }, or nil
 地点のまわりでゲームがキャラクターを列挙できることを確かめます。
 
 <Callout type="info">
-`:spawn` が `true` を返すのは**受理された**という意味であり、到着したという意味ではありません。
-アクターは数フレーム後に実体化し、再配置はリトライチェーン上で走るため、pal スイートは要求座標との
-距離をあえて確かめません。確かめるのはスポーンが受理されたことと、ワールドが列挙できることだけです。
+このバージョンでは `:spawn` は何も配置しないので、pal スイートはまず `false` を確かめ、次にその判定の
+土台になっている計測そのものを確かめます。`nearestPal` は、要求した地点のまわりで今もワールドを
+列挙できることを示します。それこそが、動くスポーンを検出する手段だからです。
 </Callout>
 
 スイートが依拠する実際のゲーム id。ライブチェックがゲームに本当に存在するコンテンツを扱うためです。
@@ -501,31 +513,34 @@ support.GAME = {
 スイープが登録解除するのは定義です。ライブテストがセーブデータに対して行ったことは元に戻せません。
 ワールドテストはそれを踏まえて書かれていますが、すべてが可逆というわけではありません。
 
-- **スポーンしたパルは残ります。** `pal` はライブテスト 3 件で `UPalCheatManager` に `ChickenPal` を
-  要求します。ツリー内にそれをデスポーンさせるものはありません。
-- **渡したアイテムも残ることがあります。** `item` は `Wood` を 3 個渡し、直後に `:take(3)` を呼びます。
-  このビルドでは確認された削除呼び出しがないため、`:take` は同じ追加経路に負のデルタを流し込んで
-  個数を読み直します。テストが主張するのは、実測した真偽値を返すことだけです。`false` は 3 個の Wood
-  がまだインベントリにあるという意味です。
+- **パルはスポーンしません。** `pal` はライブテスト 3 件で `UPalCheatManager` に `ChickenPal` を
+  要求しますが、このバージョンでは何も現れないので、この 3 件は何も残しません。もし現れるように
+  なった場合は残ります。ツリー内にパルをデスポーンさせるものはありません。
+- **渡した Wood はそのまま返され、床に落ちます。** `item` は `Wood` を 3 個渡し、同じ 3 個を取り戻します。
+  取り出しは削除ではなく、立っている場所の地面に落とすので、実行が残すのは足元の小さな山です。
+  give が成立して take が成立しなかった場合は、代わりにインベントリに残ります。
 - **設置も装着も建築もしません。** メッシュと pal のレンダリングテストは、意図的にロードできない
   モデルパスを指すので、バックエンドはプレイヤーのメッシュコンポーネントに触れる前に降ります。
   building スイートはすでに建てられているものに対する読み取り専用で、`inst:save()` は決して
   呼びません。UI スイートは `PalPlayerController` が存在するときはウィジェットの構築手前で止まります。
 - **エフェクトは自分で後始末します。** ライブの effect テストは 1 件だけで、`pcall` の下でポーンに
-  適用してから外します。PalForge のエフェクトは純粋な Lua の帳簿であり、いずれにせよネイティブの
-  状態異常は切り替わりません。
+  適用してから外します。`nativeStatus` を宣言していないのでゲーム本体の状態異常は点灯しません。
+  宣言しているエフェクトなら、外れるときに一緒に消えます。
 
 <Callout type="warn">
-ワールドに触れるスイートは、大事なセーブではなく使い捨てのセーブで実行してください。チキン 3 羽と
-Wood 3 個は小さな散らかりですが、散らかりであることに変わりはなく、フレームワークはそれを片付ける
+ワールドに触れるスイートは、大事なセーブではなく使い捨てのセーブで実行してください。床の Wood 3 個は
+小さな散らかりですが、散らかりであることに変わりはなく、フレームワークはそれを片付ける
 約束をしていません。
 </Callout>
 
 緑の実行結果は、api のすべての呼び出しが名前どおりの仕事を最後までやる、という意味ではありません。
-いまのところ 2 つは途中までしかやらず、スイートはそれを意図的に固定しています。
+いまのところ 3 つは途中までしかやらず、スイートはそれを意図的に固定しています。
 
-- `Audio.Handle:setVolume` は端の値も含め、どんな値に対しても `false` を返します。まだ何もしません。
-  音量はゲーム自身のオーディオ設定で調整し、`false` は正直な返答として受け取ってください。
+- `Pal.Handle:spawn` はワールドにクリーチャーを配置しません。ライブの pal チェック 3 件は、素通り
+  させずに `false` を主張するので、現れるようになった日にスイートがそれを知らせます。
+- `Audio.Handle:setVolume` は端の値も含め、どんな値に対しても `false` を返します。何も変わらず、
+  このビルドにはサウンド単位の音量そのものがありません。より静かなサウンドイベントを選ぶか、音量は
+  ゲーム自身のオーディオ設定に任せ、`false` は正直な返答として受け取ってください。
 - `Audio.Handle:stop` はアクター単位です。`StopSoundByActor` を発行するので、呼び出した対象の音 1 つ
   ではなくそのアクター上のすべてを止めます。一度も定義されたことのない id のハンドルでも、同じように
   アクターを黙らせます。個別に止めたい音は、別々のアクター上で鳴らしてください。
@@ -537,7 +552,8 @@ Wood 3 個は小さな散らかりですが、散らかりであることに変�
 - `test.run("pal")` で 1 スイートだけ実行でき、`test.bind("F5", fn)` で好きな処理をキーに置けます。
 - ワールドが必要なチェックは `support.needWorld(t)` で始めます。失敗ではなくスキップになります。
 - テスト内で作る id は必ず `support.id(...)` から取ります。あとでスイープが片付けます。
-- ワールドに触れるスイートは使い捨てのセーブで実行します。出したパルや渡した Wood は残ります。
+- ワールドに触れるスイートは使い捨てのセーブで実行します。ライブチェックが渡したものは残り、
+  取り戻したものは床に落ちます。
 
 次は [コンテンツパックを作る](/docs/guides/first-content-pack) を読むと、これらのチェックが守る
 対象そのものを書けます。

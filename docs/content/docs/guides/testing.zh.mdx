@@ -117,7 +117,7 @@ env.dev = false     -- set this BEFORE registry.initialize()
 ```text
 [PalForge] tests: running 13 suite(s)
 [PalForge] tests: 276 passed, 0 failed, 18 skipped
-[PalForge] FAIL [item] give hands the player a few Wood: give Wood x3 should execute
+[PalForge] FAIL [item] give adds to the live inventory and take drops it back out, both measured: the Wood count must RISE across a give (135 -> 135)
 ```
 
 每一条失败都会单独在屏幕上再显示一次。只说 `3 failed` 而没有别的信息的汇总，最后还是得回日志里
@@ -225,7 +225,7 @@ api 的大部分都需要一个已加载的世界。碰到世界的测试会把 
 s:test(":give hands the player three Wood", function(t)
     local pawn = support.needWorld(t)     -- returns the pawn, or skips out of the test
     local wood = Item.get("Wood")
-    t:eq(wood:give(3), true, "give runs through AddItem_ServerInternal")
+    t:eq(wood:give(3), true, "give reads the count before and after, so true means it rose")
 end)
 ```
 
@@ -255,16 +255,22 @@ support.needGlobal(t, "FindAllOf")   -- skip unless that engine global is a func
 测试也可以自己决定跳过，在任意深度上，只要它发现前提条件不在：
 
 ```lua
-s:test("a coordinate spawn in front of the player is accepted", function(t)
+s:test("a coordinate spawn reports what it observed", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
 
     local ok = Pal.get("ChickenPal"):spawn(coord)
     t:type(ok, "boolean", ":spawn reports a boolean verdict")
-    if not ok then t:skip("no PalCheatManager this session — the spawn route is unavailable") end
+    t:eq(ok, false, "a coordinate spawn reports false while nothing appears; a true here "
+        .. "means a pal was observed to arrive, and this test is what needs updating")
 end)
 ```
+
+最后那一行值得当成习惯抄下来。这个版本里 `:spawn` 什么都不会放下，所以这项检查就主张这件事 ——
+将来真有帕鲁出现时，这个测试会变红，而那次失败就是通知。只写 `t:type(ok, "boolean")` 的话，两种
+情况都会通过，什么也告诉不了你。把游戏今天做到的事如实写进断言，连不足的部分一起，让变化去
+故意打破测试。
 
 跳过是双向的。有几项检查覆盖的是*没有世界*的那条路径 —— 关着的 ready 闸门、没有归属者的控件的
 `:screen()` —— 它们在发现世界存在时会调用 `t:skip("a world is loaded")`。
@@ -348,12 +354,21 @@ s:test("a beacon pays out wood when it is interacted with", function(t)
     support.needWorld(t)
 
     local wood = Item.get("Wood")
-    t:eq(wood:give(3), true, "give runs through AddItem_ServerInternal")
-    t:type(wood:take(3), "boolean", "take reports what it measured")
+    local before = wood:count()
+    if before == nil then t:skip("the inventory count could not be read") end
+
+    t:eq(wood:give(3), true, "give answers the before/after delta, so true means the count rose")
+
+    local after = wood:count()
+    if after then t:eq(after - before, 3, "and it rose by exactly what was asked for") end
 end)
 
 return s
 ```
+
+只要游戏允许，就用实测代替类型检查。`:give`、`:take` 和 `:count` 返回的都是可以相减的数字，所以
+一个测试可以说出到底动了多少，而不只是说“回来了一个布尔值”—— 这样写的检查，等数字变了那天依然
+说得出话。
 
 `Suite:test` 可以链式调用，所以你喜欢的话可以写 `s:test(...):test(...)`。
 
@@ -438,7 +453,7 @@ local removed = support.sweep()   -- 217
 
 ```lua
 support.announce("half way through")   -- on screen via SendSystemAnnounce, prefixed [PalForge]
-support.log("give Wood x3 -> false")   -- UE4SS.log under [PalForge.test]
+support.log("give Wood x3 -> 135 -> 138")   -- UE4SS.log under [PalForge.test]
 ```
 
 `announce` 包在 `pcall` 里，需要 `PalUtility` 和一个活着的 `PalPlayerCharacter` 同时存在。没有
@@ -458,9 +473,8 @@ support.nearestPal(coord)    -- { actor, pos, dist, count }, or nil
 和总数。生成检查用它来确认游戏仍然能在它请求的那个点周围列出自己的角色。
 
 <Callout type="info">
-`:spawn` 返回 `true` 的意思是**已被接受**，不是已经到位。actor 要过几帧才实体化，重新定位跑在
-一条重试链上，所以 pal 套件故意不检查它离请求坐标有多远 —— 只检查生成被接受了，以及世界可以被
-枚举。
+这个版本里 `:spawn` 什么都不会放下，所以 pal 套件先核对那个 `false`，再核对这个判定所依赖的测量本身：
+`nearestPal` 证明世界在它请求的那个点周围仍然可以被枚举，而那正是一次能用的生成会被检测到的方式。
 </Callout>
 
 套件依赖的真实游戏 id，这样一次实时检查用到的是游戏里真的有的内容：
@@ -482,27 +496,31 @@ support.GAME = {
 清扫注销的是定义。它没法撤销一次实时测试对你存档做过的事，世界测试也是照着这一点写的 —— 但
 并不是所有事都可逆。
 
-- **生成出来的帕鲁会留下。** `pal` 在它的三个实时测试里向 `UPalCheatManager` 要一只 `ChickenPal`。
-  整棵树里没有东西能把它们收回去。
-- **发出去的道具可能会留下。** `item` 发三个 `Wood`，紧接着调用 `:take(3)`。这个版本上没有确认
-  可用的移除调用，所以 `:take` 把一个负的增量推过同一条添加路径，再重新读一次数量；这个测试
-  只主张它返回了一个自己确实测出来的布尔值。`false` 表示那三个 Wood 还在你的背包里。
+- **不会生成出帕鲁。** `pal` 在它的三个实时测试里向 `UPalCheatManager` 要一只 `ChickenPal`，而这个
+  版本里什么都不会出现，所以这三项什么也不会留下。将来真有一只出现的话，它会留下：整棵树里没有
+  东西能把帕鲁收回去。
+- **发出去的 Wood 会被原样交回来，掉在地上。** `item` 发三个 `Wood`，再把同样的三个拿回来。拿走
+  不是销毁，而是掉在你站着的地面上，所以一次运行留下的是你脚边的一小堆；如果 give 成了而 take
+  没成，那它们就留在你的背包里。
 - **不会放置、穿戴或建造任何东西。** mesh 和 pal 的渲染测试指向一个故意加载不了的模型路径，
   所以后端在碰到玩家的 mesh 组件之前就退出了。building 套件对你已经建好的东西只读，也从不
   调用 `inst:save()`。存在 `PalPlayerController` 时，UI 套件会在构造控件之前停下。
-- **效果会自己收拾干净。** 唯一的实时 effect 测试在 `pcall` 下把效果加到 pawn 上再移除掉，而
-  PalForge 的效果是纯 Lua 的记账 —— 无论哪种情况都不会切换原生的状态异常。
+- **效果会自己收拾干净。** 唯一的实时 effect 测试在 `pcall` 下把效果加到 pawn 上再移除掉。它没有
+  声明 `nativeStatus`，所以不会点亮游戏自己的状态异常；写了的效果，也会在退出时把它熄灭。
 
 <Callout type="warn">
-碰世界的套件请在一个可以丢掉的存档里跑，别在你在意的那个存档里跑。三只鸡和三个木头是很小的一点
+碰世界的套件请在一个可以丢掉的存档里跑，别在你在意的那个存档里跑。地上三个木头是很小的一点
 乱，但它确实是乱，而框架并没有承诺会去收拾。
 </Callout>
 
-一次全绿的运行，并不代表 api 里每个调用都把它名字暗示的活干完了。今天有两个只做了一半，套件
+一次全绿的运行，并不代表 api 里每个调用都把它名字暗示的活干完了。今天有三个只做了一半，套件
 特意把这一点钉住：
 
-- `Audio.Handle:setVolume` 对每个值都返回 `false`，边界值也一样。它目前什么也不做。请改用游戏
-  自己的音频选项来调音量，并把那个 `false` 当作诚实的回答。
+- `Pal.Handle:spawn` 不会在世界里放下生物。三项实时 pal 检查主张的就是那个 `false`，而不是绕过去，
+  所以等到真有帕鲁出现的那天，套件会告诉你。
+- `Audio.Handle:setVolume` 对每个值都返回 `false`，边界值也一样。它什么都不改，而这个版本上根本
+  没有按声音调节的音量可改。请挑一个更安静的声音事件，或者把音量交给游戏自己的音频选项，并把那个
+  `false` 当作诚实的回答。
 - `Audio.Handle:stop` 是按 actor 生效的。它发出 `StopSoundByActor`，所以它让那个 actor 上的所有
   声音都安静下来，而不只是你调用它的那一个声音 —— 就算是一个从未定义过的 id 的句柄，也照样让
   actor 安静。需要单独停止的声音，请放在不同的 actor 上播放。
@@ -514,7 +532,7 @@ support.GAME = {
 - `test.run("pal")` 只跑一个套件，`test.bind("F5", fn)` 能把你想要的任何处理放到一个键上。
 - 需要世界的检查以 `support.needWorld(t)` 开头，所以它们会跳过，而不是失败。
 - 测试里自己编出来的 id 都用 `support.id(...)` 取，之后清扫会把它们移除。
-- 碰世界的套件请在可以丢掉的存档里跑：生成出来的帕鲁和发出去的 Wood 会留下。
+- 碰世界的套件请在可以丢掉的存档里跑：实时检查发给你的东西会留下，它拿回去的东西会掉在地上。
 
 接下来读[制作内容包](/docs/guides/first-content-pack)，写出这些检查要保护的那些内容。
 
