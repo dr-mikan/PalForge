@@ -18,7 +18,7 @@
 -- statement AFTER the call (no tick in between, so it could never have seen anything), plus one
 -- more look at a nominal 1.2 s. Both missed every time, and "the call ran and nothing spawned"
 -- was reported as a property of the build instead of as a stopwatch stopping too early. The
--- correction is the observation windows at WATCH_MS / WATCH_TRIES below, whose numbers come
+-- correction is the observation window at WATCH_SECONDS below, whose number comes
 -- from that log and not from taste.
 --
 -- WHAT IS STILL UNOBSERVED, and must not be smuggled in on the strength of the above: M.pal,
@@ -214,7 +214,7 @@ end
 -- teleport. It walks every UObject, so it is only ever run in response to a spawn THE CALLER
 -- ASKED FOR: never on a background timer, and never at all in a session that spawns nothing.
 -- The deferred passes below do put it on a timer, but a bounded one that starts at a spawn and
--- stops as soon as it has an answer (WATCH_MS / WATCH_TRIES).
+-- stops as soon as it has an answer (WATCH_SECONDS).
 
 local function palActors()
     local ok, all = pcall(FindAllOf, "PalCharacter")
@@ -287,8 +287,17 @@ end
 -- measured even on a quiet session where the ticks run at their nominal rate, and ~20 s of wall
 -- clock at the stretch actually observed. Both chains stop the moment they have an answer, so
 -- the extra tries are only ever paid for by a spawn that never arrives.
-local WATCH_MS    = 400
-local WATCH_TRIES = 20
+-- ⚠️ BOUND ON SECONDS, NOT ON LOOKS, and the difference is not cosmetic. The watches ride the
+-- heartbeat, and the heartbeat's body is queued through ExecuteInGameThread — so when the game
+-- thread is busy those bodies pile up and then drain in a burst, and a counter of LOOKS advances
+-- as fast as the queue empties rather than as fast as time passes. A live run spent its whole
+-- twenty-look budget in ONE SECOND and reported "no new pal actor appeared to place", which is
+-- true of that second and says nothing about the four-to-eight the pal actually needs.
+--
+-- os.clock is the same clock every elapsed figure in this file already prints. A look counter is
+-- kept only for the log line, where it is genuinely interesting; nothing decides on it.
+local WATCH_MS      = 400   -- nominal; the heartbeat is 500 ms and neither is load-bearing
+local WATCH_SECONDS = 12    -- half again the longest arrival ever measured (5.9 s)
 
 -- Deferred ARRIVAL WATCH for the wild route, log-only, and the ONLY observation M.pal has: the
 -- spawn is asynchronous, so there is nothing to see at the call site and everything to see a few
@@ -310,10 +319,10 @@ local function watchForArrival(before, what)
         local n = newPalCount(before)
         if n > 0 then
             log.info(string.format("%s: %d new PalCharacter in the world %.1f s after the call "
-                .. "(look %d of %d)", what, n, elapsed, ticks, WATCH_TRIES))
+                .. "(look %d, %.0f s budget)", what, n, elapsed, ticks, WATCH_SECONDS))
             return true
         end
-        if ticks >= WATCH_TRIES then
+        if elapsed >= WATCH_SECONDS then
             log.warn(string.format("%s: the call ran but NO new PalCharacter appeared in %.1f s "
                 .. "(%d looks). This window is not the reason — the coordinate route received its "
                 .. "pal ~5.9 s after the same call on 2026-07-26 — so this is a real miss. A "
@@ -410,8 +419,8 @@ function M.pal(charId, level)
     end
     if watchForArrival(before, "spawn.pal " .. name) then
         log.info(string.format("spawn.pal(world) %s (lv %d): the call was issued [evidence %s]. "
-            .. "The pal arrives asynchronously, so the world is watched for up to %d looks and "
-            .. "the arrival line follows this one", name, level, evidence, WATCH_TRIES))
+            .. "The pal arrives asynchronously, so the world is watched for up to %d seconds and "
+            .. "the arrival line follows this one", name, level, evidence, WATCH_SECONDS))
     else
         log.warn(string.format("spawn.pal(world) %s (lv %d): the call was issued [evidence %s], "
             .. "but LoopAsync/ExecuteInGameThread are unavailable this session, so NOTHING will "
@@ -430,7 +439,7 @@ end
 -- is not installed here. It is inherited no longer: on 2026-07-26 the nearest-to-the-player
 -- anchor below picked the right pawn on both spawns of the run, and the teleport landed it on
 -- the requested point exactly. What the run corrected is "a few frames late" — it is SECONDS
--- late, which is what WATCH_TRIES is sized for.
+-- late, which is what WATCH_SECONDS is sized for.
 
 -- ONE route, and the one deliberate exception to "every engine call goes through
 -- core.signature". K2_TeleportTo is the character-aware relocate — it updates the movement
@@ -491,7 +500,7 @@ end
 -- teleport that refused a pawn this pass HAD found, or a spawn whose pal never arrived at all.
 -- WHAT THAT RUN ALSO SHOWED is why this pass so nearly missed: it caught the pal on or about
 -- its LAST try under the old six-try budget, at 5.9 s against a nominal 2.4 s. The budget is
--- now WATCH_TRIES; the reasoning is written there and it is the reasoning that matters more
+-- now WATCH_SECONDS; the reasoning is written there and it matters more
 -- than the number.
 --
 -- RETURNS whether the chain is FINISHED — true when a pal was found and handled, or when the
@@ -539,8 +548,8 @@ local function placeNewPal(job)
         return true          -- done: stop the loop
     end
     job.tries = job.tries + 1
-    if job.tries < WATCH_TRIES then
-        return false         -- not yet: the ONE loop keeps going
+    if (os.clock() - job.t0) < WATCH_SECONDS then
+        return false         -- not yet: the poller keeps going
     else
         log.warn(string.format("spawn.palAt: no new pal actor appeared to place — %d looks over "
             .. "%.1f s and nothing in the world was absent from the pre-spawn snapshot, so there "

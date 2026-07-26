@@ -22,7 +22,7 @@
 --   local poll = require("palforge.core.poll")
 --   poll.every("spawn arrival", function(elapsed, ticks)
 --       if found() then return true end        -- true means DONE: drop me
---       return ticks >= 20                     -- give up eventually, and say so
+--       return elapsed >= 12                   -- give up on the CLOCK, never on a tick count
 --   end)
 --
 -- The registry lives on _G so it survives a reload, exactly like the event bus does: the tick
@@ -46,8 +46,14 @@ end
 ---Register `fn` to be called on every heartbeat until it returns true.
 ---
 ---`fn(elapsed, ticks)` receives the seconds since registration and how many times it has been
----called. Returning true — or raising — removes it. A poller that never returns true runs until
----the world does, which is why every caller here bounds itself by `ticks`.
+---called. Returning true — or raising — removes it.
+---
+---⚠️ BOUND ON `elapsed`, NOT ON `ticks`. The heartbeat's body is queued through
+---ExecuteInGameThread, so when the game thread is busy the bodies pile up and then drain in a
+---burst: `ticks` advances as fast as the queue empties, not as fast as time passes. A live run
+---spent a twenty-tick budget in ONE SECOND and reported a spawn missing that had not had time to
+---arrive. `ticks` is honest about how many times you ran and is worth printing; it is not a
+---clock. A poller that never returns true runs until the world does.
 ---@param name string   # shown in the log when it is dropped or refused
 ---@param fn fun(elapsed: number, ticks: integer): boolean
 ---@return boolean registered

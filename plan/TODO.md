@@ -110,7 +110,7 @@ bound there can never be pressed — which is where `watch` sat, unreachable and
 it. The bindings are printed at startup now, so a key the game has taken is visible in the
 log rather than looking like a probe that found nothing.
 
-## Closed (30)
+## Closed (31)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -148,8 +148,9 @@ without the game running.
 - **`item-discard-source`** — Item.Spec.Events.onDiscard. **Observed live**, 2026-07-26, with the slot resolving to a real item id. Two separate things had to be right. A drop does NOT go through `AddItem_ServerInternal` — that hook was armed and fired zero times across two sessions, because dropping goes through `UPalNetworkItemComponent`, one class over from everywhere the search had looked. And the container holding the dropped slot is not necessarily one the player's inventory helper lists: the first live firing reported "no container of the player's 6 matched", so the set comes from a world sweep now. The GUID match is exact, which is what makes the wider search safe.
 - **`skill-activate-source`** — Skill.Spec.Events.onActivate. **Observed live**, 2026-07-26, in real combat: `skill.activate carried its first event from source "PalActionBase:OnBeginAction"`. The source that works is the ACTION OBJECT, not a utility that builds one — a pal's move IS a `UPalActionWazaBase` and carries its own `EPalWazaID`, so hooking it puts the identity a handler needs on `self` rather than in someone else's argument list. `PlayActionByWazaID` stays armed as the control that proved it: it registered successfully and carried nothing while a pal fought and killed another pal, which is what sent the search to the action side.
 - **`pal-spawned-hook`** — Pal.Spec.Events.onSpawned. **Observed live**, 2026-07-26, from BOTH new sources: `PalNPC:OnCompletedInitParam` and `PalPlayerCharacter:OnCompleteInitializeParameter`. They are the bound TARGETS of the initialise broadcast, not the broadcaster — which was hooked first, registered fine, and never carried anything. That is the general lesson and it is worth keeping: RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
+- **`skill-passive-source`** — Skill.Spec.Events.onEquip. **Observed live**, 2026-07-26: `skill.equip carried its first event from source "AddPassiveSkill"`. The write that triggered it came from PalForge itself — `core/character.addSkill` put a passive on a live `BP_ChickenPal_C` and read it back — which is a useful property in its own right: the source catches a pack's own writes as well as the game's. It also confirms the passive half of `pal-skills-equip` on the way past. `SetupSkillFromSelf` stays armed beside it and has carried nothing yet, so which call the GAME uses when a player changes a passive at a bench is still open — the log names the source, so one bench visit settles it.
 
-## Open (8)
+## Open (7)
 
 ### Pal
 
@@ -321,54 +322,6 @@ with a NAMED move (e.g. a fire attack) and, separately, with a plain melee hit, 
 be diffed. PASTE BACK: the full field list of every param struct plus their values for both
 cases — we need to see whether any field holds a skill/waza row FName and, if so, its exact
 name.
-
-#### `skill-passive-source` — Skill.Spec.Events.onEquip / Skill.Spec.Events.onUnequip
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:130
-
-**What a pack author sees**
-
-Both handlers only run when the pack calls Handle:equip(owner) / Handle:unequip(owner). PalForge
-keeps no equipped set and never tells the game anything, so declaring kind = "passive" plus
-onEquip attaches nothing.
-
-**What is still unknown**
-
-```text
-TODO(skill-passive-source): NARROWED — the shortlist exists now. dumps/reflection/
-02_reflection.txt puts AddPassiveSkill and RemovePassiveSkill on /Script/Pal.Pal-
-IndividualCharacterParameter, together with GetPassiveSkillList to read the result back
-and an OnPassiveSkillUpdateDelegate (+ its __DelegateSignature) that announces the
-change; PalCharacter owns a :PassiveSkillComponent and PalGameInstance a
-:PassiveSkillManager. So both halves this channel wants — a SOURCE to hook and an
-attach call for Handle:equip to make real — have named targets on classes proven
-loaded. Covers onUnequip too: same object, RemovePassiveSkill.
-THE ONE THING LEFT: the parameter list of Add/RemovePassiveSkill (passive row FName vs
-an index into a fixed-size array), and whether hooking them catches the statue-of-power
-/ party in-out path. 02_reflection prints names only, and neither was ever armed.
-```
-
-**What the probe prints**
-
-STEP 1 (find the holder): `local pal = FindFirstOf("PalCharacter")` in a world with a deployed
-Pal; print `pal:GetClass():GetFName():ToString()`, then enumerate the class chain with `local c
-= pal:GetClass(); while c do c:ForEachProperty(function(p) print("PROP",
-p:GetFName():ToString(), p:GetClass():GetFName():ToString()) end); c:ForEachFunction(function(f)
-print("FN", f:GetFName():ToString()) end); c = c:GetSuperStruct() end`. Repeat the same
-enumeration for the CDOs `StaticFindObject("/Script/Pal."..n)` with n in {"PalIndividualCharacte
-rParameter","PalCharacterParameterComponent","PalIndividualCharacterHandle","PalPassiveSkillComp
-onent","PalCharacterContainer"}, printing whether each class EXISTS (non-nil) — the existence
-answer alone is load-bearing. STEP 2 (shortlist): print every function or property whose name
-contains Passive / Skill / Add / Remove / Set / Array. For each shortlisted UFunction print its
-parameters via `f:ForEachProperty(function(p) print(" PARAM", p:GetFName():ToString(),
-p:GetClass():GetFName():ToString()) end)`. STEP 3 (confirm live): RegisterHook every
-Add*/Remove* found (dump/auto_mod/main.lua pattern), then in game capture a Pal, use the Statue
-of Power / passive-skill change bench, and pull a Pal in and out of the party. PASTE BACK: which
-classes existed, the shortlisted function names with their parameter lists, and which hooks
-fired during those actions with their parameter values.
-
-### Audio
 
 #### `audio-custom-file-loader` — Audio.Spec.soundFile (Audio{ soundFile = ... }:play, via core.sound.file FileSource:play)
 

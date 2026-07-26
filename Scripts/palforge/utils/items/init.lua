@@ -470,7 +470,9 @@ local function watchLateFall(resolved, before, num)
                 .. "reported false for it", resolved, num, before, now, elapsed))
             return true
         end
-        if ticks >= 20 or elapsed >= 3.0 then
+        -- Elapsed only. A tick count bounds on how fast the game thread drains its queue, not
+        -- on how much time has passed — see the warning on poll.every.
+        if elapsed >= 3.0 then
             log.info(string.format("take %s x%d: still %s after %.1f s, so the removal did not "
                 .. "land late either", resolved, num, tostring(now), elapsed))
             return true

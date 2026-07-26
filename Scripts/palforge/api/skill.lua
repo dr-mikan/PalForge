@@ -127,11 +127,11 @@ local Events = schema.define("Skill.Spec.Events", {
     --      first call for a component emits equip for every passive that character already has,
     --      so a pal streaming into the world announces its four passives once. Keep onEquip
     --      idempotent. ctx = { skillId, owner, actor, component, source, via }.
-    -- TODO(skill-passive-source): NARROWED. Source 1 is ruled out by measurement. What is
-    -- unmeasured is whether source 2 fires and WHICH moments it covers — character init,
-    -- capture-time assignment and the Statue of Power are the expectation. If it too is silent,
-    -- the last lead is UPalMapObjectOperatingTableModel:RequestChangePassiveSkill (:24094), the
-    -- bench's own request, which takes the passive FName as its third parameter.
+    -- onEquip FIRES, observed 2026-07-26: skill.equip carried its first event from source
+    -- "AddPassiveSkill". The write that triggered it came from PalForge itself — a passive was
+    -- put on a live pal and read back — which is a useful property in its own right: the source
+    -- catches a pack's own writes as well as the game's. SetupSkillFromSelf stays armed beside
+    -- it, so which one the GAME uses at a bench is still an open question the log will answer.
     { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "a passive was attached (self, owner, ctx) - two sources armed, none seen firing" },
     { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
