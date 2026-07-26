@@ -488,7 +488,20 @@ function M.skillsOn(actor)
     if not p then return nil end
     local _, equip   = signature.call(p, "GetEquipWaza", {})
     local _, passive = signature.call(p, "GetPassiveSkillList", {})
-    return { active = readList(equip, true), passive = readList(passive, false) }
+
+    -- EQUIPPED is not the only list, and telling them apart is the open question. A pal knows
+    -- moves it has MASTERED and moves it COULD equip, separately from the up-to-four it has
+    -- equipped right now — so an empty `active` on a wild pal may be perfectly correct rather
+    -- than a read that missed. These two are read for that reason alone; they cost one call
+    -- each and they are what distinguishes "nothing equipped" from "nothing reachable".
+    local _, equipable = signature.call(p, "GetEquipableWaza", {})
+    local _, mastered  = signature.call(p, "GetMasteredWaza", {})
+    return {
+        active    = readList(equip, true),
+        passive   = readList(passive, false),
+        equipable = readList(equipable, true),
+        mastered  = readList(mastered, true),
+    }
 end
 
 --=============================================================================

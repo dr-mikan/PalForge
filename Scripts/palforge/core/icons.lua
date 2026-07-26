@@ -413,13 +413,20 @@ end
 local iconMaps = setmetatable({}, { __mode = "k" })
 local sampled  = {}   -- one raw-shape sample per table, so a busy log stays readable
 
--- TODO(icons-row-read): unknown whether GetDataTableColumnAsString is reflected on this build.
--- That is the whole of what is left. The table is found, the row keys read, the column measured,
--- and the accessor's two arguments are the shapes this tree marshals every day — but no run has
--- called it. core.signature refuses it unless the live class declares it, so one F1 in a loaded
--- world answers it in one line: a row count closes the item, and "refused ... is not declared on
--- this build" means the library is unreflected here and icons have no route at all, which is
--- equally an answer.
+-- OBSERVED WORKING, 2026-07-26, on a live save — every icon table at once:
+--     DT_PalCharacterIconDataTable        674 of 674 rows carry an icon [declared]
+--     DT_ItemIconDataTable               1183 of 1207 [declared]
+--     DT_BuildObjectIconDataTable         567 of 571  [declared]
+--     DT_partnerSkillIconDataTable        311 of 311  [declared]
+-- The item table's 24 blanks are rows that genuinely have no icon, not a read that missed: the
+-- other six tables are at or near 100%, which is what a working read looks like.
+--
+-- It took three wrong turns, and each one is worth a sentence so nobody repeats it. The row
+-- accessors are not UFunctions and not on UDataTable — UE4SS binds them itself. The value in an
+-- icon column is a TSoftObjectPtr userdata that answers none of the nineteen member names a
+-- soft pointer could plausibly expose, so the struct cannot be opened from Lua at all. And the
+-- string column that replaces it delivers its elements wrapped in RemoteUnrealParam, which is
+-- what made the array read the right LENGTH with nothing in it.
 local function iconMap(tbl, tableName)
     local cached = iconMaps[tbl]
     if cached then return cached end

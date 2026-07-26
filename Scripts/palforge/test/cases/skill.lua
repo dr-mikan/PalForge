@@ -422,8 +422,13 @@ s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)",
     if pal then
         local theirs = character.skillsOn(pal)
         if theirs then
-            support.log(string.format("skills: the nearest pal carries %d active and %d passive",
-                #theirs.active, #theirs.passive))
+            -- All four lists, because the useful question is which of them are empty. A wild pal
+            -- with nothing EQUIPPED but a non-empty mastered/equipable list is a correct read of
+            -- a pal that simply has no loadout; all four empty means the read is not reaching
+            -- what it should. That distinction is the whole of TODO(pal-skills-equip) now.
+            support.log(string.format("skills: the nearest pal carries %d active, %d passive, "
+                .. "%d equipable, %d mastered", #theirs.active, #theirs.passive,
+                #(theirs.equipable or {}), #(theirs.mastered or {})))
         end
     end
 end)

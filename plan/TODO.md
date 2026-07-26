@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (17)
+## Closed (18)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -90,8 +90,9 @@ without the game running.
 - **`effect-native-status`** — Effect.Spec.nativeStatus. **Observed working in a loaded save**, 2026-07-26: `status.add AttackUp (EPalStatusID 26) [declared]`, the game reading the ailment back as present, then `status.remove` and the game reading it back as gone. The route is `PalCharacter.StatusComponent` -> `UPalStatusComponent::AddStatus(EPalStatusID)`, and the vocabulary that previously had no source anywhere on disk is `EPalStatusID`'s 38 names. One thing had to change to get there and it generalises: those parameters are declared **EnumProperty**, not ByteProperty — an `enum class`, not a legacy `enum` — and `core/signature.lua` refused three correct calls over the spelling until it learned the two marshal identically. Every `EPal*` argument in this tree is an enum class.
 - **`pal-spawnmonster-signature`** — Pal.Handle:spawn. **Observed working**, 2026-07-26. The call was never broken: `cm:SpawnMonster(FName("ChickenPal"), lv)` was issued with `[evidence declared]`, meaning `core/signature.lua` walked the real UFunction on the installed binary and matched it. What was broken was the VERDICT around it — a spawn that arrives after ~4-6 seconds was measured synchronously, and the miss was reported as a property of the build. Three hypotheses died with it, including the server-authority one, which had been invented to explain an observation that never happened. `:spawn` now returns whether the call was ISSUED, because arrival is seconds away and no caller can block; the arrival line follows in the log, with elapsed seconds.
 - **`pal-spawn-placement`** — core.spawn.palAt. **Observed end to end, twice, in the same press**: `placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0`. Every half that had never been seen is now seen — the pal appears, the nearest-to-player anchor picks the right one, `K2_TeleportTo` accepts it, and the read-back is exact rather than approximate.
+- **`icons-row-read`** — core.icons.resolve, and every domain's `:iconOf()`. **Observed working**, 2026-07-26, on every icon table at once: 674/674 pal, 1183/1207 item, 567/571 building, 311/311 partner skill. (The item table's 24 blanks are rows that genuinely carry no icon; six of the seven tables are at or near 100%.) Three wrong turns, each worth remembering: the row accessors are not UFunctions and not on `UDataTable` — UE4SS binds them itself; the value in an icon column is a `TSoftObjectPtr` userdata that answers none of the nineteen member names a soft pointer could plausibly expose, so the struct cannot be opened from Lua; and the string column that replaces it delivers its elements wrapped in **RemoteUnrealParam**, with the real value behind `:get()` — which is what made the array read the right LENGTH with nothing in it. `utils/items` had been unwrapping correctly all along.
 
-## Open (21)
+## Open (20)
 
 ### Pal
 
@@ -1037,80 +1038,6 @@ Setup, each logging `'FIRED <path>'` once; then in game open and close the inven
 build menu, and return to the title screen, and paste which paths fired and in what order.
 
 ### Events and icons
-
-#### `icons-row-read` — core.icons.resolve -> Item/Pal/Building/Skill Handle:iconOf()
-
-- **Probe:** F1
-- **Marked at:** Scripts/palforge/core/icons.lua:398
-
-**What a pack author sees**
-
-`:iconOf()` falls back to the icon you declared yourself and never finds the vanilla one, so a
-pack cannot reuse the game's own artwork for an item, pal, building or partner skill.
-
-**What the runs settled, so nobody retries it**
-
-Reading a ROW works. UE4SS binds `FindRow` / `GetRowNames` / `GetRowMap` / `GetAllRows` /
-`ForEachRow` onto `UDataTable` itself — they are not UFunctions, which is why every reflection
-sweep in this tree missed them and why `dumps/cxx/Engine.hpp` shows the class with zero
-functions. `FindRow("Wood")` returned the row and the measured column was on it.
-
-The VALUE in that column cannot be unwrapped from Lua. It is a `TSoftObjectPtrUserdata`, and a
-probe asked it for all nineteen names a soft pointer could plausibly expose — `Get`,
-`LoadSynchronous`, `ToString`, `ToSoftObjectPath`, `GetPathName`, `GetAssetName`,
-`GetLongPackageName`, `GetAssetPathName`, `GetAssetPathString`, `IsValid`, `IsNull`,
-`IsPending`, `ObjectID`, `AssetPath`, `AssetPathName`, `SubPathString`, `PackageName`,
-`AssetName`, `WeakPtr` — and not one is readable. The UE4SS install ships class docs for
-UDataTable, Property and UFunction and none for TSoftObjectPtr. Guessing more member names is
-not a plan.
-
-So the value is read as TEXT instead, by the one accessor that returns plain strings rather than
-a struct: `GetDataTableColumnAsString(UDataTable*, FName)` on `UDataTableFunctionLibrary`, one
-entry per row in RowMap order, zipped against `dt:GetRowNames()` which walks the same map in the
-same order. No struct crosses into Lua. (An earlier attempt at this route took the names from
-the function library's own `GetDataTableRowNames`, which answered nothing here — that is fixed.)
-
-**What is still unknown**
-
-Whether `GetDataTableColumnAsString` is reflected on this build. That is the whole of it — the
-question used to be "does any way to read a DataTable value exist" and is now one yes/no.
-
-What changed: reading a ROW was the wrong question. `dumps/cxx/Engine.hpp` dumps `UDataTable`
-in full and it declares five properties and **zero functions**, so every accessor this code used
-to try (`dt:GetDataTableRowFromName`, `dt:FindRow`) was called on an object that does not have
-it. The real accessors are statics on `UDataTableFunctionLibrary` and take the table as their
-first argument:
-
-```text
-void GetDataTableRowNames(UDataTable* Table, TArray<FName>& OutRowNames);
-bool GetDataTableRowFromName(UDataTable* Table, FName RowName, FTableRowBase& OutRow);
-TArray<FString> GetDataTableColumnAsString(const UDataTable* DataTable, FName PropertyName);
-bool DoesDataTableRowExist(UDataTable* Table, FName RowName);
-```
-
-The row-VALUE one still cannot be used, for the reason this module worked out correctly long
-ago: it is CustomThunk with a wildcard out-struct whose real type comes from Blueprint bytecode,
-so a reflected call can only offer the declared `FTableRowBase` and the thunk rejects it. So
-`core/icons.lua` reads a COLUMN instead — no wildcard, no out-param, an object and an FName in,
-an array of plain strings out, one per row in RowMap order. `GetDataTableRowNames` walks the
-same RowMap in the same order, so zipping the two gives id -> icon path for a whole table in two
-calls and never needs a row struct in Lua.
-
-The sibling is the evidence: `GetDataTableRowNames` on this same library is proven on this build
-and runs in production in `utils/items`. The column call has simply never been made.
-
-Settled alongside it, from `dumps/cxx/Pal.hpp`: the column TYPE. All three row structs carry
-exactly one field and it is a `TSoftObjectPtr<UTexture2D>` — an asset path, which is what
-`LoadAsset` wants, so reading the column as a string loses nothing. It also confirms the column
-NAMES (`Icon`, `Icon`, `SoftIcon`) from the shipping binary.
-
-**What the probe prints**
-
-F1 in a loaded world. The suite asks the question a pack author would — can PalForge reuse the
-game's own artwork for `Wood`? — and `core.signature` logs whether
-`GetDataTableColumnAsString` is declared here. `declared`/`present` plus a row count closes the
-item; `refused ... is not declared on this build` means the library is unreflected here and icon
-resolution has no route at all, which is equally an answer.
 
 #### `pal-spawned-fresh` — Pal{ events = { onSpawned } } / event.on("pal.spawned")
 
