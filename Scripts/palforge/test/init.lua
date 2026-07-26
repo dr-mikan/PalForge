@@ -131,13 +131,37 @@ M.ACTIONS = {
 -- PalForge can make both. Spawning works and is measured; the passive write goes through the
 -- same AddPassiveSkill this tree already hooks. So these produce the situation instead of
 -- waiting for it.
+-- NO COORDINATE, deliberately. The coordinate route works — it places the pal exactly, off by
+-- 0 — but placing is an extra step that can put a pal somewhere a player cannot see or reach:
+-- a live run put one at z=8521, reported success, and the player never found it. Without a
+-- coordinate the game itself decides, which is beside the player, and that is the whole
+-- requirement here: something to hit.
+--
+-- Then it LOOKS BACK. "The call was issued" is not "there is a pal in front of me", and the gap
+-- between those two is what wasted a run — so this reports what is actually nearby, with its
+-- class and its distance, instead of leaving anyone to go and search.
 pf_spawn = function()
-    local Pal = require("palforge.api.pal")
-    local coord = support.inFront(400.0, 50.0)
-    local ok = coord and Pal.get(support.GAME.pal):spawn(coord)
-    log.info(string.format("pf_spawn: %s issued for %s — it arrives in about 4-8 seconds, "
-        .. "then hit it with a melee weapon and watch for skill.hit",
-        tostring(ok), support.GAME.pal))
+    local Pal  = require("palforge.api.pal")
+    local poll = require("palforge.core.poll")
+    local ok = Pal.get(support.GAME.pal):spawn()
+    log.info(string.format("pf_spawn: %s issued for %s — the game places it beside you, and it "
+        .. "takes a few seconds", tostring(ok), support.GAME.pal))
+
+    poll.every("pf_spawn look-back", function(elapsed)
+        if elapsed < 10 then return false end
+        local pal, cls = support.nearbyPal()
+        if not pal then
+            log.warn("pf_spawn: 10 s later there is still no PalMonsterCharacter near you")
+            return true
+        end
+        local here, there = support.location(support.player()), support.location(pal)
+        local d = (here and there)
+            and math.sqrt((there.x - here.x) ^ 2 + (there.y - here.y) ^ 2 + (there.z - here.z) ^ 2)
+            or nil
+        log.info(string.format("pf_spawn: the nearest pal is a %s, %s away — that is what to hit "
+            .. "for skill.hit", tostring(cls), d and string.format("%.0f cm", d) or "unreadable"))
+        return true
+    end)
 end,
 
 pf_teach = function()
