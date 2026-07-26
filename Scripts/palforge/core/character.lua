@@ -429,6 +429,15 @@ end
 -- depending on build and element type, so all three are tried. FName elements are ToString'd;
 -- enum elements arrive as numbers and are mapped back to their names where one exists, because
 -- a caller asked in names and should be answered in names.
+--
+-- ⚠️ UNWRAP RemoteUnrealParam FIRST, and this is not a detail. UE4SS hands array elements over
+-- inside its dynamic wrapper, with the real value behind :get(), and the C++ signature gives no
+-- hint of it — GetEquipWaza declares TArray<EPalWazaID> and delivers a list of wrappers. A
+-- reader that does not unwrap sees an array of the right LENGTH with nothing readable in it,
+-- and reports an empty list. That is exactly what "the nearest pal carries 0 active and 0
+-- passive" was: not a pal with no moves, and not a write that failed, but a read that could not
+-- see what it was holding. The identical bug was found and fixed in core/icons.lua the same
+-- afternoon, where it read as "0 of 1207 rows carry an icon".
 local nameOfWaza = nil
 local function readList(arr, asWaza)
     if arr == nil then return {} end
@@ -437,7 +446,16 @@ local function readList(arr, asWaza)
         for k, v in pairs(M.WAZA) do nameOfWaza[v] = k end
     end
     local out = {}
+    local function unwrap(v)
+        if type(v) ~= "userdata" then return v end
+        for _, get in ipairs({ function() return v:get() end, function() return v:Get() end }) do
+            local ok, inner = pcall(get)
+            if ok and inner ~= nil and inner ~= v then return inner end
+        end
+        return v
+    end
     local function push(v)
+        v = unwrap(v)
         if type(v) == "number" then
             out[#out + 1] = (asWaza and nameOfWaza[v]) or v
         elseif type(v) == "string" then

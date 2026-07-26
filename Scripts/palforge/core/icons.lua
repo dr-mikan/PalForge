@@ -358,7 +358,24 @@ end
 local function toList(arr)
     if arr == nil then return {} end
     local out = {}
+
+    -- UNWRAP RemoteUnrealParam FIRST. This is what the whole icon route was missing, and it is
+    -- not guessable from the C++ signature: GetDataTableColumnAsString declares TArray<FString>,
+    -- but UE4SS hands each element over as a RemoteUnrealParam — its dynamic wrapper for any
+    -- type — and the string is behind :get(). Without this the array has exactly the right
+    -- length and every value reads as blank, which is what "0 of 1207 rows carry an icon" was.
+    -- (ue4ss/Docs/lua-api/classes/remoteunrealparam.md: Get() / get() -> the underlying value.)
+    local function unwrap(v)
+        if type(v) ~= "userdata" then return v end
+        for _, get in ipairs({ function() return v:get() end, function() return v:Get() end }) do
+            local ok, inner = pcall(get)
+            if ok and inner ~= nil and inner ~= v then return inner end
+        end
+        return v
+    end
+
     local function push(v)
+        v = unwrap(v)
         if type(v) == "string" then
             out[#out + 1] = v
         elseif type(v) == "userdata" then
@@ -439,7 +456,11 @@ local function iconMap(tbl, tableName)
                         local okp, v = pcall(probe[2])
                         if okp and v ~= nil then
                             local str; pcall(function() str = tostring(v) end)
-                            bits[#bits + 1] = string.format("%s=%s(%s)", probe[1], type(v), tostring(str))
+                            -- and what it is once unwrapped, since a RemoteUnrealParam's
+                            -- tostring says nothing about the value inside it
+                            local inner; pcall(function() inner = v.get and v:get() end)
+                            bits[#bits + 1] = string.format("%s=%s(%s)%s", probe[1], type(v), tostring(str),
+                                inner ~= nil and string.format(" -> %s(%s)", type(inner), tostring(inner)) or "")
                         end
                     end
                     log.info(string.format("icons: %s column %s raw sample -> %s",
