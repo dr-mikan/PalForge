@@ -1285,20 +1285,28 @@ local function installItemSource()
         return ok and eq == true
     end
 
-    ---Every UPalItemContainer the LOCAL player's inventory holds, as a plain list.
-    ---FindFirstOf carries the same caveat as ctx.actor on item.use above: it is the local
-    ---player, which is right in single player and is whichever pawn comes first on a
-    ---dedicated server. A drop from a chest UI moves items between containers and does not
-    ---reach RequestDrop, so the player's own containers are the set that matters.
-    local function playerContainers()
+    ---Every live UPalItemContainer, as a plain list.
+    ---
+    ---THIS USED TO ASK THE PLAYER'S INVENTORY HELPER, and the first live drop is what showed
+    ---that is too narrow: "no container of the player's 6 matched the dropped slot's id". Six
+    ---containers listed, none of them the one the item came out of. A Palworld player has more
+    ---containers than InventoryMultiHelper carries — the inventory data also reaches them by
+    ---TYPE (TryGetContainerFromInventoryType, TryGetEquipmentContainerIDFromStaticItemID) — and
+    ---a drop can come from any of them.
+    ---
+    ---So ask the world instead. The match is on an exact GUID, so a wider search cannot produce
+    ---a WRONG answer, only a right one or none — which is the property that makes widening safe
+    ---here and would not make it safe anywhere the match were fuzzy.
+    local function allContainers()
         local out = {}
         pcall(function()
-            local inv = FindFirstOf("PalPlayerInventoryData")
-            if not (inv and inv.IsValid and inv:IsValid()) then return end
-            local helper; pcall(function() helper = inv.InventoryMultiHelper end)
-            if not (helper and helper.IsValid and helper:IsValid()) then return end
-            local arr; pcall(function() arr = helper.Containers end)
-            eachArray(arr, function(c) out[#out + 1] = c end)
+            local list = FindAllOf("PalItemContainer")
+            if type(list) ~= "table" then return end
+            for i = 1, #list do
+                local c = list[i]
+                local ok, live = pcall(function() return c.IsValid and c:IsValid() end)
+                if ok and live then out[#out + 1] = c end
+            end
         end)
         return out
     end
@@ -1322,9 +1330,9 @@ local function installItemSource()
             return nil, "slotId.SlotIndex is " .. type(index) .. ", not a number"
         end
 
-        local containers = playerContainers()
+        local containers = allContainers()
         if #containers == 0 then
-            return nil, "the player's inventory helper listed no containers"
+            return nil, "FindAllOf('PalItemContainer') listed none"
         end
         for _, c in ipairs(containers) do
             local cid; pcall(function() cid = c.ID.ID end)
@@ -1346,13 +1354,17 @@ local function installItemSource()
                 return id
             end
         end
-        return nil, string.format("no container of the player's %d matched the dropped slot's id",
+        return nil, string.format("none of the %d live containers matched the dropped slot's id "
+            .. "— the container may not exist as a UObject at the moment the RPC is sent",
             #containers)
     end
 
     -- One line per session, not per drop: an unresolvable slot is a standing fact about the
     -- build, and repeating it every time the player cleans out a bag would be noise.
-    local discardMissLogged = false
+    -- One line per distinct REASON, not one per session and not one per drop. The first live
+    -- firing logged its miss, and a second drop that failed differently would have been silent
+    -- behind it — which is how a single flag turns two findings into one.
+    local discardMissSeen = {}
     local function emitDiscard(entry, reason)
         local slotId, num
         pcall(function() slotId = entry.SlotId end)
@@ -1360,11 +1372,11 @@ local function installItemSource()
         if slotId == nil then return end
         local id, why = slotItemId(slotId)
         if not id then
-            if not discardMissLogged then
-                discardMissLogged = true
-                log.warn("item.discard: " .. tostring(why or "the slot could not be resolved"))
-                log.warn("item.discard: the dropped slot could not be resolved to an item id "
-                    .. "(see TODO(item-discard-source)); the channel stays silent this session")
+            local key = tostring(why or "the slot could not be resolved")
+            if not discardMissSeen[key] then
+                discardMissSeen[key] = true
+                log.warn("item.discard: " .. key .. " — the channel stays silent for this "
+                    .. "kind of drop (see TODO(item-discard-source))")
             end
             return
         end
