@@ -35,14 +35,20 @@ plan/
 # the evidence plan/TODO.md cites — they are the difference between "we measured this" and
 # "someone has to boot the game and measure it again", so they ship. The rest is scratch.
 #
-# cxx/ is UE4SS's own CXXHeaderDump of the installed binary: 1579 headers with every
-# UFunction's real signature. It is the strongest declaration source in the tree and the only
-# one that answers a parameter list without the game running — three dead capabilities were
-# diagnosed from it in a single afternoon. 10 MB is worth not having to regenerate it.
+# cxx/ is DELIBERATELY NOT SHIPPED. It is UE4SS's own CXXHeaderDump of the installed binary —
+# 1579 headers carrying every UFunction's real signature, and the single most useful artifact
+# in this project's history: give, take, spawning, DataTable reads, status effects and skill
+# lists were all diagnosed from it. But it is reverse-engineered class declarations from a
+# commercial game's shipping executable, which is a different thing from the row data in
+# catalog/ and the name lists in reflection/, and it does not belong in a public repository.
+#
+# Regenerate it locally in one action — UE4SS GUI console, "Dump CXX Headers" — and it lands in
+# Pal/Binaries/Win64/ue4ss/CXXHeaderDump/. dumps/cxx/README.md (also untracked) explains how to
+# read it. Every fact this tree took FROM it is quoted inline at the call site with a file:line
+# citation, so no finding depends on having the dump to hand.
 dumps/*
 !dumps/reflection/
 !dumps/catalog/
-!dumps/cxx/
 # Written into the DEPLOYED copy by tools/deploy.sh so a stale in-game run is visible in
 # the log. Never part of the source tree.
 Scripts/palforge/build.lua
