@@ -210,11 +210,33 @@ end
 function Class:onBuild(ctx) end
 function Class:onPlace(ctx) end
 function Class:onRightClick(ctx) end
--- TODO(building-leftclick): no UFunction on PalBuildObject is known to fire when a player
--- hits/attacks a structure, so nothing emits this. Needs the PalBuildObject function list.
+-- INERT, AND MEASURED TO BE UNFIXABLE FROM LUA ON THIS BUILD. PalBuildObject's complete
+-- function list is now on disk (dumps/reflection/02_reflection.txt, 22 functions) and
+-- carries nothing that runs when a player STRIKES a structure: the only input-shaped
+-- entries are the interact family (OnBeginInteractBuilding / OnTriggerInteractBuilding /
+-- OnStartTriggerInteractBuilding / OnEndTriggerInteractBuilding), which is right-click and
+-- is already onRightClick. The one damage-shaped entry, OnDamage, is NOT a strike: in
+-- dumps/reflection/06_events.txt it fires 196 times on a strict 12-13 s per-structure
+-- cadence — the workbench placed at t=306.412 takes its first at t=306.933 and 180 more
+-- over the next 2250 s without dying — i.e. it is the deterioration tick (cf. the
+-- :DeteriorationDamage / :DeteriorationTotalDamage fields on PalMapObjectModel), which
+-- fires with no player anywhere near it. Wiring onLeftClick to it would call the handler
+-- every 12 s on every structure in the base forever.
+-- Left declared: the hook, its schema entry and Handle:onLeftClick still work for a pack's
+-- own emit, and the dumps cover /Script/Pal.* only — a BP_BuildObject_<Id>_C subclass
+-- graph event is the one place not yet enumerated.
 function Class:onLeftClick(ctx) end
--- TODO(building-break): no dismantle/destroy UFunction has ever been found in either tree,
--- so nothing emits this; the scan's miss sweep covers disappearance as onRemove instead.
+-- INERT, for the same measured reason. No destroy/dismantle UFunction exists on ANY of the
+-- classes that could own one: PalBuildObject (22 fns), PalMapObjectModel (18),
+-- PalMapObjectConcreteModelBase (25) and PalNetworkPlayerComponent (77) are all listed in
+-- full in dumps/reflection/02_reflection.txt and none has a Destroy/Dismantle/Demolish/
+-- Deconstruct/Break entry. Destruction exists there only as DELEGATE FIELDS
+-- (PalMapObjectModel:OnDestroyDelegate, :OnDisposeDelegateInServer), which RegisterHook
+-- cannot address by path, and PalBuildObject.OnChangeVisualForDismantle is the dismantle
+-- PREVIEW visual (cf. :bDismantleTargetInLocal), not a completion. OnDamage is a
+-- deterioration tick and never signalled a destruction (see onLeftClick above).
+-- So disappearance keeps surfacing through the scan's miss sweep as onRemove with
+-- ctx.reason = "missing", which cannot tell a dismantle from a streamed-out structure.
 function Class:onBreak(ctx) end
 function Class:onLoad(ctx) end
 function Class:onTick(ctx) end

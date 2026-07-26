@@ -10,10 +10,12 @@
 --   soundId / soundPath -> { kind = "native" }  -> core.sound.native  (WORKING)
 --   soundFile           -> { kind = "file"   }  -> core.sound.file    (seam, no-op)
 --
--- The native route is a real engine call, not yet a recorded in-game success: a catalog entry
--- is a Wwise AkAudioEvent NAME with an asset PATH, played via
--- LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor. The path is what actually
--- plays; PlaySoundByActor({Key=FName(id)}) is a DIFFERENT namespace (SoundID rows) and is
+-- The native route is the game's own route: a catalog entry is a Wwise AkAudioEvent NAME with
+-- an asset PATH, played via LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor —
+-- a reflected UFunction (dumps/reflection/02_reflection.txt) that a recorded session caught the
+-- GAME ITSELF calling, with exactly (AActor, UObject) in that order (06_events.txt, [SOUND.ak]),
+-- which is the shape used here. The path is what actually plays;
+-- PlaySoundByActor({Key=FName(id)}) is a DIFFERENT namespace (SoundID rows) and is
 -- silent for AkAudioEvent names.
 --
 -- SO A NAME ALONE IS ENOUGH: when a definition carries a soundId and no soundPath, lowering
@@ -28,10 +30,14 @@
 -- that names nothing, or a world that has no player pawn, returns false rather than a
 -- reassuring true. It is still not a promise of audibility (the engine returns nothing).
 --
--- TWO THINGS HERE STILL DO NOTHING, and say so rather than pretending. Custom audio FILES
--- are not playable: Palworld is all Wwise and no runtime file loader is confirmed, so a
--- `soundFile` definition resolves and then no-ops (core/sound/file.lua). Volume is not wired
--- either — no volume call is confirmed to exist on any class here (see Handle:setVolume).
+-- TWO THINGS HERE STILL DO NOTHING, and say so rather than pretending. Custom audio FILES are
+-- not playable: every shipped Palworld sound is a Wwise AkAudioEvent, and although the shipping
+-- build does still carry UE-native sound objects (05_assets.txt: 6 USoundWave + 2 SoundCue, all
+-- from SkyCreatorPlugin), no runtime path from a file on DISK to one of them is confirmed — so
+-- a `soundFile` definition resolves and then no-ops (core/sound/file.lua). Volume is not wired
+-- either, but for a narrower reason than before: UPalSoundUtility does carry
+-- SetRTPCValueByActor and SetRTPCValueByActorByEnum (02_reflection.txt); what is missing is
+-- their parameter lists and the NAME of a volume RTPC (see Handle:setVolume).
 -- Both return false, and both carry a TODO marker naming the one fact a probe has to settle.
 --
 --   local Theme = Audio.bgm{ id = "AKE_BGM_Title",
@@ -245,8 +251,10 @@ end
 
 ---Stop sounds on `actor` (default: the local player pawn). ACTOR-WIDE by design: the native
 ---call is StopSoundByActor, so it silences everything playing on that actor and WHICH sound
----you called it on is ignored (a per-sound stop needs a Wwise PlayingID we do not capture
----yet). Returns true only when that native call was issued.
+---you called it on is ignored. A narrower StopSoundByActorWithSoundId is reflected on
+---UPalSoundUtility, but its parameter list has never been measured and the AkAudioEvent play
+---route hands back no id to give it, so it is not wired.
+---Returns true only when that native call was issued.
 ---@param actor any?
 ---@return boolean ok
 function Handle:stop(actor)
@@ -256,18 +264,22 @@ function Handle:stop(actor)
 end
 
 ---Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell
----it did nothing. Nothing in this tree records a volume call on any Palworld or Wwise class:
----the candidates a probe should look for are UPalSoundUtility::SetRTPCValueByActor,
----UAkGameplayStatics::SetRTPCValue and UAkComponent::SetOutputBusVolume, but none of them is
----confirmed to exist here, none is per-SOUND, and no volume RTPC name is known. Wiring one
----most likely changes this signature to setVolume(volume, actor) or moves it to a bus-level
----call, which is exactly why it is not written on a guess.
+---it did nothing. A volume entry point DOES exist now: UPalSoundUtility reflects
+---SetRTPCValueByActor and SetRTPCValueByActorByEnum (02_reflection.txt). What is missing is
+---what to hand them — neither parameter list has been walked, and no RTPC NAME is known
+---anywhere: the Wwise registry dump holds 1958 objects and every single one is an AkAudioEvent,
+---with no AkRtpc / AkAuxBus / AkAudioBank in the tree at all. A guessed RTPC name would return
+---true and change nothing, which is worse than false. Note also that the confirmed route is
+---per-ACTOR, so wiring it may change this signature to setVolume(volume, actor).
 ---@param volume number
 ---@return boolean ok
 function Handle:setVolume(volume)
-    -- TODO(audio-volume-rtpc): no volume call is known to exist — which class carries one
-    -- (UPalSoundUtility / UAkGameplayStatics / UAkComponent), its parameter list, and the name
-    -- of a volume RTPC are all unknown; a reflection walk of those CDOs would settle it.
+    -- TODO(audio-volume-rtpc): existence is settled — UPalSoundUtility::SetRTPCValueByActor and
+    -- ::SetRTPCValueByActorByEnum are reflected in this build, and the route is per-actor. Still
+    -- unknown, and all a probe needs now: their parameter lists (is the RTPC an FName or an
+    -- FString, is there an InterpolationTimeMs), which RTPC controls volume, and the entries of
+    -- the enum the ByEnum overload takes — enumerating that UEnum is the cheapest way to get a
+    -- real RTPC name, since no dump in the tree carries one.
     return false
 end
 

@@ -1,0 +1,28 @@
+# Live objects — real ids + asset refs (mesh/anim) from what's in the world
+
+== PalBuildObject (build ids + mesh) : 5 live ==
+  class BlueprintGeneratedClass /Game/Pal/Blueprint/MapObject/BuildObject/BP_BuildObject_ItemChest.BP_BuildObject_ItemChest_C   -> id: ItemChest
+      meshComp = StaticMeshComponent
+      staticMesh = StaticMesh /Game/Pal/Model/Prop/Architecture/ChestWood/SM_ChestWood.SM_ChestWood
+      animClass = ?
+      skeletalMesh = ?
+  class BlueprintGeneratedClass /Game/Pal/Blueprint/MapObject/BuildObject/BP_BuildObject_WorkBench.BP_BuildObject_WorkBench_C   -> id: WorkBench
+  class BlueprintGeneratedClass /Game/Pal/Blueprint/MapObject/BuildObject/BP_BuildObject_PalBoxV2.BP_BuildObject_PalBoxV2_C   -> id: PalBoxV2
+
+== PalCharacter (pal/player + skeletal/anim) : 5 live ==
+  class BlueprintGeneratedClass /Game/Pal/Blueprint/Character/Player/Female/BP_Player_Female.BP_Player_Female_C   -> id: Female
+      animInstance = ABP_Player_C
+      animClass = AnimBlueprintGeneratedClass /Game/Pal/Blueprint/Character/Player/ABP_Player.ABP_Player_C
+      staticMesh = ?
+      meshComp = PalSkeletalMeshComponent
+      skeletalMesh = SkeletalMesh /Game/Pal/Model/Character/Player/Outfit/SK_Player_Female_Outfit_Hunter001/SK_Player_Female_Outfit_Hunter001.SK_Player_Female_Outfit_Hunter001
+  class BlueprintGeneratedClass /Game/Pal/Blueprint/Character/Monster/PalActorBP/PinkCat/BP_PinkCat.BP_PinkCat_C
+      animInstance = ABP_PinkCat_C
+      animClass = AnimBlueprintGeneratedClass /Game/Pal/Blueprint/Character/Monster/PalActorBP/PinkCat/ABP_PinkCat.ABP_PinkCat_C
+      staticMesh = ?
+      meshComp = PalSkeletalMeshComponent
+      skeletalMesh = SkeletalMesh /Game/Pal/Model/Character/Monster/PinkCat/SK_PinkCat.SK_PinkCat
+
+== PalMapObjectModel : 340 live ==
+  class Class /Script/Pal.PalMapObjectModel
+

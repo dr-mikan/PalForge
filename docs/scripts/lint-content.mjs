@@ -55,14 +55,21 @@ const BANNED = [
   /モジュール自体が(?:コンストラクタ|定義)/,
   /(?:以前は|かつては|旧|従来)[^。]{0,20}(?:でした|呼ばれ|という名|form)/,
   /(?:改名|リネーム)(?:されました|しました)/,
+  /本(?:文|页|章)(?:中|里)?(?:我们|将)/,
+  /(?:以前|原来|过去)(?:叫做|称为|是)/,
+  /(?:已)?(?:重命名|更名)(?:为|成)/,
 ];
 
 // The two structural sections every page carries, in both languages.
 const INTRO_HEADINGS = [
   'What you can do after this page',
   'このページでできるようになること',
+  '读完本页你可以做到',
 ];
-const SUMMARY_HEADINGS = ['Summary', 'まとめ'];
+const SUMMARY_HEADINGS = ['Summary', 'まとめ', '小结'];
+
+// Every page exists in all three. `en` is the source of truth for structure.
+const LOCALES = ['en', 'ja', 'zh'];
 
 const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/u;
 
@@ -177,26 +184,35 @@ for (const full of files) {
 
   if (stats.chars < 1200) fail(file, `too short (${stats.chars} chars) — this reads as a stub`);
 
-  const key = full.replace(/\.ja\.mdx$/, '').replace(/\.mdx$/, '');
+  const localeMatch = full.match(/\.([a-z]{2})\.mdx$/);
+  const locale = localeMatch ? localeMatch[1] : 'en';
+  const key = full.replace(/(\.[a-z]{2})?\.mdx$/, '');
   const entry = byPage.get(key) ?? {};
-  entry[full.endsWith('.ja.mdx') ? 'ja' : 'en'] = stats;
+  entry[locale] = stats;
   byPage.set(key, entry);
 }
 
-for (const [key, pair] of byPage) {
+for (const [key, group] of byPage) {
   const page = relative(CONTENT, key);
-  if (!pair.en) fail(page, 'has a Japanese page but no English one');
-  if (!pair.ja) fail(page, 'has an English page but no Japanese translation');
-  if (!pair.en || !pair.ja) continue;
-
-  if (pair.en.headings !== pair.ja.headings) {
-    fail(page, `heading count differs: en ${pair.en.headings} vs ja ${pair.ja.headings}`);
+  if (!group.en) {
+    fail(page, 'has a translation but no English source');
+    continue;
   }
-  if (pair.en.code !== pair.ja.code) {
-    fail(page, `code block count differs: en ${pair.en.code} vs ja ${pair.ja.code}`);
-  }
-  if (pair.en.mermaid !== pair.ja.mermaid) {
-    fail(page, `mermaid count differs: en ${pair.en.mermaid} vs ja ${pair.ja.mermaid}`);
+  for (const locale of LOCALES) {
+    if (locale === 'en') continue;
+    if (!group[locale]) {
+      fail(page, `is missing its ${locale} translation`);
+      continue;
+    }
+    for (const [what, field] of [
+      ['heading', 'headings'],
+      ['code block', 'code'],
+      ['mermaid', 'mermaid'],
+    ]) {
+      if (group.en[field] !== group[locale][field]) {
+        fail(page, `${what} count differs: en ${group.en[field]} vs ${locale} ${group[locale][field]}`);
+      }
+    }
   }
 }
 

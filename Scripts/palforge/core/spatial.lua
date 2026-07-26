@@ -174,35 +174,70 @@ function M.indexReset()
 end
 
 -- ---- world/save id for the persistence namespace ----
--- Memoized. Probes a few likely sources; falls back to a single "world" bucket. The seams
--- (FindFirstOf) are read lazily so headless tests that don't define them get the fallback.
+-- Memoized. Reads the selected save off the live PalGameInstance; falls back to a single
+-- "world" bucket. The seams (FindFirstOf) are read lazily so headless tests that don't
+-- define them get the fallback.
 --
--- WHAT IS PROVEN AND WHAT IS NOT. The CLASS is real — PalGameInstance is one of the
--- reflection targets in PalSmith/dump/dump.lua:83 and one of the FindFirstOf names
--- dump_targets.md:372 lists as used. The three PROPERTY names below are not: nothing in
--- either tree names a world/save identifier, and the one artifact a real session ever
--- produced is `state/entities_world.json` (PalSmith commit dc206a6) — i.e. the fallback is
--- what has actually run so far, and every save file shares one bucket. That is safe (keys
--- are position-based and a record only binds when an actor of the right build id is
--- standing there) but it is not isolation, so treat the fallback as the documented normal
--- case, not as an error path.
+-- MEASURED (dumps/reflection/02_reflection.txt, /Script/Pal.PalGameInstance). The class
+-- carries BOTH a getter and a backing field for the selected save, and for the world's
+-- display name beside it:
+--     [functions]  .GetSelectedWorldSaveDirectoryName   .GetSelectedWorldName
+--     [properties] :SelectedWorldSaveDirectoryName      :SelectedWorldName
+-- The save DIRECTORY name is the identity we want: it is the per-save folder the game
+-- writes into, so two saves cannot share it, whereas :SelectedWorldName is the label the
+-- player typed and two saves may well carry the same one. The name is therefore tried
+-- first and the display name only as a second chance.
+--
+-- The same 111-property listing settles the previous guesses in the negative: WorldGuid,
+-- WorldSaveName and SaveName appear nowhere on the class, so the old probe could only ever
+-- have produced the "world" fallback — which is exactly the one artifact a real session
+-- left behind (`state/entities_world.json`, PalSmith commit dc206a6).
+--
+-- WHAT IS STILL INFERRED: 02_reflection lists NAMES only, never signatures, so the getters
+-- are called no-arg and every read is pcall'd; and the values have not been compared
+-- across two save files, so per-save uniqueness rests on what the name means. Both
+-- residuals are safe — a raising call, an empty string or a value that turns out to be
+-- constant just lands back on the shared "world" bucket, which is the documented normal
+-- case (keys are position-based and a record only binds when an actor of the right build
+-- id is standing there), not an error path.
 local cachedSaveId = nil
+
+-- Coerce one reflected value to a non-empty Lua string, or nil. An FString arrives as a
+-- plain string and an FName-like arrives with :ToString(); NOTHING ELSE is accepted. In
+-- particular there is deliberately no tostring() fallback: a reflected call that hands back
+-- a table (UE4SS wraps multiple out-params that way) would stringify to its ADDRESS, which
+-- differs every launch and would rename the persistence file on every session.
+local function asName(v)
+    local s
+    if type(v) == "string" then
+        s = v
+    elseif type(v) == "number" then
+        s = tostring(v)
+    elseif type(v) == "table" or type(v) == "userdata" then
+        local ok, t = pcall(function() return v.ToString and v:ToString() end)
+        if ok and type(t) == "string" then s = t end
+    end
+    if type(s) ~= "string" or s == "" or s == "None" then return nil end
+    return s
+end
 
 local function tryProbe()
     if type(FindFirstOf) ~= "function" then return nil end
     local ok, id = pcall(function()
         local gi = FindFirstOf("PalGameInstance")
-        if gi and gi:IsValid() then
-            -- TODO(spatial-saveid): these three property names are guesses — no dump or POC
-            -- names a world/save identifier on PalGameInstance. A reflection walk of the
-            -- class's properties would settle which (if any) exists.
-            for _, field in ipairs({ "WorldGuid", "WorldSaveName", "SaveName" }) do
-                local okf, v = pcall(function() return gi[field] end)
-                if okf and v then
-                    local oks, s = pcall(function() return v.ToString and v:ToString() or tostring(v) end)
-                    if oks and s and #s > 0 then return s end
-                end
+        if not (gi and gi:IsValid()) then return nil end
+        -- Getter first, backing property second, for each of the two measured names.
+        for _, pair in ipairs({
+            { "GetSelectedWorldSaveDirectoryName", "SelectedWorldSaveDirectoryName" },
+            { "GetSelectedWorldName", "SelectedWorldName" },
+        }) do
+            local okF, v = pcall(function() return gi[pair[1]] and gi[pair[1]](gi) end)
+            local s = okF and asName(v) or nil
+            if not s then
+                local okP, pv = pcall(function() return gi[pair[2]] end)
+                s = okP and asName(pv) or nil
             end
+            if s then return s end
         end
         return nil
     end)

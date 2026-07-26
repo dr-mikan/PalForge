@@ -1,7 +1,15 @@
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
-import { DocsBody, DocsDescription, DocsPage, DocsTitle } from 'fumadocs-ui/layouts/docs/page';
-import { source } from '@/lib/source';
+import {
+  DocsBody,
+  DocsDescription,
+  DocsPage,
+  DocsTitle,
+  MarkdownCopyButton,
+  ViewOptionsPopover,
+} from 'fumadocs-ui/layouts/docs/page';
+import { markdownFor, source } from '@/lib/source';
+import { gitConfig } from '@/lib/shared';
 import { getMDXComponents } from '@/components/mdx';
 
 type Params = { lang: string; slug?: string[] };
@@ -12,11 +20,19 @@ export default async function Page(props: { params: Promise<Params> }) {
   if (!page) notFound();
 
   const MDX = page.data.body;
+  const markdownUrl = markdownFor(page.slugs).url;
 
   return (
     <DocsPage toc={page.data.toc} full={page.data.full}>
       <DocsTitle>{page.data.title}</DocsTitle>
-      <DocsDescription>{page.data.description}</DocsDescription>
+      <DocsDescription className="mb-0">{page.data.description}</DocsDescription>
+      <div className="flex flex-row items-center gap-2 border-b pb-6">
+        <MarkdownCopyButton markdownUrl={markdownUrl} />
+        <ViewOptionsPopover
+          markdownUrl={markdownUrl}
+          githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/docs/content/docs/${page.path}`}
+        />
+      </div>
       <DocsBody>
         <MDX components={getMDXComponents(lang)} />
       </DocsBody>

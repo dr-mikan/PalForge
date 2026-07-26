@@ -1,5 +1,5 @@
 // Every documented route, kept in one place so the specs below and the link crawl agree.
-export const LOCALES = ['en', 'ja'] as const;
+export const LOCALES = ['en', 'ja', 'zh'] as const;
 
 export const DOC_SLUGS = [
   '',

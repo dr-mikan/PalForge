@@ -14,10 +14,11 @@
 -- nothing is re-applied on the next world.
 --
 -- What is NOT wired: the game's own ailments (EPalStatusEffectType — Poison / Burn /
--- Freeze) are a native enum, and no native call to apply one was confirmed, so a PalForge
--- effect does not toggle the game's status icon. `nativeStatus` is therefore an ANNOTATION
--- today: it is validated, stored on the definition and readable off it, and nothing acts on
--- it — see TODO(effect-native-status) in Handle:apply. The gameplay lives in YOUR handlers —
+-- Freeze) are a native enum, and no native call to apply one has been found on any class
+-- yet reflected, so a PalForge effect does not toggle the game's status icon.
+-- `nativeStatus` is therefore an ANNOTATION today: it is validated, stored on the
+-- definition and readable off it, and nothing acts on it — see TODO(effect-native-status)
+-- in Handle:apply for where the search now stands. The gameplay lives in YOUR handlers —
 -- onTick is where you deal the damage / heal / buff through whatever call you have (e.g.
 -- utils.items, an actor method).
 --
@@ -347,9 +348,28 @@ function Handle:apply(target, ctx)
         remaining = tonumber(cls.duration) or nil,
     }
     byId[cls.id] = app
-    -- TODO(effect-native-status): cls.nativeStatus is stored and read by nothing — the native
-    -- add/remove-status call (and the EPalStatusEffectType value it takes) is undumped, so a
-    -- declared nativeStatus toggles no game ailment. The remove side belongs in expire().
+    -- TODO(effect-native-status): NARROWED, and mostly by ELIMINATION. cls.nativeStatus is
+    -- still stored and read by nothing, but the search space has collapsed. Four of the
+    -- classes this was going to be looked for on are now fully reflected in dumps/reflection/
+    -- 02_reflection.txt — PalCharacter, PalPlayerCharacter, PalCharacterParameterComponent,
+    -- PalIndividualCharacterParameter — and NONE of them has an add- or remove-status
+    -- function; neither does PalUtility, which is the game's 597-function catch-all. So the
+    -- ailment API does not live on the character or its parameter objects.
+    -- WHERE IT DOES LIVE, most likely: /Script/Pal.PalCharacter carries a :StatusComponent
+    -- property (right beside :PassiveSkillComponent), and PalCharacterParameterComponent
+    -- carries GetStatusHit, IsStatusHitActive, :StatusAccumulateMap, :IsStun and :StunPoint —
+    -- an accumulate-then-hit model with the applier on that component. Its CLASS is not one
+    -- of the 21 reflected here, so its function list is unread, not absent.
+    -- THE VOCABULARY IS ALSO STILL MISSING: not one DataTable in 01_datatables.txt — a full
+    -- sweep of the loaded set — is a status-effect table, which repeats on live data what the
+    -- on-disk catalog said. The only "StatusEffect" name is DT_StatusEffectFood, 54 FOOD
+    -- rows over columns EffectTime / EffectType1 / EffectType2 / EffectValue1 / EffectValue2 /
+    -- Interaval1 / Interaval2 — enum columns whose MEMBER names that dump does not print. So
+    -- the legal values of nativeStatus have no source on disk either.
+    -- THE ONE THING LEFT: reflect the class behind PalCharacter.StatusComponent (read it off
+    -- a live pal, then walk it with ForEachFunction/ForEachProperty up GetSuperStruct) and
+    -- print the parameters of whatever Add/Apply/Remove it exposes — a ByteProperty there
+    -- means the enum form, a NameProperty the FName form. The remove side belongs in expire().
     pcall(function()
         cls:onApply(target, setmetatable({ effect = cls.id, stacks = 1 }, { __index = ctx }))
     end)

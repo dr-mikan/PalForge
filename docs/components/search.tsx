@@ -19,9 +19,9 @@ import { basePath } from '@/lib/shared';
 function initOrama(locale?: string) {
   return create({
     schema: { _: 'string' },
-    // Orama has no Japanese tokenizer here; the default splitter still indexes the Latin
-    // API names, which is what a reader searches a Lua reference for.
-    language: locale === 'ja' ? undefined : 'english',
+    // Orama has no Japanese or Chinese tokenizer here; the default splitter still indexes
+    // the Latin API names, which is what a reader searches a Lua reference for.
+    language: locale === 'en' ? 'english' : undefined,
   });
 }
 

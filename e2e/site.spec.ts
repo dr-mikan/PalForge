@@ -92,13 +92,25 @@ test.describe('navigation', () => {
     expect(broken, 'these links 404').toEqual([]);
   });
 
-  test('the language switch reaches the Japanese page', async ({ page }) => {
-    await page.goto(docUrl('en', 'api/pal'));
+  for (const locale of ['ja', 'zh'] as const) {
+    test(`the ${locale} page is really translated`, async ({ page }) => {
+      await page.goto(docUrl(locale, 'api/pal'));
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+      const bodyText = await page.locator('article').innerText();
+      // A translation that is an English copy would pass every other check here.
+      expect(bodyText).toMatch(/[぀-ヿ一-龯]/);
+    });
+  }
+
+  test('every page can be copied as English Markdown', async ({ page, request }) => {
+    // The button hands over the English text whatever locale the reader is on, because the
+    // copy is nearly always going into a coding assistant.
     await page.goto(docUrl('ja', 'api/pal'));
-    await expect(page.locator('html')).toHaveAttribute('lang', 'ja');
-    const bodyText = await page.locator('article').innerText();
-    // Japanese pages must actually be translated, not an English copy.
-    expect(bodyText).toMatch(/[぀-ヿ一-龯]/);
+    const res = await request.get(siteUrl('/md/docs/api/pal/content.md'));
+    expect(res.status()).toBe(200);
+    const text = await res.text();
+    expect(text).toContain('# Pal');
+    expect(text).not.toMatch(/[぀-ヿ]/);
   });
 });
 
@@ -152,12 +164,12 @@ test.describe('mermaid', () => {
 });
 
 test.describe('search', () => {
-  test('the static index is published and covers both locales', async ({ request }) => {
+  test('the static index is published and covers every locale', async ({ request }) => {
     const res = await request.get(siteUrl('/api/search'));
     expect(res.status()).toBe(200);
     const data = await res.json();
     expect(data.type).toBe('i18n');
-    expect(Object.keys(data.data).sort()).toEqual(['en', 'ja']);
+    expect(Object.keys(data.data).sort()).toEqual([...LOCALES].sort());
   });
 
   test('searching the English index finds the Pal reference', async ({ page }) => {

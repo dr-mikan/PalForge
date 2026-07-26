@@ -4,14 +4,21 @@
 -- Play mechanism: our catalog ids are Wwise AkAudioEvent NAMES with a known asset PATH, so
 -- the route is
 --   LoadAsset(assetPath) -> PalSoundUtility:PlayAkEventSoundByActor(actor, asset).
--- PlayAkEventSoundByActor is believed to be a reflected UFunction on the shipping binary, but
--- no run log in this tree records it making a sound and no dump in the parent tree records
--- its parameter list. Credible route, unproven result — see the TODO at the call.
+-- That is the GAME'S OWN route, and it is measured twice. PlayAkEventSoundByActor is one of the
+-- 13 reflected UFunctions on UPalSoundUtility (dumps/reflection/02_reflection.txt), and a
+-- recorded session caught the game itself calling it six times on the PalSoundUtility callee
+-- with exactly two arguments — a1 an AActor, a2 a UObject (the AkAudioEvent), a3/a4 empty
+-- (dumps/reflection/06_events.txt, tag [SOUND.ak]). Same callee, same arity, same order as the
+-- call below. What is still unrecorded is the AUDIBILITY of OUR call, and whether the function
+-- hands back a Wwise PlayingID — a pre-call hook log cannot show a return parm, which is why
+-- stop() below is still actor-wide.
 -- PlaySoundByActor({Key=FName(id)}) is SILENT for AkAudioEvent names (its Key is a
 -- SoundID-table row, a different namespace) — kept as the fallback for a source that carries
--- an id and no loadable asset. api/audio fills the path in from the AkAudioEvent catalog
--- before we get here, so that fallback is now reached only for names the catalog does not
--- know, i.e. names that plausibly ARE SoundID rows.
+-- an id and no loadable asset. The same session logged that one 286 times as
+-- (AActor, UScriptStruct, UScriptStruct), so the arity and the two struct arguments used below
+-- are right; the struct FIELD names (Key / FadeInTime) are still assumed. api/audio fills the
+-- path in from the AkAudioEvent catalog before we get here, so that fallback is now reached
+-- only for names the catalog does not know, i.e. names that plausibly ARE SoundID rows.
 --
 -- The two routes are tried in SEPARATE pcalls on purpose: if the AkAudioEvent call throws
 -- (wrong argument count, missing function) the source still falls through to the id route
@@ -76,9 +83,10 @@ function NativeSource:play(actor)
     local asset = loadAsset(self.path)
     if asset then
         local played = false
-        -- TODO(audio-akevent-play-signature): UPalSoundUtility::PlayAkEventSoundByActor is
-        -- assumed to exist and to take (Actor, AkAudioEvent) in that order, and no run has
-        -- ever confirmed it is audible; its reflected parameter list would settle both.
+        -- Argument shape is no longer a guess: the game's own calls to this function are
+        -- (AActor, UObject) on the PalSoundUtility callee, two parameters, that order
+        -- (06_events.txt [SOUND.ak]) — which is exactly this call. It stays inside a pcall and
+        -- `played` still only means ISSUED: the call reports nothing back that we can read.
         pcall(function() u:PlayAkEventSoundByActor(actor, asset); played = true end)
         if played then return true end
     end
@@ -98,8 +106,12 @@ function NativeSource:play(actor)
 end
 
 -- Stop sounds on `actor`. StopSoundByActor stops ALL sounds on the actor and is not
--- SoundID-specific, so self.id/self.path are unused here (a per-sound stop needs a Wwise
--- PlayingID this source does not capture). True only when that call was issued.
+-- SoundID-specific, so self.id/self.path are unused here. A narrower call does exist —
+-- UPalSoundUtility also reflects StopSoundByActorWithSoundId (02_reflection.txt) — but nothing
+-- has measured its parameter list, no session log records it firing, and the AkAudioEvent play
+-- route hands back no SoundId to pass it, so it is not wired on a guess: a narrow stop that
+-- silently misses would be worse than an actor-wide one that works. True only when the
+-- actor-wide call was issued.
 function NativeSource:stop(actor)
     if not alive(actor) then return false end
 

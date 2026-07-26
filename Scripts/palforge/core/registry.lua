@@ -82,6 +82,11 @@ function M.initialize()
     if env.dev then
         pcall(function() require("palforge.core.keyboard.base.registory").load() end)
         installDevCatalogCommand()
+        -- Editing a file and pressing a key beats restarting the game. F9 drops every
+        -- palforge.* module and runs this function again; the engine-facing hooks stay as
+        -- they were armed on the first load. See core/reload.lua for what that does and
+        -- does not replace.
+        pcall(function() require("palforge.core.reload").bind("F9") end)
         -- the headless unit bundle runs NOW (it touches nothing but Lua tables)
         pcall(function()
             local tests = require("palforge.tests")

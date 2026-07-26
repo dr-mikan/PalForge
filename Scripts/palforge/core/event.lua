@@ -84,8 +84,20 @@ M.PAL_SCAN_MS = 3000
 
 -- =====================================================================================
 -- BUS (Rx)
+--
+-- The subjects and the dispatch subscriptions live on _G, not in this module, so they
+-- SURVIVE A HOT RELOAD (core/reload). A native hook armed on the first load holds a closure
+-- over whatever `subjects` table existed then; if a reload built a fresh one, those hooks
+-- would keep pushing into the old table while the new dispatch listened to the new one, and
+-- every hook-driven event would silently stop arriving. Sharing the table through _G keeps
+-- the old emitters and the new subscribers on the same channels.
 -- =====================================================================================
-local subjects = {}
+local bus = _G.__PalForgeBus
+if not bus then
+    bus = { subjects = {}, dispatch = {} }
+    _G.__PalForgeBus = bus
+end
+local subjects = bus.subjects
 local function subject(name)
     assert(type(name) == "string" and #name > 0, "event: channel name required")
     subjects[name] = subjects[name] or Rx.Subject.create()
@@ -731,18 +743,34 @@ local function installBuildingSource()
             if not ok then log.err("building source: build-complete handler: " .. tostring(e)) end
         end)
 
-    -- api/building also DECLARES onBreak and onLeftClick, and there is no channel for either
-    -- here, so neither can ever fire. That file says no candidate was ever found; the parent
-    -- tree contradicts it once, for the break side only: dump/docs/further_plan.md:157-166
-    -- ("Opportunity: direct building lifecycle hooks (found in the probe)") records
-    -- /Script/Pal.PalBuildObject:OnDamage as ARMED AND SEEN by the event probe
-    -- (dump/auto_mod/Scripts/main.lua:37, label BUILD.damage), annotated "(break/damage)".
-    -- What that note does NOT say is whether it also fires on DESTRUCTION, or how a handler
-    -- would tell a chipped wall from a demolished one — and a channel that reports every
-    -- scratch as a break is worse than the silence. Destruction is meanwhile covered, one
-    -- MISS_THRESHOLD late, by the scan's miss sweep -> building.remove -> onRemove.
-    -- TODO(building-break-source): unknown whether PalBuildObject:OnDamage fires on destroy and
-    -- what its params carry; onLeftClick has no candidate hook at all.
+    -- NO building.break AND NO building.leftclick CHANNEL — MEASURED, not omitted.
+    -- api/building DECLARES onBreak and onLeftClick; neither gets a channel here because
+    -- the dumps now show there is nothing to feed one with.
+    --
+    -- (1) OnDamage is a DETERIORATION TIMER, not a strike and not a death rattle. It was
+    --     the one lead (dump/docs/further_plan.md:157-166, harness label BUILD.damage,
+    --     dump/auto_mod/Scripts/main.lua:37) and dumps/reflection/06_events.txt settles
+    --     what it actually is: 196 firings, every one on a placed WorkBench, at a strict
+    --     12-13 s per-structure cadence. The workbench placed at t=306.412 (BUILD.place,
+    --     OnFinishBuildWork_ServerInternal) takes its first OnDamage at t=306.933 and 180
+    --     more over the following 2250 s and is never destroyed. That is the passive decay
+    --     the :DeteriorationDamage / :DeteriorationTotalDamage fields on PalMapObjectModel
+    --     describe. It fires with no player involved, so it cannot mean "clicked"; it fires
+    --     181 times without a destruction, so it cannot mean "broken".
+    --
+    -- (2) Nothing else on the candidate classes fires either. 02_reflection.txt lists all
+    --     four in full — PalBuildObject (22 fns), PalMapObjectModel (18),
+    --     PalMapObjectConcreteModelBase (25), PalNetworkPlayerComponent (77) — and none has
+    --     a Destroy / Dismantle / Demolish / Deconstruct / Break / Click / Hit / Attack
+    --     entry. Destruction appears only as delegate FIELDS
+    --     (PalMapObjectModel:OnDestroyDelegate, :OnDisposeDelegateInServer), which
+    --     RegisterHook cannot address by path; PalBuildObject.OnChangeVisualForDismantle is
+    --     the dismantle preview visual, not a completion.
+    --
+    -- So destruction stays covered — one MISS_THRESHOLD late and without an instigator — by
+    -- the scan's miss sweep -> building.remove -> onRemove(reason = "missing"), and a left
+    -- click stays uncovered. Both DISPATCH paths already exist, so a future source (a BP
+    -- subclass graph event, or binding OnDestroyDelegate from C++) only has to emit.
 end
 
 -- =====================================================================================
@@ -1076,8 +1104,22 @@ local function installItemSource()
     -- begins working the moment an emit lands here.
     -- TODO(item-craft-source): no craft-complete UFunction is known — which class/function the
     -- game calls when a bench finishes an item, and which param carries the id + count.
-    -- TODO(item-discard-source): no drop/discard UFunction is known, and it is unobserved
-    -- whether AddItem_ServerInternal ever arrives with a NEGATIVE Count for a discard.
+    -- Still fully open: the 21 classes in dumps/reflection/02_reflection.txt do not include
+    -- PalMapObjectProductItemModel / PalMapObjectWorkeeModel / PalWorkProgress*, and no
+    -- craft-shaped hook was ever armed, so nothing in the dumps speaks to it.
+    --
+    -- TODO(item-discard-source): NARROWED by the dumps, not closed. What is now measured:
+    -- there is no dedicated drop/discard entry point on the inventory classes at all —
+    -- 02_reflection.txt lists PalPlayerInventoryData in full (69 fns; the only removal-shaped
+    -- name is TryRemoveEquipment) and PalItemContainer in full (13 fns, all reads), so the
+    -- "separate discard UFunction" branch of this question is dead. What is still unknown is
+    -- the standing hypothesis: whether a drop arrives as AddItem_ServerInternal with a
+    -- NEGATIVE Count. The dumps cannot say — that hook WAS armed successfully (14/14, label
+    -- ITEM.add, dump/auto_mod/Scripts/main.lua:44) and never fired once across both recorded
+    -- sessions, in either direction, while ITEM.getlog and ITEM.use did; so either the
+    -- sessions contained no qualifying action or this call does not run client-side at all.
+    -- The next probe has to log ITEM.add and ITEM.getlog side by side across a pickup AND a
+    -- drop to tell those two apart.
 end
 
 -- =====================================================================================
@@ -1200,33 +1242,40 @@ local function eachLiveBuilding(hook, ctx, channel)
     end
 end
 
+-- Subscribe DISPATCH to every channel. Re-runnable: a hot reload calls this again with the
+-- new module's handlers, so the previous run's subscriptions are dropped first — otherwise
+-- each reload would add a second dispatcher and every hook would run twice, then three times.
 local function installDispatch()
+    for _, sub in ipairs(bus.dispatch) do pcall(function() sub:unsubscribe() end) end
+    bus.dispatch = {}
+    local function on(name, fn) bus.dispatch[#bus.dispatch + 1] = M.on(name, fn) end
+
     -- world -> shared hooks on every live object. world.ready is emitted by the scan (see
     -- installBuildingSource), so the instances it iterates really exist by then.
-    M.on("world.ready", function(ctx) eachLiveBuilding("onWorldReady", ctx, "world.ready") end)
-    M.on("world.left",  function(ctx) eachLiveBuilding("onWorldLeft", ctx, "world.left") end)
+    on("world.ready", function(ctx) eachLiveBuilding("onWorldReady", ctx, "world.ready") end)
+    on("world.left",  function(ctx) eachLiveBuilding("onWorldLeft", ctx, "world.left") end)
     -- building (place fires exactly once: the scan emits it only on instance creation)
-    M.on("building.place",    function(ctx) call("building", "onPlace", ctx, "building.place") end)
-    M.on("building.load",     function(ctx) call("building", "onLoad", ctx, "building.load") end)
-    M.on("building.interact", function(ctx) call("building", "onRightClick", ctx, "building.interact") end)
-    M.on("building.remove",   function(ctx) call("building", "onRemove", ctx, "building.remove") end)
+    on("building.place",    function(ctx) call("building", "onPlace", ctx, "building.place") end)
+    on("building.load",     function(ctx) call("building", "onLoad", ctx, "building.load") end)
+    on("building.interact", function(ctx) call("building", "onRightClick", ctx, "building.interact") end)
+    on("building.remove",   function(ctx) call("building", "onRemove", ctx, "building.remove") end)
     -- building.build is the exception: it fires before the actor/instance exists, so it
     -- dispatches to the DEFINITION CLASS (self = the class, like pal/item), not an instance.
-    M.on("building.build",    function(ctx) call("buildingClass", "onBuild", ctx, "building.build") end)
+    on("building.build",    function(ctx) call("buildingClass", "onBuild", ctx, "building.build") end)
     -- tick -> onTick on every live building (tickList + tickInterval + circuit-breaker)
-    M.on("tick", function(ctx) tickAll(ctx) end)
+    on("tick", function(ctx) tickAll(ctx) end)
     -- pal (resolve -> the defined Pal CLASS by BP class name; fires for any PalForge
     -- pal, no-op for a vanilla pal). The source hooks emit ctx.actor.
-    M.on("pal.spawned",  function(ctx) call("pal", "onSpawned", ctx, "pal.spawned") end)
-    M.on("pal.damaged",  function(ctx) call("pal", "onDamaged", ctx, "pal.damaged") end)
-    M.on("pal.death",    function(ctx) call("pal", "onDeath", ctx, "pal.death") end)
-    M.on("pal.captured", function(ctx) call("pal", "onCaptured", ctx, "pal.captured") end)
+    on("pal.spawned",  function(ctx) call("pal", "onSpawned", ctx, "pal.spawned") end)
+    on("pal.damaged",  function(ctx) call("pal", "onDamaged", ctx, "pal.damaged") end)
+    on("pal.death",    function(ctx) call("pal", "onDeath", ctx, "pal.death") end)
+    on("pal.captured", function(ctx) call("pal", "onCaptured", ctx, "pal.captured") end)
     -- item (resolve -> the defined Item CLASS by ctx.itemId, exact or namespaced;
     -- item.craft / item.discard have no source yet, so they never carry traffic)
-    M.on("item.obtain",  function(ctx) call("item", "onObtain", ctx, "item.obtain") end)
-    M.on("item.use",     function(ctx) call("item", "onUse", ctx, "item.use") end)
-    M.on("item.craft",   function(ctx) call("item", "onCraft", ctx, "item.craft") end)
-    M.on("item.discard", function(ctx) call("item", "onDiscard", ctx, "item.discard") end)
+    on("item.obtain",  function(ctx) call("item", "onObtain", ctx, "item.obtain") end)
+    on("item.use",     function(ctx) call("item", "onUse", ctx, "item.use") end)
+    on("item.craft",   function(ctx) call("item", "onCraft", ctx, "item.craft") end)
+    on("item.discard", function(ctx) call("item", "onDiscard", ctx, "item.discard") end)
 end
 
 -- =====================================================================================
@@ -1260,15 +1309,26 @@ function M.isWorldReady() return worldReady end
 -- =====================================================================================
 -- start: wire the whole 導線 once (called by registry.initialize)
 -- =====================================================================================
-local started = false
+-- The SOURCE layer arms native hooks and starts LoopAsync loops, and UE4SS can take back
+-- neither — so it runs once per SESSION, not once per module load. The flag lives on _G
+-- (core/reload owns it) so a hot reload cannot re-arm and double every hook.
+-- DISPATCH is re-attached on every load, because that is what routes a channel to the
+-- freshly-loaded definition classes.
 function M.start()
-    if started then return end
-    started = true
+    local reload = require("palforge.core.reload")
+    if reload.armed() then
+        installDispatch()
+        log.info("event re-attached: dispatch rebound to the reloaded modules "
+            .. "(native hooks and loops kept from the first load)")
+        return
+    end
+
     -- sources (native -> channel)
     installTickSource(); installWorldSource(); installBuildingSource()
     installPalSource();  installItemSource()
     -- dispatch (channel -> object hook)
     installDispatch()
+    reload.markArmed()
     log.info("event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned "
         .. "arm at world.ready; craft+discard have no native source) + dispatch")
 end

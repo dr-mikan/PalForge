@@ -16,17 +16,18 @@
 --     crash-prone (it touches EVERY loaded table, and a stale pointer there raises an access
 --     violation Lua's pcall cannot catch), which is why utils/items refuses it "inside an
 --     ordinary helper" — and iconOf() is exactly that.
---   * The /Game PACKAGE PATHS are NOT proven. They appear nowhere else in either tree, and
---     no dump ever recorded an icon table's path — the dumper only ever recorded object
---     NAMES. They survive as a last-resort fallback only, now written in the "Package.Object"
---     form LoadAsset actually wants (the convention that works in core/sound/native.lua).
---     Every table this module finds is logged WITH ITS FULL NAME, so one line of UE4SS.log
---     from a loaded world settles the real paths without a probe.
+--   * The /Game PACKAGE PATHS are now PROVEN. dumps/reflection/01_datatables.txt printed
+--     GetFullName() for all 391 loaded DataTables in a real session, and every one of the
+--     seven names below appeared under the directory PACKAGE_DIRS already guessed. They stay
+--     a last-resort fallback (discovery is cheaper), written in the "Package.Object" form
+--     LoadAsset wants — the convention that works in core/sound/native.lua.
+--   * The ICON COLUMN of each table is now MEASURED, not inferred — see ICON_COLUMNS_BY_TABLE.
 --   * READING A ROW is proven NOWHERE, and the two members tried are unlikely to be the
 --     answer — see findRow. No artifact in either tree has ever read a DataTable row VALUE
---     from Lua; the catalog dumper read row NAMES only. The icon column is likewise a probe
---     list (see ICON_COLUMNS) rather than a fact.
---   So: this module finds the table for real, and the last two steps stay best-effort.
+--     from Lua; every dump that touched these tables read row NAMES only. That single missing
+--     step is now the ONLY reason resolve() returns nil for a vanilla id.
+--   So: this module finds the table for real and knows where to look inside a row; only the
+--   row fetch in the middle is still best-effort.
 --
 -- Strictly fail-soft. Every engine call is inside a pcall, any miss at any step returns nil,
 -- and each domain's iconOf() then falls back to the declared `icon`. Nothing throws when the
@@ -46,6 +47,9 @@ local M = {}
 -- convention (PalSchema resolves DT_TechnologyRecipeUnlock -> _Common the same way) and is
 -- listed second wherever the catalog actually has one — it does for item, pal and building,
 -- and does NOT for the partner-skill table, which therefore stands alone.
+-- All seven are loaded in a live session (01_datatables.txt). The three unsuffixed ones are
+-- CompositeDataTables that aggregate their `_Common` sibling, so both spellings carry the same
+-- rows and the same column: item 1207 rows, pal 674, building 571/562, skill 311.
 -- NOTE on skill: DT_partnerSkillIconDataTable is keyed by PAL id, not by skill id (its 311
 -- rows are Alpaca/Anubis/Bastet/...), so only pal-derived partner skills can ever hit it;
 -- passive skills have no icon row and fall back to the declared icon by design.
@@ -56,11 +60,12 @@ M.TABLES = {
     building = { "DT_BuildObjectIconDataTable",  "DT_BuildObjectIconDataTable_Common" },
 }
 
--- UNVERIFIED package directories, used only by the last-resort path fallback below. The
--- directories are the historical guesses from this file's first version and nothing in either
--- tree corroborates them; a miss here is the expected outcome. They are kept because the
--- attempt costs one LoadAsset per name per retry window, and because a table that is not
--- loaded yet is invisible to the discovery sweep.
+-- Package directories, used only by the last-resort path fallback below. MEASURED: every one
+-- is the directory 01_datatables.txt printed for that object's GetFullName() in a live session
+-- (e.g. "/Game/Pal/DataTable/Item/DT_ItemIconDataTable.DT_ItemIconDataTable"). Kept as a
+-- fallback rather than promoted to the primary route because a table that IS loaded is found
+-- more cheaply by name, and this path costs one LoadAsset per name per retry window; its real
+-- job is the case discovery cannot cover — a table not loaded yet.
 local PACKAGE_DIRS = {
     DT_ItemIconDataTable                = "/Game/Pal/DataTable/Item/",
     DT_ItemIconDataTable_Common         = "/Game/Pal/DataTable/Item/",
@@ -71,21 +76,51 @@ local PACKAGE_DIRS = {
     DT_BuildObjectIconDataTable_Common  = "/Game/Pal/DataTable/MapObject/Building/",
 }
 
--- Columns a row may carry the texture ref under, probed in order. `SoftIcon` leads because it
--- is the one name the shipping binary's FName table ties to an icon ROW STRUCT (it sits on
--- FPalBuildObjectIconData); `IconName` is a real Palworld column too — it is on
--- FPalStaticItemDataStruct, and __knowledges/palworld-ue4ss-functions.md:119 records it on the
--- technology-unlock row — and it was this file's original guess. `IconTexture` / `Icon` /
--- `Texture` are defensive leftovers; "Icon" does not appear in that name table at all, and each
--- extra probe costs one nil index, so they stay last. All of this is name-table inference: no
--- row has ever actually been read here, so the ORDER is a bet, not a measurement.
--- Settling it does NOT need a readable row, only the row STRUCT: a UDataTable carries its
--- RowStruct as a property and dump/dump.lua:55-59 already walks it
--- (`dt.RowStruct` -> `rs:ForEachProperty(...)`) to print a table's columns — that output is
--- what this list should be replaced by.
--- TODO(icons-row-column): unknown which property of each icon table's row struct holds the
--- texture ref, and of what type — these five names are inferred, never observed.
-local ICON_COLUMNS = { "SoftIcon", "IconName", "IconTexture", "Icon", "Texture" }
+-- The column each icon table carries its texture ref under. MEASURED, one column per table:
+-- dumps/reflection/01_datatables.txt walked `dt.RowStruct` -> `rs:ForEachProperty(...)` over
+-- all 391 DataTables loaded in a real session and printed the property list of every one.
+-- Item, pal and building tables each have exactly ONE column, and it is the whole row.
+--
+-- Scoring the five-name guess this replaces (SoftIcon / IconName / IconTexture / Icon /
+-- Texture, tried in that order against every table): it would have found building on the
+-- first index and item and pal on the fourth, and it would NEVER have found the partner-skill
+-- column, whose real name is nothing like any of the five. Three of the five — IconName,
+-- IconTexture, Texture — are not columns of any icon table on this build at all.
+--
+--   DT_ItemIconDataTable[_Common]         [columns] Icon
+--   DT_PalCharacterIconDataTable[_Common] [columns] Icon
+--   DT_BuildObjectIconDataTable[_Common]  [columns] SoftIcon
+--   DT_partnerSkillIconDataTable          [columns] IsSquare_5_116F13E54A95BA260E4C56848C50332E,
+--                                                   TextureID_8_2B2F889C43EB586246BDB981B6462ACA
+--
+-- The partner-skill row struct is a Blueprint UserDefinedStruct, so its properties carry the
+-- editor GUID suffix UE appends to every field of one — that decorated spelling IS the
+-- reflected property name and is what an index has to use. The undecorated "TextureID" is
+-- listed after it only in case a future accessor hands back a struct whose fields were
+-- de-suffixed on the way out; it costs one nil index. `IsSquare` is a layout flag, not the
+-- texture, so it is not probed.
+--
+-- What is NOT measured: the column's TYPE. ForEachProperty printed names only, so whether
+-- `Icon` is a soft object path, an FName or a live object is still open — readIcon therefore
+-- keeps handling all three shapes.
+local ICON_COLUMNS_BY_TABLE = {
+    DT_ItemIconDataTable                = { "Icon" },
+    DT_ItemIconDataTable_Common         = { "Icon" },
+    DT_PalCharacterIconDataTable        = { "Icon" },
+    DT_PalCharacterIconDataTable_Common = { "Icon" },
+    DT_BuildObjectIconDataTable         = { "SoftIcon" },
+    DT_BuildObjectIconDataTable_Common  = { "SoftIcon" },
+    DT_partnerSkillIconDataTable        = { "TextureID_8_2B2F889C43EB586246BDB981B6462ACA", "TextureID" },
+}
+
+-- For a table this module has never measured — a modded icon table someone points M.TABLES at.
+-- Every name that IS measured above leads, so a pack table spelled like a vanilla one hits on
+-- the first index; the rest are the old inference list, kept for reach rather than for truth.
+local ICON_COLUMNS_FALLBACK = { "Icon", "SoftIcon", "TextureID", "IconName", "IconTexture", "Texture" }
+
+local function columnsFor(tableName)
+    return ICON_COLUMNS_BY_TABLE[tableName] or ICON_COLUMNS_FALLBACK
+end
 
 -- Seconds between full discovery sweeps, and between retries for one table name. A /Game
 -- asset can be absent right after boot and present later, so a miss must stay retryable —
@@ -266,8 +301,17 @@ end
 -- capability is probably not a call spelling but a whole accessor; whatever probe closes this
 -- has to go LOOKING for one rather than assume one, which is why no third guess is bolted on
 -- here.
+--
+-- The 2026-07 reflection dumps do not touch this. They re-confirm both halves that already
+-- worked — 01_datatables.txt read `dt.RowStruct` and a row-NAME accessor for all 391 loaded
+-- tables, 0 of them reporting "<no row-name accessor>" — and they add nothing about values,
+-- because 02_reflection.txt covers 21 /Script/Pal.* classes ONLY: no /Script/Engine.UDataTable
+-- and no UDataTableFunctionLibrary appear anywhere in the tree. This stays a /Script/Engine
+-- question and cannot be answered from those files.
 -- TODO(icons-row-read): unknown whether ANY reflected row-VALUE accessor exists on this build
--- (on UDataTable, on UDataTableFunctionLibrary, or as a Pal-specific icon getter).
+-- (on UDataTable, on UDataTableFunctionLibrary, or as a Pal-specific icon getter). This is now
+-- the ONLY missing step: the table is found, its package path is measured, and the column to
+-- index once a row is in hand is measured too (ICON_COLUMNS_BY_TABLE).
 local function findRow(tbl, id)
     local key = nameArg(id)
     -- 1) GetDataTableRowFromName(RowName), FName first then the raw string.
@@ -289,13 +333,14 @@ local function findRow(tbl, id)
     return nil
 end
 
--- Read the texture ref off a row, probing each candidate column. An FName / soft ref that
--- exposes ToString is normalized to a string; an empty string or "None" means the column is
--- there but unset, so the probe moves on instead of handing back a lie. An object handle with
--- no ToString comes back as-is (callers only need a truthy handle). Anything that is neither
--- string nor userdata — a stray number or bool — is not an icon and is skipped.
-local function readIcon(row)
-    for _, col in ipairs(ICON_COLUMNS) do
+-- Read the texture ref off a row of the table named `tableName`, using that table's measured
+-- column (see ICON_COLUMNS_BY_TABLE). An FName / soft ref that exposes ToString is normalized
+-- to a string; an empty string or "None" means the column is there but unset, so the probe
+-- moves on instead of handing back a lie. An object handle with no ToString comes back as-is
+-- (callers only need a truthy handle). Anything that is neither string nor userdata — a stray
+-- number or bool — is not an icon and is skipped.
+local function readIcon(row, tableName)
+    for _, col in ipairs(columnsFor(tableName)) do
         local ok, v = pcall(function() return row[col] end)
         if ok and v ~= nil then
             if type(v) == "userdata" then
@@ -339,7 +384,7 @@ function M.resolve(spec, id)
         if tbl then
             local row = findRow(tbl, id)
             if row ~= nil then
-                local tex = readIcon(row)
+                local tex = readIcon(row, name)
                 if tex ~= nil then return tex end
             end
         end

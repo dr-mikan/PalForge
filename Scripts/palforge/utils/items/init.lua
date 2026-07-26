@@ -40,16 +40,36 @@ local function playerInventory()
     return inv
 end
 
--- How many of `id` the local inventory holds right now; nil when the count could not be
--- read. CountItemNum is the accessor deprecated.container.probeWrite reached for when it
--- wanted to confirm its AddItem writes landed — but it wrapped the call in its own pcall
--- and no run of it was ever recorded, so "readable" is the assumption this whole module's
--- honesty rests on and NOT an observation. Every caller here treats nil as UNKNOWN, never
--- as zero, so a build where this is unbound degrades to "unverified", not to a lie.
--- TODO(item-inventory-count-readback): unknown whether UPalPlayerInventoryData:CountItemNum
--- is reflected on this build and what it returns (int vs struct) — one probe call settles it.
+-- How many of `id` the local inventory holds right now; nil when the count could not be read.
+--
+-- CountItemNum IS REFLECTED on this build — measured, not assumed. dumps/reflection/
+-- 02_reflection.txt enumerated /Script/Pal.PalPlayerInventoryData with ForEachFunction and
+-- `.CountItemNum` is in its 69-function list, alongside the `.AddItem_ServerInternal` both
+-- write helpers already call and the `.IsExistItem` boolean. The whole resolve chain in
+-- playerInventory() is on that same measured footing: PalUtility.GetPlayerStateByPlayer and
+-- PalPlayerState.GetInventoryData are both in the dump too. So the call reaches a real
+-- UFunction; that is no longer the open question.
+--
+-- What is still open is the RETURN. ForEachFunction lists function NAMES only — no parameter
+-- or return types — so whether this hands Lua a plain integer or a struct/userdata that
+-- tonumber() flattens to nil is unmeasured. `.CountItemNum64` sits right beside it in the same
+-- list, so when the 32-bit call yields something tonumber() cannot read, the 64-bit sibling is
+-- tried before giving up; it costs one call and only on a path that was about to answer nil.
+-- Every caller treats nil as UNKNOWN, never as zero, so a build that will not hand back a
+-- number degrades to "unverified", not to a lie.
+-- TODO(item-inventory-count-readback): unknown what CountItemNum RETURNS to Lua (int vs
+-- struct/userdata) — its existence is settled, its shape is not. If both spellings answer
+-- nil, the measured escape hatch is the container walk: PalPlayerInventoryData exposes
+-- .TryGetContainerFromStaticItemID and .TryGetItemIdBySlot, PalItemContainer exposes
+-- .Num / .Get / .GetItemStackCount, and PalItemSlot exposes .GetItemId / .GetStackCount /
+-- .IsEmpty — all present in 02_reflection.txt, none of them with a known signature yet.
 local function countOf(inv, id)
     local ok, n = pcall(function() return inv:CountItemNum(FName(id)) end)
+    if ok then
+        local v = tonumber(n)
+        if v ~= nil then return v end
+    end
+    ok, n = pcall(function() return inv:CountItemNum64(FName(id)) end)
     if ok then return tonumber(n) end
     return nil
 end
@@ -150,25 +170,46 @@ end
 -- TRY to remove `count` of `itemId` from the local player's inventory. `count` is treated
 -- as a magnitude.
 --
--- ⚠️ REMOVAL IS UNCONFIRMED. No removal call has ever been found on this build — not in
--- the POCs, the deprecated Lua, the C++ module, the probe harness or the knowledge notes;
--- AddItem_ServerInternal is documented for ADDS only, and the one direct-slot alternative
--- in the tree (deprecated.container._extractImpl, which writes UPalItemSlot.StackCount by
--- hand) is gated off as save-corrupting and only ever reached a CHEST's container, never
--- the player's inventory. This pushes a NEGATIVE delta through that same add call on the
--- untested hypothesis that the game accepts it. Because that is a hypothesis, the outcome
--- is MEASURED instead of assumed: CountItemNum is read before and after and the return
--- value is whether the count really fell. So false here means "nothing was observed to
--- leave the inventory" — the negative delta did nothing, there was nothing to take, or the
--- count could not be read at all (all logged, distinctly). A caller is never told a removal
--- happened that was not seen.
+-- ⚠️ REMOVAL IS UNCONFIRMED, and there is now MEASURED reason to think no dedicated remove
+-- call is coming. dumps/reflection/02_reflection.txt enumerated the four classes an item
+-- removal could plausibly live on and none of them declares one:
+--   * PalPlayerInventoryData (69 functions) — has AddItem_ServerInternal, CountItemNum,
+--     IsExistItem, RequestAddItem_ForDebug. It has no RemoveItem, RemoveItem_ServerInternal,
+--     SubItem, ConsumeItem, DecreaseItem, DeleteItem, DiscardItem, DropItem, TakeItem,
+--     LostItem or UseItem. Its only Remove is TryRemoveEquipment, which unequips a slot.
+--   * PalItemContainer (13 functions) — Get, Num, GetItemStackCount[64], GetLastNotEmptyIndex,
+--     GetPermission, filter/OnRep members. Nothing that subtracts.
+--   * PalItemSlot (23 functions) — GetItemId, GetStackCount, IsEmpty, RequestUseToCharacter.
+--     Nothing that subtracts; StackCount is a PROPERTY, which is the save-corrupting hand-write
+--     deprecated.container._extractImpl is gated off for.
+--   * PalItemUseProcessor (2 functions) — CanUseItemToCharacter, UseItemToCharacter_ServerInternal.
+-- One caveat keeps this from being absolute: UE4SS ForEachFunction lists a class's OWN
+-- functions only (proven in the same dump — PalPlayerCharacter and PalCharacter share zero
+-- entries, and no engine APlayerController function appears under PalPlayerController), so a
+-- base class of these four could still carry one. The four most likely homes are ruled out,
+-- including the very class that declares the ADD.
+--
+-- The only consumption path ever OBSERVED is UseItemToCharacter_ServerInternal: 06_events.txt
+-- caught it firing with `{Id=Berries}` when the player ate one. That is the game invoking its
+-- own use processor, not an inventory API a pack can call for an arbitrary id.
+--
+-- So this still pushes a NEGATIVE delta through the add call, on the untested hypothesis that
+-- the game accepts it. Because that is a hypothesis, the outcome is MEASURED instead of
+-- assumed: CountItemNum is read before and after and the return value is whether the count
+-- really fell. false here means "nothing was observed to leave the inventory" — the negative
+-- delta did nothing, there was nothing to take, or the count could not be read at all (all
+-- logged, distinctly). A caller is never told a removal happened that was not seen.
 --
 -- Two guards keep the unproven write as small as it can be: when the count IS readable the
 -- delta is clamped to what the inventory actually holds (never ask for an underflow), and
 -- when it holds none the write is skipped entirely (nothing to remove, so an untested
 -- negative delta buys nothing).
--- TODO(item-remove-call): unknown whether ANY dedicated remove/consume UFunction exists on
--- UPalPlayerInventoryData, and whether AddItem_ServerInternal honours a negative Count.
+-- TODO(item-remove-call): unknown whether AddItem_ServerInternal honours a negative Count.
+-- The other half of this item is answered: no remove/consume UFunction is declared on
+-- PalPlayerInventoryData, PalItemContainer, PalItemSlot or PalItemUseProcessor, so there is
+-- no better call to switch to on those classes and a probe should stop hunting for one there.
+-- Only an observed before/after delta around this write can settle what is left — 02_reflection
+-- lists names, never signatures or behaviour, so no dump can answer it.
 function M.take(itemId, count)
     count = math.floor(math.abs(tonumber(count) or 1))
     local resolved = object_manager.resolve(itemId) or itemId

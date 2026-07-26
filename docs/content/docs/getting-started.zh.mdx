@@ -1,0 +1,685 @@
+---
+title: 快速上手
+description: 安装 PalForge，确认它已经加载，并让第一份自己的内容在游戏里跑起来
+---
+
+PalForge 让你把自己做的建筑物、道具、帕鲁、技能、声音、效果和菜单加进 Palworld。你在一个简短的
+Lua 文件里写下想要的东西，它就会出现在你的游戏里。
+
+本页会把它装好、确认它在运行，并让你的第一个定义对游戏里的操作作出反应。
+
+## 读完本页你可以做到
+
+- 在自己的 Palworld 里跑起 PalForge
+- 只看游戏自己的日志，就知道它有没有启动
+- 加入自己的道具，捡起它时输出一条消息
+- 加入一个会数自己被打开过几次的箱子，下次再玩时次数还在
+- 自己查出某个东西为什么没出现，不用问别人
+
+## 安装
+
+<Steps>
+
+<Step>
+
+### 复制文件
+
+PalForge 跑在 UE4SS 上，UE4SS 是让 Palworld 能运行 Lua 模组的加载器。如果你已经有别的 Palworld
+Lua 模组能用，那你就已经装了它。
+
+在 `ue4ss/Mods/` 下建一个叫 `PalForge` 的文件夹，按下面的样子放文件。`palforge/` 必须和
+`main.lua` 放在同一层：`main.lua` 会在自己所在的文件夹里找 PalForge 的其余部分，布局不一样就会
+让每一个部分都失效。
+
+```text
+ue4ss/
+└── Mods/
+    └── PalForge/
+        ├── enabled.txt
+        └── Scripts/
+            ├── main.lua
+            └── palforge/
+                ├── env.lua
+                ├── types.lua
+                ├── api/
+                ├── core/
+                ├── native/
+                ├── tests/
+                └── utils/
+```
+
+`Scripts/palforge/types.lua` 只有类型注解，游戏运行时不会有任何地方加载它。它的作用是让你输入时
+编辑器能补全定义的每一个字段。参见[编辑器设置](/docs/concepts/editor-setup)。
+
+</Step>
+
+<Step>
+
+### 打开这个模组
+
+UE4SS 打开一个 Lua 模组有两种方式：在模组文件夹里放一个空的 `enabled.txt` 文件，或者在
+`ue4ss/Mods/mods.txt` 里加一行。
+
+```text title="ue4ss/Mods/mods.txt"
+CheatManagerEnablerMod : 1
+ConsoleEnablerMod : 1
+PalForge : 1
+```
+
+想生成帕鲁的话，就让 `CheatManagerEnablerMod` 保持开启。`Pal.Handle:spawn` 走的是游戏自己的
+`UPalCheatManager`，所以没有那个模组时，`core/spawn` 会写下这一行然后放弃，返回 `false`：
+
+```text
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+```
+
+</Step>
+
+<Step>
+
+### 启动游戏并读日志
+
+UE4SS 会把模组说的话打印到它的控制台窗口，并把同样的文本写进一个叫 `UE4SS.log` 的文件。PalForge
+的每条消息都经过 `utils/log`，格式是 `[PalForge.<scope>][<level>] <msg>`。游戏加载时盯着它看，
+具体要找哪几行在接下来的两节里。
+
+</Step>
+
+</Steps>
+
+## 游戏启动时发生了什么
+
+`main.lua` 是 UE4SS 唯一运行的文件。它按顺序做这些事：
+
+1. 把 Lua 的 `package.path` 指向自己所在的文件夹
+   （`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`），这样 `require("palforge.api")` 就能找到
+   放在旁边的模块。
+2. 加载 `palforge.env`，打印版本号和 dev 标志。
+3. 在 `pcall` 里调用 `registry.initialize()`，失败就打印 `initialize failed: <err>`，成功就打印
+   `ready`。
+4. 发布 `_G.PalForge`，让别的模组能用同一份正在运行的副本。
+
+```lua title="Scripts/main.lua (excerpt)"
+local thisDir = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
+package.path = thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;" .. package.path
+
+local env      = require("palforge.env")
+local registry = require("palforge.core.registry")
+local log      = require("palforge.utils.log").scope("main")
+
+log.info("PalForge v" .. tostring(env.version) .. " starting (dev=" .. tostring(env.dev) .. ")")
+```
+
+一切启动起来的地方是 `registry.initialize()`。它跑五个步骤：
+
+```mermaid
+flowchart TD
+  A["main.lua sets package.path"] --> B["registry.initialize"]
+  B --> C["require palforge.api - installs the globals"]
+  C --> D["native catalogs self-register"]
+  D --> E["event.start - sources and dispatch"]
+  E --> F["dev tools when env.dev"]
+  F --> G["emit gameStart"]
+  G --> H["_G.PalForge published"]
+```
+
+内容目录的加载顺序是：`buildings`、`items`、`pals`、`skills`、`effects`、`audio`、`ui`。加载一个
+目录就等于注册它的内容，定义调用在运行时会把自己写进 `core/object_manager`。那些文件里长长的 id
+列表在有人用 `get(id)` 来要之前只是普通数据，所以启动时不会一次注册成千上万个行 id。
+
+`_G.PalForge` 带着别的模组可能想要的一切：
+
+```lua
+_G.PalForge = {
+    env = env,
+    api = require("palforge.api"),
+    utils = { log = ..., json = ..., file = ..., items = ... },
+    core = {
+        registry = ..., event = ..., object_manager = ..., spawn = ..., mesh = ...,
+        sound = ..., player = ..., spatial = ..., icons = ...,
+    },
+    native = require("palforge.native"),
+}
+```
+
+## 正常的启动日志
+
+`env.dev = true` 是随包发布的默认值。在这个默认值下，一次干净的启动是这样的：
+
+```text
+[PalForge.main][info] PalForge v0.3.0 starting (dev=true)
+[PalForge.event][info] tick source live
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard TODO(dump)) + dispatch
+[PalForge.keyboard][info] bound F4
+[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
+[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
+[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
+[PalForge.keyboard][info] bound F1
+[PalForge.registry][info] initialized (dev=true, 19 class(es) registered)
+[PalForge.main][info] ready
+```
+
+class 的数量就是注册了多少个定义：随包目录声明的那些，加上你自己的。表示 PalForge 已经启动的那一
+行是 `[PalForge.main][info] ready`。
+
+另外两行属于世界闸门。PalForge 会等存档加载完成，才去碰世界里的东西；第一行在存档准备好时出现，
+第二行在你离开那个世界时出现：
+
+```text
+[PalForge.event][info] world ready - building dispatch enabled
+[PalForge.event][info] world left - building dispatch paused
+```
+
+<Callout type="info">
+world 源每 1000 毫秒检查一次 `FindFirstOf("PalPlayerCharacter")`，要连续五次检查有效才会发出
+`world.ready`。在那之前，building、pal 和 item 这几个源都会直接返回，所以你还在标题界面时，你写的
+东西都不会触发。tick 心跳是唯一从模组加载起就在跑的源。如果那个检查循环根本装不上，日志会写
+`ready-watch unavailable (...) - dispatch always on`，然后所有东西照常运行。
+</Callout>
+
+## dev 开关
+
+`Scripts/palforge/env.lua` 放着 PalForge 运行时读的设置。`require()` 会缓存它，所以每个模块看到的
+是同一张表：
+
+```lua title="Scripts/palforge/env.lua"
+return {
+    dev     = true,        -- THE dev/release switch (dev tools load only when true)
+    name    = "PalForge",
+    version = "0.3.0",
+}
+```
+
+`dev` 为 true 时，`registry.initialize()` 还会：
+
+- 加载 `core/keyboard/` 下的按键绑定文件，它把 **F4** 绑到 `utils.items.unlockAllTech` 上，按一下，
+  你自定义的建筑物和箱子就会出现在建造菜单里；
+- 注册 `ps_catalog` 控制台命令，这是一个由你手动运行的 DataTable 导出工具，它从不自己启动；
+- 运行 `palforge.tests` 里的无界面测试包，`tests: ...` 那一行就是它输出的；
+- 加载游戏内测试套件 `palforge.test`，并把它放在 **F1** 上。你按下这个键之前里面什么都不会跑，因为
+  那些测试会生成帕鲁、发放道具。
+
+想要一个只注册内容目录的安静发布版，就把 `dev` 设为 false：
+
+```lua title="Scripts/palforge/env.lua"
+return {
+    dev     = false,
+    name    = "PalForge",
+    version = "0.3.0",
+}
+```
+
+任何模块都能读同一张表：
+
+```lua
+local env = require("palforge.env")
+local log = require("palforge.utils.log").scope("mypack")
+
+if env.dev then
+    log.info("dev build " .. tostring(env.version))
+end
+```
+
+<Callout type="warn">
+dev 开关是在 `registry.initialize()` 内部读的。在那之后再改 `require("palforge.env").dev`，只会改变
+你自己的代码看到的值，并不会加载或卸载 dev 工具。要真正切换，请改 `env.lua`。
+</Callout>
+
+## 你的第一个定义
+
+把你自己的代码放进 `main.lua` 旁边一个独立的文件里。`package.path` 已经覆盖了那个文件夹，所以一句
+普通的 `require` 就能找到它。
+
+```lua title="ue4ss/Mods/PalForge/Scripts/mypack.lua"
+local api = require("palforge.api")
+local log = require("palforge.utils.log").scope("mypack")
+
+api.Item{
+    id       = "Stone",
+    name     = "Stone",
+    category = "material",
+    maxStack = 9999,
+    events   = {
+        onObtain = function(item, ctx)
+            log.info("picked up " .. tostring(ctx.count) .. " stone")
+        end,
+    },
+}
+```
+
+等 PalForge 本体起来之后，在 `main.lua` 的末尾加载它：
+
+```lua title="ue4ss/Mods/PalForge/Scripts/main.lua"
+_G.PalForge = {
+    -- ... unchanged ...
+}
+
+local ok, err = pcall(require, "mypack")
+if not ok then print("[mypack] load failed: " .. tostring(err) .. "\n") end
+
+return _G.PalForge
+```
+
+<Callout type="warn">
+一定要在 `registry.initialize()` 跑完**之后**再 require 你的文件。在那之前，裸的全局名还没装上，
+native 目录也还没加载。`pcall` 同样重要：定义里写错一个字段会抛出硬错误，不加保护的话，`main.lua`
+剩下的部分就停了。
+</Callout>
+
+`Item{ id = "Stone" }` 是把你的行为和元数据挂在一个游戏里已经有的 id 上。光靠 Lua 没法往游戏的
+道具、帕鲁、建筑物表里加一个全新的行，那些是游戏的 DataTable，往里面写新行是 PalSchema 的活。所以
+要在已经存在的 id 上做，这也是例子里用原版 id 的原因。不带冒号的 id 就是游戏里真实的 id（`Stone`、
+`Wood`、`PalBoxV2`）；`"pack:name"` 是你自己的带命名空间的 id，它对应行名 `pack_name`。
+
+接下来是一个会记住东西的定义。建筑物实例带着 `self.actor`、`self.pos`、`self.state` 和
+`self:save()`：
+
+```lua title="ue4ss/Mods/PalForge/Scripts/mypack.lua"
+local api = require("palforge.api")
+local log = require("palforge.utils.log").scope("mypack")
+
+api.Building{
+    id     = "ItemChest",
+    name   = "Counted Chest",
+    gridCm = 100,
+    state  = { uses = 0 },
+    events = {
+        onLoad = function(self, ctx)
+            log.info("chest tracked at " .. string.format("%.0f,%.0f,%.0f", self.pos.x, self.pos.y, self.pos.z))
+        end,
+        onRightClick = function(self, ctx)
+            self.state.uses = self.state.uses + 1
+            self:save()
+            log.info("chest opened " .. tostring(self.state.uses) .. " time(s)")
+        end,
+    },
+}
+```
+
+一个 id 只保存一个定义，`object_manager` 用种类加 id 作为键，所以给一个 PalForge 已经带了定义的 id
+再定义一次，就会替换掉那一个。`native/buildings` 带了 `WorkBench` 和 `PalBoxV2`，`native/items` 带了
+`Wood`、`Berries` 和 `Arrow`，`native/pals` 带了 `ChickenPal` 和 `SheepBall`。除非你就是想替换，
+否则请换一个 id。
+
+再来一个帕鲁的例子，看的是一个动作而不是处理函数：
+
+```lua
+local api = require("palforge.api")
+
+-- Pal.get works for any game CharacterID, defined or not.
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+
+-- Defining the same id attaches your own mesh and handlers to it. This replaces
+-- native/pals' curated ChickenPal demo definition.
+local chicken = api.Pal{
+    id   = "ChickenPal",
+    name = "Chicken Pal",
+    mesh = api.Mesh{
+        id        = "mypack:chicken_body",
+        kind      = "skeletal",
+        model     = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal",
+        animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C",
+    },
+    events = {
+        onSpawned = function(pal, ctx)
+            pal:renderOn(ctx.actor)
+        end,
+    },
+}
+
+chicken:spawn(api.Player.coordinateOffset(300, 0, 0))
+```
+
+## 在游戏里确认
+
+读取一个存档，盯着日志看。
+
+<Steps>
+
+<Step>
+
+### 确认世界闸门开了
+
+```text
+[PalForge.event][info] world ready - building dispatch enabled
+```
+
+这一行出现之前，building、pal 和 item 这几个源都会直接返回，只有 tick 心跳在跑。
+
+</Step>
+
+<Step>
+
+### 触发随包的演示
+
+PalForge 自带的定义上已经挂好了能用的处理函数，所以你什么都不写也能证明整条线路是通的：
+
+```text
+[PalForge.native.items][info] Wood onObtain: count=1
+[PalForge.native.items][info] Berries onUse: target=...
+[PalForge.native.pals][info] ChickenPal onDamaged: ...
+```
+
+第一条砍一棵树，第二条吃浆果，第三条打一只野生的 Chicken。
+
+</Step>
+
+<Step>
+
+### 触发你自己的
+
+挖一块石头，你的处理函数就会跑：
+
+```text
+[PalForge.mypack][info] picked up 3 stone
+```
+
+从游戏到你的函数的路径：
+
+```mermaid
+flowchart LR
+  A[you pick up stone] --> B["AddItemGetLog_ToClient hook"]
+  B --> C["item.obtain channel"]
+  C --> D[dispatch resolves the item class]
+  D --> E["your onObtain runs"]
+```
+
+`ctx.itemId` 和 `ctx.count` 取自游戏自己的获取日志结构体，这个 id 会拿到 `object_manager` 里查。
+一个你从没定义过的原版 id 什么都匹配不上，整件事就安静地什么也不做。
+
+</Step>
+
+<Step>
+
+### 查看注册了什么
+
+```lua
+local registry = require("palforge.core.registry")
+local log      = require("palforge.utils.log").scope("mypack")
+
+for id in pairs(registry.registered().item) do
+    log.info("item: " .. id)
+end
+```
+
+`registry.registered()` 返回一份快照，先按种类再按 id 组织，种类有 `item`、`pal`、`building`、
+`skill`、`effect`、`audio`、`mesh`、`ui`。
+
+</Step>
+
+</Steps>
+
+`env.dev = true` 时你还有 **F1**（运行游戏内测试套件）和 **F4**（解锁全部科技）可以当作快速的
+冒烟测试。
+
+## 访问 API
+
+`require("palforge.api")` 一次做两件事：它返回一张带着所有东西的表，同时还创建了可以直接用的普通
+全局名。两边指向的是同一批对象。
+
+<Tabs items={['命名空间', '全局名', '配套模组']}>
+
+<Tab value="命名空间">
+
+```lua
+local api = require("palforge.api")
+
+api.Item.get("Wood"):give(10)
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+```
+
+</Tab>
+
+<Tab value="全局名">
+
+```lua
+require("palforge.api")   -- installing the globals is the side effect
+
+Item.get("Wood"):give(10)
+Pal.get("ChickenPal"):spawn(Player.coordinate())
+```
+
+全局名是 `Pal`、`Item`、`Building`、`Skill`、`Effect`、`Audio`、`Mesh`、`UI` 和 `Player`。UE4SS 给
+每个 Lua 模组各自独立的 Lua state，所以这些名字只属于你的模组，不会和游戏或别的模组撞车。
+
+</Tab>
+
+<Tab value="配套模组">
+
+```lua
+local api = _G.PalForge.api
+
+api.Item.get("Wood"):give(10)
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())
+```
+
+当你自己的 `package.path` 没有指向 PalForge 的 `Scripts/` 文件夹、因而没法 `require("palforge.*")`
+时，用这个写法。
+
+</Tab>
+
+</Tabs>
+
+每一种内容的用法都一样，所以学会一种就等于学会全部：
+
+```lua
+local pal = Pal{ id = "example:Boss", name = "Boss" }   -- make one
+Pal.get("ChickenPal")                                   -- find one by id
+Pal.get_all()                                           -- list every one
+```
+
+## 把你的包做成独立模组
+
+`main.lua` 发布了 `_G.PalForge`，所以另一个模组可以用已经在跑的那一份，而不用再加载一份。
+
+```mermaid
+flowchart LR
+  A["PalForge mod loads"] --> B["_G.PalForge published"]
+  B --> C["MyPack mod loads"]
+  C --> D["MyPack calls PalForge.api"]
+```
+
+```text
+ue4ss/Mods/MyPack/
+├── enabled.txt
+└── Scripts/
+    └── main.lua
+```
+
+```lua title="ue4ss/Mods/MyPack/Scripts/main.lua"
+local PF = _G.PalForge
+if not PF then
+    print("[mypack] PalForge is not loaded - check the mod load order\n")
+    return
+end
+
+local api = PF.api
+local log = PF.utils.log.scope("mypack")
+
+api.Item{
+    id       = "Stone",
+    name     = "Stone",
+    category = "material",
+    maxStack = 9999,
+    events   = {
+        onObtain = function(item, ctx)
+            log.info("picked up " .. tostring(ctx.count) .. " stone")
+        end,
+    },
+}
+
+log.info("mypack loaded")
+```
+
+在 `ue4ss/Mods/mods.txt` 里把 PalForge 写在你的包上面，这样你的定义运行之前，它已经启动完毕。
+
+<Callout type="warn">
+UE4SS 给每个 Lua 模组各自独立的 Lua state。`_G.PalForge` 能被加载进 PalForge 的 `main.lua` 所在
+state 的代码访问到；另一个模组文件夹是否共享那个 state，取决于你的 UE4SS 版本和加载配置。请留着
+`if not PF then ... return end` 这道防线，如果它真的触发了，就照“你的第一个定义”一节里的做法，从
+PalForge 自己的 `Scripts/` 文件夹加载你的文件。
+</Callout>
+
+除了 `api`，公开出来的这张表还给你工具箱和引擎：
+
+```lua
+local PF = _G.PalForge
+
+PF.utils.log.scope("mypack").info("hello")
+PF.utils.items.unlockAllTech()
+PF.native.items.get("Arrow_Fire")
+PF.native.buildings.WorkBench:unlock()
+
+PF.core.event.on("tick", function(ctx)
+    if ctx.count % 120 == 0 then PF.utils.log.scope("mypack").info("one minute") end
+end)
+```
+
+启动之后再定义也没问题。之后定义的建筑物会被下一次扫描拾到，帕鲁和道具的事件在触发的那一刻按 id
+解析，所以在 `gameStart` 一分钟之后才注册的定义照样能收到自己的事件。
+
+## 排查问题
+
+### 一行 `[PalForge.*]` 都没有
+
+模组根本没加载。按顺序检查：
+
+- `Scripts/main.lua` 就在 `ue4ss/Mods/PalForge/` 下面，`palforge/` 在它旁边。`main.lua` 是根据自己
+  文件的位置算出 `package.path` 的，文件夹一挪，每个 `require` 都会坏。
+- 模组是开着的：模组文件夹里有个空的 `enabled.txt`，或者 `ue4ss/Mods/mods.txt` 里有
+  `PalForge : 1`。
+- UE4SS 本身确实在加载 Lua 模组（别的 Lua 模组会打印它们自己的行）。
+
+### `initialize failed: ...`
+
+```text
+[PalForge.main][err] initialize failed: ...
+```
+
+有一个错误从 `registry.initialize()` 里跑了出来。`main.lua` 把它接住了，所以游戏还能跑，但什么都
+没起来，没有源，没有分发，没有目录。冒号后面的文字才是真正的错误。只有某一个目录失败时，会单独出
+一行 `native catalog 'palforge.native.items' load error: ...`。
+
+### 未知字段
+
+```text
+PalForge: Pal: unknown field "meshSpec" (did you mean "mesh"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
+```
+
+不属于定义的字段会直接报硬错误，并附上修改建议，所以名字拼错绝不会被悄悄忽略。同样的检查也会跑在
+嵌套的表上，包括 `events`：
+
+```text
+PalForge: Pal: field "events" (Pal.Spec.Events): unknown field "onSpawn" (did you mean "onSpawned"?). Valid fields: onSpawned, onDamaged, onDeath, onCaptured, onTick
+```
+
+一个调用接受什么，你也可以从自己的代码里问：
+
+```lua
+local schema = require("palforge.core.schema")
+
+print(schema.help("Pal.Spec"))          -- every field, type, default and meaning
+print(schema.help("Pal.Spec.Events"))   -- the handler list
+schema.get("Pal.Spec").fields           -- the same as a table, for tooling
+```
+
+### 缺少 id
+
+```text
+PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
+```
+
+每一种内容都必须有 `id`。括号里的文字是这个字段自己的文档，所以这条消息会告诉你该给一个什么样的值。
+
+### 值不对或类型不对
+
+```text
+PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
+PalForge: Item: field "maxStack" expects number, got string
+PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
+```
+
+调用不会做到一半就算成功：检查一旦不通过，在注册任何东西之前就先报错。
+
+### 处理函数一直不触发
+
+- 检查有没有东西能触发那个钩子。道具上的 `onCraft` 和 `onDiscard`、建筑物上的 `onLeftClick` 和
+  `onBreak` 可以写，但现在还没有任何东西发出它们，请改用 `onUse` / `onObtain` 和 `onRightClick` /
+  `onRemove`。[生命周期](/docs/concepts/lifecycle)列出了哪些是能用的。
+- 检查世界闸门：`world ready - building dispatch enabled` 之前什么都不会跑。
+- 检查有没有游戏不让 PalForge 装上的钩子：
+
+  ```text
+  [PalForge.event][warn] hook unavailable (feature disabled): /Script/Pal.PalBuildObject:OnBeginInteractBuilding -> ...
+  ```
+
+- 检查 id。道具按 `ctx.itemId` 匹配，帕鲁按蓝图类名（`BP_<Id>_C`）匹配，那是游戏内部给这只帕鲁的
+  actor 起的名字。在 `object_manager` 里匹配不到的 id 会安静地什么都不做，这不算错误。
+
+### 处理函数触发了，但里面出了问题
+
+你的处理函数跑在 `pcall` 里，所以里面写错也不会让游戏崩溃。错误会写进日志，带上出问题的通道和钩子：
+
+```text
+[PalForge.event][err] item.use -> onUse handler failed: ...
+```
+
+建筑物的 `onTick` 如果一直失败就会被关掉，这样一个坏掉的处理函数不会永远烧着心跳：
+
+```text
+[PalForge.event][err] onTick 'WorkBench@1204,-431,84' failed: ...
+[PalForge.event][warn] onTick 'WorkBench@1204,-431,84' disabled after 5 failures
+```
+
+开发时自己把有风险的活包起来，消息说什么由你决定：
+
+```lua
+events = {
+    onRightClick = function(self, ctx)
+        local ok, err = pcall(function()
+            -- your work here
+        end)
+        if not ok then log.err("onRightClick: " .. tostring(err)) end
+    end,
+}
+```
+
+### 生成帕鲁没有反应
+
+```text
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+```
+
+`:spawn` 走的是 `UPalCheatManager`。在 `mods.txt` 里打开 `CheatManagerEnablerMod`。
+
+## 接下来读什么
+
+<Cards>
+  <Card title="定义" href="/docs/concepts/definitions">
+    怎么做一个、怎么找一个、怎么列出全部，以及你拿回来的是什么。
+  </Card>
+  <Card title="Schema" href="/docs/concepts/schema">
+    每一种内容接受哪些字段，以及运行时怎么读它们。
+  </Card>
+  <Card title="生命周期" href="/docs/concepts/lifecycle">
+    哪些处理函数会触发、什么时候触发、`ctx` 里有什么。
+  </Card>
+  <Card title="第一个内容包" href="/docs/guides/first-content-pack">
+    用每一种内容从头到尾搭出来的一个完整的包。
+  </Card>
+</Cards>
+
+## 小结
+
+- PalForge 放在 `ue4ss/Mods/PalForge/Scripts/`，`palforge/` 和 `main.lua` 并排。换成别的布局就
+  不能用。
+- `[PalForge.main][info] ready` 表示 PalForge 启动了；
+  `world ready - building dispatch enabled` 表示你的处理函数现在可以触发了。
+- 把你的内容写进 `main.lua` 旁边你自己的文件里，并在 `main.lua` 末尾、`registry.initialize()`
+  之后 `require` 它。
+- `Item{ ... }`、`Building{ ... }` 和 `Pal{ ... }` 的用法完全一样：传一张表调用就是做一个，
+  `get(id)` 是找一个，`get_all()` 是列出全部。
+- 不带冒号的 id 是游戏自己的；`"pack:name"` 是你的。
+- 字段名写错会让调用停下，消息里会点出那个字段并列出有效的字段，读它，别猜。
+
+接着读[定义](/docs/concepts/definitions)，看看一个定义会返回什么、你能拿它做什么。

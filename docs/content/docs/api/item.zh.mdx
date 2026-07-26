@@ -1,0 +1,670 @@
+---
+title: Item
+description: 往玩家背包里放道具、再取回来，并在道具被拾取或被使用时运行你自己的代码
+---
+
+## 读完本页你可以做到
+
+- 从自己的代码往玩家背包里加道具，也能再取回来
+- 在玩家捡到东西的那一刻运行你自己的代码
+- 在玩家吃下或用掉东西的那一刻运行你自己的代码
+- 玩家攒够某种材料后发一份奖励
+- 给游戏里的道具写上自己的名字、说明和配方数值
+
+道具就是待在背包里的东西：材料、食物、装备、弹药。写 `Item{ ... }` 描述一个道具。你会拿回一个**句柄** —— 一个带着这个道具各种操作的小对象，比如 `:give`。
+
+```lua
+local berries = Item{ id = "Berries", name = "Red Berries", category = "consumable" }
+
+Item.get("Wood")          -- a handle for any item id, defined or not
+Item.get_all()            -- every PalForge-registered item, as handles
+```
+
+`Item.get(id)` 会给你一个道具的句柄，不管这个道具是不是你自己描述的。`Item.get_all()` 列出 PalForge 目前知道的所有道具。
+
+描述一个道具时，PalForge 会检查你的表，把它按 ID 归档，然后返回句柄：
+
+```mermaid
+flowchart LR
+  A[define] --> B["validate against Item.Spec"]
+  B --> C["register under type item and the id"]
+  C --> D["return Item.Handle"]
+```
+
+写 `Item{ ... }` 并不会在游戏里造出一个新道具。它是把你的行为和你的信息挂到游戏里已经有的 ID 上。不带冒号的 ID 是游戏自带的 ID（`"Wood"`、`"Berries"`、`"Arrow"`）。带冒号的 ID 是你自己内容包里的东西（`"example:Potion"`），它对应的游戏数据行写作 `example_Potion`。要创建那一行需要 PalSchema —— 只靠 Lua 没法往 `DT_ItemDataTable_Common` 里加一行。
+
+只要你的内容包加载了 PalForge，`Item` 就是一个全局变量；带命名空间的写法也一样能用：
+
+```lua
+local api = require("palforge.api")
+api.Item{ id = "Arrow" }
+Item{ id = "Arrow" }        -- same module; the globals are mod-local under UE4SS
+```
+
+Palworld 自带的道具 ID 都列在 `palforge.native.items` 里。自己造新东西之前先翻一翻 —— 你想要的 ID 多半已经有了：
+
+```lua
+local items = require("palforge.native.items")
+
+items.CATALOG            -- every DT_ItemDataTable_Common row id, as a list of strings
+items.get("Arrow_Fire")  -- a lazily built, cached handle for any catalog id; nil if unknown
+items.Wood               -- curated handles, defined at load; Wood and Berries carry hooks
+items.Berries
+items.Arrow
+```
+
+一开始就描述好的道具有三个：`Wood`、`Berries` 和 `Arrow`。其他所有目录 ID 会在你第一次用 `items.get(id)` 询问时变成句柄，这个句柄会留着下次用。
+
+## 字段
+
+必须传的字段只有 `id`。其余的要么补一条信息，要么挂上行为。传入不在这张表里的字段，调用会直接停下报错，并告诉你最接近的合法字段名。
+
+<TypeTable
+  type={{
+    id: {
+      description: '道具 ID。可以是游戏里的 ItemId，比如 "Wood"；内容包的内容则写成 "pack:name"。必须是非空字符串。',
+      type: 'string',
+      required: true,
+    },
+    name: {
+      description: '显示在界面上，也是 Handle:name 的返回值。',
+      type: 'string',
+      default: '与 id 相同',
+    },
+    description: {
+      description: '一行说明，给界面和工具用。由 Handle:description 返回。',
+      type: 'string',
+    },
+    category: {
+      description: '这是哪一类背包内容。只是 PalForge 自己的记录。',
+      type: '"material" | "consumable" | "equipment" | "ammo" | "ingredient" | "other"',
+      default: 'material',
+    },
+    maxStack: {
+      description: '背包里的堆叠上限。只是 PalForge 自己的记录。',
+      type: 'number',
+      default: '1',
+    },
+    icon: {
+      description: '备用图标，在图标 DataTable 查不到时使用。任意值，原样返回。',
+      type: 'any',
+    },
+    recipe: {
+      description: '生产这个道具的配方。形状见 Item.Spec.Recipe。',
+      type: 'table',
+    },
+    events: {
+      description: '你的处理函数，集中放在这里。形状见 Item.Spec.Events。',
+      type: 'table',
+    },
+    data: {
+      description: '你自己的任意数据，会被复制到定义类上。',
+      type: 'table',
+    },
+  }}
+/>
+
+大多数道具只需要 `id`、`name`、`category` 和 `maxStack`。下面是 PalForge 自带的三个，处理函数已经去掉：
+
+```lua title="content/items.lua"
+Item{
+    id          = "Wood",
+    name        = "Wood",
+    category    = "material",
+    maxStack    = 9999,
+}
+
+Item{
+    id          = "Berries",
+    name        = "Red Berries",
+    category    = "consumable",
+    maxStack    = 100,
+}
+
+Item{
+    id          = "Arrow",
+    name        = "Arrow",
+    category    = "ammo",
+    maxStack    = 999,
+}
+```
+
+### 配方的形状
+
+`recipe` 记录生产这个道具的合成：要花什么，能得到多少。
+
+<TypeTable
+  type={{
+    materials: {
+      description: '一张映射表，从道具 ID 到一次合成消耗的数量。每个值都必须是 number。',
+      type: 'table',
+      required: true,
+    },
+    count: {
+      description: '一次合成产出多少个这个道具。',
+      type: 'number',
+      default: '1',
+    },
+    work: {
+      description: '设备需要投入的工作量。',
+      type: 'number',
+    },
+    station: {
+      description: '能合成它的工作台或设备 ID。',
+      type: 'string',
+    },
+  }}
+/>
+
+```lua
+local arrow = Item{
+    id       = "Arrow",
+    name     = "Arrow",
+    category = "ammo",
+    maxStack = 999,
+    recipe = {
+        materials = { Wood = 2, Stone = 1 },
+        count     = 5,
+        work      = 20,
+        station   = "WorkBench",
+    },
+}
+
+local r = arrow:recipeOf()
+print(r.count)                -- 5
+print(r.materials.Wood)       -- 2
+```
+
+<Callout type="warn">
+配方只是一条记录，不是真的合成。PalForge 不会把它注册进游戏的合成系统，能把它读回来的只有 `Handle:recipeOf()`。写了配方并不会让这个道具在游戏里可以合成，它只是给你自己的代码一个存放数值的地方。
+</Callout>
+
+### 校验
+
+你的表里每一个问题都会报错，所以调用不会做到一半就算成功。消息以 `PalForge: ` 开头，并指出它停在哪个字段。
+
+```text
+PalForge: Item: unknown field "maxStackSize" (did you mean "maxStack"?). Valid fields: id, name, description, category, maxStack, icon, recipe, events, data
+PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
+PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
+PalForge: Item: field "maxStack" expects number, got string
+PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials" is required ({ <itemId> = <count> } consumed by one craft)
+PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials.Wood" expects number, got string
+PalForge: Item: field "events" (Item.Spec.Events): unknown field "onEquip". Valid fields: onObtain, onUse, onCraft, onDiscard
+```
+
+同一份清单在游戏运行时也能读出来，编辑器用的注解 `Scripts/palforge/types.lua` 也是从它生成的：
+
+```lua
+local schema = require("palforge.core.schema")
+print(schema.help("Item.Spec"))            -- every field, type, default and meaning
+print(schema.help("Item.Spec.Recipe"))
+schema.get("Item.Spec").fields             -- the same as a table, for tooling
+```
+
+## 事件
+
+把你的代码放进 `events` 表。每个处理函数的第一个参数是**这个道具的句柄**，第二个参数是一张装着细节的表，叫 `ctx`。
+
+<TypeTable
+  type={{
+    onObtain: {
+      description: 'LIVE。道具进入了背包。带 ctx.itemId、ctx.count 和 ctx.via。',
+      type: 'fun(self: Item.Handle, ctx: table)',
+    },
+    onUse: {
+      description: 'LIVE。道具被使用或消耗了。ctx.itemId 是道具，ctx.actor 是本地玩家的 pawn，ctx.targetId 是原始的目标 ID，ctx.itemData 是道具数据对象，ctx.processor 是使用处理器。',
+      type: 'fun(self: Item.Handle, ctx: table)',
+    },
+    onCraft: {
+      description: '可以声明，但目前没有任何地方发出 item.craft，所以它永远不会运行。',
+      type: 'fun(self: Item.Handle, ctx: table)',
+    },
+    onDiscard: {
+      description: '可以声明，但目前没有任何地方发出 item.discard，所以它永远不会运行。',
+      type: 'fun(self: Item.Handle, ctx: table)',
+    },
+  }}
+/>
+
+游戏自身的三个调用会汇进这些处理函数。其中两个报告拾取，一个报告使用：
+
+```mermaid
+flowchart LR
+  A["AddItemGetLog_ToClient"] --> B["item.obtain"]
+  G["AddItem_ServerInternal"] --> B
+  C["UseItemToCharacter_ServerInternal"] --> D["item.use"]
+  B --> E["resolve by ctx.itemId"]
+  D --> E
+  E --> F[your handler]
+```
+
+PalForge 不会追踪世界里每一份道具。它从事件里取出游戏的道具 ID，再去找归档在这个 ID 下的定义。如果那里什么都没有，它就把你描述过的道具走一遍，取解析后名字对得上的那一个。你从没描述过的原版道具对不上任何东西，处理函数也就不会运行。
+
+### 带命名空间的 ID
+
+你写成 `"example:Potion"` 的道具会按这个写法原样归档，而游戏报告的是数据行名 `example_Potion`。这个差距由 PalForge 替你补上：精确查找落空时，它把你注册过的每个 ID 都解析一遍，返回对得上的那个。你的内容包照样能收到事件。
+
+```mermaid
+flowchart LR
+  A["ctx.itemId is example_Potion"] --> B[exact lookup]
+  B -->|hit| C[call the hook]
+  B -->|miss| D[resolve every registered id]
+  D --> E["example:Potion resolves to example_Potion"]
+  E --> C
+```
+
+```lua title="content/items/potion.lua"
+local log = require("palforge.utils.log").scope("potion")
+
+Item{
+    id       = "example:Potion",        -- the DataTable row is example_Potion
+    name     = "Potion",
+    category = "consumable",
+    events = {
+        onUse = function(item, ctx)
+            -- ctx.itemId is "example_Potion": the row name the game carries
+            log.info("potion used: " .. tostring(ctx.itemId))
+        end,
+    },
+}
+```
+
+句柄保留了带冒号的写法，所以你自己的调用还是用你写的那个 ID：
+
+```lua
+Item.get("example:Potion"):give(1)   -- resolves to example_Potion for the engine
+```
+
+这个搜索走的是已注册道具的一份快照，顺序不定，返回第一个匹配，所以两个解析后行名相同的 ID 是有歧义的。请让内容包里的 ID 保持唯一。帕鲁也是用同样的方式匹配的，按蓝图类名。
+
+### onObtain
+
+`onObtain` 在道具落进背包时运行：拾取、采集、战利品、奖励。游戏有两个调用会报告这件事，PalForge 两个都听 —— `AddItemGetLog_ToClient`，也就是游戏自己的“获得道具”日志，以及真正改动数量的 `PalPlayerInventoryData:AddItem_ServerInternal`。
+
+| ctx 的键 | 类型 | 说明 |
+| --- | --- | --- |
+| `ctx.itemId` | string | 获得的游戏道具 ID。一定有。 |
+| `ctx.count` | number \| nil | 数量。读不出来时为 `nil`。 |
+| `ctx.via` | string | 由哪个调用报告：`"getlog"` 或 `"additem"`。 |
+
+```lua
+Item{
+    id = "Wood",
+    events = {
+        onObtain = function(item, ctx)
+            local log = require("palforge.utils.log").scope("woodpack")
+            log.info("obtained " .. tostring(ctx.count) .. " of " .. tostring(ctx.itemId))
+        end,
+    },
+}
+```
+
+<Callout type="info">
+这两个调用是同一次拾取的两个视角，所以同一个道具 ID 在半秒内重复出现时会被丢掉，你的处理函数只运行一次。代价是实打实的：同一个道具在这半秒内真的被第二次拾取，那一次就丢了。数量为负是移除而不是拾取，所以 `:take` 会被跳过，不会当成获得来报告。
+</Callout>
+
+### onUse
+
+`onUse` 在玩家吃下、喝下或以别的方式用掉道具时运行。来源是 `PalItemUseProcessor:UseItemToCharacter_ServerInternal`。
+
+| ctx 的键 | 类型 | 说明 |
+| --- | --- | --- |
+| `ctx.itemId` | string | 被使用的游戏道具 ID。一定有。 |
+| `ctx.actor` | any \| nil | 本地玩家的 pawn —— 使用道具的那个角色。找不到时为 `nil`。 |
+| `ctx.player` | any \| nil | 和 `ctx.actor` 是同一个值。 |
+| `ctx.targetId` | any \| nil | 道具用在了谁身上，是游戏传来的原始 `FPalInstanceID`。不会转成角色。 |
+| `ctx.itemData` | any \| nil | 游戏里这个被使用道具的数据对象。 |
+| `ctx.processor` | any | 执行这次使用的 `PalItemUseProcessor`。 |
+
+<Callout type="warn">
+`ctx.actor` 是“使用”道具的角色。只有食物、药水这类玩家用在自己身上的东西，它才等于“被用上”的那个角色。喂帕鲁时，帕鲁在 `ctx.targetId` 里，是一个原始实例 ID，这里没有任何东西会把它变成 actor。在专用服务器上，`ctx.actor` 是第一个被找到的玩家 pawn，不一定就是动手的那个人。把它当成一个可以作用的玩家 pawn，而不是谁动手的证据。
+</Callout>
+
+```lua
+Item{
+    id       = "Berries",
+    name     = "Red Berries",
+    category = "consumable",
+    maxStack = 100,
+    events = {
+        onUse = function(item, ctx)
+            local log = require("palforge.utils.log").scope("berries")
+            log.info("used " .. tostring(ctx.itemId) .. " on " .. tostring(ctx.actor))
+        end,
+    },
+}
+```
+
+为了找出道具 ID，PalForge 会读第一个参数上的 `ID` 字段 —— 游戏里只见过这一种形状 —— 读不到就依次退到 `Id`、`StaticId` 和后面三个参数，所以签名偏移了也还能解析出来。如果找不到 ID，就什么都不报告，处理函数也不运行。
+
+### onCraft 和 onDiscard
+
+<Callout type="warn">
+`onCraft` 和 `onDiscard` 永远不会运行。`item.craft` 和 `item.discard` 这两个频道存在，你的处理函数也接上去了，但游戏里目前没有任何地方报告这两件事：合成是通过工作流程完成的，不走获得道具日志；丢弃的调用则还没找到。声明它们不会报错，想留着代码就留着 —— 但今天真正要做的事，放进 `onObtain`、`onUse` 或你自己的代码里。
+</Callout>
+
+### 关于处理函数还要知道的
+
+- 处理函数只在世界加载之后才运行。在那之前，每个来源都会直接返回。
+- 你的处理函数跑在 `pcall` 里。如果它抛错，错误会连同频道名和出问题的钩子一起写进日志，事件继续发给其他人。错误不会被重新抛出，所以你的处理函数拦不住事件。
+- 第一个参数是句柄，不是定义。`:give`、`:take` 和各种查询就在它上面。
+- 用一个已经用过的 ID 再描述一个道具，会替换掉前一个，只有最新的那个能收到事件。
+
+抛错的处理函数在日志里长这样：
+
+```text
+[PalForge.event][err] item.use -> onUse handler failed: content/items.lua:12: attempt to index a nil value
+```
+
+除了在单个道具上声明处理函数，你也可以直接监听原始频道。想一次盯住所有道具就用这个：
+
+```lua
+local event = require("palforge.core.event")
+
+local sub = event.on("item.obtain", function(ctx)
+    print(ctx.itemId, ctx.count)
+end)
+
+sub:unsubscribe()
+```
+
+句柄也可以直接调用你的处理函数，`ctx` 由你自己拼。想不进游戏就试一下处理函数，就这么做：
+
+```lua
+Item.get("Berries"):onUse({ itemId = "Berries" })
+```
+
+## 句柄
+
+`Item{ ... }`、`Item.get(id)` 和 `Item.get_all()` 都会给你一个 `Item.Handle`。`Item.get` 永远不返回 `nil`：对于你从没描述过的 ID，它当场造一个薄薄的句柄，所以任何原版道具不用先描述就能给、能拿、能查。
+
+| 成员 | 返回 | 作用 |
+| --- | --- | --- |
+| `.id` | string | 这个道具的游戏道具 ID。就是一个普通字段。 |
+| `:give(count)` | boolean | 往本地玩家的背包里加 `count` 个（默认 1）。 |
+| `:take(count)` | boolean | 尝试移除 `count` 个（默认 1）；`count` 按绝对值处理。只有观察到背包数量确实下降时才是 `true`。 |
+| `:recipeOf()` | table \| nil | 声明过的配方；没有配方时为 `nil`。 |
+| `:iconOf()` | any \| nil | 道具图标 DataTable 里的贴图引用，查不到就用声明的 `icon`。 |
+| `:name()` | string | 声明的名字，没有就用 ID。 |
+| `:description()` | string \| nil | 声明的说明。 |
+| `:category()` | string | 声明的分类，没有就是 `"material"`。 |
+| `:maxStack()` | number | 声明的堆叠上限，没有就是 `1`。 |
+| `:onObtain(ctx)` | any | 立刻运行这个道具的 `onObtain` 处理函数。 |
+| `:onUse(ctx)` | any | 立刻运行这个道具的 `onUse` 处理函数。 |
+| `:onCraft(ctx)` | any | 立刻运行这个道具的 `onCraft` 处理函数。 |
+| `:onDiscard(ctx)` | any | 立刻运行这个道具的 `onDiscard` 处理函数。 |
+
+### give
+
+`:give` 通过游戏自己的服务器调用把道具放进玩家背包。PalForge 解析 ID，找到本地玩家的背包，然后调用 `AddItem_ServerInternal`。
+
+```mermaid
+flowchart LR
+  A["Item.Handle:give"] --> B["utils.items.give"]
+  B --> C["object_manager.resolve"]
+  C --> D["AddItem_ServerInternal"]
+```
+
+```lua
+Item.get("Wood"):give(10)        -- 10 Wood into the local player inventory
+Item.get("Arrow"):give()         -- count defaults to 1
+
+if not Item.get("Berries"):give(5) then
+    -- false means a step failed: no world yet, no player state, no inventory
+end
+```
+
+每一次引擎调用都被包住了，所以这个辅助函数只返回布尔值，永远不抛错；`false` 的原因会写进日志。带命名空间的 ID 会先被解析，所以 `Item.get("example:Potion"):give(1)` 交给引擎的名字是 `example_Potion` —— PalForge 不会检查对应的数据行是否存在。`true` 表示原生调用跑完了没抛错，游戏让 Lua 看到的就到此为止。它不是背包现在装了什么的报告。
+
+<Callout type="info">
+`AddItem_ServerInternal` 也是报告拾取的调用之一，所以你在普通代码里做的 `:give` 通常也会走到 `onObtain`。在 `onObtain` 处理函数里面则不会：有一道保护拦着，不让处理函数把自己再触发一遍。
+</Callout>
+
+### take
+
+`:take` 不像 `:give` 那么有把握。这个版本上从来没确认过用于移除的调用，所以 `:take` 是往同一个 `AddItem_ServerInternal` 推一个负数，指望游戏能接受。既然只是指望，结果就不能假定，只能实测：写入前后各读一次背包数量，`:take` 返回它是不是真的降了。
+
+```mermaid
+flowchart LR
+  A["Item.Handle:take"] --> B["read CountItemNum"]
+  B --> C["AddItem_ServerInternal with a negative delta"]
+  C --> D["read CountItemNum again"]
+  D --> E[true only when the count dropped]
+```
+
+```lua
+if Item.get("Wood"):take(3) then
+    -- the inventory count really fell
+else
+    -- nothing was observed to leave: the negative delta did nothing on this build,
+    -- or the count could not be read at all
+end
+```
+
+每一种结果都会写进日志，所以布尔值分不出来的情况，日志能分出来：
+
+```text
+[PalForge.items][info] take Wood x3 (12 -> 9)
+[PalForge.items][warn] take Wood x3: only 2 removed (12 -> 10)
+[PalForge.items][warn] take Wood x3: count unchanged at 12 (the negative delta removed nothing)
+[PalForge.items][warn] take Wood x3: CountItemNum unreadable, removal unconfirmed
+```
+
+<Callout type="warn">
+只移除了一部分也照样返回 `true` —— 上面第二行就是 3 个里走了 2 个，返回 `true`。`true` 的意思是“看到有东西离开了”，不是“正好走了 `count` 个”。数量必须精确时，自己在前后各读一次数量。
+</Callout>
+
+### 查询
+
+不用一直把定义拿在手里，句柄就能回答关于这个道具的问题：
+
+```lua
+local wood = Item.get("Wood")
+
+print(wood:name())        -- "Wood" for the curated definition
+print(wood:category())    -- "material"
+print(wood:maxStack())    -- 9999 for the curated definition, 1 for a bare handle
+
+local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
+```
+
+`iconOf` 会去 `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` 里查这个 ID，读出那一行上的贴图。每一步都是容错的：表、行或列缺了任何一个，返回的就是你声明的 `icon`，而你没设过的话它是 `nil`。
+
+### 枚举
+
+```lua
+for _, item in ipairs(Item.get_all()) do
+    print(item.id, item:category(), item:maxStack())
+end
+```
+
+`get_all` 返回 PalForge 已注册道具的句柄：自带的三个、你的内容包描述过的，以及任何有人通过 `native.items.get(id)` 取用过的目录 ID。它不是游戏完整的道具表。
+
+## 示例
+
+### 使用时施加一个效果的消耗品
+
+`onUse` 会在 `ctx.actor` 里给你玩家。把它交给一个 `Effect`，效果会按自己的节奏运行，直到过期。
+
+```lua title="content/items/berry_regen.lua"
+local log = require("palforge.utils.log").scope("berryregen")
+
+local Regen = Effect{
+    id          = "example:BerryRegen",
+    name        = "Berry Regeneration",
+    description = "Ticks for a while after eating berries.",
+    duration    = 10.0,   -- seconds; omit for "until :remove()"
+    interval    = 1.0,    -- seconds between onTick calls
+    events = {
+        onApply = function(effect, target, ctx)
+            log.info("regen started on " .. tostring(target))
+        end,
+        onTick = function(effect, target, ctx)
+            -- ctx.elapsed = seconds since apply, ctx.stacks = current stack count
+            log.info("regen tick at " .. tostring(ctx.elapsed))
+        end,
+        onExpire = function(effect, target, ctx)
+            -- ctx.reason is "duration", "removed", "target_gone" or "world_left"
+            log.info("regen ended: " .. tostring(ctx.reason))
+        end,
+    },
+}
+
+Item{
+    id          = "Berries",
+    name        = "Red Berries",
+    description = "Applies a short regeneration effect when eaten.",
+    category    = "consumable",
+    maxStack    = 100,
+    events = {
+        onUse = function(item, ctx)
+            Regen:apply(ctx.actor or Player.character())
+        end,
+    },
+}
+```
+
+效果在加载时描述一次就够了，处理函数里只调用 `:apply`。写在处理函数里面的话，每用一次就会重新注册一遍。
+
+<Callout type="warn">
+PalForge 的效果不碰游戏自己的状态系统。`EPalStatusEffectType` 是一个原生枚举，施加它的调用还没被确认过，所以状态栏上不会出现任何东西，HP 也不会自己变。效果实际要做的事，写在 `onTick` 里。
+</Callout>
+
+在任何地方都能查看正在运行的效果：
+
+```lua
+local who = Player.character()
+
+Regen:isActive(who)     -- true while it runs
+Regen:timeLeft(who)     -- seconds left, nil when the effect has no duration
+Regen:stacksOn(who)     -- 0 when inactive
+Effect.activeOn(who)    -- ids of every effect currently on that target
+Regen:remove(who)       -- ends it early, firing onExpire with reason "removed"
+```
+
+### 统计玩家已经获得了多少
+
+`onObtain` 带着数量。道具自己保存不了任何东西，所以把累计放在一个 Lua 变量里，或者放进会被复制到定义上的 `data` 表里。
+
+```lua title="content/items/wood_counter.lua"
+local log = require("palforge.utils.log").scope("woodcount")
+
+local obtained = 0
+
+Item{
+    id       = "Wood",
+    name     = "Wood",
+    category = "material",
+    maxStack = 9999,
+    data     = { milestone = 100, reward = "Arrow", rewardCount = 10 },
+    events = {
+        onObtain = function(item, ctx)
+            local cfg = item._cls.data          -- `data` lives on the definition class
+            obtained = obtained + (ctx.count or 0)
+            log.info("wood so far: " .. obtained)
+
+            if obtained >= cfg.milestone then
+                obtained = obtained - cfg.milestone
+                Item.get(cfg.reward):give(cfg.rewardCount)
+                log.info("milestone reached, handed out " .. cfg.reward)
+            end
+        end,
+    },
+}
+```
+
+<Callout type="info">
+`data` 会被复制到定义类上，而 `Item.Handle` 没有读它的方法 —— 用 `item._cls.data` 去取。像上面 `obtained` 那样一个普通的局部变量，通常是放计数器更清楚的地方，因为一眼就能看出它是按文件、按本次游玩来算的。
+</Callout>
+
+这两种都撑不过一次重新加载。有存档 `state` 和 `:save()` 的只有建筑物；模组被拆掉时，道具的计数器就归零了。想留住它，就用 `palforge.utils.file` 自己写出去，世界加载时再读回来：
+
+```lua
+local event = require("palforge.core.event")
+
+event.on("world.ready", function(ctx)
+    obtained = 0     -- or load your own record here
+end)
+```
+
+### 从建筑物里发放道具
+
+建筑物的处理函数拿到的是**活着的建筑物**而不是句柄：有 `self.actor`、`self.pos`、`self.state` 和 `self:save()`。这让 `onRightClick` 成了运行 `:give` 的自然位置。
+
+```lua title="content/buildings/supply_bench.lua"
+local log = require("palforge.utils.log").scope("supply")
+
+Building{
+    id     = "WorkBench",
+    name   = "Workbench",
+    gridCm = 100,
+    mesh = {
+        kind  = "static",
+        model = "/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBenchPrimitive.SM_WorkBenchPrimitive",
+    },
+    state = { handouts = 0 },
+    events = {
+        onRightClick = function(self, ctx)
+            -- ctx.actor = the build object, ctx.player = who interacted, ctx.buildId
+            local ok = Item.get("Wood"):take(5)
+            if not ok then
+                log.warn("could not take the wood")
+                return
+            end
+
+            Item.get("Arrow"):give(10)
+
+            self.state.handouts = self.state.handouts + 1
+            self:save()
+            log.info("handouts so far: " .. self.state.handouts)
+        end,
+        onLoad = function(self, ctx)
+            log.info("bench restored with " .. tostring(self.state.handouts) .. " handouts")
+        end,
+    },
+}
+```
+
+<Callout type="warn">
+这个例子接管了 ID `"WorkBench"`，而 PalForge 已经描述过它。最新的描述胜出，所以这里把 mesh 那一块又写了一遍，好保住原版的外观。你自己的内容请用带命名空间的 ID。
+</Callout>
+
+因为 `take` 会实测发生了什么，上面的 `false` 分支确实表示没看到木头离开，箭也就不会发出去。而 `true` 不保证 5 个全走了 —— 只移除一部分同样返回 `true` —— 所以必须精确的交易还是得自己查一次数量。
+
+## 注意事项
+
+在这些东西上面搭点什么之前，先知道它们粗糙在哪里。
+
+**你没法创建新道具。** Lua 没法往 `DT_ItemDataTable_Common` 里加一行。`Item{ ... }` 是把行为和信息挂到一个 ID 上，创建那一行的是 PalSchema。没人创建过的 ID，游戏就不会显示。
+
+**`onCraft` 和 `onDiscard` 永远不会运行。** 频道和接线都在，但游戏里没有任何地方报告这两件事。
+
+**带命名空间的 ID 是靠兜底搜索匹配到的。** 事件带的是游戏的数据行名，所以注册成 `"example:Potion"` 的道具精确查找找不到，是在你注册过的 ID 上做的搜索找到它的。这个搜索读的是一份快照，顺序不定，返回第一个匹配的 ID，所以两个解析后行名相同的内容包 ID 是有歧义的。
+
+**移除还没被确认过。** 这个版本上没有已知的移除调用。`:take` 把一个负数推进添加用的调用，然后报告背包数量发生了什么，所以 `true` 的意思是“看到有东西离开了”，绝不是“正好走了 `count` 个”。
+
+**`onUse` 不会直接告诉你目标是谁。** `ctx.actor` 是本地玩家的 pawn，也就是使用道具的那个。被用上的角色在 `ctx.targetId` 里，是一个原始实例 ID，这里没有东西会把它变成 actor。食物和药水两者相同，喂帕鲁时就不同。
+
+**`category`、`maxStack`、`icon` 和 `recipe` 是 PalForge 自己的记录。** 你通过句柄和自己的代码把它们读回来。没有任何东西会把它们写进游戏的道具表，所以 `maxStack = 9999` 不会改变游戏怎么堆叠这个道具。
+
+**道具保存不了数据。** 存档 `state` 和 `:save()` 是建筑物的东西，所以处理函数数出来的东西只在本次游玩里有效。想要它回来，自己写进文件。
+
+**处理函数的错误只写日志，不抛出。** 失败会通过 `utils.log` 报告，带上频道名和钩子名，例如 `item.use -> onUse handler failed: ...`。你的处理函数还是拦不住事件。
+
+**`give` 和 `take` 只作用于本地玩家。** 它们找到 `PalPlayerCharacter`，然后作用在那个背包上。任何一步失败时两者都返回 `false` 并把原因写进日志；`:take` 还会在每一步都成功但数量没降时返回 `false`。
+
+**一次 `:give` 通常也会触发 `onObtain`。** 它走的是游戏拾取时用的同一个调用。在 `onObtain` 处理函数里面有保护拦着，处理函数不会把自己再触发一遍；在别的地方，就要预料到自己的 give 会绕回来。
+
+**半秒内的重复拾取会被丢掉。** 游戏的两个调用报告的是同一次拾取，PalForge 会在这个时间窗内丢掉同一个道具 ID 的重复，好让你的处理函数只运行一次。同一个道具真的在这么短时间内被第二次拾取，那一次就丢了。
+
+## 小结
+
+- 写 `Item{ ... }` 描述一个道具。只有 `id` 是必须的，而且这个 ID 必须是游戏里已经有的。
+- `Item.get("Wood")` 会给你任意道具的句柄。`:give` 往玩家背包里加；`:take` 尝试移除，并告诉你数量是不是真的降了。
+- 把你的代码放进 `events`。`onObtain` 在拾取时运行，`onUse` 在道具被使用时运行。`onCraft` 和 `onDiscard` 还不会运行。
+- 在 `onUse` 里，`ctx.actor` 是使用道具的玩家 —— 食物和药水要作用的正是他。
+- `category`、`maxStack`、`icon` 和 `recipe` 是给你自己代码用的记录。游戏不会读它们。
+- 道具保存不了数据。把累计放在 Lua 变量里，或者用 `palforge.utils.file` 自己写出去。
+
+接下来读 [Effect](/docs/api/effect)，做一个用掉之后还会持续起作用的道具 —— 或者读 [Lifecycle](/docs/concepts/lifecycle) 了解完整的事件流程，以及 [Pal](/docs/api/pal) 和 [Building](/docs/api/building) 了解上面用到的两个领域。

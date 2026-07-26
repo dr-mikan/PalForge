@@ -29,3 +29,11 @@ node_modules/
 
 # plan
 plan/
+
+# dumps
+# Measured reflection data recovered from a real session. reflection/ and catalog/ are the
+# evidence plan/TODO.md cites — they are the difference between "we measured this" and
+# "someone has to boot the game and measure it again", so they ship. The rest is scratch.
+dumps/*
+!dumps/reflection/
+!dumps/catalog/

@@ -8,9 +8,13 @@
 -- ("skill", id), so it is discoverable (Skill.get / Skill.get_all / core.registry) and a
 -- Pal declares which skills it owns by id (Pal{ skills = { ... } }).
 --
--- HONEST STATE OF THE 導線: there is NO native skill source. The in-game event probe found
--- no hook that says "this Pal used skill X", and Lua cannot inject a row into the skill
--- DataTables (that is PalSchema's job). So:
+-- HONEST STATE OF THE 導線: there is NO native skill source WIRED. The two hooks that were
+-- actually armed in game (PalPlayerController:PlaySkill and :SkillDamageReactionComponent_
+-- ProcessDamage_ToServer) fired 0 times, and Lua cannot inject a row into the skill
+-- DataTables (that is PalSchema's job). The reflection dump has since named several
+-- unarmed candidates on classes that are proven loaded — see the per-hook markers below —
+-- so "no candidate exists" is no longer the blocker; "none has been observed firing" is.
+-- So:
 --   * NOTHING fires these handlers automatically — core/event.lua declares no skill
 --     channel (M.CHANNELS is world / building / pal / item / tick) and nothing in the tree
 --     emits one, so a declared `events` table is inert until you call into it yourself.
@@ -51,20 +55,46 @@ local schema = require("palforge.core.schema")
 ---handle as its first argument; only MANUAL invocation fires them today (see the header).
 ---A handler this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Skill.Spec.Events", {
-    -- TODO(skill-activate-source): no native call is known to announce "this character used
-    -- skill X" — PalPlayerController:PlaySkill was armed in two in-game probes and fired 0
-    -- times, so the executing class/function is still unidentified.
+    -- TODO(skill-activate-source): NARROWED — candidates now have names. PlaySkill stays
+    -- ruled out (armed in two in-game probes, 0 firings), but dumps/reflection/02_reflection
+    -- .txt shows /Script/Pal.PalUtility carries PlayActionByWazaID and PlayAction, and
+    -- /Script/Pal.PalPlayerController carries ActionComponent_PlayAction_ToServer_ForPlayer
+    -- and OnActionBegin (PalPlayerCharacter has OnBeginAction); PalCharacter exposes
+    -- GetActionComponent / :ActionComponent, so the executor is an action component, not the
+    -- controller. PlayActionByWazaID is the standout: its name says the waza row id is a
+    -- parameter, which is exactly the identity this channel needs.
+    -- THE ONE THING LEFT: which of those actually runs when a PAL uses a move (none has ever
+    -- been armed), and whether the waza id it carries is an FName or a struct. Until a
+    -- RegisterHook run logs one firing, no skill.activate channel gets written.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "an active skill fired (self, owner, ctx)" },
-    -- TODO(skill-hit-source): the only confirmed damage hook (PalCharacter:OnDamageReaction,
-    -- wired as pal.damaged) fires on the VICTIM and carries no skill identity, so nothing can
-    -- say WHICH skill landed; the candidate that would,
-    -- PalPlayerController:SkillDamageReactionComponent_ProcessDamage_ToServer, fired 0 times.
+    -- TODO(skill-hit-source): NARROWED on both sides. VICTIM side: dumps/reflection/
+    -- 06_events.txt records PalCharacter:OnDamageReaction firing 9 times on real pals and on
+    -- the player, and shows its shape — exactly ONE parameter, a UScriptStruct (a2..a4 are
+    -- empty). So the question shrinks from "which hook and how many params" to "what are the
+    -- FIELDS of that one struct". The probe never expanded it, so they are still unprinted.
+    -- ATTACKER side: /Script/Pal.PalUtility carries MakeDamageInfoByWazaType alongside
+    -- MakeDamageInfo, ProcessDamageAndPlayEffectsByDamageInfo and ProcessDamageAndPlayEffects
+    -- — a damage-info struct BUILT from a waza type is strong reason to expect the waza
+    -- identity to be a field of the very struct OnDamageReaction receives, and those
+    -- Process* calls are attacker-side hook candidates that would carry it.
+    -- THE ONE THING LEFT: the field list of that struct (walk its UClass with ForEachProperty
+    -- inside the hook) and whether any field holds a waza / skill row FName.
+    -- Still ruled out: PalPlayerController:SkillDamageReactionComponent_ProcessDamage_ToServer
+    -- (armed, 0 firings).
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
                     doc = "one of its hits landed (self, target, ctx)" },
-    -- TODO(skill-passive-source): passive attach/detach has never been probed at all — no
-    -- candidate native function has even been named for it, so onEquip/onUnequip have no
-    -- source and no shortlist to arm. Covers onUnequip too: they are the same component.
+    -- TODO(skill-passive-source): NARROWED — the shortlist exists now. dumps/reflection/
+    -- 02_reflection.txt puts AddPassiveSkill and RemovePassiveSkill on /Script/Pal.Pal-
+    -- IndividualCharacterParameter, together with GetPassiveSkillList to read the result back
+    -- and an OnPassiveSkillUpdateDelegate (+ its __DelegateSignature) that announces the
+    -- change; PalCharacter owns a :PassiveSkillComponent and PalGameInstance a
+    -- :PassiveSkillManager. So both halves this channel wants — a SOURCE to hook and an
+    -- attach call for Handle:equip to make real — have named targets on classes proven
+    -- loaded. Covers onUnequip too: same object, RemovePassiveSkill.
+    -- THE ONE THING LEFT: the parameter list of Add/RemovePassiveSkill (passive row FName vs
+    -- an index into a fixed-size array), and whether hooking them catches the statue-of-power
+    -- / party in-out path. 02_reflection prints names only, and neither was ever armed.
     { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
                     doc = "a passive was attached (self, owner, ctx)" },
     { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",

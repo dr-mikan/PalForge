@@ -145,9 +145,18 @@ function Class:recipeOf() return self.recipe end
 -- self.icon and that is what you get in practice.
 -- TODO(item-datatable-row-read): unknown which row-VALUE accessor a UDataTable exposes to
 -- UE4SS Lua here (GetDataTableRowFromName / FindRow / something else) and what it hands back.
--- Settling it turns both :iconOf and :recipeOf into live reads; nothing else is missing —
--- the tables are found, the row keys are the item ids, and the columns are known
--- (IconName/SoftIcon for icons, Product_Count/WorkAmount/MaterialN_Id for recipes).
+-- That accessor is now the ONLY missing piece for both :iconOf and :recipeOf. Everything
+-- around it is measured, in dumps/reflection/01_datatables.txt, from a real session:
+--   * the tables are loaded — DT_ItemIconDataTable (1207 rows) and
+--     DT_ItemRecipeDataTable_Common (1414 rows on disk), both under /Game/Pal/DataTable/Item/;
+--   * the row keys are the item ids ("Stone", "Wood", ...);
+--   * the columns are no longer a guess. The icon column is `Icon` — NOT the IconName /
+--     SoftIcon this comment used to claim, neither of which is a column of that table (see
+--     core/icons ICON_COLUMNS_BY_TABLE). The recipe row struct carries Product_Id,
+--     Product_Count, Material1_Id..Material5_Id, Material1_Count..Material5_Count, WorkAmount,
+--     CraftExpRate, EnergyType, EnergyAmount, UnlockItemID, WorkableAttribute, DenyRecipeChain.
+-- What the 2026-07 dumps cannot settle: the accessor itself. 02_reflection.txt covers 21
+-- /Script/Pal.* classes only, so UDataTable / UDataTableFunctionLibrary are absent from it.
 function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, self.id) end)
     if ok and tex ~= nil then return tex end

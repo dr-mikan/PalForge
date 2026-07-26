@@ -14,17 +14,30 @@
 --
 --   WIRED (live — see core/event installPalSource):
 --     onCaptured <- PalCharacterParameterComponent:SetIsCapturedProcessing(true)
---                   (ctx.actor = the pal, ctx.comp = its parameter component)
---     onDamaged  <- PalCharacter:OnDamageReaction        (ctx.actor)
---     onDeath    <- PalCharacter:OnDeadCharacter         (ctx.actor)
+--                   (ctx.actor = the pal, ctx.comp = its parameter component). OBSERVED
+--                   FIRING: dumps/reflection/06_events.txt logs it as [PAL.capture.set]
+--                   with self = the pal's CharacterParameterComponent, and with BOTH a1=true
+--                   and a1=false in one session — which is why the source filters on true.
+--     onDamaged  <- PalCharacter:OnDamageReaction        (ctx.actor). OBSERVED FIRING
+--                   ([PAL.damage], 9 times, on both BP_ChickenPal_C and BP_Player_Female_C).
+--     onDeath    <- PalCharacter:OnDeadCharacter         (ctx.actor). OBSERVED FIRING
+--                   ([PAL.dead], on BP_ChickenPal_C).
 --     onSpawned  <- PalCharacter:BroadcastOnCompleteInitializeParameter (ctx.actor).
---                   Still an UNCONFIRMED candidate, and now ARMED LATE: core/event
---                   registers it on world.ready, never at mod load, because it fires for
---                   every pal in the world-load init storm and doing that once wedged the
---                   shared UE4SS hook dispatch — which would take the three confirmed hooks
---                   down with it. Late arming protects them; it does not make the hook
---                   proven. It is still unshown that it signals a FRESH spawn rather than a
---                   re-init, so keep the handler idempotent.
+--                   The FUNCTION is confirmed to exist — dumps/reflection/02_reflection.txt
+--                   lists it on /Script/Pal.PalCharacter next to Bind/UnbindOnComplete-
+--                   InitializeParameterDelegate and the OnCompleteInitializeParameter-
+--                   DelegateMap property — so the hook path is real and registerable. What
+--                   is still UNCONFIRMED is that it FIRES for a fresh post-load spawn:
+--                   06_events carries no line for it, but the probe mod that wrote that log
+--                   had dropped it from its arming list (dumps/palsmith-dump-mod/Scripts/
+--                   main.lua says so in as many words, after a run of it froze the UE4SS
+--                   callback layer during the world-load storm) — so the absence proves
+--                   nothing. It stays ARMED LATE for that same reason: core/event registers
+--                   it on world.ready, never at mod load, so the load-storm firing cannot
+--                   wedge the shared hook dispatch and take the three confirmed hooks down
+--                   with it. Late arming protects them; it does not make the hook proven.
+--                   It is still unshown that it signals a FRESH spawn rather than a re-init,
+--                   so keep the handler idempotent.
 --     onTick     <- core/event's pal sweep. There is NO native hook behind this one; the
 --                   sweep is the source, and it is described in full below.
 --   NOT WIRED: nothing. All five declared events have a source.
@@ -78,7 +91,9 @@
 --       id          = "NewPal",
 --       name        = "New Pal",
 --       description = "the one that greets you",
---       mesh        = Mesh{ id = "newpal:body", model = "/Game/.../SK_X" },
+--       -- a real, dump-confirmed skeletal path (dumps/reflection/05_assets.txt):
+--       mesh        = Mesh{ id = "newpal:body",
+--                           model = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal" },
 --       events      = {
 --           onSpawned = function(pal, ctx)
 --               pal:renderOn(ctx.actor)
@@ -125,9 +140,16 @@ local Material = schema.define("Pal.Spec.Material", {
 ---handle as its first argument and an event context `ctx` (ctx.actor = the pawn in the
 ---world). An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Pal.Spec.Events", {
-    -- TODO(pal-spawned-hook): nobody has ever seen this channel's hook fire — the one probe
-    -- that armed BroadcastOnCompleteInitializeParameter recorded 0 calls, and it has not been
-    -- re-armed post-load since. Handlers stay idempotent until a run proves it.
+    -- TODO(pal-spawned-hook): NARROWED by dumps/reflection/. Two halves of the old question
+    -- are now answered: (a) BroadcastOnCompleteInitializeParameter IS a real UFunction on
+    -- /Script/Pal.PalCharacter (02_reflection.txt), so the hook path is not a guess; (b) the
+    -- three sibling hooks this channel sits beside — SetIsCapturedProcessing, OnDamageReaction,
+    -- OnDeadCharacter — are all recorded FIRING in a live session (06_events.txt), so the
+    -- source machinery around them works. What is left is ONE unknown: does that function run
+    -- when a pal spawns AFTER world load, and is `self` then the new pal? 06_events cannot
+    -- answer it — the probe mod that produced it had dropped this hook from its arming list,
+    -- so there is no line there to be missing. Handlers stay idempotent until a post-load
+    -- arming records a firing.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -178,8 +200,23 @@ function Class:onTick(ctx) end
 
 -- The declared skill ids, verbatim. DECLARATIVE ONLY: nothing here teaches the pawn
 -- anything — a pack reads the list back and drives each skill itself through api/skill.
--- TODO(pal-skills-equip): no add-skill/waza call is named anywhere in either tree, so a
--- declared `skills` list cannot be pushed onto a spawned pal.
+-- TODO(pal-skills-equip): NARROWED — the attach calls EXIST, only their argument shape is
+-- still unmeasured. dumps/reflection/02_reflection.txt lists, on /Script/Pal.PalIndividual-
+-- CharacterParameter: AddEquipWaza / RemoveEquipWaza / ClearEquipWaza / ReplaceEquipWaza
+-- (via the controller RPCs) for actives, AddPassiveSkill / RemovePassiveSkill for passives,
+-- and the readbacks that would VERIFY a write — GetEquipWaza, GetEquipableWaza,
+-- GetMasteredWaza, HasMasteredWaza, GetPassiveSkillList. The route from a pawn to that
+-- object is named too: /Script/Pal.PalUtility:GetIndividualCharacterParameterByActor, or
+-- PalCharacter:GetCharacterParameterComponent -> PalCharacterParameterComponent:
+-- GetIndividualParameter. /Script/Pal.PalPlayerController additionally carries the
+-- server-authoritative forms AddEquipWaza_ToServer / RemoveEquipWaza_ToServer /
+-- ReplaceEquipWaza_ToServer.
+-- THE ONE THING LEFT: the parameter list of AddEquipWaza / AddPassiveSkill — an FName, a
+-- struct or an index — and whether the direct call replicates or the _ToServer RPC is
+-- required. 02_reflection prints function NAMES only, never parameters, so calling one now
+-- would be a guess with a live pawn on the other end. Nothing is pushed onto the pawn until
+-- a probe prints those parameters (f:ForEachProperty on the UFunction) — this stays a
+-- read-back of what the author declared.
 function Class:skillsOf() return self.skills or {} end
 function Class:mesh() return self.meshSpec end
 
