@@ -9,14 +9,18 @@
 --
 -- That live test DOES WRITE to the running save's inventory, and it is the only thing in this
 -- file that does: it asks for a few Wood, measures that they arrived, hands them straight back
--- and measures that they left. The hand-back is a DROP — take puts the items on the ground at
--- the player's feet rather than deleting them — so the net effect on a save is a small pickup
--- lying next to you, and the stockpile itself ends where it started. Both writes go through the
--- cheat-manager route (GetItem / DropItem) that no run has yet observed working, which is
--- exactly why the assertions are on the counts the game reports rather than on booleans.
+-- and measures that they left. The add is the inventory's own AddItem_ServerInternal and it is
+-- OBSERVED working; the hand-back is a consume through the weapon's RequestConsumeItem and no run
+-- has watched that succeed yet, which is exactly why its assertion is on the count the game
+-- reports rather than on a boolean. The worst case is that the Wood stays in the bag.
+--
+-- The declaration test beside it writes NOTHING. It prints what the live build declares for the
+-- removal candidates, because a printed parameter list is what ended the add's long outage and it
+-- is the only safe thing to do with a candidate (InitInventory) whose name suggests it may wipe.
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Item    = require("palforge.api.item")
+local items   = require("palforge.utils.items")
 local om      = require("palforge.core.object_manager")
 local event   = require("palforge.core.event")
 
@@ -312,18 +316,55 @@ s:test("give really adds to the live inventory, measured both ways", function(t)
     t:truthy(after, "the count is still readable after the write")
     t:eq(after - before, COUNT, string.format("exactly %d landed (%d -> %d)", COUNT, before, after))
 
-    -- Put them back. take is NOT its equal and this suite must not pretend otherwise: no removal
-    -- route is known on this build, so this is a best effort whose only job is to leave the save
-    -- as it was found. Its verdict is asserted as a boolean, never as a success.
+    -- Put them back. take is NOT give's equal and this suite must not pretend otherwise: its
+    -- route (the weapon's own consume) has never been watched succeed, and it needs the player to
+    -- have something equipped, so this is a best effort whose only job is to leave the save as it
+    -- was found. Its verdict is asserted as a boolean, never as a success.
     local removed = wood:take(COUNT)
     t:type(removed, "boolean", "take reports what it measured, never an assumed removal")
-    if not removed then
+    if removed then
+        local back = wood:count()
+        t:eq(back, before, string.format("the %d %s went back out again (%d -> %s)",
+            COUNT, support.GAME.item, after, tostring(back)))
+    else
         support.log(string.format("item: take could not give the %d %s back — the suite has left "
             .. "them in the inventory, which is the honest outcome while TODO(item-remove-call) "
-            .. "is open", COUNT, support.GAME.item))
+            .. "is open. The [PalForge.items] line above says which step stopped it",
+            COUNT, support.GAME.item))
     end
 end)
-s:test("a vanilla item's icon comes back from the game's own table -- TODO(icons-row-read)", function(t)
+
+s:test("the removal candidates' live declarations are printed, and none of them is called -- TODO(item-remove-call)", function(t)
+    support.needWorld(t)
+
+    -- READ-ONLY, deliberately. sig.describe walks a UFunction on the running build and logs the
+    -- shape it found; it calls nothing. That distinction is the whole test: InitInventory is a
+    -- candidate precisely because "Init" might mean SET (so Count 0 would be a removal) and might
+    -- equally mean WIPE, and the only safe first move on a real save is to read its parameter
+    -- list. The same printed-declaration move is what ended the add's outage, where the live
+    -- build turned out to declare one more parameter than dumps/cxx/Pal.hpp does.
+    local read = items.describeRemoval()
+    t:type(read, "table", "describeRemoval reports what it managed to read")
+
+    if read.InitInventory == nil then
+        support.log("item: InitInventory's declaration was not read (no cheat manager — needs "
+            .. "CheatManagerEnabler); dumps/cxx/Pal.hpp:16379 says (FName, int32)")
+    else
+        t:type(read.InitInventory, "string", "an evidence level came back for InitInventory")
+        support.log("item: InitInventory declaration evidence = " .. read.InitInventory)
+    end
+
+    if read.RequestConsumeItem == nil then
+        support.log("item: RequestConsumeItem's declaration was not read — the player has no "
+            .. "spawned weapon actor, which is also why :take has no route in this session")
+    else
+        t:type(read.RequestConsumeItem, "string", "an evidence level came back for the take route")
+        t:neq(read.RequestConsumeItem, "absent",
+            "the build must still declare the call :take makes; an absent here means "
+            .. "dumps/cxx/Pal.hpp:11776 has gone stale the way AddItem_ServerInternal did")
+    end
+end)
+s:test("a vanilla item's icon comes back from the game's own table", function(t)
     support.needWorld(t)
 
     -- This is the whole of icons-row-read, asked as a question a pack author would ask: can

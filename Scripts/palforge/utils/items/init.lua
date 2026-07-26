@@ -7,13 +7,14 @@
 --   local items = require("palforge.utils.items")
 --   items.count("Wood")            -- what the inventory holds right now, or nil (MEASURED)
 --   items.count("example:Potion")  -- namespaced ids resolve to their DataTable fname
---   items.give("Wood", 10)         -- cheat-manager GetItem; true only if the count ROSE
---   items.take("Wood", 3)          -- remove 3 Wood from the inventory (MEASURED)
+--   items.give("Wood", 10)         -- the inventory's own add; true only if the count ROSE
+--   items.take("Wood", 3)          -- consume 3 Wood out of the bag; true only if it FELL
+--   items.describeRemoval()        -- print the removal candidates' live declarations, call none
 --   items.unlockAllTech()          -- PalCheatManager: recipe + category + lv-cap
 --   items.unlockTech("example:Bench") -- unlock one technology row (ids resolve too;
 --                                     -- true only if that row really exists in game)
 --
--- GIVE AND TAKE GO THROUGH THE INVENTORY'S OWN WRITE, not through a cheat:
+-- GIVE GOES THROUGH THE INVENTORY'S OWN WRITE, not through a cheat:
 --
 --     PalPlayerInventoryData:AddItem_ServerInternal(
 --         FName StaticItemId, int32 Count, bool IsAssignPassive,
@@ -26,9 +27,13 @@
 -- the parameter. Nothing here is called until core.signature has matched the declaration against
 -- the live object, and this is why.
 --
--- take is the same call with a NEGATIVE Count. That was the standing hypothesis for removal from
--- the beginning and was set aside for one reason: a call whose parameter list is unread must not
--- be made with any Count at all.
+-- TAKE GOES SOMEWHERE ELSE, because that same write will not subtract. A NEGATIVE Count was the
+-- standing hypothesis for removal for the whole project; it was finally testable once the
+-- parameter list was read, and it is dead: the inventory answered `Success` and the count did not
+-- move (161 -> 161, measured in a real save). Accepted and inert. So take routes through the one
+-- call on this build that consumes an item id out of the player's bag without putting it in the
+-- world — the weapon's own ammo consume, APalWeaponBase:RequestConsumeItem (Pal.hpp:11776). The
+-- long version, including what was eliminated and what was NOT chosen, is on M.take.
 --
 -- WHAT THE CHEAT ROUTE COST, since the comments here spent a long time defending it.
 -- UPalCheatManager::GetItem(FName, int32) is declared on this build, executes with evidence
@@ -41,12 +46,13 @@
 -- Fail-soft everywhere: every engine call is pcall-wrapped and reported via utils.log; helpers
 -- return true on success, false on failure, never throw. What "success" means differs per helper
 -- and each says so on its own doc comment. count MEASURES the live inventory through
--- CountItemNum (observed answering 135 for Wood), give and take report what the count did AND
--- what the inventory itself answered, unlockTech CHECKS that the name really is a row of the
--- live technology table, and unlockAllTech can only report that the native cheats executed
--- without raising.
+-- CountItemNum (observed answering 135 for Wood), give reports what the count did AND what the
+-- inventory itself answered, take reports what the count did (its call returns void, so there is
+-- nothing else to report), unlockTech CHECKS that the name really is a row of the live technology
+-- table, and unlockAllTech can only report that the native cheats executed without raising.
 local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
+local poll           = require("palforge.core.poll")
 local sig            = require("palforge.core.signature")
 
 local M = {}
@@ -69,6 +75,80 @@ local function playerInventory()
     local inv = ps:GetInventoryData()
     assert(inv and inv:IsValid(), "no InventoryData")
     return inv
+end
+
+-- One element out of a UE4SS TArray, unwrapped. Array elements arrive wrapped in
+-- RemoteUnrealParam on this build — that is the trap `icons-row-read` cost three wrong turns to
+-- find (an array read the right LENGTH with nothing in it, because every element was a wrapper
+-- whose value lives behind :get()). Anything that walks a TArray here goes through this.
+local function unwrap(v)
+    if type(v) == "userdata" then
+        local ok, inner = pcall(function() return v.get and v:get() end)
+        if ok and inner ~= nil then return inner end
+    end
+    return v
+end
+
+-- The first LIVE object in a UE4SS TArray, or nil. Three access shapes are tried because
+-- UE4SS spells array access differently across builds and this tree has been bitten by each:
+-- ForEach, 1-based [i], and 0-based Get(i-1). This is a READ; it calls nothing on the game.
+local function firstLiveElement(arr)
+    if arr == nil then return nil end
+    local found
+    pcall(function()
+        if arr.ForEach then
+            arr:ForEach(function(_, elem)
+                if found == nil then
+                    local e = unwrap(elem)
+                    local ok, live = pcall(function() return e ~= nil and e.IsValid and e:IsValid() end)
+                    if ok and live == true then found = e end
+                end
+            end)
+        end
+    end)
+    if found ~= nil then return found end
+
+    local n = 0
+    pcall(function() if arr.GetArrayNum then n = arr:GetArrayNum() end end)
+    for i = 1, n do
+        local e
+        pcall(function() e = unwrap(arr[i]) end)
+        if e == nil then pcall(function() e = unwrap(arr:Get(i - 1)) end) end
+        local ok, live = pcall(function() return e ~= nil and e.IsValid and e:IsValid() end)
+        if ok and live == true then return e end
+    end
+    return nil
+end
+
+-- Resolve ONE weapon actor the local player currently has spawned. Raises on any missing link so
+-- the caller's pcall reports which step failed, exactly like playerInventory above.
+--
+-- THE CHAIN, every link read off the shipping binary:
+--   APalPlayerCharacter.LoadoutSelectorComponent          dumps/cxx/Pal.hpp:10523 (property)
+--   UPalLoadoutSelectorComponent.spawnedWeaponsArray      dumps/cxx/Pal.hpp:21851 (property,
+--                                                         TArray<APalWeaponBase*>)
+--
+-- Both links are PROPERTIES, deliberately. `UPalLoadoutSelectorComponent::GetWeaponList()`
+-- (Pal.hpp:21878) hands back the same list through a UFunction, and a call is the one thing in
+-- this tree that can kill the process when a declaration has moved — a property read cannot.
+-- There is nothing to gain by paying that risk for data that is readable directly.
+--
+-- WHY THE PLAYER'S OWN LOADOUT AND NOT FindAllOf("PalWeaponBase"): a weapon actor consumes from
+-- ITS OWNER's inventory (the class declares GetOwnerCharacter, Pal.hpp:11838, and
+-- IsExistBulletInPlayerInventory, :11812). The engine's flat list is full of NPC weapons, and
+-- charging the wrong bag would be invisible from here. Coming out of the player's own loadout
+-- component, ownership is structural rather than checked.
+local function playerWeapon()
+    local player = FindFirstOf("PalPlayerCharacter")
+    assert(player and player:IsValid(), "no PalPlayerCharacter")
+    local loadout
+    pcall(function() loadout = player.LoadoutSelectorComponent end)
+    assert(loadout and loadout:IsValid(), "the player pawn carries no LoadoutSelectorComponent")
+    local arr
+    pcall(function() arr = loadout.spawnedWeaponsArray end)
+    local weapon = firstLiveElement(arr)
+    assert(weapon ~= nil, "the player has no spawned weapon actor")
+    return weapon
 end
 
 -- How many of `id` the local inventory holds right now; nil when the count could not be read.
@@ -110,18 +190,6 @@ local function liveCount(resolved)
     if not ok then return nil end
     return n
 end
-
--- The declared parameter shape the two item cheats share, in the order core.signature checks
--- it: an FName item id, then a plain int32 count. GetItem(FName StaticItemId, int32 Count) and
--- DropItem(const FName StaticItemId, const int32 Num) really are the same shape, so this is
--- named once rather than repeated.
---
--- That shape is also the reason "present" evidence is acceptable for these two at all:
--- core.signature refuses to pass a struct, an out-param, a delegate or an enum on an unread
--- declaration, because those are where marshalling actually breaks. An FName plus an integer is
--- the marshalling this file already performs successfully on this build every time it unlocks a
--- technology.
-local ITEM_CHEAT_PARAMS = { "NameProperty", "IntProperty" }
 
 -- THE INVENTORY'S OWN WRITE, read from the live build rather than from the dump:
 --   AddItem_ServerInternal — [StaticItemId:NameProperty, Count:IntProperty,
@@ -192,6 +260,20 @@ local function resultOk(v)
     local n = tonumber(v)
     return n == 0 or n == 1
 end
+
+-- THE REMOVAL, which comes from the other end of the game entirely:
+--   APalWeaponBase:RequestConsumeItem(const FName& StaticItemId, int32 ConsumeNum)
+--   dumps/cxx/Pal.hpp:11776
+-- Two arguments, and they are the SAME shape this file already marshals successfully on this
+-- build every time it counts an inventory (CountItemNum takes a `const FName&` too) or unlocks a
+-- technology. `const FName&` reaches Lua as a plain NameProperty parameter; the reference is a
+-- C++ calling convention, not a different argument type, and there is no struct, out-param,
+-- delegate or enum anywhere in the list — the four kinds core.signature refuses to pass on an
+-- unread declaration. Nothing here is called before that check runs anyway.
+--
+-- It returns VOID, which is the one way it is weaker than the add above: it cannot say why. The
+-- count is the only witness a caller gets, and M.take says so rather than implying more.
+local CONSUME_ITEM_PARAMS = { "NameProperty", "IntProperty" }
 
 -- CLOSED (was item-additem-signature). The declaration was read off the LIVE build and give
 -- works: "give Wood x3: 140 -> 143", with the game's own pickup event firing beside it
@@ -368,77 +450,103 @@ function M.give(itemId, count)
     return true
 end
 
--- Remove `count` of `itemId` from the local player's inventory by DROPPING IT ON THE GROUND,
--- and measure that the inventory really lost it. `count` is treated as a magnitude.
+-- Read the count once more a few ticks later and LOG what it says. This never changes what take
+-- returned — the caller already has its answer — and it exists for one reason: this session's own
+-- worst diagnosis. Pal spawning was declared broken on a build where it worked, because the pal
+-- arrives about four seconds after the call and every check was taken immediately. A consume
+-- routed through a "Request" function is exactly the same shape of risk, so if the count falls
+-- late, the log says so instead of the miss standing as a property of the build.
 --
--- ⚠️ WHAT PHYSICALLY HAPPENS, said plainly: the call is UPalCheatManager:DropItem(const FName
--- StaticItemId, const int32 Num) — dumps/cxx/Pal.hpp:16453 — and a drop is not a delete. The
--- items leave the inventory, which is what :take promises and what the count below verifies,
--- and then they exist in the world at the player's feet, where anyone can walk over them and
--- pick them back up. A pack that takes a payment this way leaves the payment lying there. If a
--- pack needs the item GONE, this is not that call — and no call on this build is (below).
+-- It registers with core.poll and NEVER creates a timer. Asking UE4SS for a LoopAsync per watch
+-- removed its engine tick hook three times in one afternoon, each time silently killing every
+-- keybind in the mod (core/poll.lua carries the full story).
+local function watchLateFall(resolved, before, num)
+    if before == nil then return end
+    poll.every(string.format("take %s late read-back", resolved), function(elapsed, ticks)
+        local now = liveCount(resolved)
+        if now ~= nil and now < before then
+            log.info(string.format("take %s x%d: the count fell LATE — %d -> %d after %.1f s. "
+                .. "The removal worked and the synchronous check was simply too early; take "
+                .. "reported false for it", resolved, num, before, now, elapsed))
+            return true
+        end
+        if ticks >= 20 or elapsed >= 3.0 then
+            log.info(string.format("take %s x%d: still %s after %.1f s, so the removal did not "
+                .. "land late either", resolved, num, tostring(now), elapsed))
+            return true
+        end
+        return false
+    end)
+end
+
+-- Remove `count` of `itemId` from the local player's inventory, and measure that the inventory
+-- really lost it. `count` is treated as a magnitude. Nothing is left on the ground.
 --
--- WHY THIS CALL AND NOT A REMOVE: there is no remove. dumps/f5-partial-run.txt walked the
--- inventory's WHOLE class chain in a live save, which is what the earlier reflection dump could
--- not do (UE4SS ForEachFunction lists a class's own functions only, so a base class was still a
--- live possibility). The walk:
---   * [0] BP_PalPlayerInventoryData_C — 0 functions, 0 properties of its own.
---   * [1] /Script/Pal.PalPlayerInventoryData — 69 functions, 25 properties. Exactly ONE
---         function matches remove|sub|consume|discard|drop|take|lost|delete|decrease|trash|
---         throw, and it is TryRemoveEquipment, which unequips a slot. No property matches.
---   * [2] /Script/CoreUObject.Object — 1 function, no match.
---   * PalItemContainer, the container behind it — 13 functions, no match.
--- 69 + 13 + 1 functions, one hit, and the hit is about equipment. Nothing on the chain
--- subtracts an item, base classes included. The only consumption path ever OBSERVED is
--- UseItemToCharacter_ServerInternal (dumps/reflection/06_events.txt caught it firing with
--- `{Id=Berries}` when the player ate one), and that is the game invoking its own use processor,
--- not an inventory API a pack can call for an arbitrary id. Against that, a cheat that takes the
--- item out of the inventory in one FName-plus-int call — the shape this file already marshals
--- successfully — is the best-evidenced removal on this build. It is simply honest about where
--- the item goes.
--- (The F5 block also printed "function absent" for a dozen proposed removal names — ignore
--- those lines as evidence. The same helper printed it for AddItem_ServerInternal, which
--- demonstrably exists, so what is being reported there is a probe bug, not an absence. The
--- FN/PROP chain counts above are the part that was really measured.)
+-- THE CALL is APalWeaponBase:RequestConsumeItem(const FName& StaticItemId, int32 ConsumeNum) —
+-- dumps/cxx/Pal.hpp:11776 — issued through core.signature on a weapon actor the player's own
+-- loadout component spawned (playerWeapon, above). It is the game's own "spend an item out of
+-- the bag" call: the path a throw weapon takes when it consumes the thing it just threw. The
+-- item is consumed, not dropped — nothing appears at the player's feet — which is the whole
+-- point, because a pack that charges a cost cannot leave the cost lying on the floor.
+--
+-- WHY THIS ONE, WHEN THE INVENTORY ITSELF HAS NO REMOVE. Everything below is READ, not guessed,
+-- and it is listed so the next reader does not re-walk what is already walked:
+--   * The inventory's whole class chain was walked in a live save. BP_PalPlayerInventoryData_C
+--     (0 own functions), /Script/Pal.PalPlayerInventoryData (69), /Script/CoreUObject.Object (1)
+--     and PalItemContainer (13). ONE name across all 83 matches
+--     remove|sub|consume|discard|drop|take|delete|decrease|trash|throw, and it is
+--     TryRemoveEquipment, which unequips a slot.
+--   * UPalItemContainer (Pal.hpp:21505) and UPalItemSlot (:21633) are read in full. Every
+--     function on both is a getter, except UPalItemSlot::RequestUseToCharacter (:21660), which
+--     consumes through the USE processor for a target character — an FPalInstanceID struct and
+--     an item that HAS a use effect, so not an arbitrary-id removal. Wood cannot be "used".
+--   * UPalCheatManager's whole surface (:16085) is visible too: its only item removals are
+--     DropItem / DropItems (:16453 / :16451), which put the item in the WORLD, and
+--     ClearPlatformInventoryItem / ConsumePlatformInventoryItem (:16495), which are storefront
+--     entitlements rather than inventory.
+--   * A NEGATIVE Count through AddItem_ServerInternal — the standing hypothesis for years — is
+--     dead. It was finally testable once the parameter list was read, and the inventory answered
+--     `Success` while the count did not move (161 -> 161, in a real save). Accepted and inert.
+-- What that sweep says is not "there is no removal" but "the removal is not reflected on the
+-- inventory". APalWeaponBase is where it IS reflected: the same class declares
+-- IsExistBulletInPlayerInventory (:11812) and GetOwnerCharacter (:11838), so a weapon plainly
+-- both reads and spends the owning PLAYER's bag, by item id and count, in one call.
+--
+-- THE TWO CANDIDATES THIS DID NOT TAKE, and why neither is called from anywhere in this file:
+--   (a) UPalCheatManager:InitInventory(const FName StaticItemId, const int32 Count) —
+--       Pal.hpp:16379. "Init" reads like a SET, which would make Count 0 a removal, and it may
+--       equally wipe more than the one id. It also sits on the cheat manager, and the cheat
+--       manager has a MEASURED pattern on this build: GetItem is declared, executes on the
+--       player's own instance with room in the inventory, and reaches nothing (five in-game runs
+--       went into establishing that). M.describeRemoval below prints its live declaration
+--       without calling it; until someone reads that line in a throwaway world, nothing may act
+--       on the guess.
+--   (b) UPalItemSlot.StackCount — a plain writable int32 property at offset 0x154
+--       (Pal.hpp:21650), so a slot walk could decrement it with no marshalling at all. The risk
+--       is not the write but replication: the class carries OnRep_StackCount (:21662), so a raw
+--       poke can leave server and client disagreeing about a save's contents, and
+--       PalPlayerInventoryData.RequestForceMarkAllDirty (:27012) is a toggle rather than a
+--       flush. A route that desyncs a real save is worse than a route that reports false.
 --
 -- THE VERDICT IS THE MEASUREMENT, exactly as in give and in the other direction: true only when
--- the count was seen to FALL. Two guards come with that, and both are about never asking for
--- something the inventory cannot give: the request is CLAMPED to what is actually held when
--- that is readable, so a drop never asks for an underflow, and the call is SKIPPED entirely
--- when the inventory holds none. false means nothing was called (no cheat manager,
--- core.signature refused, or nothing was held), or the cheat ran and the count could not be
--- read (UNKNOWN, never zero — an unobserved removal is not reported as one), or it ran and the
--- count did not fall.
+-- the count was seen to FALL. This call returns VOID — unlike the add, which answers with a named
+-- EPalItemOperationResult — so the count is the only witness there is, and the log says as much.
+-- Two guards come with it, both about never asking for something the inventory cannot give: the
+-- request is CLAMPED to what is actually held when that is readable, and the call is SKIPPED
+-- entirely when the inventory holds none. false means one of these, each logged distinctly:
+--   * the player has no spawned weapon actor, so there is nothing to route the consume through.
+--     That is this route's one real limitation and it is stated rather than hidden;
+--   * core.signature refused: this build does not declare RequestConsumeItem the way the dump
+--     does, and nothing was called;
+--   * it ran and the count could not be read (UNKNOWN, never zero — an unobserved removal is
+--     never reported as one);
+--   * it ran and the count did not fall. A late fall is still logged by watchLateFall.
 --
--- ⚠️ NOT YET OBSERVED IN GAME, exactly like give — same dump, same untested route, and the same
--- server-authority delay to suspect first if a live run reports false with evidence "declared".
--- TODO(item-remove-call): unknown whether ANY call on this build removes an item without
--- putting it in the world. DropItem is a real removal from the inventory and it is what :take
--- uses, but a consume/destroy that leaves nothing behind is still unfound — and the two places
--- this note used to send a reader are now READ, both negative:
---   * UPalItemContainer (dumps/cxx/Pal.hpp) declares eleven functions and every one is a
---     getter: Num, Get, GetItemStackCount, GetPermission, GetFilterPreference,
---     GetFilterOffList, and the OnRep/delegate plumbing. UPalItemSlot is the same story —
---     TryGetStaticItemData, GetStackCount, GetItemId, IsEmpty, IsMaxStack and friends, plus
---     RequestUseToCharacter, which consumes through the USE processor for a target character
---     and is not an arbitrary-id removal. Neither class can subtract.
---   * UPalCheatManager's whole surface is now visible too, and its only item removals are
---     DropItem / DropItems (both put the item in the world, which is the thing being avoided)
---     and ClearPlatformInventoryItem / ConsumePlatformInventoryItem, which are storefront
---     entitlements, not inventory.
--- TWO CANDIDATES SURVIVE, both unread and both listed so the next reader does not re-walk what
--- is already walked:
---   (a) UPalCheatManager:InitInventory(const FName StaticItemId, const int32 Count) — reads
---       like a SET rather than an add, which would make Count 0 a true removal. The name says
---       "Init", so it may also wipe more than the one id; nothing may be called on that guess.
---       Read what it does before trusting it, in a throwaway world.
---   (b) UPalItemSlot.StackCount is a plain writable int32 PROPERTY (offset 0x154), not a
---       function, so a slot walk could decrement it with no marshalling involved at all. The
---       risk there is not the write but replication: the class carries OnRep_StackCount, so a
---       raw poke may leave server and client disagreeing. PalPlayerInventoryData
---       .RequestForceMarkAllDirty exists and is the obvious partner if this is ever tried. The old candidate, a NEGATIVE
--- Count through AddItem_ServerInternal, is no longer the only one and is no longer worth the
--- risk it carries while its six parameters are unread (item-additem-signature).
+-- ⚠️ NOT YET OBSERVED IN GAME. TODO(item-remove-call): what remains is one live run — whether
+-- RequestConsumeItem spends the id it is HANDED (which is what its parameter list says) rather
+-- than whatever ammunition the weapon it hangs off happens to use, and whether it needs the
+-- weapon to be the equipped one rather than merely spawned. Both show up the same way in the
+-- log: a count that does not fall, with evidence "declared".
 function M.take(itemId, count)
     count = math.floor(math.abs(tonumber(count) or 1))
     local resolved = object_manager.resolve(itemId) or itemId
@@ -447,10 +555,15 @@ function M.take(itemId, count)
         return false
     end
 
-    local inv
-    if not pcall(function() inv = playerInventory() end) then
-        log.err(string.format("take %s x%d failed: the player's inventory could not be reached",
-            resolved, count))
+    local weapon
+    if not pcall(function() weapon = playerWeapon() end) or weapon == nil then
+        -- The one honest limitation of this route, said plainly rather than reported as a
+        -- refusal: the consume is a method ON a weapon actor, so a player whose loadout has
+        -- spawned none has nothing to call it on. Equipping anything (a weapon, a tool, a
+        -- sphere) puts an APalWeaponBase in spawnedWeaponsArray and the route opens.
+        log.err(string.format("take %s x%d: the player has no spawned weapon actor, and "
+            .. "RequestConsumeItem is a method on one — equip something and the removal route "
+            .. "exists again (see TODO(item-remove-call))", resolved, count))
         return false
     end
 
@@ -467,49 +580,79 @@ function M.take(itemId, count)
             resolved, count, before))
     end
 
-    -- A NEGATIVE Count through the same write. That was the standing hypothesis for removal long
-    -- before the signature was known, and it was set aside for one reason only: a call whose
-    -- parameter list is unread must not be made with any Count at all. The list is read now, and
-    -- the return value settles the rest — an inventory that will not subtract this way says so
-    -- with a named EPalItemOperationResult instead of leaving it to be guessed from a count.
-    --
-    -- This also removes the pile at the player's feet. The DropItem route this replaces did take
-    -- the items out of the bag, but it put them in the world, where the player walks straight
-    -- back over them — so it could never charge a cost, which is most of what :take is for.
-    local ok, result, level = sig.call(inv, "AddItem_ServerInternal", ADD_ITEM_PARAMS,
-        FName(resolved), -num, false, 0.0, false)
+    local ok, _, level = sig.call(weapon, "RequestConsumeItem", CONSUME_ITEM_PARAMS,
+        FName(resolved), num)
     if not ok then
-        log.err(string.format("take %s x%d: AddItem_ServerInternal did not execute [evidence %s]",
+        -- core.signature has already logged WHY (refused on the declaration, or raised on
+        -- binding); this line is the one that names the item and the count.
+        log.err(string.format("take %s x%d: RequestConsumeItem did not execute [evidence %s]",
             resolved, num, level))
-        return false
-    end
-    if not resultOk(result) then
-        log.err(string.format("take %s x%d refused by the inventory: %s [evidence %s]",
-            resolved, num, resultName(result), level))
         return false
     end
     local after = liveCount(resolved)
 
     if before == nil or after == nil then
-        log.warn(string.format("take %s x%d: AddItem_ServerInternal answered %s, but the inventory "
-            .. "count could not be read (%s -> %s) — the removal is unverified, so this reports "
-            .. "false", resolved, num, resultName(result), tostring(before), tostring(after)))
+        log.warn(string.format("take %s x%d: RequestConsumeItem ran, but the inventory count "
+            .. "could not be read (%s -> %s) — the removal is unverified, so this reports false",
+            resolved, num, tostring(before), tostring(after)))
         return false
     end
     if after >= before then
-        -- Reaching here means the inventory answered Success or SuccessNoOperation and the count
-        -- did not move: a call that is legal and inert. The result code is what says which, and
-        -- it is the fact this line exists to carry — it printed `level` until now, which is the
-        -- same word on every path and told nobody anything.
-        log.warn(string.format("take %s x%d: AddItem_ServerInternal(Count=-%d) answered %s and "
-            .. "the count did not fall (%d -> %d). A negative Count is accepted and does nothing, "
-            .. "so it is not how this build subtracts — see TODO(item-remove-call)",
-            resolved, num, num, resultName(result), before, after))
+        -- The call returns void, so there is no result code to name a reason with. What CAN be
+        -- distinguished cheaply is stated: the id is fine (a real number came back for it, so
+        -- this build counts it), the call was declared, and the count did not move — which
+        -- leaves the two questions on the marker, both about what the weapon consumes.
+        log.warn(string.format("take %s x%d: RequestConsumeItem executed [evidence %s] and the "
+            .. "count did not fall (%d -> %d). It returns void, so the count is the only witness "
+            .. "— see TODO(item-remove-call) for the two things that would explain this",
+            resolved, num, level, before, after))
+        watchLateFall(resolved, before, num)
         return false
     end
-    log.info(string.format("take %s x%d: %d -> %d [evidence %s, result %s]",
-        resolved, num, before, after, level, resultName(result)))
+    log.info(string.format("take %s x%d: %d -> %d [evidence %s]",
+        resolved, num, before, after, level))
     return true
+end
+
+-- Print the LIVE declarations of the removal candidates this file did NOT call, and call none of
+-- them. Nothing here touches an inventory; every line is core.signature walking a UFunction on
+-- the running build and saying what it found.
+--
+-- WHY THIS IS A FUNCTION AND NOT A COMMENT. `sig.describe` is exactly how the five-argument
+-- inventory write was finally read — the shape of a function had been the obstacle for the whole
+-- project and one printed line ended it. The two candidates left for removal are in the same
+-- position now: `InitInventory` may be a SET (in which case Count 0 is the removal this file
+-- wants) or may wipe the whole id, and no one can tell from the name. Its declaration is the
+-- first fact, it costs one keypress in a loaded world, and it is safe because reading is not
+-- calling.
+--
+-- Returns a table of { name = <evidence level> } so a test can report what it managed to read.
+function M.describeRemoval()
+    local out = {}
+
+    local cm
+    if pcall(function() cm = cheatManager() end) and cm ~= nil then
+        -- dumps/cxx/Pal.hpp:16379 — void InitInventory(const FName StaticItemId, const int32
+        -- Count). Read the printed parameter list before trusting anything about it: a two-
+        -- argument SET and a two-argument wipe-then-set look identical from here.
+        out.InitInventory = sig.describe(cm, "InitInventory")
+    else
+        log.warn("describeRemoval: no cheat manager, so InitInventory's declaration is unread "
+            .. "(it needs CheatManagerEnabler)")
+    end
+
+    local weapon
+    if pcall(function() weapon = playerWeapon() end) and weapon ~= nil then
+        -- The route :take actually uses. Printing its declaration next to the candidate's is the
+        -- point: one line then shows whether the build still agrees with dumps/cxx/Pal.hpp:11776,
+        -- which is the same thing that turned out to be stale for AddItem_ServerInternal.
+        out.RequestConsumeItem = sig.describe(weapon, "RequestConsumeItem")
+    else
+        log.warn("describeRemoval: the player has no spawned weapon actor, so "
+            .. "RequestConsumeItem's declaration is unread")
+    end
+
+    return out
 end
 
 -- ---- the technology row set (what makes unlockTech's return value mean something) ----
@@ -546,10 +689,7 @@ local function addNames(arr, set)
     if arr == nil then return 0 end
     local added = 0
     local function add(v)
-        if type(v) == "userdata" then
-            local okg, inner = pcall(function() return v.get and v:get() end)
-            if okg and inner ~= nil then v = inner end
-        end
+        v = unwrap(v)                       -- elements arrive wrapped; see unwrap's note
         local ok, s = pcall(function()
             if type(v) == "userdata" and v.ToString then return v:ToString() end
             return tostring(v)

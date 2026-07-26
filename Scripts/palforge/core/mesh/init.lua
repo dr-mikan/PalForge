@@ -107,4 +107,32 @@ end
 function M.parseObj(path) return renderers.procedural.parseObj(path) end
 function M.probeMaterials(extra) return renderers.procedural.probeMaterials(extra) end
 
+-- READ which materials an actor is wearing and which parameter names they carry, writing
+-- nothing. This is a DIAGNOSTIC, not a capability, and it exists because both open mesh
+-- questions are asset data that no dump can hold: which material a Palworld mesh really
+-- carries (mesh-base-material wants one loaded UMaterialInterface to parent a MID to) and
+-- which parameter names it exposes (mesh-material-params — the candidate lists in
+-- base/renderer are guesses until this prints the real ones). One read in a loaded world
+-- answers both. See Renderer.describeMaterials for the declarations it rests on.
+--
+-- `target` may be a component or an actor. Being a diagnostic, the actor case is allowed
+-- the two-step resolve a capability would not be: the backend that DRESSED the actor names
+-- its own component, and otherwise the actor's own `.Mesh` is read — the reflected
+-- ACharacter property (dumps/cxx/Engine.hpp:8156) that every character in this game has
+-- and that the skeletal backend already reaches actors through.
+function M.describeMaterials(target, sink)
+    local Renderer = require("palforge.core.mesh.base.renderer")
+    if target == nil then return {} end
+
+    local comp = target
+    local hasGetMaterial
+    pcall(function() hasGetMaterial = target.GetMaterial ~= nil end)
+    if not hasGetMaterial then
+        local r = dressedBy[target]
+        comp = (r and r:componentFor(target)) or nil
+        if comp == nil then pcall(function() comp = target.Mesh end) end
+    end
+    return Renderer.describeMaterials(comp, sink)
+end
+
 return M

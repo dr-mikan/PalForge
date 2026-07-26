@@ -9,9 +9,12 @@
 -- recorded session caught the game itself calling it six times on the PalSoundUtility callee
 -- with exactly two arguments — a1 an AActor, a2 a UObject (the AkAudioEvent), a3/a4 empty
 -- (dumps/reflection/06_events.txt, tag [SOUND.ak]). Same callee, same arity, same order as the
--- call below. What is still unrecorded is the AUDIBILITY of OUR call, and whether the function
--- hands back a Wwise PlayingID — a pre-call hook log cannot show a return parm, which is why
--- stop() below is still actor-wide.
+-- call below. The CXX dump then declares it outright:
+--   dumps/cxx/Pal.hpp:29170   bool UPalSoundUtility::PlayAkEventSoundByActor(AActor*, UAkAudioEvent*)
+-- so the open question "does it hand back a Wwise PlayingID" is answered NO — the return is a
+-- bool, and there is no id for a narrow stop to be given. That is why stop() below stays
+-- actor-wide, and it is no longer a gap, it is the shape of the call. What is still unrecorded
+-- is the AUDIBILITY of OUR call.
 -- PlaySoundByActor({Key=FName(id)}) is SILENT for AkAudioEvent names (its Key is a
 -- SoundID-table row, a different namespace) — kept as the fallback for a source that carries
 -- an id and no loadable asset. The same session logged that one 286 times as
@@ -32,6 +35,7 @@
 --   local NativeSource = require("palforge.core.sound.native")
 --   NativeSource:new{ id = "AKE_General_Explosion", path = "/Game/.../AKE_General_Explosion.AKE_General_Explosion" }:play(actor)
 local SoundSource = require("palforge.core.sound.base.source")
+local sig         = require("palforge.core.signature")
 
 local NativeSource = SoundSource:extend("NativeSource")
 
@@ -61,11 +65,22 @@ local function loadAsset(path)
     return nil
 end
 
--- The PalSoundUtility CDO, or nil. Every native call in this file goes through it.
+-- The PalSoundUtility CDO, or nil. Every play/stop call in this file goes through it.
 local function soundUtility()
     local u
     pcall(function() u = StaticFindObject("/Script/Pal.Default__PalSoundUtility") end)
     if alive(u) then return u end
+    return nil
+end
+
+-- The AkGameplayStatics CDO, or nil. Only setActorVolume uses it: volume is the one thing
+-- UPalSoundUtility does not expose (its 13 functions are play / stop / switch / RTPC, and the
+-- RTPC half was closed with evidence — the build declares three AkRtpc assets and none is a
+-- volume). The live run resolved this CDO by this exact path (dumps/f5-partial-run.txt:49).
+local function akStatics()
+    local o
+    pcall(function() o = StaticFindObject("/Script/AkAudio.Default__AkGameplayStatics") end)
+    if alive(o) then return o end
     return nil
 end
 
@@ -121,6 +136,57 @@ function NativeSource:stop(actor)
     local stopped = false
     pcall(function() u:StopSoundByActor(actor); stopped = true end)
     return stopped
+end
+
+-- Scale the output bus volume of `actor`'s Wwise game object. `self` is unread: like stop(),
+-- this is an ACTOR-scoped call and carries no sound identity.
+--
+-- WHAT THE DUMP SETTLED, AND IT CORRECTS THE OLD READING. `SetOutputBusVolume` was written off
+-- as "a whole output BUS, not one sound". The declaration says otherwise:
+--
+--   dumps/cxx/AkAudio.hpp:748   UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)
+--
+-- There is no bus NAME in it. The second parameter is the actor, i.e. the Wwise game object —
+-- this is the Blueprint wrapper for AK::SoundEngine::SetGameObjectOutputBusVolume, which scales
+-- what ONE emitter sends to its output bus. That is exactly the scope PlayAkEventSoundByActor
+-- posts on and StopSoundByActor clears, so it is the same granularity the rest of this file
+-- already works at: per actor, not per sound and not per bus.
+--
+-- The build declares three other overloads, and none of them is reachable or narrower:
+--   AkAudio.hpp:663   UAkComponent::SetOutputBusVolume(float)                  needs a live
+--     AkComponent for OUR sound, and there is none: PlayAkEventSoundByActor returns a bool
+--     (Pal.hpp:29170), not a component and not a PlayingID, and the 248 live AkComponents
+--     belong to level gimmicks (dumps/f5-partial-run.txt:88-89).
+--   Pal.hpp:14129     UPalAudioWorldSubsystem::SetOutputBusVolume(float)       world-global.
+--   Pal.hpp:29103     UPalSoundPlayer::SetOutputBusVolume(FName, float)        named bus, and
+--     the build declares zero AkAuxBus (dumps/f5-partial-run.txt:85), so there is no name.
+--
+-- LIVE CONFIRMATION of the name only: SetOutputBusVolume is one of AkGameplayStatics' 58
+-- reflected functions on this build (dumps/f5-partial-run.txt:58). The PARAMETER LIST above is
+-- the dump's, which is why the call goes through core/signature — it walks the live UFunction
+-- and refuses rather than calling when the declaration disagrees. Both arguments are the shapes
+-- signature is willing to pass: a float and a live UObject.
+--
+-- NOT OBSERVED: nobody has heard this change a volume. Wwise's own SetGameObjectOutputBusVolume
+-- takes a LINEAR multiplier where 1.0 is unity, so that is what `volume` is treated as; the
+-- header says only "float", so linear-vs-dB is read off the Wwise API, not off this build.
+-- Returns true only when the call was ISSUED, never a promise that anything got quieter.
+function NativeSource:setActorVolume(actor, volume)
+    -- The VALUE is checked before anything else, including the actor: a FloatProperty is only
+    -- safe to marshal when what reaches it is really a finite non-negative number, and refusing
+    -- here costs a false while the alternative costs the session.
+    -- `volume ~= volume` is the NaN test; math.huge is refused for the same reason a negative is.
+    if type(volume) ~= "number" or volume ~= volume or volume < 0 or volume == math.huge then
+        return false
+    end
+    if not alive(actor) then return false end
+
+    local s = akStatics()
+    if not s then return false end
+
+    local ok = sig.call(s, "SetOutputBusVolume", { "FloatProperty", "ObjectProperty" },
+        volume * 1.0, actor)
+    return ok == true
 end
 
 return NativeSource

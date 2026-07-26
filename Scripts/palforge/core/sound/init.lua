@@ -11,6 +11,9 @@
 --                           valid on its own; id is the fallback SoundID)
 --   M.play(spec, actor) -- resolve + play on actor -> true only if a native call was issued
 --   M.stop(actor)       -- stop all sounds on actor (native engine stop)
+--   M.setActorVolume(actor, v)
+--                       -- scale what actor's Wwise game object sends to its output bus
+--                       -- (ACTOR-scoped, exactly like stop: it carries no sound identity)
 --
 -- CONTENT KNOWLEDGE STAYS OUT OF HERE. Turning an AkAudioEvent NAME into its asset path is a
 -- catalog lookup, and the catalog lives in native/audio.lua; api/audio.lua does it while
@@ -48,12 +51,23 @@ function M.play(spec, actor)
     return src:play(actor)
 end
 
--- Stop all sounds on `actor`. Routed through NativeSource so the engine call stays
--- in sound.native (StopSoundByActor is not SoundID-specific, so a shared stopper
--- instance suffices).
-local stopper = NativeSource:new{}
+-- One source-less NativeSource for the calls that are scoped to an ACTOR rather than to a
+-- sound. Neither of them reads `id` or `path` — StopSoundByActor is not SoundID-specific, and
+-- SetOutputBusVolume addresses the actor's Wwise game object — so a single shared instance is
+-- the whole state either one needs, and the engine call still lives in sound.native.
+local engine = NativeSource:new{}
+
+-- Stop all sounds on `actor`.
 function M.stop(actor)
-    return stopper:stop(actor)
+    return engine:stop(actor)
+end
+
+-- Scale the output bus volume of `actor`'s Wwise game object (linear, 1.0 = unity). ACTOR-wide
+-- by construction, not per sound: see the long note at NativeSource:setActorVolume for which of
+-- the build's four SetOutputBusVolume declarations this is and why the other three are out.
+-- True only when the native call was ISSUED — never a promise that anything got quieter.
+function M.setActorVolume(actor, volume)
+    return engine:setActorVolume(actor, volume)
 end
 
 return M

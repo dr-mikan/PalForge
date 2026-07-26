@@ -30,31 +30,27 @@
 -- that names nothing, or a world that has no player pawn, returns false rather than a
 -- reassuring true. It is still not a promise of audibility (the engine returns nothing).
 --
--- TWO THINGS HERE STILL DO NOTHING, and say so rather than pretending.
+-- ONE THING HERE STILL DOES NOTHING, and says so rather than pretending.
 --
--- Custom audio FILES are not playable, and the in-game F5 harvest (dumps/f5-partial-run.txt,
--- audio-custom-file-loader) narrowed why. The Wwise half is CLOSED: AkExternalMediaAsset and
--- AkMediaAsset resolve as classes but reflect ZERO functions each and have ZERO live instances,
--- and AkGameplayStatics' 58 functions contain no *WithExternalSources overload — there is no
--- external-source route on this build. The UE-native half SURVIVED shipping: GameplayStatics
--- still carries PlaySound2D / CreateSound2D / SpawnSound2D / SpawnSoundAttached, and 6 SoundWave
--- + 8 SoundBase are live — the same SkyCreatorPlugin assets 05_assets.txt recorded (6 USoundWave
--- + 2 SoundCue; SoundBase is their common parent), nothing new — and _G.LoadAsset and
--- _G.StaticConstructObject are callable (NewObject is nil). What is still missing is the step
--- that matters: nothing observed turns BYTES on disk into a USoundWave. So a `soundFile`
--- definition resolves and then no-ops (core/sound/file.lua).
+-- Custom audio FILES are not playable. The in-game F5 harvest (dumps/f5-partial-run.txt) and
+-- then dumps/cxx narrowed it to a shape no call in this build can satisfy: the UE-native half is
+-- CLOSED — USoundWave declares no importer and USoundWaveProcedural declares nothing at all
+-- (Engine.hpp:21335 / :21371), so PlaySound2D survives with nothing to be handed — and the Wwise
+-- half exists but takes the wrong input: UWwiseExternalSourceStatics::SetExternalSourceMediaBy*
+-- (WwiseFileHandler.hpp:48-50) REBINDS a cooked external-source cookie to media the Wwise cook
+-- already staged, which is not a .wav on a pack's disk. So a `soundFile` definition resolves and
+-- then no-ops, and core/sound/file.lua carries the marker and the remaining question.
 --
--- VOLUME IS NOT A MISSING SIGNATURE — IT IS A MISSING PARAMETER. The same harvest ruled the
--- RTPC route out with evidence rather than leaving it unmeasured: the routes all exist
--- (UPalSoundUtility reflects SetRTPCValueByActor / SetRTPCValueByActorByEnum; AkGameplayStatics
--- reflects SetRTPCValue / GetRTPCValue / ResetRTPCValue), but the whole build declares exactly
--- THREE AkRtpc assets — Supply_Altitude, OverHeatRifle, ChargeLaserRifle_01 — and no AkAuxBus
--- and no AkAudioBank at all. None of the three is a volume, so there is no volume parameter to
--- set and a parameter list would not help. The only candidate left is SetOutputBusVolume
--- (AkComponent and AkGameplayStatics), which moves a whole output BUS, not one sound
--- (TODO audio-bus-volume, on Handle:setVolume). UNTIL THEN, THE WAY TO BE QUIETER IS TO PICK A
--- QUIETER EVENT from the catalog — that is the only volume control a pack has today.
--- Both return false, and both carry a TODO marker naming the one fact a probe has to settle.
+-- VOLUME IS NOW WIRED, and it is ACTOR-WIDE, not per sound. Handle:setVolume calls
+-- UAkGameplayStatics::SetOutputBusVolume(float, AActor*) (AkAudio.hpp:748) — Wwise's
+-- SetGameObjectOutputBusVolume, which scales what one emitter sends to its output bus. The old
+-- reading of that function ("a whole output BUS") was wrong: it has no bus name in it, it has
+-- the actor. So it lands at exactly the scope :play posts at and :stop clears. It is still not
+-- per sound, and the RTPC route that would have been is closed with evidence rather than
+-- silence: the build declares three AkRtpc assets — Supply_Altitude, OverHeatRifle,
+-- ChargeLaserRifle_01 — and no AkAuxBus and no AkAudioBank, so none of them is a volume and no
+-- parameter list would have helped. TO MAKE ONE SOUND QUIETER THAN ANOTHER, PICK A QUIETER
+-- EVENT from the catalog — that is still the only per-sound control a pack has.
 --
 --   local Theme = Audio.bgm{ id = "AKE_BGM_Title",
 --                            soundId = "AKE_BGM_Title", soundPath = "/Game/.../AKE_BGM_Title" }
@@ -267,9 +263,12 @@ end
 
 ---Stop sounds on `actor` (default: the local player pawn). ACTOR-WIDE by design: the native
 ---call is StopSoundByActor, so it silences everything playing on that actor and WHICH sound
----you called it on is ignored. A narrower StopSoundByActorWithSoundId is reflected on
----UPalSoundUtility, but its parameter list has never been measured and the AkAudioEvent play
----route hands back no id to give it, so it is not wired.
+---you called it on is ignored. The narrower StopSoundByActorWithSoundId is reflected on
+---UPalSoundUtility and the dump now declares it —
+---`StopSoundByActorWithSoundId(AActor*, const FPalDataTableRowName_SoundID&)` (Pal.hpp:29161) —
+---which rules it out twice over: its second parameter is a STRUCT, and it wants a SoundID table
+---row, while the AkAudioEvent play route hands back only a bool (Pal.hpp:29170). There is no id
+---to give it, so it is not wired.
 ---Returns true only when that native call was issued.
 ---@param actor any?
 ---@return boolean ok
@@ -279,48 +278,37 @@ function Handle:stop(actor)
     return sound.stop(a)
 end
 
----Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell it
----did nothing, and on this build there is no per-sound volume to set AT ALL.
+---Set the playback volume on `actor` (default: the local player pawn), as a LINEAR multiplier
+---where 1.0 is unity. ACTOR-WIDE by design, exactly like :stop — read that first if you expected
+---this to be per sound.
 ---
----The in-game F5 harvest settled this negatively. The routes are all present —
----UPalSoundUtility reflects SetRTPCValueByActor and SetRTPCValueByActorByEnum, AkGameplayStatics
----reflects SetRTPCValue / GetRTPCValue / ResetRTPCValue (9 of its 58 functions are volume-ish) —
----but the game declares only THREE AkRtpc assets in total: Supply_Altitude, OverHeatRifle and
----ChargeLaserRifle_01 (plus zero AkAuxBus and zero AkAudioBank). None is a volume parameter, so
----the missing piece was never a signature: there is nothing for SetRTPCValue* to address.
+---WHAT THIS ACTUALLY MOVES. The native call is
+---`UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)`
+---(dumps/cxx/AkAudio.hpp:748), the Blueprint wrapper for Wwise's
+---SetGameObjectOutputBusVolume: it scales what ONE emitter — the actor's Wwise game object —
+---sends to its output bus. So it moves every sound playing on that actor, ours and the game's
+---alike, and WHICH sound handle you called it on is ignored. That is the same scope :play posts
+---at and :stop clears, so the actor argument means the same thing in all three.
 ---
----WHAT TO DO INSTEAD, TODAY: choose a quieter AkAudioEvent. Picking the event is the only
----volume control a pack has — there is no supported way to make one sound quieter than another.
+---There is no narrower control on this build, and that is settled rather than untried. The RTPC
+---route is closed with evidence: the routes exist (UPalSoundUtility reflects SetRTPCValueByActor
+---and SetRTPCValueByActorByEnum, AkGameplayStatics reflects SetRTPCValue / GetRTPCValue /
+---ResetRTPCValue) but the whole build declares THREE AkRtpc assets — Supply_Altitude,
+---OverHeatRifle, ChargeLaserRifle_01 — and none is a volume, so there was never a parameter for
+---them to address. The per-sound AkComponent overload (AkAudio.hpp:663) has no object to be
+---called on: PlayAkEventSoundByActor returns a bool (Pal.hpp:29170), not a component and not a
+---PlayingID. To make ONE sound quieter than another, still pick a quieter AkAudioEvent.
 ---
----The one candidate left is SetOutputBusVolume (reflected on both AkComponent and
----AkGameplayStatics), and it is a BUS control: it would move every sound routed through that
----bus, so it can never satisfy this method's per-sound contract even once it is measured. If it
----is ever wired it belongs on the module as a bus call, not here (TODO audio-bus-volume).
----@param volume number
+---Returns true only when the native call was ISSUED — there is no world, or no actor, or the
+---live declaration disagreed with the dump's and core/signature refused, and you get false.
+---True is not a promise that anything got quieter: nothing here has been heard in game.
+---@param volume number   # linear multiplier, 1.0 = unchanged; negative is refused
+---@param actor any?
 ---@return boolean ok
-function Handle:setVolume(volume)
-    -- TODO(audio-bus-volume): the RTPC route is RULED OUT, with evidence rather than silence —
-    -- the harvest enumerated every AkRtpc in the build and there are three (Supply_Altitude,
-    -- OverHeatRifle, ChargeLaserRifle_01), none of them a volume, with AkAuxBus -> none and
-    -- AkAudioBank -> none. Do not re-probe SetRTPCValue*: no parameter list can conjure a
-    -- parameter that does not exist. The surviving candidate is SetOutputBusVolume, reflected on
-    -- AkComponent (3 of 14 volume-ish) and on AkGameplayStatics (9 of 58).
-    -- STILL UNKNOWN, and exactly what a probe now owes:
-    --   (a) SetOutputBusVolume's PARAMETER LIST, on either owner — is the bus an FName or an
-    --       FString, is there a leading AkComponent/actor, is the value 0..1 or dB, is there a
-    --       fade/interpolation argument. The harvest printed no list for it: every PARAM line in
-    --       that whole run reads "function absent", including for PlayAkEventSoundByActor, which
-    --       the same block proves exists — so that is the probe's lookup failing on this UE4SS
-    --       build, not the function missing. Until a real list is printed, DO NOT CALL IT: a
-    --       wrong argument type faults natively inside UE4SS marshalling and pcall does not
-    --       catch it (that is what crashed the F5 run).
-    --   (b) whether a per-sound AkComponent is REACHABLE at all. 248 AkComponents are live, but
-    --       the first sampled one is a PalAkComponent owned by a level-gimmick actor, and our
-    --       play route (PlayAkEventSoundByActor) hands back nothing — no component, no PlayingID
-    --       — so there may be no object to call the AkComponent overload ON for a sound we
-    --       played. If it is not reachable, the AkGameplayStatics overload is bus-global and
-    --       this method stays false forever.
-    return false
+function Handle:setVolume(volume, actor)
+    local a = actor or defaultActor()
+    if not a then return false end
+    return sound.setActorVolume(a, volume)
 end
 
 -- ---- queries ----

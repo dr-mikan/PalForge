@@ -72,7 +72,7 @@
 ---@class Item.Spec.Events
 ---@field onObtain? fun(self: Item.Handle, ctx: table) # LIVE - entered the inventory (ctx.count, ctx.via)
 ---@field onUse? fun(self: Item.Handle, ctx: table) # LIVE - used / consumed (ctx.actor = the local player pawn)
----@field onCraft? fun(self: Item.Handle, ctx: table) # declarable; NO native source exists — fires only on a manual emit
+---@field onCraft? fun(self: Item.Handle, ctx: table) # fires when a crafting machine finishes an item (unverified in game)
 ---@field onDiscard? fun(self: Item.Handle, ctx: table) # declarable; NO native source exists — fires only on a manual emit
 
 ---@alias Item.Spec.Category "material"|"consumable"|"equipment"|"ammo"|"ingredient"|"other"
@@ -143,10 +143,10 @@
 --=============================================================================
 
 ---@class Skill.Spec.Events
----@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # an active skill fired (self, owner, ctx)
----@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # one of its hits landed (self, target, ctx)
----@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was attached (self, owner, ctx)
----@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was removed (self, owner, ctx)
+---@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # an active skill fired (self, owner, ctx) - source wired, not yet seen firing
+---@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # one of its hits landed (self, target, ctx) - source wired, may repeat per collision
+---@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was attached (self, owner, ctx) - source wired, not yet seen firing
+---@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was removed (self, owner, ctx) - source wired, not yet seen firing
 
 ---@alias Skill.Spec.Kind "active"|"passive"
 ---@class Skill.Spec

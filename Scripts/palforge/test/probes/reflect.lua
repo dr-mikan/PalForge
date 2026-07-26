@@ -366,6 +366,31 @@ local function walkWidget(w, depth, budget)
 end
 
 --=============================================================================
+-- declarations, read the way that WORKS on this build
+--
+-- probe.params printed "function absent" for every name in the whole 2026-07-26 run —
+-- including PlayAkEventSoundByActor, which the same run proves exists — so its lookup is what
+-- failed, not the functions. core/signature reaches a UFunction through ForEachFunction on the
+-- class chain, which is the documented route and the one that answered; check() then walks the
+-- live parameter list and hands back a printable shape WITHOUT calling anything. Used by the
+-- audio and UI sections below; probe.params is left alone for the rest.
+--=============================================================================
+
+local sig = require("palforge.core.signature")
+
+---Print `fnName`'s declaration as the LIVE build states it. Calls nothing. Returns the level
+---("declared" / "present" / "absent") so a section can branch on whether it is even there.
+local function declare(owner, fnName)
+    if not probe.valid(owner) then
+        probe.line("PARAM <no owner> for %s", tostring(fnName))
+        return "absent"
+    end
+    local level, _, detail = sig.check(owner, fnName, {})
+    probe.line("PARAM %s [%s] %s", fnName, level, detail)
+    return level
+end
+
+--=============================================================================
 -- Audio
 --=============================================================================
 
@@ -418,15 +443,33 @@ end
 local function audio_bus_volume()
     probe.begin("audio-bus-volume")
 
-    probe.section("(0) SetOutputBusVolume, the one candidate left — its declaration, from both owners")
-    for _, path in ipairs({ "/Script/AkAudio.Default__AkComponent",
-                            "/Script/AkAudio.Default__AkGameplayStatics" }) do
-        local o = probe.find(path)
-        probe.params(o, "SetOutputBusVolume")
-        probe.params(o and classOf(o), "SetOutputBusVolume")
-    end
+    -- WIRED as of 2026-07-26 on dumps/cxx/AkAudio.hpp:748 —
+    --   UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)
+    -- which has no bus NAME in it: it is Wwise's SetGameObjectOutputBusVolume, scoped to the
+    -- actor's game object, so it lands at the same scope as PlayAkEventSoundByActor. This block
+    -- no longer asks whether a volume route exists; it VERIFIES that the live build's parameter
+    -- list agrees with that declaration, which is the one thing core/signature will refuse over.
+    probe.section("(1) the wired call — does the live declaration agree with AkAudio.hpp:748")
+    local stats = probe.find("/Script/AkAudio.Default__AkGameplayStatics")
+    declare(stats, "SetOutputBusVolume")
+    probe.note("EXPECTED, in this order: 1 BusVolume:FloatProperty, 2 Actor:ObjectProperty. A "
+        .. "'declared' level with exactly that shape means core/sound/native.lua's call is right "
+        .. "and Audio.Handle:setVolume works as written. A 'present' level means this build will "
+        .. "not walk a UFunction's properties, so the types are still the dump's — the call "
+        .. "proceeds, and both arguments (a float and a live UObject) are shapes signature is "
+        .. "willing to pass unread. An 'absent' level is the one real problem: the game patched "
+        .. "the function out from under the dump, and setVolume is dead again.")
 
-    probe.section("(1) does any volume-capable class exist on this build at all")
+    probe.section("(2) the three overloads that were REJECTED — confirm they are still the wrong shape")
+    declare(probe.find("/Script/AkAudio.Default__AkComponent"), "SetOutputBusVolume")
+    declare(probe.find("/Script/Pal.Default__PalAudioWorldSubsystem"), "SetOutputBusVolume")
+    declare(probe.find("/Script/Pal.Default__PalSoundPlayer"), "SetOutputBusVolume")
+    probe.note("AkComponent's takes only a float and needs a component for OUR sound, which the "
+        .. "play route does not hand back (Pal.hpp:29170 returns a bool). PalAudioWorldSubsystem's "
+        .. "(Pal.hpp:14129) is world-global. PalSoundPlayer's (Pal.hpp:29103) wants an FName bus, "
+        .. "and section (4) is why there is no name to give it.")
+
+    probe.section("(3) the volume-ish surface, for a build that ships MORE than this one")
     local targets = {
         { "/Script/Pal.Default__PalSoundUtility",       "PalSoundUtility" },
         { "/Script/AkAudio.Default__AkGameplayStatics", "AkGameplayStatics" },
@@ -437,9 +480,8 @@ local function audio_bus_volume()
     for _, t in ipairs(targets) do
         local o = probe.find(t[1])
         local k = o and classOf(o)
-        probe.section("(2/3) " .. t[2] .. " — volume-ish names and their parameters")
-        local hits = grep(k, t[2], "fn", VOL)
-        paramsFor(k, hits, 6)
+        probe.section("(3/" .. t[2] .. ") volume-ish names")
+        grep(k, t[2], "fn", VOL)
     end
 
     probe.section("(4) the RTPC / bus names themselves — nothing in either tree can supply these")
@@ -455,46 +497,63 @@ local function audio_bus_volume()
         probe.line("LIVE   outer = %s", probe.valid(outer) and probe.full(outer) or "?")
     end
 
-    probe.note("WHAT TO PASTE BACK: the SetOutputBusVolume PARAM lines from section (0) — is the bus an "
-        .. "FName or an FString, is there a leading AkComponent/actor, is the value 0..1 or dB, is "
-        .. "there a fade argument. Nothing can be called until they are read.")
-    probe.note("The AkRtpc/AkAuxBus/AkAudioBank listings below are the evidence that CLOSED "
+    probe.note("The AkRtpc/AkAuxBus/AkAudioBank listings are the evidence that CLOSED "
         .. "audio-volume-rtpc; they are reprinted so a build that ships more of them is noticed "
-        .. "rather than assumed to match. Three RTPCs and no buses is the known answer.")
-    probe.note("IF SetOutputBusVolume IS ABSENT FROM BOTH OWNERS: there is no volume entry point on this "
-        .. "build at all, and Audio.Handle:setVolume is permanently false — say so in the docs instead "
-        .. "of leaving it looking implementable. Picking a quieter AkAudioEvent stays the only control.")
+        .. "rather than assumed to match. Three RTPCs and no buses is the known answer, and it is "
+        .. "also why the PalSoundPlayer named-bus overload has no name to be given.")
+    probe.note("STILL OWED, and this probe cannot do it because it would change audible state: "
+        .. "the AUDIBILITY half. In a throwaway session run the F1 audio suite (its live case "
+        .. "issues SetOutputBusVolume(1.0), which is unity and changes nothing), then console: "
+        .. "local s=StaticFindObject('/Script/AkAudio.Default__AkGameplayStatics'); "
+        .. "s:SetOutputBusVolume(0.1, FindFirstOf('PalPlayerCharacter')) — play a sound and report "
+        .. "whether it is quieter, and whether 1.0 restores it. That is the only thing left "
+        .. "between 'the call is issued' and 'the volume moved'.")
     probe.finish()
 end
 
 local function audio_custom_file_loader()
     probe.begin("audio-custom-file-loader")
 
-    probe.section("(1) class existence — a run of 'absent' closes this item permanently")
-    local paths = {
-        "/Script/Engine.Default__SoundWave",
-        "/Script/Engine.Default__SoundBase",
-        "/Script/Engine.Default__GameplayStatics",
-        "/Script/AkAudio.Default__AkExternalMediaAsset",
-        "/Script/AkAudio.Default__AkMediaAsset",
-        "/Script/AkAudio.Default__AkGameplayStatics",
-    }
-    local found = {}
-    for _, p in ipairs(paths) do found[p] = probe.find(p) end
+    -- The UE-native half of this item is CLOSED on declarations and is not re-asked here:
+    -- USoundWave (Engine.hpp:21335) declares only the two compression accessors, and
+    -- USoundWaveProcedural (:21371) declares NOTHING, so there is no way to make a USoundBase for
+    -- PlaySound2D to be handed. The whole question is now the Wwise external-source pipeline,
+    -- and it lives in a module the earlier harvest never looked at: /Script/WwiseFileHandler.
+    probe.section("(1) the entry point — WwiseFileHandler, which /Script/AkAudio never had")
+    local wes = probe.find("/Script/WwiseFileHandler.Default__WwiseExternalSourceStatics")
+    probe.line("CLASS WwiseExternalSourceStatics -> %s", wes and probe.describe(wes) or "absent")
+    declare(wes, "SetExternalSourceMediaByName")
+    declare(wes, "SetExternalSourceMediaById")
+    declare(wes, "SetExternalSourceMediaWithIds")
+    probe.note("EXPECTED from WwiseFileHandler.hpp:48-50: ByName(FString, FString), "
+        .. "ById(FString, int32), WithIds(FAkUniqueID, int32) — all scalars, all shapes signature "
+        .. "would pass. If this class prints 'absent' the plugin is not in the shipping binary and "
+        .. "this item closes for good.")
 
-    probe.section("(2) does a 2D sound path survive into shipping")
-    local gs = found["/Script/Engine.Default__GameplayStatics"]
+    probe.section("(2) does the COOK declare any external source for those to rebind")
+    grep(wes and classOf(wes), "WwiseExternalSourceStatics", "fn", { "external", "media", "source" })
+    for _, n in ipairs({ "WwiseExternalSourceSettings", "WwiseExternalSourceManager",
+                         "AkExternalMediaAsset", "AkMediaAsset" }) do
+        listInstances(n, 20)
+    end
+    local wss = probe.find("/Script/WwiseSimpleExternalSource.Default__WwiseExternalSourceSettings")
+    probe.line("CLASS WwiseExternalSourceSettings -> %s", wss and probe.describe(wss) or "absent")
+    if wss then
+        -- WwiseSimpleExternalSource.hpp:27-29: the two DataTables and the staging directory that
+        -- say whether this build has ANY external source at all.
+        probe.read(wss, "MediaInfoTable")
+        probe.read(wss, "ExternalSourceDefaultMedia")
+        probe.read(wss, "ExternalSourceStagingDirectory")
+    end
+
+    probe.section("(3) the UE-native half, reprinted only so a PATCH that adds a loader is noticed")
+    local gs = probe.find("/Script/Engine.Default__GameplayStatics")
     grep(gs and classOf(gs), "GameplayStatics", "fn", { "sound", "audio" })
     probe.note("the COMPLETE GameplayStatics function list is dumped once, under spawn-actor-conventions")
-
-    probe.section("(3) Wwise external-source entry points")
-    for _, p in ipairs({ "/Script/AkAudio.Default__AkExternalMediaAsset",
-                         "/Script/AkAudio.Default__AkMediaAsset",
-                         "/Script/AkAudio.Default__AkGameplayStatics" }) do
-        local k = found[p] and classOf(found[p])
-        local hits = grep(k, p, "fn", { "external", "media", "source", "post", "load" })
-        paramsFor(k, hits, 6)
-    end
+    grep(classOf(probe.find("/Script/Engine.Default__SoundWave")), "SoundWave", "fn",
+        { "import", "queue", "init", "raw", "audio", "resource", "load" })
+    probe.allOf("SoundWave")
+    probe.allOf("SoundBase")
 
     probe.section("(4) can UE4SS Lua construct an engine object on this build at all")
     for _, g in ipairs({ "NewObject", "StaticConstructObject", "StaticConstructObject_Internal",
@@ -502,17 +561,15 @@ local function audio_custom_file_loader()
         probe.line("VALUE _G.%s -> %s", g, type(_G[g]))
     end
 
-    probe.section("(5) is either pipeline alive in memory")
-    probe.allOf("SoundWave")
-    probe.allOf("SoundBase")
-    probe.allOf("AkMediaAsset")
-    probe.allOf("AkExternalMediaAsset")
-
-    probe.note("HIT: a live AkExternalMediaAsset/AkMediaAsset class plus a Post*WithExternalSources-style "
-        .. "function is the ONLY shape in which Audio.Spec.soundFile can ever work.")
-    probe.note("MISS: all six absent, zero SoundWave and zero AkMediaAsset instances, and no constructor "
-        .. "global -> the decision (not the implementation) follows: delete Audio.Spec.soundFile and "
-        .. "core/sound/file.lua, or demote soundFile so it stops outranking a working soundPath.")
+    probe.note("HIT: WwiseExternalSourceStatics resolving AND a non-empty MediaInfoTable / "
+        .. "ExternalSourceDefaultMedia is the ONLY shape in which Audio.Spec.soundFile can ever "
+        .. "work — and even then only for Wwise-encoded media (.wem) already staged by the cook, "
+        .. "so a pack shipping a .wav would still need an offline conversion step PalForge cannot "
+        .. "perform. Say that in the docs before anyone builds on it.")
+    probe.note("MISS: WwiseExternalSourceStatics absent, or present with no external-source tables "
+        .. "behind it -> nothing for SetExternalSourceMedia* to rebind, and the decision (not the "
+        .. "implementation) follows: delete Audio.Spec.soundFile and core/sound/file.lua, or "
+        .. "demote soundFile so it stops outranking a working soundPath.")
     probe.finish()
 end
 
@@ -1356,10 +1413,41 @@ end
 local function ui_host_paths()
     probe.begin("ui-host-paths")
 
-    -- The ROOT classes are already known from deprecated/catalog/ui_widget_classes.txt; what is
+    -- WIRED as of 2026-07-26 on dumps/cxx/WBP_PalOverallUILayout.hpp:9 — CanvasPanel_Root, a
+    -- UCanvasPanel (therefore a UPanelWidget, therefore it answers AddChild) declared on
+    -- UWBP_PalOverallUILayout_C, whose native base UPalPrimaryGameLayoutBase (Pal.hpp:27311) is
+    -- what native/ui/_widget.gameUIRoot asks FindFirstOf for. Section (0) verifies that one
+    -- object on the live build; everything after it is the ORIGINAL survey, kept because it is
+    -- the only record of what else is reachable and because a patch could move the layout.
+    probe.section("(0) the wired host — PalPrimaryGameLayoutBase.CanvasPanel_Root")
+    local layout = probe.firstOf("PalPrimaryGameLayoutBase")
+    probe.line("WIDGET layout -> %s", layout and probe.describe(layout) or "absent")
+    if probe.valid(layout) then
+        probe.line("WIDGET layout class -> %s", classFull(layout))
+        for _, member in ipairs({ "CanvasPanel_Root", "CanvasPanel_Fade", "CanvasPanel_3" }) do
+            local panel; pcall(function() panel = layout[member] end)
+            local n; local okN = pcall(function() n = panel:GetChildrenCount() end)
+            probe.line("WIDGET   %s -> %s children=%s", member,
+                probe.valid(panel) and (probe.name(panel) .. " <" .. classFull(panel) .. ">") or "nil",
+                (okN and n ~= nil) and tostring(n) or "-")
+        end
+    end
+    probe.note("EXPECTED: CanvasPanel_Root resolves to a live UCanvasPanel and its children= "
+        .. "prints a NUMBER. That is the whole of ui-host-paths confirmed. 'absent' at the title "
+        .. "screen is correct and not a failure — the layout belongs to the in-game UI, which is "
+        .. "why gameUIRoot() returns nil there and an element rides :autoMount to get in.")
+    probe.note("STILL OWED (adding a widget to the live UI is a state change, so it is not done "
+        .. "here): AddChild a throwaway TextBlock into CanvasPanel_Root, print the slot class — "
+        .. "UMG.hpp:347 says it must be a UCanvasPanelSlot — then RemoveChild it. That is the one "
+        .. "step between 'the panel is there' and 'PalForge can mount into it'.")
+
+    -- The ROOT classes are already known from deprecated/catalog/ui_widget_classes.txt; what was
     -- missing is one level down. A node whose children= prints a NUMBER answered
     -- GetChildrenCount, which is the cheap read-only proxy for "is a UPanelWidget"; a '-' is a
-    -- leaf that raised, i.e. definitely not an injection host.
+    -- leaf that raised, i.e. definitely not an injection host. PalUIHUDLayoutBase is kept in the
+    -- list even though the dump says it declares no widget members at all (Pal.hpp:30707) — it
+    -- offers AddHUD(UPalUserWidget*, int32) instead (:30714), a route PalForge does not take
+    -- because M.screen builds a plain UMG.UserWidget, not a UPalUserWidget.
     for _, n in ipairs({ "PalUIHUDLayoutBase", "PalUIWorldHUDWidgetCanvas",
                          "PalUIInsideBaseCampCanvas", "PalUIInventoryEquipment" }) do
         probe.section(n)
@@ -1394,38 +1482,63 @@ local function ui_host_paths()
     end
     if shown > 150 then probe.line("WIDGET ... (%d more unique)", shown - 150) end
 
-    probe.note("HIT: any named child with a numeric children= inside the HUD tree is a candidate host — "
-        .. "its name goes into native/ui/_widget M.PATHS and PalForge panels can finally be parented "
-        .. "into the game's OWN screens instead of a separate viewport layer.")
-    probe.note("MISS: a tree of '-' everywhere means no panel is reachable one level down and the "
-        .. "viewport layer (widget.screen) stays the only host — which is a documentable answer.")
-    probe.note("STILL OWED (adding a widget to the live HUD is a state change, so it is not done here): "
-        .. "for each numeric-children node, construct a throwaway TextBlock, AddChild it, print the slot "
-        .. "class, RemoveChild it. That confirms AddChild really answers.")
+    probe.note("HIT: any OTHER named child with a numeric children= is a second candidate host, "
+        .. "and its name belongs in native/ui/_widget M.PATHS beside gameUIRoot.")
+    probe.note("MISS: a tree of '-' everywhere below section (0) simply means the wired host is the "
+        .. "only one — which is an answer, not a gap.")
     probe.finish()
 end
 
 local function ui_update_event()
     probe.begin("ui-update-event")
 
-    local NEEDLES = { "open", "show", "construct", "refresh", "update", "setup", "close", "hide" }
-    for _, n in ipairs({ "PalUIManagerSubsystem", "PalUIHUDLayoutBase", "PalUITitleBase",
-                         "PalUIInventoryEquipment" }) do
-        probe.section(n)
-        local cls = probe.find("/Script/Pal." .. n)
-        local cdo = probe.find("/Script/Pal.Default__" .. n)
-        local k = cls or (cdo and classOf(cdo))
-        local hits = grep(k, n, "fn", NEEDLES)
-        paramsFor(k, hits, 6)
+    -- The old question — "does Palworld raise a catchable UFunction when a UI is (re)built" — is
+    -- ANSWERED YES by dumps/cxx, and the four names below are the candidates. This block no
+    -- longer greps for their existence; it prints each one's declaration so the two things that
+    -- are actually unknown can be judged: whether the base UFunction is the one that EXECUTES
+    -- (OnSetup/OnClosed/AddHUD read as BlueprintImplementableEvents, and a blueprint that
+    -- implements one gets its own UFunction of that name, which a hook on the base never sees),
+    -- and how often each fires.
+    --
+    -- ELIMINATED, do not enumerate it again: UPalUIManagerSubsystem (Pal.hpp:30988) declares zero
+    -- functions. It was the first name in the old recipe and it is empty.
+    probe.section("(1) the four candidates, as this build declares them")
+    local candidates = {
+        { "/Script/Pal.PalUserWidget",                  "OnSetup",         "Pal.hpp:31902" },
+        { "/Script/Pal.PalUserWidget",                  "OnClosed",        "Pal.hpp:31903" },
+        { "/Script/Pal.PalUserWidgetStackableUI",       "OnClose",         "Pal.hpp:31934" },
+        { "/Script/Pal.PalUIHUDLayoutBase",             "AddHUD",          "Pal.hpp:30714" },
+        { "/Script/Pal.PalUIHUDLayoutBase",             "RemoveHUD",       "Pal.hpp:30712" },
+        { "/Script/CommonUI.CommonActivatableWidget",   "ActivateWidget",  "CommonUI.hpp:177" },
+        { "/Script/CommonUI.CommonActivatableWidget",   "DeactivateWidget","CommonUI.hpp:171" },
+    }
+    for _, c in ipairs(candidates) do
+        -- The UCLASS itself, by path — signature.find starts with ForEachFunction on the owner
+        -- when the owner is already a UStruct, so a class is the cheapest thing to hand it.
+        local k = probe.find(c[1])
+        probe.line("CLASS %s -> %s   (dump: %s)", c[1], k and probe.describe(k) or "absent", c[3])
+        declare(k, c[2])
     end
 
-    probe.note("HIT: one hookable Open/Show/Construct function is a ui.* channel in core/event, so "
-        .. "UI.Handle:autoRefresh stops being the only driver and TitleMenu can re-inject on the rebuild "
-        .. "signal instead of on a 2 s timer.")
-    probe.note("MISS: no such function on any of the four means polling is not a shortcut but the only "
-        .. "mechanism available, and autoRefresh should be documented as such.")
-    probe.note("STILL OWED (F7): RegisterHook every name above, then open and close the inventory, open "
-        .. "the build menu and return to the title screen; paste which paths fired and in what order.")
+    probe.section("(2) the class chain that makes those four cover every screen")
+    for _, n in ipairs({ "PalUserWidget", "PalUserWidgetHierarchical", "PalUserWidgetStackableUI",
+                         "PalUITitleBase", "PalUIHUDLayoutBase", "PalUIManagerSubsystem" }) do
+        local k = probe.find("/Script/Pal." .. n)
+        probe.line("CLASS %-28s -> %s", n, k and probe.full(k) or "absent")
+        grep(k, n, "fn", { "setup", "close", "open", "show", "construct", "refresh", "update", "hide" })
+    end
+
+    probe.note("HIT: any of the seven printing a 'declared'/'present' level is hookable BY NAME. "
+        .. "That is not yet permission to hook it — see the STILL OWED line.")
+    probe.note("STILL OWED, and it is the whole of what is left (F7, and it MUST be a throwaway "
+        .. "session): RegisterHook each path above one at a time, log a single line per firing, "
+        .. "then (a) open and close the inventory, (b) open the build menu, (c) return to the "
+        .. "title screen, and (d) LOAD A SAVE and watch the world-load storm. Paste which paths "
+        .. "fired, in what order, and HOW MANY TIMES during (d). The count in (d) is the "
+        .. "load-bearing number: core/event.lua records a shared-dispatch wedge caused by a hook "
+        .. "armed into exactly that storm, and a UI hook fires hardest there. A candidate that "
+        .. "fires thousands of times during load is not usable as a refresh signal even though it "
+        .. "exists — polling stays, and that is a real answer.")
     probe.finish()
 end
 

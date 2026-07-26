@@ -4,14 +4,19 @@
 -- their widget trees. The element LIFECYCLE lives in palforge.api.ui; this module
 -- only builds/wires widgets — it holds no lifecycle or watch loop.
 --
--- Two ways to get a host for those widgets: inject into a panel the game already
--- has (title_menu does that), or make one of your own with M.screen() — the
+-- Three ways to get a host for those widgets: inject into a panel the game already
+-- has (title_menu does that on the title screen), hang one off the game's own live
+-- in-game UI root with M.gameUIRoot(), or make one of your own with M.screen() — the
 -- UserWidget + WidgetTree + AddToViewport sequence verified in poc/V6-ui-native.
 --
--- Ported self-contained (no PalForge module deps) so core/native do not depend on
--- the deprecated layer. Includes the shared CLICK ROUTER: one RegisterHook on
--- CommonButtonBase dispatches to whichever callback registered the clicked button;
--- it is installed lazily on the first registerClick().
+-- Ported self-contained apart from core/signature, which is not optional: two calls
+-- here take arguments whose declared types decide whether the call is safe at all, and
+-- a wrong TYPE faults inside UE4SS's marshalling where pcall cannot see it. signature
+-- walks the live UFunction and refuses instead. Includes the shared CLICK ROUTER: one
+-- RegisterHook on CommonButtonBase dispatches to whichever callback registered the
+-- clicked button; it is installed lazily on the first registerClick().
+
+local sig = require("palforge.core.signature")
 
 local M = {}
 
@@ -38,19 +43,32 @@ function M.findFirst(class)
     return (ok and o) or nil
 end
 
--- Known Palworld UI asset/class paths. TITLE MENU ONLY — every entry below was read off
--- WBP_Title_MenuButton and the title screen (verified 2026-07-17, poc/V7-title-injection).
--- Nothing here names the live HUD, the inventory or the build menu, so cloneGameWidget()
--- and Button:mount(<a panel of the game's own>) have no in-game host to target: a PalForge
--- panel today is either a title entry or a viewport layer of our own (M.screen).
+-- Known Palworld UI asset/class paths. The title-screen entries were read off
+-- WBP_Title_MenuButton and the title screen (verified 2026-07-17, poc/V7-title-injection);
+-- dumps/cxx re-confirms both names PalForge matches by string, `Test_Content` and
+-- `WBP_PalInvisibleButton`, as declared members of the button class
+-- (dumps/cxx/WBP_Title_MenuButton.hpp:14-15).
 --
--- The HUD's own CLASS is known — deprecated/catalog/ui_widget_classes.txt lists
--- UPalUIHUDLayoutBase (and UPalUIWorldHUDWidgetCanvas / UPalUIInventoryEquipment); note it
--- does NOT list the "PalHUD"/"PalHUDWidget" that dump/docs/04_native_ui.md guesses at. What
--- is missing is one level down, and no dump in either tree has it:
--- TODO(ui-host-paths): unknown — the widget NAME of a child inside the live
--- PalUIHUDLayoutBase tree that is a UPanelWidget (i.e. answers AddChild), which is the one
--- fact needed to parent a PalForge widget into the game's HUD instead of our own layer.
+-- The IN-GAME host is the last two entries, and it is the one thing this table used to be
+-- missing. What is wanted is a child inside the game's own live UI that is a UPanelWidget,
+-- i.e. answers AddChild; the dump names one outright:
+--
+--   dumps/cxx/WBP_PalOverallUILayout.hpp:4   class UWBP_PalOverallUILayout_C : UPalPrimaryGameLayoutBase
+--                                       :9     class UCanvasPanel* CanvasPanel_Root;
+--
+-- UPalPrimaryGameLayoutBase is Pal.hpp:27311, a UPrimaryGameLayout (CommonGame.hpp:156) — the
+-- CommonUI root the whole in-game UI stacks onto. A UCanvasPanel is a UPanelWidget
+-- (UMG.hpp:344), so it answers UPanelWidget::AddChild (UMG.hpp:1087) and hands back a
+-- UCanvasPanelSlot (UMG.hpp:347, :350). LIVE CONFIRMATION: an instance of that class is alive
+-- under the game instance with its own WidgetTree —
+-- `BP_PalGameInstance_C_2147482476.WBP_PalOverallUILayout_C_2147481885.WidgetTree_2147481884`
+-- (dumps/reflection/03_widgets.txt:54). Not observed: nobody has watched a widget appear there.
+--
+-- WHAT THE DUMP ELIMINATED, so nobody re-walks it. UPalUIHUDLayoutBase (Pal.hpp:30707) has no
+-- panel child to find: it is a native UCommonActivatableWidget and declares no widget members
+-- at all. It offers an API instead — AddHUD(UPalUserWidget*, int32) / RemoveHUD (Pal.hpp:30714,
+-- :30712) — and that route is NOT taken here, because its parameter is a UPalUserWidget
+-- (Pal.hpp:31888) and M.screen builds a plain /Script/UMG.UserWidget. One route per host.
 M.PATHS = {
     menuButton      = "/Game/Pal/Blueprint/UI/UserInterface/Title/WBP_Title_MenuButton.WBP_Title_MenuButton_C",
     palTextBlock    = "/Game/Pal/Blueprint/UI/PalTextBlock/BP_PalTextBlock.BP_PalTextBlock_C",
@@ -58,6 +76,8 @@ M.PATHS = {
     menuButtonLabel = "Test_Content",      -- label widget inside WBP_Title_MenuButton
     menuButtonClick = "WBP_PalInvisibleButton",
     menuButtonInner = "HorizontalBox_0",
+    gameUILayout    = "PalPrimaryGameLayoutBase",  -- the live in-game UI root, by native class
+    gameUIRoot      = "CanvasPanel_Root",          -- its root UCanvasPanel: the injection host
 }
 
 -- Slate alignment enums, named so callers don't memorize integers.
@@ -260,6 +280,40 @@ function M.owner()
         or M.findFirst("GameInstance")
 end
 
+-- The game's OWN in-game UI root: the UCanvasPanel a PalForge widget can be parented into
+-- instead of a viewport layer of our own. Returns the panel, or nil + a reason.
+--
+--   local host = widget.gameUIRoot()
+--   if host then Button:new{ label = "Mods", onClick = f }:mount(host) end
+--
+-- Read the M.PATHS note above for the declarations this rests on. Two things about the WAY it
+-- is reached are deliberate:
+--
+--   * FindFirstOf takes the NATIVE base class (PalPrimaryGameLayoutBase), not the blueprint
+--     class name. FindFirstOf matches subclasses — the same call answers FindFirstOf
+--     ("PalPlayerCharacter") with a BP_Player_Female_C every run (dumps/f5-partial-run.txt:160)
+--     — so asking for the base survives a blueprint rename, and WBP_PalOverallUILayout_C is
+--     the only subclass this build has.
+--   * The panel is read as a PROPERTY (`layout.CanvasPanel_Root`), not searched for by name
+--     through findByName. It is a declared member at a known offset (WBP_PalOverallUILayout.hpp:9);
+--     a tree walk would find the same object more slowly and could find a different one.
+--
+-- nil at the title screen and during load, which is correct rather than a failure: the layout
+-- belongs to the in-game UI. An element that wants it should ride :autoMount, exactly as a
+-- title-screen element does.
+function M.gameUIRoot()
+    local layout = M.findFirst(M.PATHS.gameUILayout)
+    if not layout then
+        return nil, "no " .. M.PATHS.gameUILayout .. " live (title screen, or still loading)"
+    end
+    local panel
+    pcall(function() panel = layout[M.PATHS.gameUIRoot] end)
+    if not alive(panel) then
+        return nil, M.PATHS.gameUILayout .. " has no live " .. M.PATHS.gameUIRoot
+    end
+    return panel
+end
+
 -- Put a screen (or a bare UserWidget) on the viewport. Returns true only when the
 -- widget reports itself in the viewport afterwards — or, on a build without
 -- IsInViewport, when the AddToViewport call itself did not error.
@@ -348,21 +402,46 @@ end
 -- ---- Palworld game widgets ----
 
 -- Force a freshly created WBP_Title_MenuButton's inner content to the left so labels align
--- regardless of the button's outer width. Cosmetic and best-effort: SetAnchors/SetAlignment
--- exist on a CanvasPanelSlot, and nobody has recorded what HorizontalBox_0's Slot actually
--- is inside that button — on any other slot class both calls raise inside the pcall and the
--- label simply stays centred. Left as-is rather than guessed at: the label is still legible
--- either way, and clickableRow does not depend on it (it overlays its own left-aligned text).
--- TODO(ui-menubutton-inner-slot): unknown — the CLASS of `HorizontalBox_0`.Slot inside a
--- created WBP_Title_MenuButton, which decides whether these two calls do anything at all.
+-- regardless of the button's outer width. Cosmetic and best-effort: the label is legible either
+-- way, and clickableRow does not depend on it (it overlays its own left-aligned text).
+--
+-- THIS USED TO CALL SetAnchors + SetAlignment, AND THAT WAS THE WRONG CALL TO MAKE. dumps/cxx
+-- says so twice over:
+--   * Those two exist on UCanvasPanelSlot and on NO other slot class in the whole of UMG
+--     (UMG.hpp:364-365). UHorizontalBoxSlot (:734), UVerticalBoxSlot (:1800), UOverlaySlot
+--     (:1056) and USizeBoxSlot (:1328) declare SetHorizontalAlignment / SetVerticalAlignment /
+--     SetPadding instead, and UPanelSlot itself (:1067) declares no setter at all. So on five of
+--     the six slot classes the old pair could never have done anything.
+--   * Both take STRUCTS — SetAnchors(FAnchors), SetAlignment(FVector2D). A struct argument on an
+--     unread declaration is the category that faults inside UE4SS marshalling, where pcall does
+--     NOT catch it and the process dies. The pcall around them was never protection.
+--
+-- What replaces them is one ENUM call: SetHorizontalAlignment(TEnumAsByte<EHorizontalAlignment>),
+-- declared by every box/overlay/size slot, with HAlign_Left = 1 confirmed at
+-- SlateCore_enums.hpp:91-97 (which is where M.HALIGN's numbers come from). It goes through
+-- core/signature, so if this slot IS a CanvasPanelSlot the live parameter walk finds no such
+-- function and the call is REFUSED and logged rather than made — and that log line is itself the
+-- answer to the question below, from an ordinary session instead of a probe.
+--
+-- TODO(ui-menubutton-inner-slot): still unknown — whether a widget named `HorizontalBox_0` is
+-- in a created WBP_Title_MenuButton's tree AT ALL, and if so which slot class it occupies.
+-- dumps/cxx/WBP_Title_MenuButton.hpp:11-15 lists the button's five declared widget members —
+-- Image_161, Image_Icon_Appeal, SizeBox_Icon, Test_Content, WBP_PalInvisibleButton — and
+-- HorizontalBox_0 is not among them, while the two names this file DOES match by string are.
+-- That is not proof of absence (a widget with "Is Variable" unchecked gets no member and still
+-- exists in the WidgetTree), so what is owed is one line off a live button: findByName returning
+-- nil means the name is stale and the whole function should go; a slot whose class this now logs
+-- means it is real and the alignment is settled.
 local function leftAlignButtonContent(btn)
     local inner = M.findByName(btn, M.PATHS.menuButtonInner)
-    if not (inner and inner:IsValid()) then return end
-    pcall(function()
-        local slot = inner.Slot
-        slot:SetAnchors({ Minimum = { X = 0.0, Y = 0.5 }, Maximum = { X = 0.0, Y = 0.5 } })
-        slot:SetAlignment({ X = 0.0, Y = 0.5 })
-    end)
+    if not alive(inner) then return false end
+    local slot
+    pcall(function() slot = inner.Slot end)
+    if not alive(slot) then return false end
+    -- ByteProperty: UE spells an enum parameter either ByteProperty or EnumProperty and
+    -- signature treats the two as equivalent, so naming one covers both.
+    local ok = sig.call(slot, "SetHorizontalAlignment", { "ByteProperty" }, M.HALIGN.LEFT)
+    return ok == true
 end
 
 -- Clone the game's title menu button as a clickable row. Returns (button, invBtn,
@@ -453,11 +532,31 @@ end
 -- addScroll. The typed names are only a fallback, and they go last because UE4SS does not
 -- always answer an unknown method with nil — V7a recorded it handing back a TrivialObject —
 -- so asking a ScrollBox for AddChildToVerticalBox is a question worth not asking first.
+local function slotClassName(slot)
+    local ok, n = pcall(function() return slot:GetClass():GetFName():ToString() end)
+    return (ok and type(n) == "string") and n or nil
+end
+
 function M.addChild(panel, child)
-    return tryAdd(panel, "AddChild", child)
+    local slot = tryAdd(panel, "AddChild", child)
         or tryAdd(panel, "AddChildToVerticalBox", child)
         or tryAdd(panel, "AddChildToHorizontalBox", child)
         or tryAdd(panel, "AddChildToOverlay", child)
+    if not slot then return nil end
+
+    -- A CanvasPanelSlot is the one slot class that lays its child out by OFFSETS, and a fresh
+    -- one's are all zero — so a widget added to a canvas (which is what M.gameUIRoot hands back:
+    -- UMG.hpp:347 says a UCanvasPanel answers with a UCanvasPanelSlot) occupies a 0x0 box and
+    -- never draws. bAutoSize is what makes it take its own desired size instead, and it is the
+    -- ONE way to fix that without a struct argument: SetAutoSize(bool) at UMG.hpp:363, against
+    -- SetSize/SetPosition/SetOffsets/SetAnchors/SetAlignment which all take FVector2D, FMargin
+    -- or FAnchors and are therefore not callable on evidence we have.
+    -- Gated on the class name rather than tried blind: every box slot would otherwise log a
+    -- refusal per child, and a title-menu entry is a box slot.
+    if slotClassName(slot) == "CanvasPanelSlot" then
+        sig.call(slot, "SetAutoSize", { "BoolProperty" }, true)
+    end
+    return slot
 end
 
 function M.addV(vbox, child, padTop)

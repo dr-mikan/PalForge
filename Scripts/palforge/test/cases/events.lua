@@ -18,9 +18,11 @@ local event   = require("palforge.core.event")
 local s = T.suite("events")
 
 -- Channels whose DISPATCH reaches live player content on any payload at all. Everything else
--- resolves through ctx.key / ctx.actor / ctx.itemId, so an inert marker payload dispatches to
--- nothing. (tick is deliberately NOT in here: one extra heartbeat is indistinguishable from the
--- 500 ms one the game already sends, and event.every can only be exercised through it.)
+-- resolves through ctx.key / ctx.actor / ctx.itemId / ctx.buildId / ctx.skillId, so an inert
+-- marker payload dispatches to nothing — including the four skill.* channels added in
+-- 2026-07, which key on ctx.skillId and no-op without one. (tick is deliberately NOT in here:
+-- one extra heartbeat is indistinguishable from the 500 ms one the game already sends, and
+-- event.every can only be exercised through it.)
 local LIVE_HOOKS = { ["world.ready"] = true, ["world.left"] = true }
 
 -- Emit `n` heartbeats. pcall'd because a live session has other subscribers on this channel and

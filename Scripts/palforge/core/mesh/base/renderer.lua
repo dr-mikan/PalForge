@@ -92,15 +92,41 @@ end
 
 -- Candidate parameter names to probe on the (unknown) base material. Each is written in
 -- turn; the ones the material does not carry are silent no-ops.
--- TODO(mesh-material-params): NARROWED to the names alone. dumps/cxx/Engine.hpp:17572 /
--- :17576 / :17574 settle the three writes themselves — SetVectorParameterValue(FName,
--- FLinearColor), SetScalarParameterValue(FName, float), SetTextureParameterValue(FName,
--- UTexture*) — so a call that runs is reaching a real UFunction with the right arity and
--- the right argument types, and "the write did not execute" is eliminated as an
--- explanation for an unchanged mesh. What is left is exactly one question: WHICH names a
--- Palworld material carries. The dump cannot answer it (parameter names are asset data,
--- not class declarations) and nothing else in dumps/ enumerates a loaded Material, so it
--- takes an in-game probe: write each name onto a real MID and watch which one is visible.
+--
+-- TODO(mesh-material-params): the dump CANNOT name a parameter and never will — a
+-- CXXHeaderDump records the classes in the binary, and a material's parameter names are
+-- asset data inside a .uasset. What the dump CAN do, and now has, is turn the probe from
+-- "write six names and stare at the mesh" into a read with no writing in it at all:
+--
+--   Engine.hpp:17540  class UMaterialInstance : public UMaterialInterface
+--   Engine.hpp:17548  TArray<FScalarParameterValue>  ScalarParameterValues
+--   Engine.hpp:17549  TArray<FVectorParameterValue>  VectorParameterValues
+--   Engine.hpp:17551  TArray<FTextureParameterValue> TextureParameterValues
+--   Engine.hpp:7652   struct FVectorParameterValue { FMaterialParameterInfo ParameterInfo;
+--                                                    FLinearColor ParameterValue; FGuid ... }
+--   Engine.hpp:4038   struct FMaterialParameterInfo { FName Name; ... }
+--
+-- Those are reflected PROPERTIES, so a material instance that is already in the world can
+-- simply be ASKED which parameters it carries, by name, without calling anything and
+-- without touching a save. Renderer.describeMaterials below does exactly that, and
+-- test/cases/mesh drives it against the live player pawn on F1.
+--
+-- Two things that read like answers and are not, so nobody spends a run on them:
+--   * K2_GetVectorParameterValue (Engine.hpp:17583) cannot VALIDATE a name on a MID. A
+--     dynamic instance stores whatever it is handed in its own override array, so it hands
+--     back a bogus name's value just as happily as a real one. Read the parent instance's
+--     arrays; do not interrogate the MID we made.
+--   * a plain UMaterial has no such array — its parameters live in the expression graph,
+--     which is not reflected. The names come off a material INSTANCE (a MIC on a real
+--     asset), which is what a Palworld mesh actually carries: the game's own
+--     UPalItemFlowSplineComponent declares GetBuildObjectMaterialInstanceNormal(
+--     UMeshComponent*, int32) and GetMaterialInstanceVectorParameterValue(UMaterialInstance*,
+--     FName) — Pal.hpp:21573 / :21572 — so build objects are instances read by parameter
+--     name in the shipping game itself.
+-- The three writes are settled and are not what is missing: Engine.hpp:17572 / :17576 /
+-- :17574 declare SetVectorParameterValue(FName, FLinearColor), SetScalarParameterValue(
+-- FName, float) and SetTextureParameterValue(FName, UTexture*) exactly as written below,
+-- so "the write did not execute" is eliminated as an explanation for an unchanged mesh.
 Renderer.COLOR_PARAMS    = { "Color", "BaseColor", "Tint", "BaseColorTint", "Albedo", "EmissiveColor" }
 Renderer.TEXTURE_PARAMS  = { "BaseColor", "Texture", "Albedo", "Diffuse", "BaseTexture", "MainTexture" }
 Renderer.EMISSIVE_PARAMS = { "EmissiveColor", "Emissive", "EmissiveColour" }
@@ -109,15 +135,33 @@ Renderer.EMISSIVE_PARAMS = { "EmissiveColor", "Emissive", "EmissiveColour" }
 -- material of its own (a fresh ProceduralMeshComponent section is the standing case:
 -- CreateAndSetMaterialInstanceDynamic returns nil there). StaticFindObject only returns
 -- ALREADY-LOADED objects, so we try several and take the first present.
--- TODO(mesh-base-material): NARROWED to asset availability. The API half is settled —
--- dumps/cxx/Engine.hpp:19841 declares CreateAndSetMaterialInstanceDynamicFromMaterial(
--- int32 ElementIndex, UMaterialInterface* Parent) exactly as createMids calls it, so if a
--- base material is ever found the parenting call itself is right. What the dump cannot
--- say is whether any of these paths EXISTS in a cooked shipping build: it records classes
--- from the binary, not the assets in the pak. The one live sweep on disk
--- (dumps/reflection/05_assets.txt) enumerates SkeletalMesh, StaticMesh and Texture2D but
--- never sweeps Material at all, so nothing in this tree names a single loaded material.
--- Still an in-game probe: find ANY loaded UMaterialInterface that can serve as a parent.
+-- TODO(mesh-base-material): the dump CANNOT answer this one either, and the reason is
+-- worth stating once so nobody re-reads dumps/cxx/ hoping. A CXXHeaderDump lists the
+-- classes compiled into the binary; whether /Engine/BasicShapes/BasicShapeMaterial was
+-- COOKED INTO THE PAK is a property of the shipped content, and no header mentions an
+-- asset path. dumps/reflection/05_assets.txt is the only live asset evidence in the tree
+-- and it sweeps AnimMontage, AnimSequence, SkeletalMesh, StaticMesh, AkAudioEvent,
+-- SoundBase, SoundWave and Texture2D — eight classes, no Material. So not one material in
+-- this tree is known to be loadable, and the five paths below remain five guesses.
+--
+-- The API half IS settled: Engine.hpp:19841 declares
+-- CreateAndSetMaterialInstanceDynamicFromMaterial(int32 ElementIndex, UMaterialInterface*
+-- Parent) exactly as createMids calls it, so the moment a parent is found the parenting
+-- call is right.
+--
+-- THE PROBE THAT WOULD CLOSE IT, and it needs no asset path at all. A material that is
+-- currently RENDERING is by definition cooked, loaded and usable as a parent, and
+-- Engine.hpp:19824 declares UPrimitiveComponent::GetMaterial(int32 ElementIndex) as the
+-- way to reach it off any mesh component in the world. So: in a loaded save, take a
+-- component that is visibly drawing (the player pawn's own .Mesh is the always-present
+-- one; a nearby PalBuildObject's UStaticMeshComponent is the closest thing to what a
+-- procedural marker wants to look like), call GetMaterial(0), and print
+-- GetFullName() — that object path goes to the FRONT of the list below, and
+-- Renderer.describeMaterials prints it together with the parameter names the same
+-- material carries, which is the OTHER open mesh item. One read answers both.
+-- Two cheaper checks worth running in the same breath, in this order:
+--   1. Renderer.probeMaterials() — whether any of the five below happens to be loaded;
+--   2. FindAllOf("MaterialInstanceConstant") — the sweep 05_assets.txt never did.
 -- The one in-game record of this path is still "no-MID -> white".
 Renderer.BASE_MATERIAL_CANDIDATES = {
     "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",       -- has a "Color" vector param
@@ -184,6 +228,125 @@ function Renderer.probeMaterials(extra, sink)
     end
     for _, p in ipairs(Renderer.BASE_MATERIAL_CANDIDATES) do try(p) end
     for _, p in ipairs(extra or {}) do try(p) end
+    return out
+end
+
+-- How many material slots `comp` has. Falls back to 1 (element 0 only) when the getter is
+-- not there — that is exactly the ProceduralMeshComponent single-section case. It sits up
+-- here rather than beside createMids because describeMaterials walks the same slots.
+local function slotCount(comp)
+    local n
+    pcall(function() n = comp:GetNumMaterials() end)
+    n = tonumber(n) or 0
+    if n < 1 then return 1 end
+    if n > 32 then return 32 end   -- sanity clamp; nothing we dress has more slots than this
+    return n
+end
+
+-- One element out of a UE4SS TArray, unwrapped. Array elements arrive wrapped in
+-- RemoteUnrealParam on this build — the trap that made an icon column read the right
+-- LENGTH with nothing in it — so anything walking a TArray here goes through this.
+local function unwrap(v)
+    if type(v) == "userdata" then
+        local ok, inner = pcall(function() return v.get and v:get() end)
+        if ok and inner ~= nil then return inner end
+    end
+    return v
+end
+
+-- Call `fn(elem)` for each element of a UE4SS TArray. Three access shapes are tried,
+-- because UE4SS spells array access differently across builds and this tree has been
+-- bitten by each: ForEach, 1-based [i], 0-based Get(i-1). Pure READ; calls nothing.
+local function eachElement(arr, fn)
+    if arr == nil then return 0 end
+    local seen = 0
+    pcall(function()
+        if arr.ForEach then
+            arr:ForEach(function(_, elem) seen = seen + 1; pcall(fn, unwrap(elem)) end)
+        end
+    end)
+    if seen > 0 then return seen end
+
+    local n = 0
+    pcall(function() if arr.GetArrayNum then n = arr:GetArrayNum() end end)
+    for i = 1, n do
+        local e
+        pcall(function() e = unwrap(arr[i]) end)
+        if e == nil then pcall(function() e = unwrap(arr:Get(i - 1)) end) end
+        if e ~= nil then seen = seen + 1; pcall(fn, e) end
+    end
+    return seen
+end
+
+-- The parameter NAMES held in one of a material instance's override arrays, as a list of
+-- strings. `field` is "VectorParameterValues" / "ScalarParameterValues" /
+-- "TextureParameterValues" — reflected properties on UMaterialInstance
+-- (dumps/cxx/Engine.hpp:17548-17551), whose elements each carry an FMaterialParameterInfo
+-- with an FName Name (:7652 -> :4038). Empty is a real answer: a material with no
+-- overrides in that category, or a plain UMaterial, which keeps its parameters in an
+-- expression graph that is not reflected at all.
+local function paramNames(mat, field)
+    local out = {}
+    local arr
+    pcall(function() arr = mat[field] end)
+    eachElement(arr, function(entry)
+        local ok, name = pcall(function()
+            return entry.ParameterInfo.Name:ToString()
+        end)
+        if ok and type(name) == "string" and #name > 0 then out[#out + 1] = name end
+    end)
+    return out
+end
+
+-- READ what materials `comp` is wearing and which parameter names each one carries, and
+-- write NOTHING. This is the probe both open mesh items are waiting on, and it is safe to
+-- run unattended on a real save precisely because it only reads:
+--
+--   * mesh-base-material wants ONE loaded UMaterialInterface that can parent a MID. A
+--     material that is currently rendering is cooked, loaded and usable, so the full name
+--     printed here is an answer rather than a guess (Engine.hpp:19824 GetMaterial).
+--   * mesh-material-params wants the NAMES a Palworld material carries, which is asset
+--     data no header can hold — but a material INSTANCE lists its own overrides in
+--     reflected arrays (Engine.hpp:17548-17551), so they can be read off a live object.
+--
+-- `sink` is called as sink(line) for each line; without one the results come back as a
+-- list of { element, material, vector, scalar, texture } for the caller to report.
+function Renderer.describeMaterials(comp, sink)
+    local out = {}
+    if not isLive(comp) then
+        if sink then pcall(sink, "MATDESC no live component to read") end
+        return out
+    end
+
+    local function say(line) if sink then pcall(sink, line) end end
+
+    for elem = 0, slotCount(comp) - 1 do
+        local mat
+        pcall(function() mat = comp:GetMaterial(elem) end)
+        if not isLive(mat) then
+            say(string.format("MATDESC [%d] no material on this slot", elem))
+        else
+            local path, cls
+            pcall(function() path = mat:GetFullName() end)
+            pcall(function() cls = mat:GetClass():GetFName():ToString() end)
+            local rec = {
+                element = elem,
+                material = tostring(path or "?"),
+                class    = tostring(cls or "?"),
+                vector   = paramNames(mat, "VectorParameterValues"),
+                scalar   = paramNames(mat, "ScalarParameterValues"),
+                texture  = paramNames(mat, "TextureParameterValues"),
+            }
+            out[#out + 1] = rec
+            say(string.format("MATDESC [%d] %s (%s)", elem, rec.material, rec.class))
+            say(string.format("MATDESC [%d]   vector: %s", elem,
+                #rec.vector > 0 and table.concat(rec.vector, ", ") or "(none)"))
+            say(string.format("MATDESC [%d]   scalar: %s", elem,
+                #rec.scalar > 0 and table.concat(rec.scalar, ", ") or "(none)"))
+            say(string.format("MATDESC [%d]   texture: %s", elem,
+                #rec.texture > 0 and table.concat(rec.texture, ", ") or "(none)"))
+        end
+    end
     return out
 end
 
@@ -277,17 +440,6 @@ function Renderer:forgetMaterial(actor)
         if pcall(function() rec.comp:SetMaterial(elem, mat) end) then restored = true end
     end
     return restored
-end
-
--- How many material slots `comp` has. Falls back to 1 (element 0 only) when the getter is
--- not there — that is exactly the ProceduralMeshComponent single-section case.
-local function slotCount(comp)
-    local n
-    pcall(function() n = comp:GetNumMaterials() end)
-    n = tonumber(n) or 0
-    if n < 1 then return 1 end
-    if n > 32 then return 32 end   -- sanity clamp; nothing we dress has more slots than this
-    return n
 end
 
 -- Create the dynamic material instance(s) for `comp` and remember them against `actor`.

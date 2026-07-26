@@ -30,11 +30,15 @@
 --     named EPalItemOperationResult, which the log carries). Observed in a real save:
 --     "give Wood x3: 140 -> 143", with the game's own pickup event firing beside it
 --     ("Wood onObtain: count=3").
---   * :take DOES NOT WORK YET, and reports false rather than pretending. No removal route is
---     known on this build: the inventory's whole class chain declares nothing that subtracts an
---     item, and a NEGATIVE Count through the add — the standing hypothesis, now finally
---     testable — is accepted and does nothing at all. So a pack cannot charge a cost yet. See
---     TODO(item-remove-call) in utils/items for what has been eliminated and what is left.
+--   * :take is WIRED BUT UNWATCHED, and it is measured the same way — true only when the count
+--     was seen to FALL. It does NOT drop the items on the ground any more; the route is the
+--     game's own consume, APalWeaponBase:RequestConsumeItem (dumps/cxx/Pal.hpp:11776), reached
+--     through the player's own loadout component, so nothing is left lying at the player's feet
+--     for them to walk back over. Two things to know before planning around it: the player must
+--     have a spawned weapon actor (the consume is a method ON one — equip anything and the route
+--     exists), and no run has watched it succeed yet. The inventory itself has no removal at all:
+--     its whole class chain declares nothing that subtracts, and a NEGATIVE Count through the add
+--     was measured accepted and inert (161 -> 161). See TODO(item-remove-call) in utils/items.
 --
 -- WHAT THAT COST, since it shaped this file for a long time. The add was blocked on ONE
 -- argument. The live declaration is five parameters and a return —
@@ -64,7 +68,7 @@
 --   }
 --   Item.get("Wood"):count()       -- what the inventory holds now (nil = could not read)
 --   Item.get("Wood"):give(10)      -- true only if the count was seen to rise; see ACTIONS above
---   Item.get("Wood"):take(3)       -- drops them on the GROUND; true only if the count fell
+--   Item.get("Wood"):take(3)       -- consumes them; true only if the count was seen to fall
 
 local om     = require("palforge.core.object_manager")
 local icons  = require("palforge.core.icons")
@@ -104,15 +108,25 @@ local Events = schema.define("Item.Spec.Events", {
                    doc = "LIVE - entered the inventory (ctx.count, ctx.via)" },
     { "onUse",     type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "LIVE - used / consumed (ctx.actor = the local player pawn)" },
-    -- TODO(item-craft-source): unknown which UFunction reports a craft COMPLETING and which
-    -- of its params carries the produced item id + count. Until one is observed this only
-    -- fires from a manual event.emit("item.craft", ...).
+    -- TODO(item-craft-source): a source IS wired now — core/event hooks
+    -- OnFinishWorkInServer on UPalMapObjectConvertItemModel and UPalMapObjectProductItemModel,
+    -- the two work models that carry an item id (dumps/cxx/Pal.hpp:22669 and :24341). What is
+    -- unverified is whether those hooks FIRE: neither class is among the 21 in
+    -- dumps/reflection/02_reflection.txt, so the evidence is the header dump alone. `ctx.count`
+    -- is nil by design — the count lives in the recipe row and a hook is no place for a
+    -- DataTable read.
     { "onCraft",   type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "declarable; NO native source exists — fires only on a manual emit" },
-    -- TODO(item-discard-source): unknown which UFunction reports a drop / discard / consume.
-    -- Whatever UPalCheatManager:DropItem drives internally is now the first place to look —
-    -- that is the call :take makes, so a hook that catches a drop would also catch PalForge's
-    -- own removals — but nothing has been hooked or observed there yet.
+                   doc = "fires when a crafting machine finishes an item (unverified in game)" },
+    -- TODO(item-discard-source): a source IS wired now, and the long-standing hypothesis that a
+    -- drop goes through AddItem_ServerInternal is DEAD — that hook was armed successfully and
+    -- fired zero times in two sessions because a drop does not go near it. It goes through
+    -- UPalNetworkItemComponent: RequestDrop_ToServer for the ground drop and
+    -- RequestDispose_ToServer for the inventory-menu trash (dumps/cxx/Pal.hpp:25696, :25697).
+    -- Both are _ToServer RPCs, which always go through ProcessEvent and are therefore the shape
+    -- RegisterHook can see — the same shape as RequestBuild_ToServer, which already works here.
+    -- UNVERIFIED IN GAME, and one weakness is known in advance: the parameters carry SLOT ids,
+    -- not item ids, so the source resolves the slot through the player's containers before the
+    -- call lands. When it cannot, it emits NOTHING rather than guessing an id.
     { "onDiscard", type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "declarable; NO native source exists — fires only on a manual emit" },
 })
@@ -257,35 +271,35 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 -- ---- actions ----
 
----Add `count` of this item to the local player's inventory (default 1) through the game's own
----UPalCheatManager:GetItem(FName StaticItemId, int32 Count), and MEASURE the outcome.
+---WORKS, and is measured. Add `count` of this item to the local player's inventory (default 1)
+---through the inventory's OWN write, PalPlayerInventoryData:AddItem_ServerInternal.
 ---
 ---`ok` is the measurement, never the call: CountItemNum is read before and after, and true means
----the count was seen to RISE. false means the cheat manager was missing (needs
----CheatManagerEnabler), the live declaration did not match so the call was refused outright, the
----count could not be read afterwards (UNKNOWN is never reported as success), or the count simply
----did not move — an item id the game does not know and a full inventory both execute happily and
----add nothing. Every outcome logs a line naming the item, the count and the evidence level.
----⚠️ NOT YET OBSERVED IN GAME: the signature is UE4SS's CXXHeaderDump of this install
----(dumps/cxx/Pal.hpp:16398), checked against the live class by core.signature, and the cheat
----manager is the object PalForge already unlocks technologies through here — but no run has
----exercised GetItem yet. See utils.items.give.
+---the count was seen to RISE. false means the inventory could not be reached, the live declaration
+---did not match so the call was refused outright, the inventory REFUSED and named its reason (it
+---answers a named EPalItemOperationResult, which the log carries), the count could not be read
+---afterwards (UNKNOWN is never reported as success), or the count did not move. Every outcome logs
+---a line naming the item, the count and the evidence level.
+---Observed in a real save: "give Wood x3: 140 -> 143", with the game's own pickup event firing
+---alongside it. See utils.items.give.
 ---@param count integer?
 ---@return boolean ok  # true only when the inventory count was measured to rise
 function Handle:give(count) return items.give(self.id, count or 1) end
 
----Remove `count` of this item from the local player's inventory (default 1) through the game's
----own UPalCheatManager:DropItem(const FName StaticItemId, const int32 Num), measured the same
----way as :give — true only when the count was seen to FALL.
+---Remove `count` of this item from the local player's inventory (default 1) through the game's own
+---APalWeaponBase:RequestConsumeItem(const FName& StaticItemId, int32 ConsumeNum), measured the
+---same way as :give — true only when the count was seen to FALL.
 ---
----⚠️ THE ITEMS ARE DROPPED, NOT DESTROYED. They leave the inventory and land on the ground at the
----player's feet, where anyone can pick them back up. The inventory really did lose them, which is
----what :take means, but plan for the pile: a pack that charges a price this way leaves the price
----lying on the floor. Nothing on this build deletes an item instead — the inventory's whole class
----chain declares no remove/consume/discard function at all (utils.items.take,
----TODO(item-remove-call)).
----The request is clamped to what the inventory actually holds, and skipped when it holds none.
----⚠️ NOT YET OBSERVED IN GAME either (dumps/cxx/Pal.hpp:16453; same route, same caveat as :give).
+---The items are CONSUMED, not dropped: nothing lands at the player's feet for them to walk back
+---over, which is what makes charging a cost possible at all. The request is clamped to what the
+---inventory actually holds, and skipped when it holds none.
+---⚠️ TWO CAVEATS. The consume is a method on a WEAPON ACTOR (it is the path a throw weapon takes
+---when it spends what it threw), reached through the player's own loadout component — so a player
+---with nothing equipped has no route and this reports false saying exactly that. And ⚠️ NO RUN HAS
+---WATCHED IT SUCCEED yet: the declaration is checked against the live class by core.signature
+---before anything is marshalled, but whether it spends the id it is HANDED is the open half of
+---TODO(item-remove-call). The inventory itself cannot subtract — see utils.items.take for the
+---whole eliminated list, including the negative-Count hypothesis that was finally measured dead.
 ---@param count integer?
 ---@return boolean ok  # true only when the inventory count was measured to fall
 function Handle:take(count) return items.take(self.id, count or 1) end

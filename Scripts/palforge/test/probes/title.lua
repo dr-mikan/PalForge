@@ -1,14 +1,25 @@
 -- palforge/test/probes/title.lua — what the title screen's own widgets are actually made of.
 --
--- Closes plan/TODO.md `ui-menubutton-inner-slot` (Probe: F8, marked at
--- native/ui/_widget.lua:356): the CLASS of `HorizontalBox_0`.Slot inside a freshly created
--- WBP_Title_MenuButton, versus the same slot inside a NATIVE title entry — the one fact that
--- decides whether leftAlignButtonContent's SetAnchors/SetAlignment do anything at all. While
--- the native tree is walked it also re-confirms the three names TitleMenu matches by string
--- ("VerticalBox_0", "SizeBox_4", "WBP_Title_MenuButton_ExitGame"): if any of them changed,
--- TitleMenu silently injects nothing today. THE GAME MUST BE SITTING ON THE TITLE SCREEN —
--- main menu, no save loaded, which is exactly where support.player() is legitimately nil.
--- Bind it with: test.bind("F8", function() require("palforge.test.probes.title").run() end).
+-- Closes plan/TODO.md `ui-menubutton-inner-slot` (Probe: F8, marked in
+-- native/ui/_widget.lua at leftAlignButtonContent). dumps/cxx has since narrowed the item, and
+-- this probe now answers what is LEFT of it rather than what it originally asked:
+--
+--   * SETTLED by the dump, do not re-derive it here. SetAnchors/SetAlignment exist on
+--     UCanvasPanelSlot and on no other slot class in UMG (UMG.hpp:364-365), and both take
+--     structs — so leftAlignButtonContent no longer calls them. It calls
+--     SetHorizontalAlignment(HAlign_Left) through core/signature instead, which every box,
+--     overlay and size slot declares.
+--   * STILL OPEN, and what the two questions below are for: does a widget named
+--     `HorizontalBox_0` exist in a created button AT ALL — the class declares five widget
+--     members and it is not one of them (dumps/cxx/WBP_Title_MenuButton.hpp:11-15) — and if it
+--     does, which slot class is it in. A `-> MISSING` line under "created button child" means
+--     the name is stale and leftAlignButtonContent should be deleted outright.
+--
+-- While the native tree is walked it also re-confirms the three names TitleMenu matches by
+-- string ("VerticalBox_0", "SizeBox_4", "WBP_Title_MenuButton_ExitGame"): if any of them
+-- changed, TitleMenu silently injects nothing today. THE GAME MUST BE SITTING ON THE TITLE
+-- SCREEN — main menu, no save loaded, which is exactly where support.player() is legitimately
+-- nil. Bind it with: test.bind("F8", function() require("palforge.test.probes.title").run() end).
 --
 -- Read-only: nothing is added to the viewport, no native widget is reparented, no property
 -- is written. The single object this probe brings into being is one orphan WBP_Title_MenuButton
@@ -148,9 +159,9 @@ local function reportSlot(w, tag)
     return cf, slot
 end
 
----Ask a slot's own class whether the two calls leftAlignButtonContent makes exist on it.
----A CanvasPanelSlot has both; a HorizontalBoxSlot/SizeBoxSlot has neither, which is the
----whole answer to this item.
+---Ask a slot's own class which alignment setters it declares. SetHorizontalAlignment is the one
+---leftAlignButtonContent now calls; SetAnchors/SetAlignment are printed only to confirm on the
+---live build what UMG.hpp:364-365 says — that they belong to UCanvasPanelSlot and nothing else.
 local function reportSlotSetters(slot, tag)
     if not probe.valid(slot) then return end
     local cls; pcall(function() cls = slot:GetClass() end)
@@ -265,20 +276,27 @@ local function ui_menubutton_inner_slot()
 
     if createdSlotClass then
         local isCanvas = createdSlotClass:find("CanvasPanelSlot") ~= nil
-        probe.note("HIT: leftAlignButtonContent (native/ui/_widget.lua:358) calls "
-            .. "SetAnchors/SetAlignment on this slot. It is %s, so those two calls %s. %s",
+        probe.note("HIT: HorizontalBox_0 IS in a created button and its slot is %s. "
+            .. "leftAlignButtonContent calls SetHorizontalAlignment(HAlign_Left) through "
+            .. "core/signature, so %s Either way the item is settled — record this class in "
+            .. "native/ui/_widget.lua and drop the TODO.",
             createdSlotClass,
-            isCanvas and "land" or "raise inside the pcall and do nothing",
-            isCanvas and "Keep the function and drop the TODO."
-                or ("Replace them with the setters listed under PARAM above for this slot "
-                    .. "class (a box slot aligns via SetHorizontalAlignment/SetPadding), or "
-                    .. "delete leftAlignButtonContent and rely on clickableRow's own overlay."))
+            isCanvas and ("a CanvasPanelSlot declares no such setter (UMG.hpp:350-374) and "
+                    .. "signature REFUSES the call and logs it: the label stays centred, and the "
+                    .. "only struct-free way to move it would be SetAutoSize + an offset write, "
+                    .. "which is not worth it for a cosmetic. Delete leftAlignButtonContent.")
+                or ("this slot class declares it (see the PARAM lines above) and the call lands: "
+                    .. "the label really is left-aligned."))
     else
-        probe.note("MISS: no created-button slot was read. If lib/pc/class all resolved above "
-            .. "but Create returned nil, WidgetBlueprintLibrary:Create is the blocker and the "
-            .. "item stays open; if WBP_Title_MenuButton_C printed 'absent', you are not on the "
-            .. "title screen — quit to the main menu and run this again before concluding "
-            .. "anything.")
+        probe.note("MISS: no created-button slot was read, and WHICH miss it is matters. If the "
+            .. "'created button child HorizontalBox_0' line above says MISSING while Test_Content "
+            .. "and WBP_PalInvisibleButton resolved, the answer is that the name is STALE — the "
+            .. "class declares five widget members and HorizontalBox_0 is not one of them "
+            .. "(dumps/cxx/WBP_Title_MenuButton.hpp:11-15) — so delete leftAlignButtonContent and "
+            .. "PATHS.menuButtonInner with it. If lib/pc/class all resolved but Create returned "
+            .. "nil, WidgetBlueprintLibrary:Create is the blocker and the item stays open. If "
+            .. "WBP_Title_MenuButton_C printed 'absent', you are not on the title screen — quit "
+            .. "to the main menu and run this again before concluding anything.")
     end
 
     if root then

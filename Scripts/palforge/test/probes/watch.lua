@@ -1,14 +1,22 @@
 -- palforge/test/probes/watch.lua — arms the live hooks and watches while YOU play (the F7 probe).
 --
--- Closes five plan/TODO.md items that no amount of reflection can settle, because each one asks
+-- Closes seven plan/TODO.md items that no amount of reflection can settle, because each one asks
 -- "does the game CALL this when a human does that": item-craft-source, item-discard-source,
--- pal-spawned-hook, pal-spawned-fresh and skill-hit-source. The sixth section, pal-spawn-
--- placement, now runs as a REGRESSION check: that item closed on 2026-07-26 when the spawn was
--- observed placing a pal on its exact coordinate, and this is where a build that breaks it, or a
--- machine slower than the one it was measured on, would show up. It needs a
--- LOADED SAVE with a workbench, a stack of Wood, a Berries and a pal in the box within reach:
--- the probe arms hooks, prints a numbered list of actions, and then only YOU can make the game
--- fire them. Budget about 60 s of play.
+-- pal-spawned-hook, pal-spawned-fresh, skill-activate-source, skill-hit-source and
+-- skill-passive-source. The eighth section, pal-spawn-placement, now runs as a REGRESSION check:
+-- that item closed on 2026-07-26 when the spawn was observed placing a pal on its exact
+-- coordinate, and this is where a build that breaks it, or a machine slower than the one it was
+-- measured on, would show up. It needs a LOADED SAVE with a workbench, a stack of Wood, a
+-- Berries and a pal in the box within reach: the probe arms hooks, prints a numbered list of
+-- actions, and then only YOU can make the game fire them. Budget about 60 s of play.
+--
+-- WHAT CHANGED ON 2026-07-26, and it changes what this file is for. Every one of those seven
+-- questions used to be "which function, if any" — so the sections REFLECTED first and armed
+-- whatever a name-match turned up. dumps/cxx/Pal.hpp answered the "which function" half for all
+-- of them, and core/event.lua now emits every channel from a named, declared native call. So
+-- these sections arm THOSE EXACT PATHS and ask the one remaining question: does it fire. A
+-- section that prints no HOOK line is now a real finding about the shipping build, and each one
+-- says in its own MISS note which candidate is next.
 --
 -- THIS IS THE ONE PROBE THAT IS NOT PURELY PASSIVE. It registers native hooks, and UE4SS has
 -- no way to unregister one — everything it arms stays armed until you quit the game. It also
@@ -87,35 +95,12 @@ local function fieldsOf(v, names, tag)
     return n
 end
 
----Walk a value's whole class chain printing every property AND its current value. This is the
----full-fat version skill-hit-source asks for; it is budgeted because one damage struct can
----carry dozens of fields and this runs inside a hook.
-local function walkFields(v, tag, budget)
-    budget = budget or 40
-    if type(v) ~= "userdata" and type(v) ~= "table" then return end
-    local c; pcall(function() c = v:GetClass() end)
-    local depth, printed = 0, 0
-    while probe.valid(c) and depth < 6 and printed < budget do
-        probe.line("%s STRUCT[%d] %s", tag, depth, probe.full(c))
-        pcall(function()
-            c:ForEachProperty(function(pr)
-                if printed >= budget then return end
-                pcall(function()
-                    local n = probe.name(pr)
-                    printed = printed + 1
-                    local val; local ok = pcall(function() val = v[n] end)
-                    probe.line("%s   FIELD %s : %s = %s", tag, n, probe.className(pr),
-                        ok and render(val) or "read raised")
-                end)
-            end)
-        end)
-        local sup; pcall(function() sup = c:GetSuperStruct() end)
-        if not probe.valid(sup) then pcall(function() sup = c.SuperStruct end) end
-        c = sup
-        depth = depth + 1
-    end
-    if printed >= budget then probe.line("%s   ... fields capped at %d", tag, budget) end
-end
+-- REMOVED: walkFields, the in-hook "print every property of this struct and its value" walker.
+-- It existed for one caller — skill-hit-source, hunting a waza id somewhere inside the damage
+-- structs — and dumps/cxx/Pal.hpp printed those field lists statically instead
+-- (FPalDamageRactionInfo at :1885 has six fields and none of them is a skill; FPalDamageInfo at
+-- :1834 has forty and none of them is either). Running it again would spend a hook budget
+-- re-deriving an answer that is now written down, so it is gone rather than kept "just in case".
 
 ---Every UFunction name on a class, collected WITHOUT printing them. A class with 400 functions
 ---printed once per class would bury the run; the caller prints only what it matched.
@@ -195,70 +180,68 @@ end
 -- item-craft-source
 --=============================================================================
 
+-- The two production models core/event.lua now sources item.craft from, with the field on each
+-- that names the produced item. Both were found in dumps/cxx/Pal.hpp; see installItemSource.
+local CRAFT_SOURCES = {
+    { path  = "/Script/Pal.PalMapObjectConvertItemModel",
+      field = "CurrentRecipeId",  what = "recipe benches and furnaces" },
+    { path  = "/Script/Pal.PalMapObjectProductItemModel",
+      field = "ProductItemId",    what = "fixed-output producers" },
+}
+
 local function item_craft_source()
     probe.begin("item-craft-source")
-    probe.note("no candidate function for 'a bench finished an item' exists anywhere in either "
-        .. "tree, so this section REFLECTS first and arms whatever it found.")
+    probe.note("this section is no longer a fishing trip. dumps/cxx/Pal.hpp names the "
+        .. "craft-complete function outright — OnFinishWorkInServer(UPalWorkBase*), a UFUNCTION "
+        .. "bound to UPalWorkBase::OnFinishWorkInServerDelegate, declared on nine classes of "
+        .. "which two carry an item id — and core/event.lua's installItemSource already emits "
+        .. "item.craft from both. The ONE thing left is a firing, which only you can produce.")
 
-    probe.section("reflection: which craft/production functions exist at all")
+    probe.section("do the two classes exist on this build, and is the id field readable")
+    -- Neither class is among the 21 in dumps/reflection/02_reflection.txt, so their EXISTENCE
+    -- in the shipping binary has never actually been asked. That answer alone is load-bearing:
+    -- an absent class means core/event's tryHook is logging "hook unavailable" every session.
+    for _, c in ipairs(CRAFT_SOURCES) do
+        local cls = probe.class(c.path)
+        probe.line("NOTE %s -> %s  (%s; item id reads off .%s)", c.path,
+            cls and "PRESENT" or "ABSENT", c.what, c.field)
+        if cls then probe.params(cls, "OnFinishWorkInServer") end
+    end
+
+    probe.section("the wider sweep, in case a third production model is the one you use")
+    -- Kept, but with the class names CORRECTED: PalWorkProgressModel and PalMapObjectWorkeeModel
+    -- do not exist. Pal.hpp calls them UPalWorkProgress and UPalMapObjectWorkeeModule.
     local WORDS = { "craft", "product", "complete", "finish", "output", "work" }
-    local targets = {
-        "/Script/Pal.PalMapObjectProductItemModel",
+    for _, path in ipairs({
         "/Script/Pal.PalMapObjectConcreteModelBase",
-        "/Script/Pal.PalWorkProgressModel",
         "/Script/Pal.PalWorkProgress",
-        "/Script/Pal.PalMapObjectWorkeeModel",
-    }
-    local found = {}
-    for _, path in ipairs(targets) do
-        local cls, hits = grepFns(path, WORDS)
-        if cls and #hits > 0 then found[#found + 1] = { path = path, cls = cls, hits = hits } end
-    end
-    if #found == 0 then
-        probe.note("every candidate class is absent or exposes no matching function — that CLOSES "
-            .. "the reflection half: item.craft cannot be sourced from these classes on this build.")
-    end
-
-    probe.section("signatures of the strongest candidates")
-    -- The parameter list is the other half of the answer (which param carries the id + count),
-    -- and it is readable statically, so it is printed before anything is armed.
-    local shown = 0
-    for _, f in ipairs(found) do
-        for _, n in ipairs(f.hits) do
-            local low = n:lower()
-            if shown < 4 and (low:find("complete") or low:find("finish") or low:find("product")
-                or low:find("output") or low:find("craft")) then
-                probe.params(f.cls, n)
-                shown = shown + 1
-            end
-        end
-    end
-    if shown == 0 then probe.line("PARAM (nothing worth printing a signature for)") end
+        "/Script/Pal.PalMapObjectWorkeeModule",
+    }) do grepFns(path, WORDS) end
 
     probe.section("arming")
-    local armed = 0
-    for _, f in ipairs(found) do
-        local strong = {}
-        for _, n in ipairs(f.hits) do
-            local low = n:lower()
-            if low:find("complete") or low:find("finish") or low:find("product")
-                or low:find("output") or low:find("craft") then
-                strong[#strong + 1] = n
-            end
-        end
-        armed = armed + armDiscovered(f.path, strong, "craft", 12, 3)
+    -- Armed with the model's id field PRINTED, because "it fired" and "it fired with a readable
+    -- item id" are two different answers and core/event needs the second one.
+    for _, c in ipairs(CRAFT_SOURCES) do
+        local field = c.field
+        armDetailed(c.path .. ":OnFinishWorkInServer", "craft " .. field, 12,
+            function(n, self, a1)
+                local m = pget(self)
+                local id; pcall(function() id = m[field] end)
+                probe.line("HOOK craft %s #%d t=+%.1fs  self=%s  .%s=%s  work=%s",
+                    field, n, since(), render(m), field, render(id), render(pget(a1)))
+            end)
     end
-    probe.line("NOTE %d craft candidate hook(s) armed", armed)
 
     probe.note("ACTION 1 — craft ONE item at a workbench and let it finish. Then grep the log "
         .. "for 'HOOK craft'.")
-    probe.note("A HIT (any 'HOOK craft ...' line) names the craft-complete function and shows "
-        .. "which param carries the item id and count — installItemSource in core/event.lua can "
-        .. "then emit item.craft and Item onCraft goes live for every definition.")
-    probe.note("A MISS (no 'HOOK craft' line after you crafted, or '0 craft candidate hook(s) "
-        .. "armed') closes the cheap route permanently: craft completion is not on the "
-        .. "MapObject/WorkProgress models, and item.craft must be sourced from the get-log with a "
-        .. "discriminator, or stay author-emitted. Say which of the two you saw.")
+    probe.note("A HIT with a readable .CurrentRecipeId / .ProductItemId CONFIRMS item.craft: the "
+        .. "source is already wired, so Item onCraft is live for every definition and the doc "
+        .. "line in api/item.lua stops saying 'NO native source exists'.")
+    probe.note("A HIT with the id reading None/nil means the hook is right and the FIELD is not — "
+        .. "paste the line and core/event's craftSource changes one string.")
+    probe.note("A MISS (nothing after you crafted) with both classes PRESENT means the delegate "
+        .. "broadcast does not reach RegisterHook here; with a class ABSENT it means the shipping "
+        .. "build dropped it. Say which of the two you saw — they have different fixes.")
     probe.finish()
 end
 
@@ -268,22 +251,77 @@ end
 
 local ITEM_FIELDS = { "ID", "Id", "StaticItemId", "ItemId", "ItemName", "Num", "Count", "StackCount" }
 
+-- The FPalItemSlotIdAndNum a drop request carries, and the two hops core/event.lua takes to
+-- turn it into an item id. Printed rather than assumed: every one of those hops is unobserved.
+local SLOT_FIELDS = { "SlotId", "Num" }
+
 local function item_discard_source()
     probe.begin("item-discard-source")
-    probe.note("the standing hypothesis is that a DROP is just AddItem_ServerInternal arriving "
-        .. "with a NEGATIVE Count. Nobody has ever seen the sign of that param, so this hook "
-        .. "prints a1 as an FName string and a2 as a number VERBATIM, sign included.")
+    probe.note("the standing hypothesis — that a DROP is AddItem_ServerInternal with a NEGATIVE "
+        .. "Count — is DEAD, and dumps/cxx/Pal.hpp says why: dropping does not touch the "
+        .. "inventory add at all. UPalNetworkItemComponent (Pal.hpp:25686) declares "
+        .. "RequestDrop_ToServer(TArray<FPalItemSlotIdAndNum>, FVector, bool) at :25696 and "
+        .. "RequestDispose_ToServer(FGuid, FPalItemSlotIdAndNum) at :25697 — the ground-drop and "
+        .. "the inventory-menu trash, one class over from everywhere the search had been looking. "
+        .. "core/event.lua now sources item.discard from both. AddItem stays armed here as the "
+        .. "CONTROL: it should fire on the pickup and NOT on the drop.")
 
-    probe.section("reflection: is there a dedicated drop/discard function instead")
+    probe.section("does the component exist, and what do the two RPCs declare")
+    local comp = probe.class("/Script/Pal.PalNetworkItemComponent")
+    probe.line("NOTE /Script/Pal.PalNetworkItemComponent -> %s", comp and "PRESENT" or "ABSENT")
+    if comp then
+        probe.params(comp, "RequestDrop_ToServer")
+        probe.params(comp, "RequestDispose_ToServer")
+    end
+    probe.line("NOTE %d live PalNetworkItemComponent(s)", #probe.allOf("PalNetworkItemComponent"))
+
+    probe.section("reflection: confirm the inventory classes really have no removal")
     local WORDS = { "discard", "drop", "remove", "sub", "consume", "trash", "throw", "lost", "destroy" }
     grepFns("/Script/Pal.PalPlayerInventoryData", WORDS)
     grepFns("/Script/Pal.PalItemContainer", WORDS)
-    grepFns("/Script/Pal.PalMapObjectDropItemModel", WORDS)
-    grepFns("/Script/Pal.PalMapObjectPickableItemModel", WORDS)
+    grepFns("/Script/Pal.PalNetworkItemComponent", WORDS)
 
     probe.section("arming")
-    -- core/event.lua already hooks this same path for item.obtain; a second registration is
-    -- additive in UE4SS and does not disturb it. Ours is the one that prints the sign.
+    -- The parameters carry SLOT IDS, not item ids, so what has to be printed is whether the
+    -- slot can be walked at all: the container guid, the index, and — the thing core/event
+    -- needs — whether a UPalItemContainer can be found that matches.
+    armDetailed("/Script/Pal.PalNetworkItemComponent:RequestDrop_ToServer", "discard.drop", 12,
+        function(n, self, a1, a2, a3)
+            local tag = string.format("HOOK discard.drop #%d", n)
+            probe.line("%s t=+%.1fs  self=%s  location=%s  autoPickup=%s",
+                tag, since(), render(pget(self)), render(pget(a2)), render(pget(a3)))
+            local arr = pget(a1)
+            probe.line("%s   a1(array)=%s", tag, render(arr))
+            local i = 0
+            pcall(function()
+                arr:ForEach(function(_, e)
+                    i = i + 1
+                    if i > 4 then return end
+                    probe.line("%s   entry[%d] = %s", tag, i, render(e))
+                    fieldsOf(e, SLOT_FIELDS, tag)
+                    local sid; pcall(function() sid = e.SlotId end)
+                    if sid ~= nil then fieldsOf(sid, { "ContainerId", "SlotIndex" }, tag .. " SlotId") end
+                end)
+            end)
+            if i == 0 then
+                probe.line("%s   the TArray could not be walked with :ForEach — try #arr / arr[i]",
+                    tag)
+            end
+        end)
+
+    armDetailed("/Script/Pal.PalNetworkItemComponent:RequestDispose_ToServer", "discard.dispose", 12,
+        function(n, self, a1, a2)
+            local tag = string.format("HOOK discard.dispose #%d", n)
+            local info = pget(a2)
+            probe.line("%s t=+%.1fs  self=%s  requestId=%s  slotInfo=%s",
+                tag, since(), render(pget(self)), render(pget(a1)), render(info))
+            fieldsOf(info, SLOT_FIELDS, tag)
+            local sid; pcall(function() sid = info.SlotId end)
+            if sid ~= nil then fieldsOf(sid, { "ContainerId", "SlotIndex" }, tag .. " SlotId") end
+        end)
+
+    -- CONTROL. core/event.lua already hooks this same path for item.obtain; a second
+    -- registration is additive in UE4SS and does not disturb it.
     armDetailed("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal", "item.add", 30,
         function(n, self, a1, a2, a3, a4)
             local id, count = pget(a1), pget(a2)
@@ -301,13 +339,17 @@ local function item_discard_source()
     probe.note("ACTION 3 — destroy/trash one stack from the inventory menu.")
     probe.note("ACTION 4 — eat one Berries. Leave ~5 s between each so the t=+Ns stamps separate "
         .. "them (or type 'pf_mark drop' / 'pf_mark trash' / 'pf_mark eat' in the UE4SS console).")
-    probe.note("A HIT with SIGN NEGATIVE for any of the three means item.discard can be emitted "
-        .. "straight from installItemSource's existing AddItem hook — and it simultaneously "
-        .. "confirms that utils.items.take's negative-delta call really removes items.")
-    probe.note("A MISS (the hook fires only on pickups, never on a drop/trash/eat) means dropping "
-        .. "does NOT route through AddItem: item.discard needs one of the functions listed under "
-        .. "the reflection section above, and utils.items.take's negative delta is unproven. "
-        .. "Paste the reflection list too — it is the candidate set either way.")
+    probe.note("A HIT on 'HOOK discard.drop' / 'HOOK discard.dispose' with a readable .SlotIndex "
+        .. "confirms the EVENT half of item.discard. The ID half is separate: watch the log for "
+        .. "'[PalForge.event][warn] item.discard: the dropped slot could not be resolved' — its "
+        .. "ABSENCE means core/event resolved the slot and Item onDiscard is live.")
+    probe.note("A MISS on both, in single player, means a _ToServer call on a listen server is "
+        .. "executed directly rather than dispatched and the hook never sees it — that is the "
+        .. "one thing these two hooks cannot survive, and the next place to look is "
+        .. "UPalUIInventoryModel's DropLiftUpItem / TrashLiftUpItem (Pal.hpp:30831-30843), "
+        .. "which are UI-side and carry no item id.")
+    probe.note("The AddItem control should show 'positive' on the pickup only. A NEGATIVE line "
+        .. "would reopen the old hypothesis; nobody has ever seen one.")
     probe.finish()
 end
 
@@ -338,9 +380,12 @@ local function pal_spawned_hook()
     probe.note("A HIT only after the release/spawn, naming the new pal's BP class, confirms "
         .. "Pal.Spec.Events.onSpawned as LIVE and the doc string in api/pal.lua drops "
         .. "'(UNCONFIRMED candidate)'.")
-    probe.note("A MISS (0 lines across the whole window) closes the candidate permanently: "
-        .. "onSpawned must be re-sourced, and the fallbacks armed in the pal-spawned-fresh "
-        .. "section below are the next place to look.")
+    probe.note("A MISS (0 lines across the whole window) no longer means the game does not run "
+        .. "it — dumps/cxx settled that it does, because UPalCharacterManager's spawn entry "
+        .. "point subscribes to the very delegate map this function broadcasts (Pal.hpp:15538 "
+        .. "vs :9016). It means the BROADCASTER is not reachable through ProcessEvent, and the "
+        .. "replacement is a delegate TARGET: see the pal-spawned-fresh section, which arms "
+        .. "APalPlayerCharacter:OnCompleteInitializeParameter for exactly that reason.")
     probe.finish()
 end
 
@@ -356,15 +401,27 @@ local function pal_spawned_fresh()
         .. "above — read its 'HOOK pal.init' lines for this item too. This section arms only the "
         .. "FALLBACKS the TODO names, so nothing is hooked twice.")
 
-    probe.section("fallback 1: PalCharacter:BeginPlay")
+    probe.section("fallback 1: a delegate TARGET rather than the broadcaster")
+    -- THE point of this run. BroadcastOnCompleteInitializeParameter is the thing that CALLS the
+    -- delegates; APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter* InCharacter)
+    -- (dumps/cxx/Pal.hpp:10637) is one of the things it calls, and a dynamic-delegate target is
+    -- always invoked through ProcessEvent — which is the path RegisterHook can see. If the
+    -- broadcaster is silent and this one is not, that difference IS the answer.
+    probe.params(probe.class("/Script/Pal.PalPlayerCharacter"), "OnCompleteInitializeParameter")
+    probe.watch("/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter", "pal.initTarget", 16)
+
+    probe.section("fallback 2: PalCharacter:BeginPlay")
     probe.watch("/Script/Pal.PalCharacter:BeginPlay", "pal.beginplay", 16)
 
-    probe.section("fallback 2: the spawner classes")
+    probe.section("fallback 3: the spawner classes")
+    -- CLASS NAMES CORRECTED against dumps/cxx/Pal.hpp: there is no PalMonsterSpawner,
+    -- PalMonsterSpawnerBase or PalMonsterSpawnerManager anywhere in the binary, so the three
+    -- names this list used to carry could only ever print "absent". The real ones are
+    -- APalEnemySpawner (:9449), APalNPCSpawnerBase (:10217) and UPalCharacterManager (:15519).
     local WORDS = { "spawn" }
     local spawners = {
-        "/Script/Pal.PalMonsterSpawner",
-        "/Script/Pal.PalMonsterSpawnerBase",
-        "/Script/Pal.PalMonsterSpawnerManager",
+        "/Script/Pal.PalEnemySpawner",
+        "/Script/Pal.PalNPCSpawnerBase",
         "/Script/Pal.PalCharacterManager",
     }
     local armed = 0
@@ -375,16 +432,18 @@ local function pal_spawned_fresh()
         end
     end
     -- Live spawner objects say which of those names the shipping build actually uses.
-    probe.allOf("PalMonsterSpawner")
+    probe.allOf("PalEnemySpawner")
     probe.line("NOTE %d spawner hook(s) armed", armed)
 
     probe.note("ACTION 6 — release a pal from the palbox, then travel far enough for a wild pal to "
         .. "stream in, then let the probe's own ChickenPal spawn (next section) land.")
     probe.note("A HIT on 'HOOK pal.init' whose self= is a pal BP class you just created makes "
-        .. "pal.spawned a real spawn signal — core/event.lua:900's TODO comes out unchanged.")
-    probe.note("A MISS on pal.init but a HIT on 'HOOK pal.beginplay' or 'HOOK pal.spawner' names "
-        .. "the replacement source: core/event.lua's tryHookAfterWorldReady switches path and the "
-        .. "channel, dispatch and Pal onSpawned keep working as they are.")
+        .. "pal.spawned a real spawn signal and closes both pal-spawned items.")
+    probe.note("A MISS on pal.init but a HIT on 'HOOK pal.initTarget', 'HOOK pal.beginplay' or "
+        .. "'HOOK pal.spawner' names the replacement source: core/event.lua's "
+        .. "tryHookAfterWorldReady switches path and the channel, dispatch and Pal onSpawned "
+        .. "keep working as they are. pal.initTarget is the one to hope for — it carries the new "
+        .. "character as a PARAMETER rather than as self, so the emit reads ctx.actor off a1.")
     probe.note("A MISS on ALL of them means no pal-birth signal is reachable from Lua on this "
         .. "build, and pal.spawned has to fall back to the existing 3 s PAL_SCAN sweep "
         .. "(first-seen actor = spawned). That is a real answer too — say so.")
@@ -395,48 +454,157 @@ end
 -- skill-hit-source
 --=============================================================================
 
-local SKILL_FIELDS = { "WazaType", "Waza", "WazaID", "SkillId", "SkillID", "AttackType", "AttackId",
-                       "AttackerId", "DamageType", "Type", "Id", "ID", "Name" }
+---An EPalWazaID integer as a name, so a hook line reads "FireBlast" rather than "137".
+local function wazaName(v)
+    local n = tonumber(v)
+    if not n then return nil end
+    local ok, ch = pcall(require, "palforge.core.character")
+    if not ok or type(ch) ~= "table" or type(ch.WAZA) ~= "table" then return nil end
+    for k, id in pairs(ch.WAZA) do if id == n then return k end end
+    return nil
+end
+
+---Render a waza parameter as "name(int)" — or say plainly that it is neither.
+local function renderWaza(v)
+    local n = tonumber(v)
+    if not n then return render(v) .. " <-- NOT A NUMBER: the enum did not arrive as an int" end
+    return string.format("%s(%d)", tostring(wazaName(n) or "<no EPalWazaID name>"), n)
+end
+
+local function skill_activate_source()
+    probe.begin("skill-activate-source")
+    probe.note("core/event.lua now sources skill.activate from "
+        .. "UPalUtility::PlayActionByWazaID(AActor* actionActor, AActor* TargetActor, "
+        .. "EPalWazaID WazaID) — dumps/cxx/Pal.hpp:32037, and the name is in the live build's "
+        .. "own PalUtility listing (02_reflection.txt:2049). Three scalar parameters, one of "
+        .. "which is the move's identity. It has never been armed, so this section exists to "
+        .. "find out whether the game calls it or whether it is a Blueprint-facing helper the "
+        .. "C++ combat path walks past.")
+
+    probe.params(probe.class("/Script/Pal.PalUtility"), "PlayActionByWazaID")
+
+    armDetailed("/Script/Pal.PalUtility:PlayActionByWazaID", "skill.activate", 16,
+        function(n, self, a1, a2, a3)
+            probe.line("HOOK skill.activate #%d t=+%.1fs  actor=%s  target=%s  waza=%s",
+                n, since(), render(pget(a1)), render(pget(a2)), renderWaza(pget(a3)))
+        end)
+
+    probe.note("ACTION 7 — have YOUR pal use a move (send it at something), then use a partner "
+        .. "skill yourself, then swing a melee weapon. All three within ~15 s.")
+    probe.note("A HIT with a real waza name confirms skill.activate end to end: Skill "
+        .. "onActivate is live for any pack that DEFINED a skill under that id.")
+    probe.note("A HIT whose waza prints '<no EPalWazaID name>' means core.character.WAZA is out "
+        .. "of date against this build — paste the integer.")
+    probe.note("A MISS (0 lines after a pal visibly used a move) closes this candidate: the next "
+        .. "one is a UPalActionWazaBase subclass's OnBeginAction, because Pal.hpp:13270 puts "
+        .. "`EPalWazaID WazaID` on that class itself, so `self` would carry the identity. Say so "
+        .. "and core/event's installSkillSource changes one path.")
+    probe.finish()
+end
 
 local function skill_hit_source()
     probe.begin("skill-hit-source")
-    probe.note("OnDamageReaction is the ONE damage hook confirmed to fire (it is already "
-        .. "core/event.lua's pal.damaged source). The only question is whether any of its params "
-        .. "carries the waza/skill FName — so this dumps each param struct's WHOLE field list "
-        .. "with values, twice, then just the interesting fields.")
+    probe.note("THE VICTIM SIDE IS CLOSED, and this is the correction: no struct walking on "
+        .. "OnDamageReaction could ever have named the skill. dumps/cxx/Pal.hpp:1885 gives "
+        .. "FPalDamageRactionInfo's COMPLETE field list — IsBlow, BlowVelocity, IsLeanBackAnime, "
+        .. "IsStan, IsLargeDown, HitLocation — with no skill, no waza and no attacker in it; and "
+        .. "FPalDamageInfo (:1834) has 40 fields and still no EPalWazaID, only an "
+        .. "EPalWazaCategory bucket and the weapon's AttackStaticItemID. So core/event.lua "
+        .. "sources skill.hit from the ATTACKER side instead: "
+        .. "UPalUtility::MakeDamageInfoByWazaType(Attacker, Defencer, ..., EPalWazaID WazaType, "
+        .. "...) at Pal.hpp:32046, whose 7th parameter is the move and whose 2nd is the victim.")
 
-    probe.params(probe.class("/Script/Pal.PalCharacter"), "OnDamageReaction")
+    probe.params(probe.class("/Script/Pal.PalUtility"), "MakeDamageInfoByWazaType")
 
-    armDetailed("/Script/Pal.PalCharacter:OnDamageReaction", "pal.damage", 10,
-        function(n, self, a1, a2, a3, a4)
-            local tag = string.format("HOOK pal.damage #%d", n)
-            local s = pget(self)
-            probe.line("%s t=+%.1fs  self=%s", tag, since(), render(s))
-            for i, p in ipairs({ a1, a2, a3, a4 }) do
-                local v = pget(p)
-                probe.line("%s   a%d=%s", tag, i, render(v))
-                if v ~= nil then
-                    if n <= 2 then
-                        -- The first two firings get the full walk; that is where the field NAME
-                        -- we are hunting for shows up. Later ones stay short.
-                        walkFields(v, string.format("%s a%d", tag, i), 40)
-                    else
-                        fieldsOf(v, SKILL_FIELDS, string.format("%s   a%d", tag, i))
+    -- Eight parameters deep. armDetailed only forwards four, so this one is armed inline: the
+    -- whole point is whether UE4SS hands over a7 at all.
+    M.counts["skill.hit"] = 0
+    local okHit = pcall(function()
+        RegisterHook("/Script/Pal.PalUtility:MakeDamageInfoByWazaType",
+            function(self, a1, a2, a3, a4, a5, a6, a7)
+                M.counts["skill.hit"] = (M.counts["skill.hit"] or 0) + 1
+                local n = M.counts["skill.hit"]
+                if n > 12 then return end
+                pcall(function()
+                    probe.line("HOOK skill.hit #%d t=+%.1fs  attacker=%s  defender=%s",
+                        n, since(), render(pget(a1)), render(pget(a2)))
+                    probe.line("HOOK skill.hit #%d   a7(waza)=%s  a5(hitLocation)=%s",
+                        n, renderWaza(pget(a7)), render(pget(a5)))
+                    if pget(a7) == nil then
+                        probe.line("HOOK skill.hit #%d   a7 IS NIL — UE4SS did not forward the "
+                            .. "7th parameter, so skill.hit cannot read the waza here", n)
                     end
-                end
-            end
+                end)
+            end)
+    end)
+    probe.line("NOTE armed /Script/Pal.PalUtility:MakeDamageInfoByWazaType -> %s",
+        okHit and "ok" or "FAILED (function not found on this build)")
+
+    -- The victim hook stays armed as a CONTROL only: it is already core/event's pal.damaged
+    -- source, and seeing it fire beside a silent skill.hit tells the two apart.
+    armDetailed("/Script/Pal.PalCharacter:OnDamageReaction", "pal.damage", 6,
+        function(n, self, a1)
+            probe.line("HOOK pal.damage #%d t=+%.1fs  self=%s  a1=%s (control: expected to fire; "
+                .. "it carries NO skill id — see the note above)",
+                n, since(), render(pget(self)), render(pget(a1)))
         end)
 
-    probe.note("ACTION 7 — hit a pal with a NAMED move (a fire attack from your own pal, say), "
-        .. "wait ~5 s, then hit one with a plain melee swing. The two blocks are diffed against "
-        .. "each other: a field that changes with the move is the skill id.")
-    probe.note("A HIT — any FIELD whose value differs between the named move and the melee hit, "
-        .. "and reads like a waza row name — gives core/event.lua a skill.hit channel keyed by "
-        .. "skill id, and pal.damaged's existing ctx is simply extended with it.")
-    probe.note("A MISS (identical field values for both, or no struct params at all) closes it: "
-        .. "the skill identity is NOT reachable from the damage hook, Skill onHit stays "
-        .. "Handle:hit-only, and the next candidate is the (so far 0-firing) "
-        .. "PalPlayerController:SkillDamageReactionComponent_ProcessDamage_ToServer.")
+    probe.note("ACTION 8 — hit a pal with a NAMED move (a fire attack from your own pal, say), "
+        .. "wait ~5 s, then hit one with a plain melee swing.")
+    probe.note("A HIT on 'HOOK skill.hit' with a real waza name on the MOVE and nothing on the "
+        .. "melee swing is the ideal answer: it confirms both that the hook fires and that it is "
+        .. "waza-specific rather than every-damage. Count the lines per move — this function "
+        .. "BUILDS the damage, and a multi-collision move may build one per collision.")
+    probe.note("A MISS on skill.hit while 'HOOK pal.damage' fires means damage is built somewhere "
+        .. "this helper is not, and Skill onHit stays Handle:hit-only. Do NOT go back to walking "
+        .. "the damage struct — that route is closed by the field lists above.")
+    probe.finish()
+end
+
+local function skill_passive_source()
+    probe.begin("skill-passive-source")
+    probe.note("the old open question is answered by dumps/cxx/Pal.hpp: "
+        .. "UPalIndividualCharacterParameter::AddPassiveSkill(FName AddSkill, FName "
+        .. "OverrideSkill) at :21155 and ::RemovePassiveSkill(FName SkillId) at :21003 — FNames, "
+        .. "not an index into a fixed-size array, and no struct anywhere. Both names are in the "
+        .. "live build's full listing of that class (02_reflection.txt:1107). The owner is the "
+        .. "same object's `APalCharacter* IndividualActor` property (:20910). core/event.lua "
+        .. "sources skill.equip / skill.unequip from them, armed after world.ready. What is left "
+        .. "is which player ACTIONS route through them.")
+
+    local cls = probe.class("/Script/Pal.PalIndividualCharacterParameter")
+    probe.params(cls, "AddPassiveSkill")
+    probe.params(cls, "RemovePassiveSkill")
+
+    armDetailed("/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill", "skill.equip", 16,
+        function(n, self, a1, a2)
+            local p = pget(self)
+            local owner; pcall(function() owner = p.IndividualActor end)
+            probe.line("HOOK skill.equip #%d t=+%.1fs  add=%s  override=%s  owner=%s",
+                n, since(), render(pget(a1)), render(pget(a2)), render(owner))
+        end)
+    armDetailed("/Script/Pal.PalIndividualCharacterParameter:RemovePassiveSkill", "skill.unequip", 16,
+        function(n, self, a1)
+            local p = pget(self)
+            local owner; pcall(function() owner = p.IndividualActor end)
+            probe.line("HOOK skill.unequip #%d t=+%.1fs  skill=%s  owner=%s",
+                n, since(), render(pget(a1)), render(owner))
+        end)
+
+    probe.note("ACTION 9 — capture ONE wild pal (capture-time random passives are the most "
+        .. "likely route), and if you have a Statue of Power / passive-skill bench in reach, "
+        .. "change one passive there too. Pulling a pal in and out of the party is the case "
+        .. "expected NOT to fire — do it anyway, so a fire there is recorded as a surprise.")
+    probe.note("A HIT with a readable passive FName and a non-nil owner confirms skill.equip / "
+        .. "skill.unequip: Skill onEquip / onUnequip are live for any DEFINED skill under that "
+        .. "id. Note WHICH action produced it — that is the part no dump can answer.")
+    probe.note("A STORM of skill.equip lines at world load would mean the world-ready gate is "
+        .. "not enough and passives are re-added rather than restored wholesale; say so, and the "
+        .. "source needs a first-N-seconds suppressor.")
+    probe.note("A MISS on both after a capture means these are C++-internal call sites that "
+        .. "RegisterHook cannot see — the next candidate is "
+        .. "UPalMapObjectOperatingTableModel:RequestChangePassiveSkill (Pal.hpp:24094), which is "
+        .. "the bench's own request and takes the passive FName as its third parameter.")
     probe.finish()
 end
 
@@ -583,8 +751,10 @@ local function announcePlan()
         "2. drop a stack of Wood on the ground",
         "3. trash one stack from the inventory menu",
         "4. eat one Berries",
-        "5. release one pal from the palbox",
-        "6. hit a pal with a NAMED move, then plain melee",
+        "5. release one pal from the palbox (wait 10 s)",
+        "6. send your pal at something: make it use a MOVE",
+        "7. hit a pal with a NAMED move, then plain melee",
+        "8. capture one wild pal",
         "keep acting for ~" .. WINDOW_SEC .. " s, ~5 s apart. Then read UE4SS.log",
     }
     for _, line in ipairs(screen) do support.announce(line) end
@@ -596,11 +766,13 @@ local function announcePlan()
         .. "PalForge's own spawn path, not a game hook). That is the only state it creates.")
     probe.line("NOTE do these, ~5 s apart, while it watches (about %d s):", WINDOW_SEC)
     probe.line("NOTE   1. craft ONE item at a workbench            -> grep 'HOOK craft'")
-    probe.line("NOTE   2. drop a stack of Wood on the ground       -> grep 'HOOK item.add'")
-    probe.line("NOTE   3. trash ONE stack from the inventory menu  -> grep 'HOOK item.add'")
+    probe.line("NOTE   2. drop a stack of Wood on the ground       -> grep 'HOOK discard.drop'")
+    probe.line("NOTE   3. trash ONE stack from the inventory menu  -> grep 'HOOK discard.dispose'")
     probe.line("NOTE   4. eat ONE Berries                          -> grep 'HOOK item.add'")
-    probe.line("NOTE   5. release ONE pal from the palbox          -> grep 'HOOK pal.init'")
-    probe.line("NOTE   6. hit a pal with a NAMED move, then melee  -> grep 'HOOK pal.damage'")
+    probe.line("NOTE   5. release ONE pal, then WAIT 10 s          -> grep 'HOOK pal.init'")
+    probe.line("NOTE   6. make your pal USE A MOVE                 -> grep 'HOOK skill.activate'")
+    probe.line("NOTE   7. hit a pal with a NAMED move, then melee  -> grep 'HOOK skill.hit'")
+    probe.line("NOTE   8. capture ONE wild pal                     -> grep 'HOOK skill.equip'")
     probe.line("NOTE every hook line carries t=+Ns since arming, so the six actions are told "
         .. "apart by their timestamps; type 'pf_mark <text>' in the UE4SS console between "
         .. "actions if you want explicit separators.")
@@ -665,12 +837,14 @@ function M.run()
     installMarker()
 
     local sections = {
-        { "item-craft-source",   item_craft_source },
-        { "item-discard-source", item_discard_source },
-        { "pal-spawned-hook",    pal_spawned_hook },
-        { "pal-spawned-fresh",   pal_spawned_fresh },
-        { "skill-hit-source",    skill_hit_source },
-        { "pal-spawn-placement", pal_spawn_placement },
+        { "item-craft-source",     item_craft_source },
+        { "item-discard-source",   item_discard_source },
+        { "pal-spawned-hook",      pal_spawned_hook },
+        { "pal-spawned-fresh",     pal_spawned_fresh },
+        { "skill-activate-source", skill_activate_source },
+        { "skill-hit-source",      skill_hit_source },
+        { "skill-passive-source",  skill_passive_source },
+        { "pal-spawn-placement",   pal_spawn_placement },
     }
 
     local ran = 0

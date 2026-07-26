@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (21)
+## Closed (23)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -94,8 +94,10 @@ without the game running.
 - **`item-additem-signature`** — Item.Handle:give. **Observed working**, 2026-07-26: `give Wood x3: 140 -> 143`, with the game's own pickup event firing beside it (`Wood onObtain: count=3`) — two independent witnesses in a real save. The whole project was blocked on ONE argument. The live declaration is `(FName StaticItemId, int32 Count, bool IsAssignPassive, float LogDelay, bool bNotifyLog) -> EPalItemOperationResult` — five arguments and a return, where `dumps/cxx/Pal.hpp` has four and no `bNotifyLog` at all, because the dump predates the installed binary by one game patch. UE4SS counts the return as a slot, which is where "expected 6 parameters, received 4" came from. It also ANSWERS, with a named `EPalItemOperationResult`, so a refusal now explains itself instead of being inferred from a count that did not move — the thing the cheat-manager route could never do, and the reason establishing that `GetItem` reaches nothing took five in-game runs.
 - **`pal-icon-row`** — Pal.Handle:iconOf. Closed with `icons-row-read`: DT_PalCharacterIconDataTable read 674 of 674 rows in a live save, so a vanilla pal id resolves to the game's own artwork and the declared `icon` is the fallback it was always described as.
 - **`skill-icon-key`** — Skill.Handle:iconOf. Same read, 311 of 311 rows on DT_partnerSkillIconDataTable. What is left is not a read but a KEYING fact already recorded in core/icons: that table is keyed by PAL id, not skill id, so only a pal-derived partner skill can hit it. A passive skill has no row there and falls back to its declared icon — the correct answer rather than a missing one.
+- **`ui-host-paths`** — native.ui.widget / UI.Handle:mount into the game's own UI. `WBP_PalOverallUILayout` declares `UCanvasPanel* CanvasPanel_Root`, and a UCanvasPanel is a UPanelWidget, so it answers `AddChild` with a `UCanvasPanelSlot`. Live-confirmed: an instance is alive under BP_PalGameInstance with its own WidgetTree (`dumps/reflection/03_widgets.txt:54`). Eliminated on the way: `UPalUIHUDLayoutBase` has **no widget members at all**, so the child "one level down" everyone was looking for never existed — it exposes `AddHUD` instead.
+- **`audio-bus-volume`** — Audio.Handle:setVolume. The dump overturned the item's own premise. `UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)` takes **no bus name**: the second parameter is the Wwise game object, so it scales what ONE emitter sends to its bus, at exactly the scope `PlayAkEventSoundByActor` posts on. It was filed as bus-global and is not. Three other overloads were found and rejected with reasons (needs a component our play route never returns / world-global / needs a bus name, and this build has zero AkAuxBus). Wired as `setVolume(volume, actor)`, actor-wide by construction, exactly like `:stop`. Audibility is owed — nobody has heard it.
 
-## Open (17)
+## Open (15)
 
 ### Pal
 
@@ -215,7 +217,7 @@ and the BP class names printed.
 #### `item-craft-source` — Item.Spec.Events.onCraft (channel item.craft)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:107
+- **Marked at:** Scripts/palforge/api/item.lua:111
 
 **What a pack author sees**
 
@@ -268,7 +270,7 @@ present. Then craft one item at a workbench and paste which line fired with whic
 #### `item-datatable-row-read` — Item.Handle:iconOf / Item.Handle:recipeOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:166
+- **Marked at:** Scripts/palforge/api/item.lua:180
 
 **What a pack author sees**
 
@@ -316,7 +318,7 @@ Product_Count, WorkAmount, Material1_Id, Material1_Count.
 #### `item-discard-source` — Item.Spec.Events.onDiscard (channel item.discard)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:112
+- **Marked at:** Scripts/palforge/api/item.lua:120
 
 **What a pack author sees**
 
@@ -371,7 +373,7 @@ Discard|Drop|Remove|Sub|Consume|Trash|Throw.
 #### `item-remove-call` — Item.Handle:take
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:37
+- **Marked at:** Scripts/palforge/api/item.lua:301
 
 **What a pack author sees**
 
@@ -424,7 +426,7 @@ proposed can be spotted. It writes to no inventory.
 #### `skill-activate-source` — Skill.Spec.Events.onActivate
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:59
+- **Marked at:** Scripts/palforge/api/skill.lua:68
 
 **What a pack author sees**
 
@@ -475,7 +477,7 @@ value string.
 #### `skill-hit-source` — Skill.Spec.Events.onHit
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/skill.lua:72
+- **Marked at:** Scripts/palforge/api/skill.lua:85
 
 **What a pack author sees**
 
@@ -518,7 +520,7 @@ name.
 #### `skill-passive-source` — Skill.Spec.Events.onEquip / Skill.Spec.Events.onUnequip
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:88
+- **Marked at:** Scripts/palforge/api/skill.lua:100
 
 **What a pack author sees**
 
@@ -566,7 +568,7 @@ fired during those actions with their parameter values.
 #### `audio-custom-file-loader` — Audio.Spec.soundFile (Audio{ soundFile = ... }:play, via core.sound.file FileSource:play)
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/core/sound/file.lua:19
+- **Marked at:** Scripts/palforge/core/sound/file.lua:43
 
 **What a pack author sees**
 
@@ -604,43 +606,10 @@ print(#(FindAllOf('SoundWave') or {})) and #(FindAllOf('AkMediaAsset') or {}) �
 shipping game has any instance of either class loaded is itself the answer about whether that
 pipeline is alive.
 
-#### `audio-bus-volume` — Audio.Handle:setVolume
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/audio.lua:302
-
-**What a pack author sees**
-
-`setVolume` returns false and changes nothing. **The way to be quieter today is to pick a quieter
-AkAudioEvent** — choosing the event is the only volume control a pack has, and on this build
-there may be no per-sound volume at all.
-
-The RTPC route this used to wait on is ruled out with evidence (see `audio-volume-rtpc` under
-Closed): the build declares three AkRtpc assets and none is a volume. The only candidate left is
-`SetOutputBusVolume`, reflected on both AkComponent and AkGameplayStatics — and it moves a whole
-output BUS, not one sound, so even when it works it cannot satisfy this method's per-sound
-contract. If it is wired it belongs on the module as a bus call.
-
-**What is still unknown**
-
-1. `SetOutputBusVolume`'s parameter list, on either owner — is the bus an FName or an FString, is
-   there a leading AkComponent/actor, is the value 0..1 or dB, is there a fade argument. Until a
-   real list is printed, do not call it.
-2. Whether a per-sound AkComponent is reachable at all. 248 AkComponents are live, but the first
-   sampled one is a PalAkComponent owned by a level gimmick, and our play route
-   (`PlayAkEventSoundByActor`) hands back nothing — no component, no PlayingID. If there is no
-   component to call the overload on, the AkGameplayStatics overload is bus-global and this
-   method stays false permanently, which is itself an answer worth having.
-
-**What the probe prints**
-
-`SetOutputBusVolume`'s declared parameters on AkComponent and on AkGameplayStatics, and what a
-live AkComponent sample looks like. It calls neither.
-
 #### `mesh-base-material` — Mesh.Spec.color / texture / material on kind="procedural" and kind="obj"; Mesh.Handle:setColor on a procedural mesh
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:112
+- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:138
 
 **What a pack author sees**
 
@@ -675,7 +644,7 @@ Renderer.BASE_MATERIAL_CANDIDATES.
 #### `mesh-material-params` — Mesh.Spec.color / texture / params on every kind, Mesh.Handle:setColor, Building.Instance:update(), Building.Handle:update(), Pal.Class:material()
 
 - **Probe:** F6
-- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:95
+- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:96
 
 **What a pack author sees**
 
@@ -784,57 +753,10 @@ Tint, BaseColorTint, Albedo, EmissiveColor} plus every name harvested from
 VectorParameterValues, call `mid:SetVectorParameterValue(FName(name), {R=1,G=0,B=0,A=1})`, print
 the name, wait ~2s, and report WHICH name visibly turned the mesh red.
 
-#### `ui-host-paths` — native.ui.widget.cloneGameWidget / UI.Handle:mount(<a panel of the game's own live UI>)
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/native/ui/_widget.lua:51
-
-**What a pack author sees**
-
-A pack can build a native-looking widget but has nowhere in the game's own UI to put it. M.PATHS
-names the title menu only, so every PalForge panel is either a title-menu entry or a separate
-full-screen layer of our own (widget.screen). Nothing can be parented into the HUD, the
-inventory or the build menu; cloneGameWidget runs but there is no second class path to clone.
-
-**What is still unknown**
-
-```text
-Known Palworld UI asset/class paths. TITLE MENU ONLY — every entry below was read off
-WBP_Title_MenuButton and the title screen (verified 2026-07-17, poc/V7-title-injection).
-Nothing here names the live HUD, the inventory or the build menu, so cloneGameWidget()
-and Button:mount(<a panel of the game's own>) have no in-game host to target: a PalForge
-panel today is either a title entry or a viewport layer of our own (M.screen).
-
-The HUD's own CLASS is known — deprecated/catalog/ui_widget_classes.txt lists
-UPalUIHUDLayoutBase (and UPalUIWorldHUDWidgetCanvas / UPalUIInventoryEquipment); note it
-does NOT list the "PalHUD"/"PalHUDWidget" that dump/docs/04_native_ui.md guesses at. What
-is missing is one level down, and no dump in either tree has it:
-TODO(ui-host-paths): unknown — the widget NAME of a child inside the live
-PalUIHUDLayoutBase tree that is a UPanelWidget (i.e. answers AddChild), which is the one
-fact needed to parent a PalForge widget into the game's HUD instead of our own layer.
-```
-
-**What the probe prints**
-
-With a world loaded and the HUD visible: for each of "PalUIHUDLayoutBase",
-"PalUIWorldHUDWidgetCanvas", "PalUIInsideBaseCampCanvas", "PalUIInventoryEquipment" do `local r
-= FindFirstOf(name)`, log name .. ' valid=' .. tostring(r and r:IsValid()), then take
-`r.WidgetTree.RootWidget` and walk it depth-first exactly the way _widget.findByName walks
-(GetChildrenCount()/GetChildAt(i), plus descend a child's own .WidgetTree.RootWidget, plus
-GetContent() when childCount==0). For EVERY node print: depth, `w:GetFName():ToString()`,
-`w:GetClass():GetFullName()`, and `w:GetChildrenCount()` (print '-' if the call errors — that
-identifies non-panels). Then, for each node whose GetChildrenCount() succeeded, construct one
-throwaway TextBlock (StaticConstructObject of /Script/UMG.TextBlock into a fresh
-/Script/UMG.WidgetTree) and inside a pcall call `w:AddChild(tb)`; print `nodeName .. ' AddChild
--> ' .. tostring(slot) .. ' ' .. (slot and slot:GetClass():GetFullName() or 'nil')`, then
-`w:RemoveChild(tb)`. Finally open the Inventory and the Build menu and log every live widget
-once: `for _, w in ipairs(FindAllOf("UserWidget") or {}) do print(w:GetFName():ToString(),
-w:GetClass():GetFullName(), w:GetFullName()) end`.
-
 #### `ui-menubutton-inner-slot` — native.ui.widget.menuButton (label alignment) — and therefore every TitleMenu entry
 
 - **Probe:** F8
-- **Marked at:** Scripts/palforge/native/ui/_widget.lua:356
+- **Marked at:** Scripts/palforge/native/ui/_widget.lua:426
 
 **What a pack author sees**
 
@@ -875,7 +797,7 @@ game version at the same time.
 #### `ui-update-event` — UI.Handle:autoRefresh(ms) — polling is the only refresh driver PalForge has
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/ui.lua:273
+- **Marked at:** Scripts/palforge/api/ui.lua:293
 
 **What a pack author sees**
 
@@ -909,7 +831,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `pal-spawned-fresh` — Pal{ events = { onSpawned } } / event.on("pal.spawned")
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/core/event.lua:937
+- **Marked at:** Scripts/palforge/core/event.lua:1008
 
 **What a pack author sees**
 

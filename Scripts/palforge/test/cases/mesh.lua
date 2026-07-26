@@ -11,6 +11,7 @@
 local T        = require("palforge.core.unittests")
 local support  = require("palforge.test.support")
 local Mesh     = require("palforge.api.mesh")
+local mesh     = require("palforge.core.mesh")
 local Pal      = require("palforge.api.pal")
 local Building = require("palforge.api.building")
 
@@ -240,6 +241,48 @@ s:test("attachTo the live player pawn with an OBJ that is not on disk returns an
     -- Nothing was attached, so there is nothing to take off again.
     t:eq(m:detach(pawn), false, "detach reports it removed nothing")
     t:eq(m:setColor(pawn, { 1, 1, 1, 1 }), false, "and there is no material to re-tint")
+end)
+
+s:test("the player's own materials name themselves and their parameters -- TODO(mesh-base-material) TODO(mesh-material-params)", function(t)
+    local pawn = support.needWorld(t)
+
+    -- READ-ONLY, and that is the point: this writes nothing to any material, any component
+    -- or any save. It is the probe both open mesh items have been waiting on, and neither
+    -- can be closed from dumps/ at all — a CXXHeaderDump holds classes, and which material
+    -- an asset carries and which parameters that material exposes are DATA inside a
+    -- .uasset. So the only place the answer exists is a loaded world, and the cheapest
+    -- loaded thing wearing a real Palworld material is the player's own body.
+    --
+    -- What each printed line is worth:
+    --   * the MATERIAL PATH is a mesh-base-material answer. A material that is currently
+    --     rendering is by definition cooked into the pak and loaded, so it can parent a MID
+    --     where the five /Engine/ editor paths in Renderer.BASE_MATERIAL_CANDIDATES are
+    --     guesses that a shipping build may not contain at all.
+    --   * the PARAMETER NAMES are a mesh-material-params answer. Renderer.COLOR_PARAMS
+    --     writes six candidate names per slot and any of them may be a silent no-op; these
+    --     are the names the material really carries, read off UMaterialInstance's own
+    --     reflected override arrays (dumps/cxx/Engine.hpp:17548-17551).
+    -- Nothing is asserted about WHICH names come back — that would be inventing the answer
+    -- this test exists to fetch. What is asserted is that the read itself works.
+    local found = mesh.describeMaterials(pawn, support.log)
+    t:type(found, "table", "the read reports what it saw, even when it saw nothing")
+
+    if #found == 0 then
+        t:skip("the player pawn exposed no readable material slot — look for the MATDESC "
+            .. "lines: 'no live component' means .Mesh could not be read, 'no material on "
+            .. "this slot' means the component is there and its slots are empty")
+    end
+
+    local names = 0
+    for _, rec in ipairs(found) do
+        t:type(rec.material, "string", "every slot names the material it is wearing")
+        t:truthy(#rec.material > 0, "and the name is not empty")
+        names = names + #rec.vector + #rec.scalar + #rec.texture
+    end
+    support.log(string.format("mesh: %d material slot(s) read on the player, %d parameter "
+        .. "name(s) in total. A slot with zero names is a real answer too — a plain UMaterial "
+        .. "keeps its parameters in an expression graph, which is not reflected",
+        #found, names))
 end)
 
 return s

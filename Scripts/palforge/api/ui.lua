@@ -21,10 +21,16 @@
 -- widgets through native/ui/_widget.lua — that part is LIVE and injects into the real
 -- game UI.
 --
--- REFRESH DRIVING: no native "the UI updated" event has been confirmed, so nothing calls
--- refresh() for you. Two honest options: call :refresh() yourself when your state
+-- REFRESH DRIVING: no native "the UI updated" event has been confirmed FIRING, so nothing
+-- calls refresh() for you. Two honest options: call :refresh() yourself when your state
 -- changes, or opt into polling with :autoRefresh(ms) (built on core/event's heartbeat).
--- No async policy is imposed by default.
+-- No async policy is imposed by default. dumps/cxx has since named four candidate signals
+-- and eliminated a fifth — see the note on :autoRefresh for the four and for the two things
+-- that still have to be measured before any of them is hooked.
+--
+-- WHERE TO MOUNT: native/ui/_widget.lua gives three roots — widget.screen() for a viewport
+-- layer of your own, TitleMenu for the title screen, and widget.gameUIRoot() for the game's
+-- OWN in-game UI root canvas.
 --
 -- MOUNTING WHEN THE HOST UI IS NOT UP YET: an element whose host is absent returns false
 -- from render and stays unmounted — and :autoRefresh does NOT get it in, because
@@ -270,8 +276,29 @@ function Handle:isMounted() return self._st:isMounted() end
 ---@param ms integer?  # default 500
 ---@return boolean ok
 function Handle:autoRefresh(ms)
-    -- TODO(ui-update-event): unknown whether Palworld raises a catchable UFunction when a
-    -- UI is (re)built — until one is dumped, polling is the only driver PalForge has.
+    -- The old question here was "does Palworld raise a catchable UFunction when a UI is
+    -- (re)built". dumps/cxx answers YES and names four, so that half is no longer unknown:
+    --
+    --   /Script/Pal.PalUserWidget:OnSetup            Pal.hpp:31902   } on the base class EVERY
+    --   /Script/Pal.PalUserWidget:OnClosed           Pal.hpp:31903   } Palworld screen derives
+    --     from, PalUITitleBase included (:31652 -> :31927 -> :31910 -> :31888).
+    --   /Script/Pal.PalUIHUDLayoutBase:AddHUD        Pal.hpp:30714   the HUD adding a widget.
+    --   /Script/CommonUI.CommonActivatableWidget:ActivateWidget   CommonUI.hpp:177 — the same
+    --     module as CommonButtonBase:HandleButtonClicked (CommonUI.hpp:346), which is the hook
+    --     native/ui/_widget.lua's click router already installs, so hooks DO take in this module.
+    --
+    -- It also eliminated the recipe's first target: UPalUIManagerSubsystem (Pal.hpp:30988)
+    -- declares zero functions. Do not enumerate it again.
+    --
+    -- TODO(ui-update-event): what is unknown is now narrower and is about HOOKING, not existence.
+    -- (a) OnSetup / OnClosed / AddHUD read as BlueprintImplementableEvents, and a blueprint that
+    --     implements one gets its OWN UFunction of that name — a hook on the base never sees the
+    --     override, so it is unmeasured which screens such a hook would actually catch.
+    -- (b) whether arming a UI-wide hook is SAFE here: core/event.lua records a shared-dispatch
+    --     wedge from a hook armed during the world-load storm, and a UI hook fires hardest
+    --     exactly then. Nothing is hooked from this module until one probe run says which of the
+    --     four fires, how often, and at what moment. Until then polling is the driver, and it is
+    --     a deliberate choice rather than the only option left.
     return poll(self._st, tonumber(ms) or 500, false, nil)
 end
 

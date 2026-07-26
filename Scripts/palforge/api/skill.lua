@@ -8,26 +8,28 @@
 -- ("skill", id), so it is discoverable (Skill.get / Skill.get_all / core.registry) and a
 -- Pal declares which skills it owns by id (Pal{ skills = { ... } }).
 --
--- HONEST STATE OF THE 導線: there is NO native skill source WIRED. The two hooks that were
--- actually armed in game (PalPlayerController:PlaySkill and :SkillDamageReactionComponent_
--- ProcessDamage_ToServer) fired 0 times, and Lua cannot inject a row into the skill
--- DataTables (that is PalSchema's job). The reflection dump has since named several
--- unarmed candidates on classes that are proven loaded — see the per-hook markers below —
--- so "no candidate exists" is no longer the blocker; "none has been observed firing" is.
--- So:
---   * NOTHING fires these handlers automatically — core/event.lua declares no skill
---     channel (M.CHANNELS is world / building / pal / item / tick) and nothing in the tree
---     emits one, so a declared `events` table is inert until you call into it yourself.
---   * What DOES work is MANUAL invocation: :activate(owner) / :hit(target) /
---     :equip(owner) / :unequip(owner) run the handler now, with the cooldown enforced
---     here in Lua. That is enough to drive a skill from your own code — e.g. from a Pal's
---     onTick, a building's onRightClick, or a keybind.
---   * Nothing here reaches the engine EXCEPT :iconOf, and that one lookup has never been
---     keyed by PAL id rather than by skill id (see the note above Class:iconOf).
--- Wiring a native source later means adding the channel AND the dispatch that resolves it
--- to a definition, in core/event.lua — the handlers below are then reached unchanged, but
--- that dispatch does not exist yet either. The three unknowns are marked in place, one per
--- hook, with the probe that would settle each.
+-- HONEST STATE OF THE 導線, rewritten 2026-07-26. All four handlers now have a CHANNEL, a
+-- SOURCE and a DISPATCH — core/event.lua declares skill.activate / skill.hit / skill.equip /
+-- skill.unequip, arms a native hook for each, and resolves an emit back to the definition
+-- registered under that skill id. What is still missing is the last mile, and it is the same
+-- for all four: NONE OF THE FOUR HOOKS HAS BEEN SEEN TO FIRE IN GAME. They were chosen from
+-- dumps/cxx/Pal.hpp (the installed binary's own header dump) with their real signatures, and
+-- two of the four classes are reflected in the live build as well, but nobody has yet used a
+-- move with them armed. So:
+--   * a declared `events` table is no longer inert — but until an F7 run logs a firing,
+--     assume it can still be silent, and keep the manual entry points as the reliable path;
+--   * MANUAL invocation is unchanged and unconditional: :activate(owner) / :hit(target) /
+--     :equip(owner) / :unequip(owner) run the handler now, with the cooldown enforced here
+--     in Lua — from a Pal's onTick, a building's onRightClick, or a keybind;
+--   * only a skill DEFINED with Skill{ ... } is dispatched to. Skill.get("FireBlast") hands
+--     back a handle that was never registered, so the game firing FireBlast reaches nothing;
+--   * ctx.skillId is an EPalWazaID NAME for the two combat channels ("FireBlast", the list is
+--     core.character.wazaNames()) and a passive row FName for the two passive ones;
+--   * Lua still cannot inject a row into the skill DataTables — that is PalSchema's job — and
+--     nothing here reaches the engine except :iconOf, :teach and :forget.
+-- Each hook below records which native function feeds it and how strong the evidence is; the
+-- full account, including the one route the dumps CLOSED, is in core/event.lua's SOURCE skill
+-- block.
 --
 --   local Fireball = Skill{
 --       id = "example:Fireball", kind = "active", element = "fire",
@@ -53,53 +55,56 @@ local character = require("palforge.core.character")
 --=============================================================================
 
 ---The behaviour handlers a skill can respond to. All optional. Each receives THIS skill's
----handle as its first argument; only MANUAL invocation fires them today (see the header).
----A handler this list does not name is a hard error, not a silent no-op.
+---handle as its first argument, then the subject (the owner, or the TARGET for onHit), then
+---ctx. A handler this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Skill.Spec.Events", {
-    -- TODO(skill-activate-source): NARROWED — candidates now have names. PlaySkill stays
-    -- ruled out (armed in two in-game probes, 0 firings), but dumps/reflection/02_reflection
-    -- .txt shows /Script/Pal.PalUtility carries PlayActionByWazaID and PlayAction, and
-    -- /Script/Pal.PalPlayerController carries ActionComponent_PlayAction_ToServer_ForPlayer
-    -- and OnActionBegin (PalPlayerCharacter has OnBeginAction); PalCharacter exposes
-    -- GetActionComponent / :ActionComponent, so the executor is an action component, not the
-    -- controller. PlayActionByWazaID is the standout: its name says the waza row id is a
-    -- parameter, which is exactly the identity this channel needs.
-    -- THE ONE THING LEFT: which of those actually runs when a PAL uses a move (none has ever
-    -- been armed), and whether the waza id it carries is an FName or a struct. Until a
-    -- RegisterHook run logs one firing, no skill.activate channel gets written.
+    -- SOURCE: /Script/Pal.PalUtility:PlayActionByWazaID(AActor* actionActor,
+    -- AActor* TargetActor, EPalWazaID WazaID) — dumps/cxx/Pal.hpp:32037, and the name is in
+    -- the LIVE build's own listing (dumps/reflection/02_reflection.txt:2049 PalUtility). Three
+    -- scalar parameters, one of which is the move's identity, which is what every earlier
+    -- candidate lacked: PalPlayerController:PlaySkill stays ruled out (armed twice, 0 firings)
+    -- and the action-component routes (PlayAction / PlayActionByType) carry a UClass, not a
+    -- waza id. ctx = { skillId, wazaId, owner, actor, target }.
+    -- TODO(skill-activate-source): unverified IN GAME — reflected and declared, never armed,
+    -- so it is unknown whether the C++ combat path goes through this helper or builds its
+    -- action directly. Press F7, have a pal use a move, and look for `HOOK skill.activate`.
+    -- If it is 0, the next candidate is a UPalActionWazaBase subclass's OnBeginAction:
+    -- Pal.hpp:13270 puts `EPalWazaID WazaID` on that class itself, so `self` would carry it.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "an active skill fired (self, owner, ctx)" },
-    -- TODO(skill-hit-source): NARROWED on both sides. VICTIM side: dumps/reflection/
-    -- 06_events.txt records PalCharacter:OnDamageReaction firing 9 times on real pals and on
-    -- the player, and shows its shape — exactly ONE parameter, a UScriptStruct (a2..a4 are
-    -- empty). So the question shrinks from "which hook and how many params" to "what are the
-    -- FIELDS of that one struct". The probe never expanded it, so they are still unprinted.
-    -- ATTACKER side: /Script/Pal.PalUtility carries MakeDamageInfoByWazaType alongside
-    -- MakeDamageInfo, ProcessDamageAndPlayEffectsByDamageInfo and ProcessDamageAndPlayEffects
-    -- — a damage-info struct BUILT from a waza type is strong reason to expect the waza
-    -- identity to be a field of the very struct OnDamageReaction receives, and those
-    -- Process* calls are attacker-side hook candidates that would carry it.
-    -- THE ONE THING LEFT: the field list of that struct (walk its UClass with ForEachProperty
-    -- inside the hook) and whether any field holds a waza / skill row FName.
-    -- Still ruled out: PalPlayerController:SkillDamageReactionComponent_ProcessDamage_ToServer
-    -- (armed, 0 firings).
+                    doc = "an active skill fired (self, owner, ctx) - source wired, not yet seen firing" },
+    -- SOURCE: /Script/Pal.PalUtility:MakeDamageInfoByWazaType(Attacker, Defencer, ...,
+    -- EPalWazaID WazaType, ...) — Pal.hpp:32046, 7th parameter, also in the live listing.
+    -- ctx = { skillId, wazaId, target, owner, attacker, location }.
+    -- WHAT IS CLOSED: the victim side, permanently. OnDamageReaction's one parameter is
+    -- FPalDamageRactionInfo, whose COMPLETE field list is IsBlow / BlowVelocity /
+    -- IsLeanBackAnime / IsStan / IsLargeDown / HitLocation (Pal.hpp:1885) — no skill, no waza,
+    -- no attacker. FPalDamageInfo (:1834) has 40 fields and still no EPalWazaID, only an
+    -- EPalWazaCategory bucket and the weapon's AttackStaticItemID. So no amount of struct
+    -- walking on the damage hook could ever have named the skill, and the attacker side is
+    -- the only side that can. Do not re-probe that struct.
+    -- TODO(skill-hit-source): unverified IN GAME, and imperfect by construction even if it
+    -- fires — this function BUILDS the damage rather than reporting that it landed, and its
+    -- `DamageRatePerCollision` parameter says a multi-collision move may build one per
+    -- collision. KEEP onHit IDEMPOTENT. What is left to measure is only the firing.
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
-                    doc = "one of its hits landed (self, target, ctx)" },
-    -- TODO(skill-passive-source): NARROWED — the shortlist exists now. dumps/reflection/
-    -- 02_reflection.txt puts AddPassiveSkill and RemovePassiveSkill on /Script/Pal.Pal-
-    -- IndividualCharacterParameter, together with GetPassiveSkillList to read the result back
-    -- and an OnPassiveSkillUpdateDelegate (+ its __DelegateSignature) that announces the
-    -- change; PalCharacter owns a :PassiveSkillComponent and PalGameInstance a
-    -- :PassiveSkillManager. So both halves this channel wants — a SOURCE to hook and an
-    -- attach call for Handle:equip to make real — have named targets on classes proven
-    -- loaded. Covers onUnequip too: same object, RemovePassiveSkill.
-    -- THE ONE THING LEFT: the parameter list of Add/RemovePassiveSkill (passive row FName vs
-    -- an index into a fixed-size array), and whether hooking them catches the statue-of-power
-    -- / party in-out path. 02_reflection prints names only, and neither was ever armed.
+                    doc = "one of its hits landed (self, target, ctx) - source wired, may repeat per collision" },
+    -- SOURCE: /Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill(FName AddSkill,
+    -- FName OverrideSkill) — Pal.hpp:21155 — and :RemovePassiveSkill(FName SkillId) — :21003.
+    -- Both names are in the live build's full listing of that class (02_reflection.txt:1107).
+    -- The old open question is ANSWERED: the parameters are FNames, not an index into a
+    -- fixed-size array, and no struct is involved. The owner comes off the same object's
+    -- `APalCharacter* IndividualActor` property (:20910), so ctx.owner is a real character.
+    -- ctx = { skillId, owner, actor, params, overrides }. `overrides` is AddPassiveSkill's
+    -- second argument passed straight through; it is NOT read as an unequip, because the name
+    -- does not say which of the two ids is being displaced.
+    -- TODO(skill-passive-source): unverified IN GAME. Which player actions route through these
+    -- two is still unmeasured — capture-time random assignment and the Statue of Power are the
+    -- expectation, party in/out is not. Both are armed only after world.ready, so a passive
+    -- restored during the load storm should not surface as an equip; that too is unobserved.
     { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "a passive was attached (self, owner, ctx)" },
+                    doc = "a passive was attached (self, owner, ctx) - source wired, not yet seen firing" },
     { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "a passive was removed (self, owner, ctx)" },
+                    doc = "a passive was removed (self, owner, ctx) - source wired, not yet seen firing" },
 })
 
 ---What you pass to Skill{ ... }. `id` is the only required field.

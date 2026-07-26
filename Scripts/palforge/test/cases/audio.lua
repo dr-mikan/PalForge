@@ -4,10 +4,13 @@
 -- bgm/se PIN `kind` rather than quietly overwriting a caller's, and — the part that decides
 -- whether anything can ever make noise — how a declaration is LOWERED into the core.sound
 -- spec: the id fallback, a path-only definition (which used to resolve to nothing and now
--- resolves), and an empty sound id, which still resolves to nil. Two tests assert a stub
--- rather than a promise: :setVolume returns false and a soundFile definition plays nothing.
--- Those are tripwires — they go red the day someone implements either, which is the point.
--- Only :play and :stop on a real actor need a world, so those two SKIP at the title screen.
+-- resolves), and an empty sound id, which still resolves to nil. One test still asserts a stub
+-- rather than a promise — a soundFile definition plays nothing — and it is a tripwire that goes
+-- red the day someone implements it, which is the point. :setVolume is no longer one of those:
+-- it is wired to the actor-scoped output-bus call and is asserted the way :play and :stop are,
+-- false with no actor and true once the native call has been issued.
+-- Only :play, :stop and :setVolume on a real actor need a world, so those three SKIP at the
+-- title screen.
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Audio   = require("palforge.api.audio")
@@ -192,13 +195,25 @@ s:test("a custom audio FILE does not play yet: :play is a no-op that returns fal
     t:eq(h:play(STUB_ACTOR), false, "the file route resolves and then plays nothing")
 end)
 
-s:test(":setVolume is not implemented and returns false to say so", function(t)
-    -- No per-SOUND volume route is known (the RTPC names are not dumped), so this is a
-    -- documented stub. Wiring it should break this test, and the signature with it.
+s:test(":setVolume reports false rather than true when there is no actor to scale", function(t)
+    -- setVolume is wired now (UAkGameplayStatics::SetOutputBusVolume, AkAudio.hpp:748) but it
+    -- is ACTOR-scoped, so with no world there is no default actor and nothing is issued. This
+    -- is the same fail-soft claim :play and :stop make, asserted on the same terms.
     local h = Audio.se{ id = support.id("audio"), soundId = "AKE_Test_Blip" }
-    t:eq(h:setVolume(0.5), false, ":setVolume does nothing and reports false")
+    if support.player() then t:skip("a world is loaded — there IS an actor to scale") end
+    t:eq(h:setVolume(0.5), false, "no actor, so no native call was issued")
     t:eq(h:setVolume(0.0), false, "...for every value, including the edges")
     t:eq(h:setVolume(1.0), false, "...including a full-volume request")
+end)
+
+s:test(":setVolume refuses a value that is not a non-negative number, and never raises", function(t)
+    -- The value guard runs before the engine is reached at all, which is why this claim holds
+    -- identically with and without a world: a FloatProperty is only safe to marshal when what
+    -- reaches it really is a number, and a fail-soft false is the whole contract here.
+    local h = Audio.se{ id = support.id("audio"), soundId = "AKE_Test_Blip" }
+    t:eq(h:setVolume(-1.0, STUB_ACTOR), false, "a negative multiplier is refused")
+    t:eq(h:setVolume("loud", STUB_ACTOR), false, "a string is refused")
+    t:eq(h:setVolume(nil, STUB_ACTOR), false, "and so is nothing at all")
 end)
 
 --=============================================================================
@@ -215,6 +230,19 @@ s:test(":play issues a native call for a resolvable sound on the player pawn", f
     local h = Audio.se{ id = support.id("audio"), soundPath = path }
     t:eq(h:play(pawn), true, ":play returns true once the native call has been ISSUED")
     t:eq(h:play(), true, "the default actor is the local player pawn")
+end)
+
+s:test(":setVolume issues the actor-scoped output-bus call on the player pawn", function(t)
+    local pawn = support.needWorld(t)
+
+    -- 1.0 ON PURPOSE. This is the one live audio claim that leaves state behind — an output bus
+    -- volume is a property of the actor's Wwise game object, not of a playing sound, so a test
+    -- that set 0.2 would leave the player's own audio scaled down after it passed. 1.0 is unity:
+    -- the call is fully exercised, core/signature's live parameter walk either agrees with
+    -- AkAudio.hpp:748 or refuses, and nothing about the session sounds different afterwards.
+    local h = Audio.get(support.id("audio"))
+    t:eq(h:setVolume(1.0, pawn), true, ":setVolume returns true once the native call was ISSUED")
+    t:eq(h:setVolume(1.0), true, "the default actor is the local player pawn, as with play/stop")
 end)
 
 s:test(":stop is actor-wide: it issues the native stop whatever sound you call it on", function(t)

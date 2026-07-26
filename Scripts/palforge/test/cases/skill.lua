@@ -1,15 +1,18 @@
 -- palforge/test/cases/skill.lua — the skill domain: define, lookup, manual invocation.
 --
--- Every claim here is pure Lua, because that is the honest state of the domain: no native
--- source fires a skill, so nothing in api/skill.lua reaches the engine except iconOf's
--- DataTable probe. The suite proves the shape (strict spec, kind default, carried fields),
--- the four handlers getting the DEFINING handle, and the cooldown — that it blocks the
--- second immediate :activate, that :cooldownLeft reports a sane remainder, that it is
--- per-owner, and that :hit / :equip / :unequip step around it. Only the last test needs a
--- world, and only to prove the live icon lookup fails soft; it skips at the title screen.
+-- Every claim here is pure Lua, and that is still the honest place to test this domain: the
+-- four native skill sources core/event.lua arms on 2026-07-26 cannot be driven from a test
+-- (only the game can call PlayActionByWazaID), so what IS tested is everything between the
+-- channel and the handler — emit a skill channel by hand and prove the dispatch resolves the
+-- definition and calls it with the right subject. The suite proves the shape (strict spec,
+-- kind default, carried fields), the four handlers getting the DEFINING handle, the BUS route
+-- into them, and the cooldown — that it blocks the second immediate :activate, that
+-- :cooldownLeft reports a sane remainder, that it is per-owner, and that :hit / :equip /
+-- :unequip step around it. Only two tests need a world; they skip at the title screen.
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Skill   = require("palforge.api.skill")
+local event   = require("palforge.core.event")
 local character = require("palforge.core.character")
 
 local s = T.suite("skill")
@@ -154,6 +157,66 @@ s:test("the four handlers receive the handle the definition returned", function(
     t:eq(seen.hit[2], target, "onHit got the target")
     t:eq(seen.equip[2], owner, "onEquip got the owner")
     t:eq(seen.unequip[2], owner, "onUnequip got the owner")
+end)
+
+s:test("core.event declares a channel for every one of the four handlers", function(t)
+    local want = { ["skill.activate"] = "onActivate", ["skill.hit"] = "onHit",
+                   ["skill.equip"] = "onEquip", ["skill.unequip"] = "onUnequip" }
+    for _, name in ipairs(event.CHANNELS) do want[name] = nil end
+    local missing = {}
+    for name in pairs(want) do missing[#missing + 1] = name end
+    table.sort(missing)
+    t:eq(#missing, 0, "a handler with no channel can never fire: " .. table.concat(missing, ", "))
+end)
+
+s:test("emitting a skill channel reaches the DEFINED skill with the right subject", function(t)
+    -- This is the half of the 導線 a test can own. The other half — whether the game calls
+    -- PlayActionByWazaID / MakeDamageInfoByWazaType / Add|RemovePassiveSkill — is what F7's
+    -- watch probe is for, and no assertion here can stand in for it.
+    local id = support.id("skill")
+    local seen = {}
+    local sk = Skill{ id = id, events = {
+        onActivate = function(self, owner, ctx) seen.activate = { self, owner, ctx } end,
+        onHit      = function(self, target, ctx) seen.hit     = { self, target, ctx } end,
+        onEquip    = function(self, owner, ctx) seen.equip    = { self, owner, ctx } end,
+        onUnequip  = function(self, owner, ctx) seen.unequip  = { self, owner, ctx } end,
+    } }
+
+    local owner, target = {}, {}
+    event.emit("skill.activate", { skillId = id, owner = owner })
+    event.emit("skill.hit",      { skillId = id, target = target })
+    event.emit("skill.equip",    { skillId = id, owner = owner })
+    event.emit("skill.unequip",  { skillId = id, owner = owner })
+
+    for _, name in ipairs({ "activate", "hit", "equip", "unequip" }) do
+        t:assert(seen[name] ~= nil, "skill." .. name .. " dispatched to on" .. name)
+        t:eq(seen[name][1], sk, "the handler got the DEFINING handle as self, not the class")
+    end
+    -- The subject is what separates these four from every other channel in the bus: onHit is
+    -- handed the TARGET and the other three the owner, so a shared two-argument dispatcher
+    -- would silently shift every handler's arguments by one.
+    t:eq(seen.activate[2], owner, "onActivate got ctx.owner")
+    t:eq(seen.hit[2], target, "onHit got ctx.target, NOT the owner")
+    t:eq(seen.equip[2], owner, "onEquip got ctx.owner")
+    t:eq(seen.unequip[2], owner, "onUnequip got ctx.owner")
+    t:eq(seen.activate[3].skillId, id, "the whole ctx is handed through as the third argument")
+end)
+
+s:test("a skill channel for an id nobody DEFINED dispatches to nothing", function(t)
+    -- Skill.get materialises a thin handle that is never registered, so the game firing a
+    -- vanilla move reaches no handler at all. That is the rule pals and items follow too, and
+    -- it is why a pack has to Skill{ ... } an id rather than Skill.get it.
+    local id = support.id("skill")
+    local sk = Skill.get(id)
+    local ran = false
+    sk._cls.onActivate = function() ran = true end
+
+    local ok = pcall(event.emit, "skill.activate", { skillId = id, owner = {} })
+    t:truthy(ok, "an unresolvable skill ctx is a no-op, not an error")
+    t:falsy(ran, "an unregistered id resolves to nothing, so nothing runs")
+
+    -- And a ctx with no skillId at all cannot key anything either.
+    t:truthy(pcall(event.emit, "skill.hit", { target = {} }), "a ctx with no skillId is inert")
 end)
 
 s:test("an explicit ctx is handed through to the handler untouched", function(t)

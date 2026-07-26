@@ -436,11 +436,33 @@ end)
 s:test("_widget's fail-soft helpers never throw, with or without a game", function(t)
     t:type(widget.screen, "function", "screen() is reachable from the toolkit")
     t:type(widget.owner, "function", "so is owner()")
+    t:type(widget.gameUIRoot, "function", "and so is gameUIRoot(), the game's own host")
     t:eq(widget.alive(nil), false, "alive(nil) is false, not an error")
     t:eq(widget.alive({}), false, "alive of a plain table is false too")
     t:eq(widget.findFirst("NoSuchClassAnywhere"), nil, "findFirst of a missing class is nil")
     t:eq(widget.show(nil), false, "show(nil) fails soft")
     t:eq(widget.hide(nil), false, "hide(nil) fails soft")
+end)
+
+s:test("_widget.gameUIRoot names the game's in-game UI host and fails soft when it is not up",
+function(t)
+    -- The two names are the whole answer to ui-host-paths and they are asserted here so a
+    -- rename cannot pass silently: they are read straight off the dump — the layout's native
+    -- base class (dumps/cxx/Pal.hpp:27311) and its root canvas member
+    -- (dumps/cxx/WBP_PalOverallUILayout.hpp:9).
+    t:eq(widget.PATHS.gameUILayout, "PalPrimaryGameLayoutBase", "the layout is found by its NATIVE class")
+    t:eq(widget.PATHS.gameUIRoot, "CanvasPanel_Root", "and the host panel by its declared member name")
+
+    -- Read-only either way: this only ever does a FindFirstOf and one property read, so it is
+    -- safe to run in a live session — it adds nothing to anybody's screen.
+    local host, why = widget.gameUIRoot()
+    if host then
+        t:truthy(widget.alive(host), "with a world up, the host that came back is a live widget")
+    else
+        t:type(why, "string", "and with no in-game UI it is nil plus a reason, never a raise")
+        t:truthy(why:find(widget.PATHS.gameUILayout, 1, true),
+            "which names what was missing: " .. tostring(why))
+    end
 end)
 
 s:test("_widget.screen returns nil and a reason when there is no owner to build under", function(t)

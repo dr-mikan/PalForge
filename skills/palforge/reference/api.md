@@ -195,7 +195,7 @@ Declared as `events = { onX = function(self, …) end }` inside `Item{ … }`.
 |---|---|---|---|---|
 | `onObtain` | LIVE | `fun(self: Item.Handle, ctx: table)` | ctx.count = how many were obtained | LIVE - entered the inventory (ctx.count, ctx.via) |
 | `onUse` | LIVE | `fun(self: Item.Handle, ctx: table)` | ctx.actor = who used it | LIVE - used / consumed (ctx.actor = the local player pawn) |
-| `onCraft` | no | `fun(self: Item.Handle, ctx: table)` | — | declarable; NO native source exists — fires only on a manual emit |
+| `onCraft` | manual | `fun(self: Item.Handle, ctx: table)` | — | fires when a crafting machine finishes an item (unverified in game) |
 | `onDiscard` | no | `fun(self: Item.Handle, ctx: table)` | — | declarable; NO native source exists — fires only on a manual emit |
 
 ### Item.Spec.Recipe
@@ -214,12 +214,12 @@ Declared as `events = { onX = function(self, …) end }` inside `Item{ … }`.
 | `:category()` | `string` | — |
 | `:count()` | `integer?` | WORKS, and is measured. How many of this item the local player is holding right now, or nil when the count could not be read (no world / no player — nil is UNKNOWN, never zero). |
 | `:description()` | `string?` | — |
-| `:give(count)` | `boolean` | Add `count` of this item to the local player's inventory (default 1) through the game's own UPalCheatManager:GetItem(FName… → true only when the inventory count was measured to rise |
+| `:give(count)` | `boolean` | WORKS, and is measured. → true only when the inventory count was measured to rise |
 | `:iconOf()` | `any?` | texture ref from the icon DataTable, else the declared icon |
 | `:maxStack()` | `integer` | — |
 | `:name()` | `string` | — |
 | `:recipeOf()` | `Item.Spec.Recipe?` | — |
-| `:take(count)` | `boolean` | Remove `count` of this item from the local player's inventory (default 1) through the game's own UPalCheatManager:DropItem(const… → true only when the inventory count was measured to fall |
+| `:take(count)` | `boolean` | Remove `count` of this item from the local player's inventory (default 1) through the game's own… → true only when the inventory count was measured to fall |
 
 Event forwarders (same names as the hooks above; they call the definition's
 handler NOW — a test seam, not the real dispatch): `:onCraft(ctx)` `:onDiscard(ctx)` `:onObtain(ctx)` `:onUse(ctx)`.
@@ -360,10 +360,10 @@ Declared as `events = { onX = function(self, …) end }` inside `Skill{ … }`.
 
 | hook | fires | signature | ctx | meaning |
 |---|---|---|---|---|
-| `onActivate` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | an active skill fired (self, owner, ctx) |
-| `onHit` | manual | `fun(self: Skill.Handle, target: any, ctx: table)` | — | one of its hits landed (self, target, ctx) |
-| `onEquip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was attached (self, owner, ctx) |
-| `onUnequip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was removed (self, owner, ctx) |
+| `onActivate` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | an active skill fired (self, owner, ctx) - source wired, not yet seen firing |
+| `onHit` | manual | `fun(self: Skill.Handle, target: any, ctx: table)` | — | one of its hits landed (self, target, ctx) - source wired, may repeat per collision |
+| `onEquip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was attached (self, owner, ctx) - source wired, not yet seen firing |
+| `onUnequip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was removed (self, owner, ctx) - source wired, not yet seen firing |
 
 ### Skill.Handle
 
@@ -483,7 +483,7 @@ Audio is one playable sound: background music or a one-shot effect.
 | `:kind()` | `string` | "bgm" \| "se" |
 | `:name()` | `string` | — |
 | `:play(actor)` | `boolean` | Play this sound on `actor` (default: the local player pawn). |
-| `:setVolume(volume)` | `boolean` | Set the playback volume, 0.0 .. 1.0. NOT IMPLEMENTED — returns false so a caller can tell it did nothing, and on this build there is no per-sound volume to set AT ALL. |
+| `:setVolume(volume, actor)` | `boolean` | Set the playback volume on `actor` (default: the local player pawn), as a LINEAR multiplier where 1.0 is unity. ACTOR-WIDE by design, exactly like :stop — read that first if you expected this to be per sound. |
 | `:source()` | `table?` | The lowered source spec core.sound will resolve ({ kind = "native"\|"file", ... } \| nil). |
 | `:stop(actor)` | `boolean` | Stop sounds on `actor` (default: the local player pawn). ACTOR-WIDE by design: the native call is StopSoundByActor, so it silences everything playing on that actor and WHICH sound you called it on is ignored. |
 

@@ -15,10 +15,14 @@
 -- watch — plus the OnCompleteBuild hook that runtime refused (see building.build).
 -- The runtime no longer calls hooks directly — the scan/hooks EMIT channels and
 -- DISPATCH resolves the live instance and calls the hook (place fires exactly once).
--- The PAL source arms four native hooks plus a slow onTick sweep, and the ITEM source
--- three; what is still marked `-- TODO(<id>):` is narrower than it once was — item.craft
--- and item.discard, for which no native call has been found. Their DISPATCH is wired and
--- starts firing the moment a source emits.
+-- The PAL source arms four native hooks plus a slow onTick sweep, the ITEM source six,
+-- and the SKILL source four. Seven of those fourteen were found on 2026-07-26 in
+-- dumps/cxx/Pal.hpp — UE4SS's own CXXHeaderDump of the installed binary — which is the
+-- first source in this tree that could answer "what does the game call when X happens"
+-- without the game running. Each carries, at its hook, the EVIDENCE CLASS it was wired on:
+--   recorded firing  > reflected in the live build > declared in the header dump only.
+-- Nothing below is wired on less than a real declaration, and the two channels that STILL
+-- have no source (building.leftclick, building.break) say so with the reason.
 --
 -- ARMED LATE, ON PURPOSE. Two of those hooks — building.build's
 -- OnCompleteBuild_ServerInternal and pal.spawned's BroadcastOnCompleteInitializeParameter
@@ -50,6 +54,12 @@ local BuildingBase   = require("palforge.api.building").Class
 -- definition that really implements onTick from one that inherited the inert default.
 -- (Neither api module requires core.event at load time, so this is not a cycle.)
 local PalBase        = require("palforge.api.pal").Class
+-- core/character owns the ONE EPalWazaID name<->value table in this tree (309 names, taken
+-- verbatim from dumps/cxx/Pal_enums.hpp). The skill source below receives that enum as a bare
+-- integer from two native hooks and has to answer a caller in NAMES, so it reads that table
+-- rather than keeping a second copy that could drift. (core/character requires only log and
+-- signature, so this is not a cycle; api/pal already pulls it in one line above.)
+local character      = require("palforge.core.character")
 
 local M = { Rx = Rx }   -- expose Rx so consumers can build observables / use operators
 
@@ -61,6 +71,7 @@ M.CHANNELS = {
     "building.build",                                                  -- build COMPLETE (class-dispatched)
     "pal.spawned", "pal.damaged", "pal.death", "pal.captured",
     "item.obtain", "item.use", "item.craft", "item.discard",
+    "skill.activate", "skill.hit", "skill.equip", "skill.unequip",     -- Skill.Spec.Events
     "tick",                                                            -- periodic heartbeat
 }
 
@@ -615,6 +626,53 @@ end
 -- =====================================================================================
 local function get(param) return param:get() end
 
+-- ---- hook-parameter readers, shared by every SOURCE below --------------------------------
+-- These three used to live inside installItemSource. They are module-level now because the
+-- item, skill and craft/discard sources all read parameters the same way and a second copy of
+-- "how do you get a value out of a UE4SS hook param" is exactly the thing that drifts.
+
+---A hook param's value, or nil on failure. UE4SS hands params in as wrappers with :get().
+local function getv(p) local ok, v = pcall(function() return p:get() end); if ok then return v end end
+
+---Read a stringy FIELD off a struct/object value; nil if absent, empty or "None".
+local function fstr(v, field)
+    if v == nil then return nil end
+    local raw; pcall(function() raw = v[field] end)
+    if raw == nil then return nil end
+    local s = (type(raw) == "userdata" and raw.ToString) and raw:ToString() or tostring(raw)
+    if s == nil or s == "" or s == "None" then return nil end
+    return s
+end
+
+---Read a hook param that IS the value (a bare FName / number), not a struct field.
+local function pstr(p)
+    local v = getv(p)
+    if v == nil then return nil end
+    local s
+    if type(v) == "userdata" and v.ToString then pcall(function() s = v:ToString() end)
+    else s = tostring(v) end
+    if s == nil or s == "" or s == "None" then return nil end
+    return s
+end
+
+---Walk a UE4SS TArray, calling fn(value) per element. UE4SS hands arrays back in three shapes
+---depending on build and element type (a :ForEach, a #-indexable userdata, or a :Get(i-1)), so
+---all three are tried in that order — the same ladder core/character.lua:450 uses, which is the
+---one array reader in this tree that has been read back from a live save. Elements are NOT
+---unwrapped here: every caller below wants the struct itself, not a scalar behind :get().
+local function eachArray(arr, fn)
+    if arr == nil then return 0 end
+    local n = 0
+    local function push(v) if v ~= nil then n = n + 1; pcall(fn, v) end end
+    if pcall(function() arr:ForEach(function(_, v) push(v) end) end) and n > 0 then return n end
+    local len; pcall(function() len = #arr end)
+    if type(len) ~= "number" or len <= 0 then return n end
+    for i = 1, len do local v; pcall(function() v = arr[i] end); push(v) end
+    if n > 0 then return n end
+    for i = 1, len do local v; pcall(function() v = arr:Get(i - 1) end); push(v) end
+    return n
+end
+
 local function tryHook(path, fn)
     local ok, e = pcall(RegisterHook, path, fn)
     if not ok then log.warn("hook unavailable (feature disabled): " .. path .. " -> " .. tostring(e)) end
@@ -934,8 +992,29 @@ local function installPalSource()
     -- confirmed hooks down with it, so late arming protects them, not just this one.
     -- Still unproven that it signals a FRESH spawn: that needs a post-load spawn probe, so
     -- keep handlers idempotent and treat the channel as a candidate.
-    -- TODO(pal-spawned-fresh): unknown whether BroadcastOnCompleteInitializeParameter fires for a
-    -- pal spawned AFTER world load — every probe pal so far pre-existed the hook (0 firings).
+    --
+    -- WHAT dumps/cxx SETTLED, 2026-07-26, and it is the architectural half of the question.
+    -- `void BroadcastOnCompleteInitializeParameter()` is declared on APalCharacter at
+    -- Pal.hpp:9087 with ZERO parameters, so `self` really is the character and there is
+    -- nothing else the hook could hand us. What it broadcasts is
+    -- `OnCompleteInitializeParameterDelegateMap` (:9016), a map keyed by
+    -- EPalCharacterCompleteDelegatePriority and filled through BindOnCompleteInitialize-
+    -- ParameterDelegate (:9088). And the SPAWN API rides that very map:
+    -- UPalCharacterManager::SpawnNewCharacterWithInitializeParameterCallback (Pal.hpp:15538)
+    -- takes an `EPalCharacterCompleteDelegatePriority InitializeParameterCallbackPriority`
+    -- alongside its InitializeParameterCallback — the game's own way of saying "call me when
+    -- this NEW character finishes initialising" is a subscription to this broadcast. A pal
+    -- created after world load therefore does broadcast; that is no longer a hope.
+    -- TODO(pal-spawned-fresh): what the header dump cannot settle is whether the broadcast
+    -- REACHES US. BroadcastOnCompleteInitializeParameter is the broadcaster, not a delegate
+    -- target — a plain C++ call site would bypass reflection entirely and RegisterHook would
+    -- sit behind it silently, which is a complete explanation for the one recorded arming
+    -- counting 0. Every hook in this file that is proven to fire is an RPC, a BlueprintCallable
+    -- static or a dynamic-delegate target; this one is none of the three. One post-load arming
+    -- that logs a single firing closes it (F7, then release a pal and WAIT >10 s for the
+    -- spawn); if it stays at 0, the replacement is a delegate TARGET rather than the
+    -- broadcaster — APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter*)
+    -- (Pal.hpp:10637) is one such bound handler and is the next path to arm.
     tryHookAfterWorldReady("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter",
         function(self)
             if not worldReady then return end
@@ -974,31 +1053,13 @@ end
 --                Both are armed because they fail in opposite directions; neither is
 --                authoritative enough to drop.
 --             Silent internal adds that surface no get-log are covered only if they take
---             route 2; nothing here can distinguish crafting from pickup (item.craft stays
---             sourceless on purpose rather than being faked from these).
+--             route 2; NEITHER is ever read as a craft. That distinction has not moved: a
+--             crafted item still surfaces through the same get-log, so item.craft is sourced
+--             from the production models below and never inferred from an obtain.
+--   craft  -> the two MapObject models that finish a production WORK (see below).
+--   discard-> the two player-initiated removals on PalNetworkItemComponent (see below).
 local function installItemSource()
-    -- get a hook param's value; nil on failure.
-    local function getv(p) local ok, v = pcall(function() return p:get() end); if ok then return v end end
-    -- read a stringy field off a struct/object value; nil if absent/empty/None.
-    local function fstr(v, field)
-        if v == nil then return nil end
-        local raw; pcall(function() raw = v[field] end)
-        if raw == nil then return nil end
-        local s = (type(raw) == "userdata" and raw.ToString) and raw:ToString() or tostring(raw)
-        if s == nil or s == "" or s == "None" then return nil end
-        return s
-    end
-
-    -- read a hook param that IS the value (a bare FName / number), not a struct field.
-    local function pstr(p)
-        local v = getv(p)
-        if v == nil then return nil end
-        local s
-        if type(v) == "userdata" and v.ToString then pcall(function() s = v:ToString() end)
-        else s = tostring(v) end
-        if s == nil or s == "" or s == "None" then return nil end
-        return s
-    end
+    -- getv / fstr / pstr are module-level (see the readers above tryHook).
 
     -- use: read the id off the item-data param. a1 FIRST and "ID" FIRST — that is the
     -- only shape ever observed in game (V2 probe, above). "Id"/"StaticId" and the later
@@ -1112,39 +1173,358 @@ local function installItemSource()
         end)
     end)
 
-    -- item.craft and item.discard stay SOURCELESS, on purpose rather than by omission.
-    -- The one signal that is right there — the get-log — cannot stand in for either: a
-    -- crafted item surfaces through that same get-log ("Crafting output surfaces through the
-    -- same get-log, so item.craft may be redundant with item.obtain",
-    -- dump/docs/further_plan.md:38-39), so emitting item.craft from it would report every
-    -- pickup as a craft. Neither channel has a candidate native function recorded anywhere:
-    -- dump/dump_targets.md:149-150 lists both as `dump to discover`, and the probe harness
-    -- (dump/auto_mod/Scripts/main.lua:33-48) never armed one. Their DISPATCH is wired and
-    -- begins working the moment an emit lands here.
-    -- TODO(item-craft-source): no craft-complete UFunction is known — which class/function the
-    -- game calls when a bench finishes an item, and which param carries the id + count.
-    -- Still fully open: the 21 classes in dumps/reflection/02_reflection.txt do not include
-    -- PalMapObjectProductItemModel / PalMapObjectWorkeeModel / PalWorkProgress*, and no
-    -- craft-shaped hook was ever armed, so nothing in the dumps speaks to it.
+    -- =================================================================================
+    -- item.craft — A PRODUCTION WORK FINISHED. Two hooks, and they are not a fallback
+    -- chain: they are two DIFFERENT machines that produce items, on two different classes,
+    -- and neither is consulted when the other misses.
     --
-    -- TODO(item-discard-source): NARROWED by the dumps, not closed. What is now measured:
-    -- there is no dedicated drop/discard entry point on the inventory classes at all —
-    -- 02_reflection.txt lists PalPlayerInventoryData in full (69 fns; the only removal-shaped
-    -- name is TryRemoveEquipment) and PalItemContainer in full (13 fns, all reads), so the
-    -- "separate discard UFunction" branch of this question is dead. What is still unknown is
-    -- the standing hypothesis: whether a drop arrives as AddItem_ServerInternal with a
-    -- NEGATIVE Count. The dumps cannot say — that hook WAS armed successfully (14/14, label
-    -- ITEM.add, dump/auto_mod/Scripts/main.lua:44) and never fired once across both recorded
-    -- sessions, in either direction, while ITEM.getlog and ITEM.use did; so either the
-    -- sessions contained no qualifying action or this call does not run client-side at all.
-    -- The next probe has to log ITEM.add and ITEM.getlog side by side across a pickup AND a
-    -- drop to tell those two apart.
+    -- WHAT THE DUMP SAID. dumps/cxx/Pal.hpp declares one function name on nine classes,
+    -- always with the same single parameter — `void OnFinishWorkInServer(UPalWorkBase* Work)`
+    -- — and it is a UFUNCTION bound to UPalWorkBase::OnFinishWorkInServerDelegate
+    -- (Pal.hpp:32807), i.e. a dynamic multicast delegate. That matters more than the name:
+    -- a dynamic delegate is broadcast through UObject::ProcessEvent, which is the path
+    -- RegisterHook can see, so this is not a C++-internal call that a hook would sit behind
+    -- silently. Two of those nine carry an item id and are the ones wired:
+    --   * UPalMapObjectConvertItemModel (Pal.hpp:22631, hook at :22669) — the recipe benches
+    --     and furnaces. `FName CurrentRecipeId` (:22641) is the recipe being made, and the
+    --     recipe table is keyed BY PRODUCT ITEM ID: dumps/reflection/01_datatables.txt:54129+
+    --     lists DT_ItemRecipeDataTable_Common's rows as Money / PalSphere / Arrow /
+    --     RoughBullet / ..., which are item ids. So the recipe id IS the item id for a vanilla
+    --     recipe, and it is handed over under both names so a pack need not rely on that.
+    --   * UPalMapObjectProductItemModel (Pal.hpp:24327, hook at :24341) — the fixed-output
+    --     producers. `FName ProductItemId` (:24333) names the item outright.
+    -- Neither model exposes the COUNT: for the convert route the per-craft count lives in the
+    -- recipe row's Product_Count (FPalItemRecipe, Pal.hpp), which is a DataTable read this
+    -- source deliberately does not make inside a hook. ctx.count is nil, and that is honest
+    -- rather than a 1 nobody measured.
+    --
+    -- EVIDENCE CLASS: DECLARED ONLY — the weakest of the three. Neither class is among the 21
+    -- in dumps/reflection/02_reflection.txt, so the live build has not been asked whether it
+    -- still carries them, and no craft-shaped hook has ever been armed in a recorded session.
+    -- What makes wiring it right anyway is that the failure mode is silence, not noise: if
+    -- the function is absent tryHook logs "hook unavailable" and the channel stays as empty as
+    -- it is today, and if it fires it can only mean a production work completed. That is the
+    -- opposite of the OnDamage trap that killed building.leftclick, where the candidate DID
+    -- fire — 196 times, on a 12 s decay timer — and would have run every pack's handler.
+    -- TODO(item-craft-source): unverified IN GAME. Nobody has yet crafted one item with these
+    -- two hooks armed. What is left is exactly that one observation — press F7, craft at a
+    -- bench, and look for `HOOK craft` — plus the count, which no model field carries.
+    local function craftSource(path, field, via)
+        tryHook(path, function(self, work)
+            if not worldReady then return end
+            pcall(function()
+                local m = getv(self)
+                if not (m and m.IsValid and m:IsValid()) then return end
+                local id = fstr(m, field)
+                if not id then return end
+                M.emit("item.craft", {
+                    itemId   = id,
+                    recipeId = id,       -- same value under the name the convert route calls it
+                    count    = nil,      -- not on the model; see the note above
+                    model    = m,
+                    work     = getv(work),
+                    via      = via,
+                })
+            end)
+        end)
+    end
+    craftSource("/Script/Pal.PalMapObjectConvertItemModel:OnFinishWorkInServer",
+        "CurrentRecipeId", "convert")
+    craftSource("/Script/Pal.PalMapObjectProductItemModel:OnFinishWorkInServer",
+        "ProductItemId", "product")
+
+    -- =================================================================================
+    -- item.discard — THE PLAYER THREW IT AWAY. Two hooks, both on the same component and
+    -- both player-initiated, so there is nothing to dedupe between them.
+    --
+    -- WHAT THE DUMP SAID, and it overturns the standing hypothesis rather than confirming
+    -- it. `UPalNetworkItemComponent` (dumps/cxx/Pal.hpp:25686) declares eight `_ToServer`
+    -- RPCs, and two of them are exactly the two actions the old probe script asked a human
+    -- to perform:
+    --   RequestDrop_ToServer(TArray<FPalItemSlotIdAndNum> DropSlotAndNumArray,
+    --                        FVector DropLocation, bool IsAutoPickup)     (Pal.hpp:25696)
+    --   RequestDispose_ToServer(FGuid RequestID, FPalItemSlotIdAndNum SlotInfo) (:25697)
+    -- So the answer to "is a drop an AddItem_ServerInternal with a negative Count" is NO, and
+    -- it never could have been: dropping does not go through the inventory add at all, which
+    -- is why that hook was armed successfully and fired zero times across both recorded
+    -- sessions. The reason the search kept missing is that it was run against the wrong
+    -- classes — PalPlayerInventoryData and PalItemContainer really do have no removal (this
+    -- file's old note was right about that), because removal lives on a NETWORK component,
+    -- one class over, beside RequestSwap / RequestMove / RequestMoveToContainer.
+    --
+    -- EVIDENCE CLASS: DECLARED ONLY for the two names — neither class is in 02_reflection.txt
+    -- — but the SHAPE is proven. `_ToServer` is a UE RPC, always dispatched through
+    -- ProcessEvent, and this file already runs two of them successfully: RequestBuild_ToServer
+    -- drives the whole building runtime, and PalNetworkPlayerComponent's
+    -- RequestUnlockTechnology_ToServer is recorded firing 3 times in 06_events.txt.
+    --
+    -- THE ONE WEAK LINK, stated plainly because it is where this will fail if it fails: the
+    -- params carry SLOT IDS, not item ids. FPalItemSlotIdAndNum is { FPalItemSlotId SlotId;
+    -- int32 Num } and FPalItemSlotId is { FPalContainerId ContainerId; int32 SlotIndex }
+    -- (Pal.hpp:3922-3934) — so the id has to be read off the slot the request points at,
+    -- BEFORE the server empties it, which is why this is a pre-hook. slotItemId below does
+    -- that walk and every step of it is unobserved on this build. When it cannot resolve, the
+    -- source emits NOTHING rather than an event with a guessed id, and says so once.
+    -- TODO(item-discard-source): unverified IN GAME, on two counts. (1) Do the two RPCs fire
+    -- in single player — a `_ToServer` call on a listen server may be executed directly rather
+    -- than dispatched, in which case the hook never sees it. (2) Does slotItemId resolve? It
+    -- assumes FindFirstOf("PalPlayerInventoryData") is the local player's, that
+    -- .InventoryMultiHelper.Containers is readable as an array, that a UPalItemContainer's
+    -- .ID.ID FGuid compares field-wise against the param's, and that :Get(SlotIndex) is
+    -- 0-based like ItemSlotArray. Press F7, drop a stack and trash a stack, and read the
+    -- `discard` lines. Consuming an item is NOT this channel — that is item.use, which works.
+
+    ---FGuid equality, field-wise. Neither UE4SS nor this tree has a comparison operator for a
+    ---struct param, so the four int32s are read individually; a read that comes back nil makes
+    ---this false rather than accidentally-equal (two unreadable guids must not match).
+    local function guidEq(a, b)
+        local ok, eq = pcall(function()
+            if a == nil or b == nil or a.A == nil or b.A == nil then return false end
+            return a.A == b.A and a.B == b.B and a.C == b.C and a.D == b.D
+        end)
+        return ok and eq == true
+    end
+
+    ---Every UPalItemContainer the LOCAL player's inventory holds, as a plain list.
+    ---FindFirstOf carries the same caveat as ctx.actor on item.use above: it is the local
+    ---player, which is right in single player and is whichever pawn comes first on a
+    ---dedicated server. A drop from a chest UI moves items between containers and does not
+    ---reach RequestDrop, so the player's own containers are the set that matters.
+    local function playerContainers()
+        local out = {}
+        pcall(function()
+            local inv = FindFirstOf("PalPlayerInventoryData")
+            if not (inv and inv.IsValid and inv:IsValid()) then return end
+            local helper; pcall(function() helper = inv.InventoryMultiHelper end)
+            if not (helper and helper.IsValid and helper:IsValid()) then return end
+            local arr; pcall(function() arr = helper.Containers end)
+            eachArray(arr, function(c) out[#out + 1] = c end)
+        end)
+        return out
+    end
+
+    ---Resolve one FPalItemSlotId to the item id sitting in it right now, or nil.
+    local function slotItemId(slotId)
+        local wanted, index
+        pcall(function() wanted = slotId.ContainerId.ID end)   -- FPalContainerId wraps one FGuid
+        pcall(function() index = slotId.SlotIndex end)
+        if wanted == nil or type(index) ~= "number" then return nil end
+        for _, c in ipairs(playerContainers()) do
+            local cid; pcall(function() cid = c.ID.ID end)
+            if guidEq(cid, wanted) then
+                local slot; pcall(function() slot = c:Get(index) end)
+                if slot ~= nil then
+                    local id; pcall(function() id = slot.ItemId.StaticId:ToString() end)
+                    if id and id ~= "" and id ~= "None" then return id end
+                end
+                return nil    -- right container, empty or unreadable slot: do not keep looking
+            end
+        end
+        return nil
+    end
+
+    -- One line per session, not per drop: an unresolvable slot is a standing fact about the
+    -- build, and repeating it every time the player cleans out a bag would be noise.
+    local discardMissLogged = false
+    local function emitDiscard(entry, reason)
+        local slotId, num
+        pcall(function() slotId = entry.SlotId end)
+        pcall(function() num = entry.Num end)
+        if slotId == nil then return end
+        local id = slotItemId(slotId)
+        if not id then
+            if not discardMissLogged then
+                discardMissLogged = true
+                log.warn("item.discard: the dropped slot could not be resolved to an item id "
+                    .. "(see TODO(item-discard-source)); the channel stays silent this session")
+            end
+            return
+        end
+        M.emit("item.discard", { itemId = id, count = tonumber(num), reason = reason })
+    end
+
+    -- drop: an ARRAY of slots, so one emit per entry. The Num on the entry is what is leaving
+    -- the bag, which is the number a handler wants — not the slot's whole stack.
+    tryHook("/Script/Pal.PalNetworkItemComponent:RequestDrop_ToServer", function(self, slots)
+        if not worldReady then return end
+        pcall(function() eachArray(getv(slots), function(e) emitDiscard(e, "drop") end) end)
+    end)
+
+    -- dispose: trashing one stack from the inventory menu. a1 is the request guid, a2 the slot.
+    tryHook("/Script/Pal.PalNetworkItemComponent:RequestDispose_ToServer", function(self, _reqId, slotInfo)
+        if not worldReady then return end
+        pcall(function() emitDiscard(getv(slotInfo), "dispose") end)
+    end)
+end
+
+-- =====================================================================================
+-- SOURCE skill — the four channels behind Skill.Spec.Events. Until 2026-07-26 there was
+-- no skill channel in this file at all; api/skill's handlers only ever ran from
+-- Handle:activate / :hit / :equip / :unequip.
+--
+-- The two combat sources are both BlueprintFunctionLibrary statics on /Script/Pal.PalUtility,
+-- which is the strongest class this file could have landed on: PalUtility is one of the 21
+-- classes reflected out of the LIVE build (dumps/reflection/02_reflection.txt:2049), both
+-- names appear in that listing, and its sibling library PalSoundUtility is recorded firing
+-- 286 times in one session (06_events.txt) — so a static on one of these libraries is
+-- something the shipping game demonstrably calls through reflection.
+--
+--   activate -> UPalUtility::PlayActionByWazaID(AActor* actionActor, AActor* TargetActor,
+--               EPalWazaID WazaID)                                      (Pal.hpp:32037)
+--               Three scalar-ish parameters, and every one of them is a thing this channel
+--               needs: who acted, what they aimed at, and WHICH MOVE. That last one is the
+--               identity no other candidate carried — PalPlayerController:PlaySkill was
+--               armed twice and never fired, and the action-component routes (PlayAction,
+--               PlayActionByType) carry a UClass rather than a waza id.
+--   hit      -> UPalUtility::MakeDamageInfoByWazaType(Attacker, Defencer, AttackerHitComponent,
+--               DefenderHitComponent, HitLocation, FoliageIndex, EPalWazaID WazaType, ...)
+--                                                                       (Pal.hpp:32046)
+--               The seventh parameter is the waza and the second is the victim.
+--
+-- AND HERE IS WHY IT IS THIS FUNCTION AND NOT THE DAMAGE HOOK — the dump closed the route
+-- this channel had been waiting on. OnDamageReaction's single parameter is
+-- `FPalDamageRactionInfo` (Pal.hpp:1885), whose COMPLETE field list is IsBlow, BlowVelocity,
+-- IsLeanBackAnime, IsStan, IsLargeDown, HitLocation. No skill, no waza, no attacker. And the
+-- fallback everyone assumed would carry it, `FPalDamageInfo` (:1834), has 40 fields and still
+-- no EPalWazaID — the closest are `EPalWazaCategory Category` (a Melee/Shot bucket, not an
+-- identity) and `FName AttackStaticItemID` (the weapon). So the victim side cannot answer
+-- "which skill" on this build at all, at any depth of struct walking, and the attacker side
+-- is the only side that can. That is a settled negative, not an untried idea.
+--
+-- EVIDENCE CLASS: REFLECTED (the live build declares both names) + DECLARED (the header dump
+-- gives both signatures). Not recorded firing: neither has ever been armed, so it is still
+-- unknown whether the GAME calls them or whether they are Blueprint-facing helpers the C++
+-- combat path bypasses. Wiring them cannot misfire — PlayActionByWazaID with a waza id is a
+-- move being played by definition — so silence is the only failure mode.
+-- TODO(skill-activate-source): unverified IN GAME. Arm F7, have a pal use a move, and look
+-- for a `skill.activate` dispatch; 0 firings means the C++ combat path builds its action
+-- without this helper and the next candidate is a UPalActionWazaBase subclass's OnBeginAction
+-- (Pal.hpp:13270 declares `EPalWazaID WazaID` right on that class, so `self` would carry it).
+-- TODO(skill-hit-source): unverified IN GAME, and one thing is known to be imperfect even if
+-- it fires: MakeDamageInfoByWazaType is called to BUILD the damage, not to report that it
+-- landed, and `float DamageRatePerCollision` in its parameter list says a multi-collision move
+-- may build one per collision. Handlers must be idempotent. What is NOT in doubt any more is
+-- the identity — see the FPalDamageRactionInfo paragraph above; that half is closed.
+--
+-- The passive pair writes to a character rather than to the world:
+--   equip   -> UPalIndividualCharacterParameter::AddPassiveSkill(FName AddSkill,
+--              FName OverrideSkill)                                     (Pal.hpp:21155)
+--   unequip -> UPalIndividualCharacterParameter::RemovePassiveSkill(FName SkillId)   (:21003)
+-- EVIDENCE CLASS: REFLECTED + DECLARED, and stronger than the combat pair on the reflected
+-- half — PalIndividualCharacterParameter is reflected in full in 02_reflection.txt:1107 and
+-- both names are in that listing. The open question the TODO used to carry ("passive row FName
+-- vs an index into a fixed-size array") is ANSWERED: both take FNames, one for remove and two
+-- for add, and no struct is involved. The OWNER comes off the same object as the property
+-- `APalCharacter* IndividualActor` (:20910), so nothing has to be searched for.
+--
+-- `OverrideSkill` is handed through as ctx.overrides and is NOT read as an unequip. The name
+-- does not say which of the two ids is being displaced, and inventing an unequip out of an
+-- ambiguous parameter is the kind of wiring this file refuses on principle.
+-- TODO(skill-passive-source): unverified IN GAME. What is left is which player actions route
+-- through these two — capture-time random assignment and the Statue of Power are the
+-- expectation, party in/out is not, and none has been observed. Note also that these are
+-- ordinary BlueprintCallable functions rather than RPCs or delegate targets, so the same
+-- "does a C++ call site bypass the hook" doubt applies here as to pal.spawned.
+-- =====================================================================================
+local function installSkillSource()
+    -- EPalWazaID arrives as a bare integer (core/character.lua:449 documents that enum
+    -- elements come through as numbers), and every public surface in this tree speaks skill
+    -- NAMES, so the one shared table is inverted once, lazily.
+    local nameOfWaza
+    local function wazaName(v)
+        local n = tonumber(v)
+        if not n then return nil end
+        if not nameOfWaza then
+            nameOfWaza = {}
+            for k, id in pairs(character.WAZA) do nameOfWaza[id] = k end
+        end
+        return nameOfWaza[n]
+    end
+
+    -- activate. ctx.owner is the actor that played the move (what onActivate is handed as its
+    -- second argument); ctx.target is what it was aimed at, which may be nil for a move with
+    -- no target.
+    tryHook("/Script/Pal.PalUtility:PlayActionByWazaID", function(self, actionActor, targetActor, wazaID)
+        if not worldReady then return end
+        pcall(function()
+            local id = wazaName(getv(wazaID))
+            if not id then return end
+            M.emit("skill.activate", {
+                skillId = id,
+                wazaId  = tonumber(getv(wazaID)),
+                owner   = getv(actionActor),
+                actor   = getv(actionActor),   -- same value under the name the pal channels use
+                target  = getv(targetActor),
+            })
+        end)
+    end)
+
+    -- hit. The waza is the SEVENTH parameter, so this is the one hook in the file that reads
+    -- past a4; UE4SS hands every declared parameter to the callback, and a build that hands
+    -- over fewer simply leaves wazaType nil and the guard below drops the event.
+    tryHook("/Script/Pal.PalUtility:MakeDamageInfoByWazaType",
+        function(self, attacker, defender, _aHit, _dHit, hitLocation, _foliage, wazaType)
+            if not worldReady then return end
+            pcall(function()
+                local id = wazaName(getv(wazaType))
+                if not id then return end
+                M.emit("skill.hit", {
+                    skillId  = id,
+                    wazaId   = tonumber(getv(wazaType)),
+                    target   = getv(defender),     -- onHit's second argument
+                    owner    = getv(attacker),
+                    attacker = getv(attacker),
+                    location = getv(hitLocation),
+                })
+            end)
+        end)
+
+    -- equip / unequip. ARMED AFTER world.ready, for the same reason as pal.spawned above and
+    -- building.build: these sit on a character's parameter object, and reading one of those
+    -- while the world-load storm is still initialising them is the exact shape that produced a
+    -- native access violation once already. Combat cannot happen during the storm, so the two
+    -- hooks above do not need this and are armed at start().
+    local function ownerOf(self)
+        local p = getv(self)
+        if not (p and p.IsValid and p:IsValid()) then return nil, nil end
+        local actor; pcall(function() actor = p.IndividualActor end)
+        if actor ~= nil and not pcall(function() return actor:IsValid() end) then actor = nil end
+        return actor, p
+    end
+
+    tryHookAfterWorldReady("/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill",
+        function(self, addSkill, overrideSkill)
+            if not worldReady then return end
+            pcall(function()
+                local id = pstr(addSkill)
+                if not id then return end
+                local actor, params = ownerOf(self)
+                M.emit("skill.equip", {
+                    skillId   = id,
+                    owner     = actor,
+                    actor     = actor,
+                    params    = params,
+                    overrides = pstr(overrideSkill),   -- see the note above: NOT an unequip
+                })
+            end)
+        end)
+
+    tryHookAfterWorldReady("/Script/Pal.PalIndividualCharacterParameter:RemovePassiveSkill",
+        function(self, skillId)
+            if not worldReady then return end
+            pcall(function()
+                local id = pstr(skillId)
+                if not id then return end
+                local actor, params = ownerOf(self)
+                M.emit("skill.unequip", { skillId = id, owner = actor, actor = actor, params = params })
+            end)
+        end)
 end
 
 -- =====================================================================================
 -- DISPATCH — channel -> the object's lifecycle hook. resolve() maps a ctx to whatever
 -- stands behind it: the tracked INSTANCE for buildings, the definition CLASS for pals,
--- items, and building.build (which fires before any instance exists).
+-- items, skills, and building.build (which fires before any instance exists).
 -- =====================================================================================
 
 -- Resolve the PalForge Pal CLASS behind a pal ctx. Pals have no per-instance
@@ -1194,6 +1574,25 @@ local function resolveItemClass(ctx)
     return nil
 end
 
+-- Resolve the PalForge Skill CLASS behind a skill ctx. Same shape as items: skills have no
+-- per-instance tracking, the ctx carries the game skill id (ctx.skillId — an EPalWazaID NAME
+-- like "FireBlast" for the two combat channels, a passive row FName like "Legend" for the two
+-- passive ones), and the definition registered for it acts as `self`. Note that only a skill
+-- DEFINED with Skill{ ... } is registered: Skill.get("X") on an id nobody defined hands back a
+-- thin handle that was never put in the catalog, so dispatch no-ops for it — which is the same
+-- rule pals and items follow and the reason a vanilla move fires nothing.
+local function resolveSkillClass(ctx)
+    if type(ctx) ~= "table" or not ctx.skillId then return nil end
+    local cls = object_manager.get("skill", ctx.skillId)
+    if cls then return cls end
+    -- namespaced skills: a registered "pack:name" whose resolved fname == the game id.
+    for regId, c in pairs(object_manager.all("skill")) do
+        local okR, r = pcall(object_manager.resolve, regId)
+        if okR and r == ctx.skillId then return c end
+    end
+    return nil
+end
+
 -- Resolve the PalForge Building DEFINITION CLASS behind a build id. building.build is the
 -- one building channel that fires BEFORE an instance exists — at build-complete time the
 -- scan has not created it yet (up to SCAN_MS later) and the ctx carries a UPalMapObjectModel
@@ -1218,6 +1617,7 @@ end
 local function resolve(otype, ctx) --> instance | class | nil
     if otype == "pal" then return resolvePalClass(ctx) end
     if otype == "item" then return resolveItemClass(ctx) end
+    if otype == "skill" then return resolveSkillClass(ctx) end
     if otype == "buildingClass" then return resolveBuildingClass(ctx) end
     if otype ~= "building" then return nil end
     if type(ctx) ~= "table" then return nil end
@@ -1243,6 +1643,22 @@ local function call(otype, hook, ctx, channel)
         if not ok then
             log.err(string.format("%s -> %s handler failed: %s",
                 tostring(channel or otype), hook, tostring(e)))
+        end
+    end
+end
+
+-- Skill hooks take THREE arguments, not two: api/skill declares them as
+-- onActivate(self, owner, ctx) / onHit(self, target, ctx) / onEquip(self, owner, ctx), because
+-- a skill's subject is the character it acted on rather than the skill itself. call() above
+-- passes (self, ctx) and cannot serve them without silently shifting every handler's arguments
+-- by one, so the skill channels get their own dispatcher rather than a widened shared one.
+-- Same resolve table, same pcall-and-LOG discipline.
+local function callSkill(hook, subject, ctx, channel)
+    local cls = resolve("skill", ctx)
+    if cls and type(cls[hook]) == "function" then
+        local ok, e = pcall(function() cls[hook](cls, subject, ctx) end)
+        if not ok then
+            log.err(string.format("%s -> %s handler failed: %s", tostring(channel), hook, tostring(e)))
         end
     end
 end
@@ -1289,12 +1705,20 @@ local function installDispatch()
     on("pal.damaged",  function(ctx) call("pal", "onDamaged", ctx, "pal.damaged") end)
     on("pal.death",    function(ctx) call("pal", "onDeath", ctx, "pal.death") end)
     on("pal.captured", function(ctx) call("pal", "onCaptured", ctx, "pal.captured") end)
-    -- item (resolve -> the defined Item CLASS by ctx.itemId, exact or namespaced;
-    -- item.craft / item.discard have no source yet, so they never carry traffic)
+    -- item (resolve -> the defined Item CLASS by ctx.itemId, exact or namespaced). All four
+    -- have a native source now; craft and discard are the two whose sources are wired from
+    -- the header dump and not yet seen firing in game.
     on("item.obtain",  function(ctx) call("item", "onObtain", ctx, "item.obtain") end)
     on("item.use",     function(ctx) call("item", "onUse", ctx, "item.use") end)
     on("item.craft",   function(ctx) call("item", "onCraft", ctx, "item.craft") end)
     on("item.discard", function(ctx) call("item", "onDiscard", ctx, "item.discard") end)
+    -- skill (resolve -> the defined Skill CLASS by ctx.skillId; three-argument handlers, so
+    -- callSkill rather than call — see the note on it). The subject differs per channel:
+    -- onHit is handed the TARGET, the other three the owner.
+    on("skill.activate", function(ctx) callSkill("onActivate", ctx and ctx.owner, ctx, "skill.activate") end)
+    on("skill.hit",      function(ctx) callSkill("onHit", ctx and ctx.target, ctx, "skill.hit") end)
+    on("skill.equip",    function(ctx) callSkill("onEquip", ctx and ctx.owner, ctx, "skill.equip") end)
+    on("skill.unequip",  function(ctx) callSkill("onUnequip", ctx and ctx.owner, ctx, "skill.unequip") end)
 end
 
 -- =====================================================================================
@@ -1344,12 +1768,13 @@ function M.start()
 
     -- sources (native -> channel)
     installTickSource(); installWorldSource(); installBuildingSource()
-    installPalSource();  installItemSource()
+    installPalSource();  installItemSource(); installSkillSource()
     -- dispatch (channel -> object hook)
     installDispatch()
     reload.markArmed()
-    log.info("event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned "
-        .. "arm at world.ready; craft+discard have no native source) + dispatch")
+    log.info("event wired: bus + sources (tick/world/building/pal/item/skill; onBuild, "
+        .. "onSpawned and the passive pair arm at world.ready; building.leftclick and "
+        .. "building.break have no native source and never will) + dispatch")
 end
 
 return M

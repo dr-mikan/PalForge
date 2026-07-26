@@ -156,24 +156,36 @@ local Material = schema.define("Pal.Spec.Material", {
 ---handle as its first argument and an event context `ctx` (ctx.actor = the pawn in the
 ---world). An event this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Pal.Spec.Events", {
-    -- TODO(pal-spawned-hook): NARROWED by dumps/reflection/. Two halves of the old question
-    -- are now answered: (a) BroadcastOnCompleteInitializeParameter IS a real UFunction on
-    -- /Script/Pal.PalCharacter (02_reflection.txt), so the hook path is not a guess; (b) the
-    -- three sibling hooks this channel sits beside — SetIsCapturedProcessing, OnDamageReaction,
-    -- OnDeadCharacter — are all recorded FIRING in a live session (06_events.txt), so the
-    -- source machinery around them works. What is left is ONE unknown: does that function run
-    -- when a pal spawns AFTER world load, and is `self` then the new pal? 06_events cannot
-    -- answer it — the probe mod that produced it had dropped this hook from its arming list,
-    -- so there is no line there to be missing. Handlers stay idempotent until a post-load
-    -- arming records a firing.
-    -- HOW TO GET THAT FIRING IS BACK IN REACH, and this is the 2026-07-26 correction: the
-    -- obvious trigger — arm the hook, then call Pal.get("ChickenPal"):spawn(coord) and watch —
-    -- was written off here as unavailable "because that spawn provably produces no pal at all".
-    -- It does produce one; the same day's log shows the coordinate form placing a real pawn. So
-    -- the trigger works, with one condition that is the whole lesson: the pal arrives ~6 s after
-    -- the call, so WATCH FOR AT LEAST TEN SECONDS. A hook log that is empty at 1.2 s says
-    -- nothing about the hook. The box-release / capture / stream-in triggers remain fine and
-    -- have the advantage of not needing a cheat manager.
+    -- TODO(pal-spawned-hook): NARROWED again, 2026-07-26, this time by dumps/cxx/Pal.hpp —
+    -- and the remaining doubt has MOVED, which is the useful part. What is now settled:
+    --   (a) the SHAPE. `void BroadcastOnCompleteInitializeParameter()` is declared on
+    --       APalCharacter with ZERO parameters (Pal.hpp:9087), so `self` is the character and
+    --       there is nothing else the hook could hand a handler. Also reflected in the live
+    --       build (02_reflection.txt:874), so the path is not a guess on either source.
+    --   (b) that a pal born AFTER world load really does broadcast. The map it broadcasts,
+    --       OnCompleteInitializeParameterDelegateMap (:9016), is keyed by
+    --       EPalCharacterCompleteDelegatePriority — and the game's own spawn entry point,
+    --       UPalCharacterManager::SpawnNewCharacterWithInitializeParameterCallback
+    --       (Pal.hpp:15538), takes a priority of that same enum for its
+    --       InitializeParameterCallback. "Tell me when this NEW character has initialised" IS
+    --       a subscription to this broadcast, so the broadcast happens on a fresh spawn.
+    --   (c) the three sibling hooks beside this one — SetIsCapturedProcessing,
+    --       OnDamageReaction, OnDeadCharacter — are all recorded FIRING in a live session
+    --       (06_events.txt), so the machinery around it works.
+    -- WHAT IS LEFT is no longer "does the game run it" but "can RegisterHook SEE it".
+    -- BroadcastOnCompleteInitializeParameter is the broadcaster, not a delegate target: a
+    -- plain C++ call site never enters ProcessEvent, and a hook armed on it would then sit
+    -- there silently forever — which is a complete, boring explanation for the one recorded
+    -- arming counting 0. Every hook in this tree that is PROVEN to fire is an RPC, a
+    -- BlueprintCallable static, or a dynamic-delegate target; this is none of the three.
+    -- Handlers stay idempotent until one post-load arming logs one line.
+    -- HOW TO GET THAT LINE (unchanged, and the timing is the whole lesson): press F7, then
+    -- release a pal from the box or call Pal.get("ChickenPal"):spawn(coord) — and WATCH FOR AT
+    -- LEAST TEN SECONDS, because the pal arrives ~6 s after the call. A hook log that is empty
+    -- at 1.2 s says nothing about the hook. If it stays at 0, the replacement is a delegate
+    -- TARGET rather than the broadcaster: APalPlayerCharacter::OnCompleteInitializeParameter
+    -- (APalCharacter* InCharacter) at Pal.hpp:10637 is one such bound handler, and it takes
+    -- the new character as its parameter rather than as self.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
