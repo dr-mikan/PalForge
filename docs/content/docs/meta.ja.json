@@ -1,0 +1,5 @@
+{
+  "title": "PalForge",
+  "root": true,
+  "pages": ["index", "getting-started", "concepts", "api", "guides"]
+}

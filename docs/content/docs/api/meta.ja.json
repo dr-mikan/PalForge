@@ -1,0 +1,4 @@
+{
+  "title": "API リファレンス",
+  "pages": ["pal", "item", "building", "skill", "effect", "audio", "mesh", "ui", "player"]
+}
