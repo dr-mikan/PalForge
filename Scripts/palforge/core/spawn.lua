@@ -100,7 +100,7 @@
 -- mean, for the different reason written at its own doc (nothing here can enumerate a party/box).
 local log            = require("palforge.utils.log").scope("spawn")
 local object_manager = require("palforge.core.object_manager")
-local reload         = require("palforge.core.reload")
+local poll           = require("palforge.core.poll")
 local sig            = require("palforge.core.signature")
 
 local M = {}
@@ -263,6 +263,9 @@ local function newPalCount(before)
     return n
 end
 
+-- Whether the heartbeat that drives every watch in this file can run at all. core/event.lua
+-- arms it from LoopAsync + ExecuteInGameThread, so those are still the requirement — this file
+-- simply no longer creates any of its own.
 local function canDefer()
     return type(LoopAsync) == "function" and type(ExecuteInGameThread) == "function"
 end
@@ -298,58 +301,28 @@ local WATCH_TRIES = 20
 -- else's machine, and a nominal schedule cannot tell anyone that. os.clock is the clock this
 -- tree already uses for elapsed everywhere else (api/skill's cooldowns, test/probes/watch's
 -- timeline); it is approximate, which at this resolution does not matter.
--- How many arrival/placement watches may run at once. Each holds one UE4SS registry reference
--- for its lifetime, and the tick hook is what services them all — so this is a ceiling on how
--- much of that machinery one careless loop can occupy. Four covers the suite's three spawns
--- plus one, and a pack that asks for more gets told rather than silently queued.
-local MAX_WATCHES = 4
-
--- True when there is room for another watch. A refusal is logged and the spawn still happens:
--- the pal arrives either way, only the log line about it is lost, and losing a log line is a
--- far better outcome than filling the tick with watches.
-local function watchSlotFree(what)
-    if reload.asyncPending() < MAX_WATCHES then return true end
-    log.warn(string.format("%s: %d watches already running, so this one is not started. The spawn "
-        .. "still happens — only the arrival line is lost", what, reload.asyncPending()))
-    return false
-end
-
 local function watchForArrival(before, what)
-    if not (before and canDefer()) then return false end
-    if not watchSlotFree(what) then return false end
-    -- Registered with the reloader for the length of the chain: an F9 that lands while this is
-    -- outstanding can leave UE4SS holding a dead callback reference, and its answer to that is
-    -- to remove the engine tick hook — which silently kills every keybind in the mod. See the
-    -- pending-async block in core/reload.lua.
-    reload.asyncBegin("spawn arrival watch")
-    local t0, tries, done = os.clock(), 0, false
-    LoopAsync(WATCH_MS, function()
-        -- ExecuteInGameThread QUEUES its body, so `done` can be read one tick before the body
-        -- that sets it runs. One extra enumeration is the entire cost of that race.
-        ExecuteInGameThread(function()
-            pcall(function()
-                tries = tries + 1
-                local n = newPalCount(before)
-                if n > 0 then
-                    done = true
-                    reload.asyncDone()
-                    log.info(string.format("%s: %d new PalCharacter in the world %.1f s after the "
-                        .. "call (look %d of %d)", what, n, os.clock() - t0, tries, WATCH_TRIES))
-                elseif tries >= WATCH_TRIES then
-                    done = true
-                    reload.asyncDone()
-                    log.warn(string.format("%s: the call ran but NO new PalCharacter appeared in "
-                        .. "%.1f s (%d looks). This window is not the reason — the coordinate route "
-                        .. "received its pal ~5.9 s after the same call on 2026-07-26 — so this is "
-                        .. "a real miss. A CharacterID the game does not have looks exactly like "
-                        .. "this from here, and nothing reports the difference",
-                        what, os.clock() - t0, tries))
-                end
-            end)
-        end)
-        return done   -- true stops the loop; keep looking until there is an answer
+    if not before then return false end
+    -- Rides the ONE heartbeat (core/poll.lua). It used to arm a LoopAsync of its own, and the
+    -- teardown race that creates is what removed UE4SS's engine tick hook and killed the mod's
+    -- keybinds three times in an afternoon.
+    return poll.every(what, function(elapsed, ticks)
+        local n = newPalCount(before)
+        if n > 0 then
+            log.info(string.format("%s: %d new PalCharacter in the world %.1f s after the call "
+                .. "(look %d of %d)", what, n, elapsed, ticks, WATCH_TRIES))
+            return true
+        end
+        if ticks >= WATCH_TRIES then
+            log.warn(string.format("%s: the call ran but NO new PalCharacter appeared in %.1f s "
+                .. "(%d looks). This window is not the reason — the coordinate route received its "
+                .. "pal ~5.9 s after the same call on 2026-07-26 — so this is a real miss. A "
+                .. "CharacterID the game does not have looks exactly like this from here, and "
+                .. "nothing reports the difference", what, elapsed, ticks))
+            return true
+        end
+        return false
     end)
-    return true
 end
 
 -- THE spawn call, made once for both world routes. Answers
@@ -522,9 +495,9 @@ end
 -- than the number.
 --
 -- RETURNS whether the chain is FINISHED — true when a pal was found and handled, or when the
--- tries ran out; false while it should keep looking. The single LoopAsync driving it passes that
--- straight through as its own stop flag. It used to return whether the move succeeded, which
--- nothing read, and to schedule its own next try.
+-- tries ran out; false while it should keep looking. The poller driving it passes that straight
+-- through as its own done flag. It used to return whether the move succeeded, which nothing
+-- read, and to schedule its own next try.
 local function placeNewPal(job)
     local best, bd
     for _, a in ipairs(palActors()) do
@@ -563,14 +536,12 @@ local function placeNewPal(job)
             log.warn(string.format("spawn.palAt: found the new pal but K2_TeleportTo did not "
                 .. "report success; it stays where it spawned, not (%.0f,%.0f,%.0f)", x, y, z))
         end
-        reload.asyncDone()   -- found and handled: this chain is over
         return true          -- done: stop the loop
     end
     job.tries = job.tries + 1
     if job.tries < WATCH_TRIES then
         return false         -- not yet: the ONE loop keeps going
     else
-        reload.asyncDone()   -- given up: this chain is over too
         log.warn(string.format("spawn.palAt: no new pal actor appeared to place — %d looks over "
             .. "%.1f s and nothing in the world was absent from the pre-spawn snapshot, so there "
             .. "is nothing to move to (%.0f,%.0f,%.0f). The window is not the reason: this same "
@@ -625,41 +596,13 @@ function M.palAt(charId, level, x, y, z)
     end
     -- The relocation chain is the only pass that can see the pal, since the pal is seconds
     -- away, and its last line is the record of whether anything ever arrived.
-    if canDefer() and watchSlotFree("spawn.palAt") then
-        reload.asyncBegin("spawn placement chain")
+    do
         local job = { before = before, px = px, py = py, pz = pz, x = x, y = y, z = z,
                       tries = 0, t0 = os.clock() }
-        -- ONE LoopAsync for the whole chain. It used to schedule a FRESH one per try and return
-        -- true immediately — twenty registry refs created and released per spawn, three spawns
-        -- per suite run, and UE4SS answered that churn with
-        --   [UE4SS.EngineTick.LuaModImpl] Hook threw exception:
-        --     "[Lua::Registry::get_function_ref] Ref was not function", removing hook!
-        -- which removes the ENGINE TICK HOOK and silently kills every keybind in the mod. It
-        -- fired 1.4 s after a suite finished, long after the reload it was first blamed on. One
-        -- ref, held for the length of the chain, is both cheaper and the fix.
-        --
-        -- `done` is read on the loop thread while placeNewPal sets it on the game thread one
-        -- tick later; the cost of that race is one extra enumeration, which is the same trade
-        -- watchForArrival makes and for the same reason.
-        local done = false
-        LoopAsync(WATCH_MS, function()
-            ExecuteInGameThread(function()
-                local ok, finished = pcall(placeNewPal, job)
-                if (not ok) or finished then done = true end
-            end)
-            return done
-        end)
-        log.info(string.format("spawn.palAt %s (lv %d): the call was issued [evidence %s]; "
-            .. "relocation to (%.0f,%.0f,%.0f) is scheduled and reports when the pal arrives "
-            .. "(up to %d looks)", name, level, evidence, x, y, z, WATCH_TRIES))
-    else
-        -- Without the async pair there is no chain to wait for the pal with, so whatever
-        -- arrives stays next to the player. Say so rather than implying a placement.
-        log.warn(string.format("spawn.palAt %s (lv %d): the call was issued [evidence %s], but "
-            .. "LoopAsync/ExecuteInGameThread are unavailable — nothing can wait for the pal, so "
-            .. "it will stay where it spawns, not (%.0f,%.0f,%.0f)", name, level, evidence, x, y, z))
-    end
-    return true
+        -- Same heartbeat, same reason: no timer of its own. placeNewPal answers whether the
+        -- chain is FINISHED, which is exactly what a poller returns.
+        poll.every("spawn.palAt placement", function() return placeNewPal(job) == true end)
+    end    return true
 end
 
 -- ---- the player-summon route ------------------------------------------------------------

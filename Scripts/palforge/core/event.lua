@@ -133,8 +133,17 @@ local function installTickSource()
             ExecuteInGameThread(function()
                 n = n + 1
                 pcall(function() M.emit("tick", { count = n, now = os.clock() }) end)
+                -- Everything in this tree that needs to watch the world repeatedly rides HERE,
+                -- rather than asking UE4SS for a timer of its own. This loop is armed once per
+                -- session and never stops, so it creates no registry references to tear down —
+                -- and a teardown race on those is what removes the engine tick hook and kills
+                -- every keybind in the mod. See core/poll.lua for the full account.
+                -- Required fresh each tick, never captured: this closure was armed on the FIRST
+                -- load and keeps running across every reload, so it must reach the CURRENT
+                -- module rather than the one that existed when it was created.
+                pcall(function() require("palforge.core.poll").drain() end)
             end)
-            return false  -- keep looping
+            return false  -- keep looping, for the life of the process
         end)
     end)
     log[ok and "info" or "warn"](ok and "tick source live" or "tick source: LoopAsync unavailable")

@@ -57,7 +57,7 @@
 -- native cheats executed without raising — no cheat on this build reports back what it did.
 local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
-local reload         = require("palforge.core.reload")
+local poll           = require("palforge.core.poll")
 local sig            = require("palforge.core.signature")
 
 local M = {}
@@ -192,32 +192,29 @@ end
 -- been tested. An add that lands after the second reading looks exactly like an add that never
 -- happened.
 --
--- One LoopAsync, fired once, and registered with the reloader for its short life. NOT a retry
--- chain: rescheduling a fresh LoopAsync per try is what removed UE4SS's engine tick hook earlier
--- today and cost the session its keybinds.
+-- It rides the shared heartbeat (core/poll.lua) and creates no timer of its own. Asking UE4SS
+-- for a timer per watch — and then tearing it down while its queued bodies were still in
+-- flight — is what removed the engine tick hook three times in one afternoon, each time
+-- silently killing every keybind in the mod.
 local function recheckLater(resolved, before, asked)
-    if type(LoopAsync) ~= "function" or type(ExecuteInGameThread) ~= "function" then return end
-    reload.asyncBegin("items.give delayed re-read")
-    local fired = false
-    LoopAsync(1200, function()
-        ExecuteInGameThread(function()
-            pcall(function()
+    poll.every("items.give delayed re-read", function(elapsed, ticks)
+        if ticks < 3 then return false end   -- ~1.5 s on the 500 ms heartbeat
+        do
+            do
                 local later = liveCount(resolved)
                 if later and before and later > before then
-                    log.info(string.format("items: %s DID land, late — %d -> %d, 1.2 s after the "
-                        .. "call. The add is asynchronous and give()'s immediate check is too "
+                    log.info(string.format("items: %s DID land, late — %d -> %d, %.1f s after "
+                        .. "the call. The add is asynchronous and give()'s immediate check is too "
                         .. "early; that is a fixable verdict, not a broken cheat",
-                        resolved, before, later))
+                        resolved, before, later, elapsed))
                 else
-                    log.info(string.format("items: %s still %s 1.2 s later (asked for %d) — not a "
-                        .. "timing problem, so GetItem is reaching nothing on this build",
-                        resolved, tostring(later), asked))
+                    log.info(string.format("items: %s still %s after %.1f s (asked for %d) — not "
+                        .. "a timing problem, so GetItem is reaching nothing on this build",
+                        resolved, tostring(later), elapsed, asked))
                 end
-            end)
-        end)
-        fired = true
-        reload.asyncDone()
-        return true   -- one shot
+            end
+        end
+        return true   -- one look is the whole question
     end)
 end
 
