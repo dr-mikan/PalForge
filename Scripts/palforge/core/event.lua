@@ -1241,9 +1241,13 @@ local function installItemSource()
     -- it is today, and if it fires it can only mean a production work completed. That is the
     -- opposite of the OnDamage trap that killed building.leftclick, where the candidate DID
     -- fire — 196 times, on a 12 s decay timer — and would have run every pack's handler.
-    -- TODO(item-craft-source): unverified IN GAME. Nobody has yet crafted one item with these
-    -- two hooks armed. What is left is exactly that one observation — press F8, craft at a
-    -- bench, and look for `HOOK craft` — plus the count, which no model field carries.
+    -- OBSERVED LIVE, 2026-07-26: "channel item.craft carried its first event this session".
+    -- Crafting at a real machine reaches OnFinishWorkInServer on one of the two work models
+    -- below and the channel carries it. The evidence class was DECLARED ONLY when this was
+    -- wired — neither class is among the 21 in dumps/reflection/02_reflection.txt — and it is
+    -- now a firing anyone can reproduce by crafting anything.
+    -- STILL DECLARATIVE: ctx.count is nil. The count lives in the recipe row, and a hook is no
+    -- place for a DataTable read.
     local function craftSource(path, field, via)
         tryHook(path, function(self, work)
             if not worldReady then return end
@@ -1300,14 +1304,14 @@ local function installItemSource()
     -- BEFORE the server empties it, which is why this is a pre-hook. slotItemId below does
     -- that walk and every step of it is unobserved on this build. When it cannot resolve, the
     -- source emits NOTHING rather than an event with a guessed id, and says so once.
-    -- TODO(item-discard-source): unverified IN GAME, on two counts. (1) Do the two RPCs fire
-    -- in single player — a `_ToServer` call on a listen server may be executed directly rather
-    -- than dispatched, in which case the hook never sees it. (2) Does slotItemId resolve? It
-    -- assumes FindFirstOf("PalPlayerInventoryData") is the local player's, that
-    -- .InventoryMultiHelper.Containers is readable as an array, that a UPalItemContainer's
-    -- .ID.ID FGuid compares field-wise against the param's, and that :Get(SlotIndex) is
-    -- 0-based like ItemSlotArray. Press F8, drop a stack and trash a stack, and read the
-    -- `discard` lines. Consuming an item is NOT this channel — that is item.use, which works.
+    -- OBSERVED LIVE, 2026-07-26: "channel item.discard carried its first event this session",
+    -- with no resolution warning, so the slot really did resolve to an item id.
+    -- Two things had to be right and only the first was obvious. A drop does NOT go through
+    -- AddItem_ServerInternal — that hook was armed and fired zero times across two sessions
+    -- because dropping goes through UPalNetworkItemComponent, one class over. And the container
+    -- holding the dropped slot is NOT necessarily one of the player inventory helper's: the
+    -- first live firing reported "no container of the player's 6 matched", so the set comes from
+    -- FindAllOf now. The GUID match is exact, which is what makes the wider search safe.
 
     ---FGuid equality, field-wise. Neither UE4SS nor this tree has a comparison operator for a
     ---struct param, so the four int32s are read individually; a read that comes back nil makes
@@ -1411,7 +1415,7 @@ local function installItemSource()
             if not discardMissSeen[key] then
                 discardMissSeen[key] = true
                 log.warn("item.discard: " .. key .. " — the channel stays silent for this "
-                    .. "kind of drop (see TODO(item-discard-source))")
+                    .. "kind of drop — the channel is otherwise live")
             end
             return
         end

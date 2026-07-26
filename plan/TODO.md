@@ -78,7 +78,7 @@ bound there can never be pressed — which is where `watch` sat, unreachable and
 it. The bindings are printed at startup now, so a key the game has taken is visible in the
 log rather than looking like a probe that found nothing.
 
-## Closed (26)
+## Closed (28)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -112,8 +112,10 @@ without the game running.
 - **`item-remove-call`** — Item.Handle:take. **Observed working**, 2026-07-26, in the same press that proved give: `give Wood x3: 161 -> 164` then `take Wood x3: 164 -> 161`. A pack can charge a cost, and the items are CONSUMED rather than dropped — nothing lands at the player's feet to be picked straight back up, which is what made the DropItem route useless for this. The route is `APalWeaponBase::RequestConsumeItem(const FName&, int32)`, and the reason it went unfound for so long is that nobody thought to look on a WEAPON: the inventory's own class chain has no subtract, and neither does the container, the slot, or the cheat manager. The same weapon class declares `IsExistBulletInPlayerInventory`, so a weapon demonstrably reads and spends the owning PLAYER's bag. Both of the questions left open when it was wired are answered by that one press — it spends the id it is HANDED rather than the weapon's ammunition, and the weapon need only be spawned, not equipped. One real constraint remains and is reported as its own message: a player carrying nothing has no weapon actor to ask.
 - **`mesh-material-params`** — Mesh.Spec.color / texture / params, Mesh.Handle:setColor. The names were **read off the running game**, 2026-07-26, because a header dump never could have said them — a CXXHeaderDump records classes, and which parameters an asset exposes is data inside a `.uasset`. Following each MaterialInstanceDynamic on the player's `CharacterMesh0` up to its MaterialInstanceConstant gave: vector `BaseColor`, `Subsurface Color`; texture `Base Texture`, `MetallicRoughnessOcclusionSpecularTexture`, `Normal Map`, `Subsurface Texture`; scalar `Character CameraFade Distance`, `Occlusion Add`, `Roughness Add`, `Light Affect Subsurface Max`, `RefractionDepthBias`. Mostly Title Case WITH SPACES, which no guess had — except `BaseColor`, which was already in the colour list, so tinting had a real chance all along while the texture list had none. Still owed: nobody has watched a colour actually change.
 - **`mesh-base-material`** — the material a procedural mesh is parented to. Closed by the same read. `dumps/reflection/05_assets.txt` never swept Material, so not one material in this tree was known to be LOADABLE and five plausible `/Engine/` paths were five guesses. A material that is currently RENDERING is cooked and shipped by construction — the player's own outfit instance now leads the candidate list and carries the `BaseColor` vector a tint needs. It is a character shader hung on a procedural cube, which is odd and is said plainly at the list rather than hidden; a working material that looks wrong can be improved, an unloadable one cannot be used at all.
+- **`item-craft-source`** — Item.Spec.Events.onCraft. **Observed live**, 2026-07-26: crafting at a real machine reaches `OnFinishWorkInServer` on one of the two work models that carry an item id, and the channel was seen carrying its first event in a real save. Wired on the header dump alone — neither class is among the 21 in the live reflection dump — and now reproducible by crafting anything. `ctx.count` stays nil: the count lives in the recipe row, and a hook is no place for a DataTable read.
+- **`item-discard-source`** — Item.Spec.Events.onDiscard. **Observed live**, 2026-07-26, with the slot resolving to a real item id. Two separate things had to be right. A drop does NOT go through `AddItem_ServerInternal` — that hook was armed and fired zero times across two sessions, because dropping goes through `UPalNetworkItemComponent`, one class over from everywhere the search had looked. And the container holding the dropped slot is not necessarily one the player's inventory helper lists: the first live firing reported "no container of the player's 6 matched", so the set comes from a world sweep now. The GUID match is exact, which is what makes the wider search safe.
 
-## Open (12)
+## Open (10)
 
 ### Pal
 
@@ -230,63 +232,10 @@ in order: (1) stand idle 30 s (expect 0 lines); (2) run Pal.get("ChickenPal"):sp
 every line for the next 10 s; (3) release one pal from the box. Paste the per-step line counts
 and the BP class names printed.
 
-#### `item-craft-source` — Item.Spec.Events.onCraft (channel item.craft)
-
-- **Probe:** F8
-- **Marked at:** Scripts/palforge/api/item.lua:112
-
-**What a pack author sees**
-
-A declared onCraft handler never runs. Crafting at a workbench fires nothing on this channel;
-the produced item surfaces as onObtain via the get-log instead, which cannot be told apart from
-a pickup. Only a manual event.emit('item.craft', ...) reaches the handler. | The channel exists
-and DISPATCH is wired, but no source ever emits it: an onCraft handler is registered, validated,
-and then never runs for any item, with no warning.
-
-**What is still unknown**
-
-```text
-item.craft and item.discard stay SOURCELESS, on purpose rather than by omission.
-The one signal that is right there — the get-log — cannot stand in for either: a
-crafted item surfaces through that same get-log ("Crafting output surfaces through the
-same get-log, so item.craft may be redundant with item.obtain",
-dump/docs/further_plan.md:38-39), so emitting item.craft from it would report every
-pickup as a craft. Neither channel has a candidate native function recorded anywhere:
-dump/dump_targets.md:149-150 lists both as `dump to discover`, and the probe harness
-(dump/auto_mod/Scripts/main.lua:33-48) never armed one. Their DISPATCH is wired and
-begins working the moment an emit lands here.
-TODO(item-craft-source): no craft-complete UFunction is known — which class/function the
-game calls when a bench finishes an item, and which param carries the id + count.
-Still fully open: the 21 classes in dumps/reflection/02_reflection.txt do not include
-PalMapObjectProductItemModel / PalMapObjectWorkeeModel / PalWorkProgress*, and no
-craft-shaped hook was ever armed, so nothing in the dumps speaks to it.
-```
-
-**What the probe prints**
-
-Two steps. (1) Reflection: for each of /Script/Pal.PalMapObjectProductItemModel,
-/Script/Pal.PalMapObjectWorkeeModel, /Script/Pal.PalWorkProgress and
-/Script/Pal.PalMapObjectConcreteModelBase, StaticFindObject the class (or CDO) and enumerate
-every UFunction, printing the name of any whose name matches
-Product|Complete|Work|Output|Craft|Finish, and for each one walk its Children logging property
-name, class name and offset. (2) Hook: RegisterHook each candidate path, then craft ONE item at
-a workbench in a throwaway world, and for every fire log the function path plus, for each param
-i in 1..4, tostring(p:get()) and the value of .Id / .ID / .StaticItemId / .Num when the field
-exists. | Two steps, in a throwaway world. (1) REFLECT: add
-"/Script/Pal.PalMapObjectProductItemModel", "/Script/Pal.PalMapObjectConcreteModelBase" and
-"/Script/Pal.PalWorkProgressModel" to CANDIDATE_CLASSES in dump/dump.lua and run its
-dumpReflection (StaticFindObject(path) -> cls:ForEachFunction(fn ->
-print(fn:GetFName():ToString()))); paste every function name matching
-Craft|Product|Complete|Work|Output. (2) HOOK: for each candidate add {"ITEM.craft",
-"/Script/Pal.<Class>:<Fn>"} to HOOKS in dump/auto_mod/Scripts/main.lua and log, per firing: the
-path, self:get():GetClass():GetFName():ToString(), and for a1..a4 both p:get() and its
-:ToString()/tostring plus the fields .ID, .Id, .StaticItemId, .ItemId, .Num, .Count when
-present. Then craft one item at a workbench and paste which line fired with which id and count.
-
 #### `item-datatable-row-read` — Item.Handle:iconOf / Item.Handle:recipeOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:181
+- **Marked at:** Scripts/palforge/api/item.lua:175
 
 **What a pack author sees**
 
@@ -330,61 +279,6 @@ struct/class name and then index it with each of SoftIcon, IconName, IconTexture
 printing name -> tostring(value). Repeat the whole sequence verbatim on
 FindObject('DataTable','DT_ItemRecipeDataTable_Common') with row FName('Arrow'), indexing
 Product_Count, WorkAmount, Material1_Id, Material1_Count.
-
-#### `item-discard-source` — Item.Spec.Events.onDiscard (channel item.discard)
-
-- **Probe:** F8
-- **Marked at:** Scripts/palforge/api/item.lua:121
-
-**What a pack author sees**
-
-A declared onDiscard handler never runs. Dropping a stack on the ground, destroying it from the
-inventory menu, or consuming a potion all fire nothing on this channel. Only a manual
-event.emit('item.discard', ...) reaches the handler. | Same as onCraft: declarable, dispatched,
-and never emitted — dropping, trashing or consuming an item produces no event at all.
-
-**What is still unknown**
-
-```text
-game calls when a bench finishes an item, and which param carries the id + count.
-Still fully open: the 21 classes in dumps/reflection/02_reflection.txt do not include
-PalMapObjectProductItemModel / PalMapObjectWorkeeModel / PalWorkProgress*, and no
-craft-shaped hook was ever armed, so nothing in the dumps speaks to it.
-
-TODO(item-discard-source): NARROWED by the dumps, not closed. What is now measured:
-there is no dedicated drop/discard entry point on the inventory classes at all —
-02_reflection.txt lists PalPlayerInventoryData in full (69 fns; the only removal-shaped
-name is TryRemoveEquipment) and PalItemContainer in full (13 fns, all reads), so the
-"separate discard UFunction" branch of this question is dead. What is still unknown is
-the standing hypothesis: whether a drop arrives as AddItem_ServerInternal with a
-NEGATIVE Count. The dumps cannot say — that hook WAS armed successfully (14/14, label
-ITEM.add, dump/auto_mod/Scripts/main.lua:44) and never fired once across both recorded
-sessions, in either direction, while ITEM.getlog and ITEM.use did; so either the
-sessions contained no qualifying action or this call does not run client-side at all.
-The next probe has to log ITEM.add and ITEM.getlog side by side across a pickup AND a
-drop to tell those two apart.
-```
-
-**What the probe prints**
-
-Arm RegisterHook on /Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal (already listed in
-dump/auto_mod/Scripts/main.lua:44) and log, on every fire, param1 as an FName string and param2
-as a NUMBER including its sign. In a throwaway world perform three separate actions with a
-marker line printed between them: (a) drop a stack of Wood on the ground, (b) destroy a stack
-from the inventory menu, (c) eat one Berries. Report which hooks fired per action and what sign
-param2 carried. If AddItem never fires with a negative Count, reflect
-/Script/Pal.PalMapObjectDropItemModel, /Script/Pal.PalMapObjectPickableItemModel and
-PalPlayerInventoryData, printing every UFunction whose name matches
-Drop|Discard|Destroy|Throw|Consume|Lost, with each function's parameter names and classes. | In
-a throwaway world with the harness armed on
-"/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal" (label ITEM.add already in
-dump/auto_mod/Scripts/main.lua:44), log per firing: a1 via p:get():ToString() and a2 via
-tostring(p:get()) VERBATIM INCLUDING SIGN. Print a marker line before each action, then: (a)
-drop a stack from the inventory to the ground, (b) trash/destroy one, (c) eat one to zero. Paste
-the lines and the sign of a2 for each. If nothing fires for (a)/(b), reflect
-"/Script/Pal.PalPlayerInventoryData" and "/Script/Pal.PalItemContainer" with
-cls:ForEachFunction(fn -> print(fn:GetFName():ToString())) and paste every name matching
-Discard|Drop|Remove|Sub|Consume|Trash|Throw.
 
 #### `skill-activate-source` — Skill.Spec.Events.onActivate
 
@@ -647,7 +541,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `pal-spawned-fresh` — Pal{ events = { onSpawned } } / event.on("pal.spawned")
 
 - **Probe:** F8
-- **Marked at:** Scripts/palforge/core/event.lua:1008
+- **Marked at:** Scripts/palforge/core/event.lua:1043
 
 **What a pack author sees**
 

@@ -110,25 +110,18 @@ local Events = schema.define("Item.Spec.Events", {
                    doc = "LIVE - entered the inventory (ctx.count, ctx.via)" },
     { "onUse",     type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "LIVE - used / consumed (ctx.actor = the local player pawn)" },
-    -- TODO(item-craft-source): a source IS wired now — core/event hooks
-    -- OnFinishWorkInServer on UPalMapObjectConvertItemModel and UPalMapObjectProductItemModel,
-    -- the two work models that carry an item id (dumps/cxx/Pal.hpp:22669 and :24341). What is
-    -- unverified is whether those hooks FIRE: neither class is among the 21 in
-    -- dumps/reflection/02_reflection.txt, so the evidence is the header dump alone. `ctx.count`
-    -- is nil by design — the count lives in the recipe row and a hook is no place for a
-    -- DataTable read.
+    -- OBSERVED LIVE, 2026-07-26. Crafting at a real machine fires this: core/event hooks
+    -- OnFinishWorkInServer on the two work models that carry an item id, and the channel was
+    -- seen carrying its first event in a real save. `ctx.count` is nil by design — the count
+    -- lives in the recipe row and a hook is no place for a DataTable read.
     { "onCraft",   type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "fires when a crafting machine finishes an item (unverified in game)" },
-    -- TODO(item-discard-source): a source IS wired now, and the long-standing hypothesis that a
-    -- drop goes through AddItem_ServerInternal is DEAD — that hook was armed successfully and
-    -- fired zero times in two sessions because a drop does not go near it. It goes through
-    -- UPalNetworkItemComponent: RequestDrop_ToServer for the ground drop and
-    -- RequestDispose_ToServer for the inventory-menu trash (dumps/cxx/Pal.hpp:25696, :25697).
-    -- Both are _ToServer RPCs, which always go through ProcessEvent and are therefore the shape
-    -- RegisterHook can see — the same shape as RequestBuild_ToServer, which already works here.
-    -- UNVERIFIED IN GAME, and one weakness is known in advance: the parameters carry SLOT ids,
-    -- not item ids, so the source resolves the slot through the player's containers before the
-    -- call lands. When it cannot, it emits NOTHING rather than guessing an id.
+    -- OBSERVED LIVE, 2026-07-26, with the slot resolving to a real item id. Two things had to
+    -- be right. A drop does NOT go through AddItem_ServerInternal — that hook was armed and
+    -- fired zero times across two sessions, because dropping goes through
+    -- UPalNetworkItemComponent, one class over from everywhere the search had looked. And the
+    -- container holding the dropped slot is not necessarily one of the inventory helper's, so
+    -- the container set comes from a world sweep matched on an exact GUID.
     { "onDiscard", type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "declarable; NO native source exists — fires only on a manual emit" },
 })
