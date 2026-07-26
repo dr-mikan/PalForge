@@ -71,22 +71,23 @@
 -- constructs a cheat manager itself on a dedicated server, where nothing else does. A summon TO
 -- THE PLAYER (`toPlayer`) goes through APalPlayerState:RequestSpawnMonsterForPlayer and touches
 -- no cheat manager at all.
--- ⚠️ NO SPAWN ROUTE HAS BEEN OBSERVED TO WORK ON THIS BUILD. The wild route is measured DEAD:
--- 2026-07-26, a loaded save whose cheat manager already existed — cm:SpawnMonster ran without
--- raising and NO PalCharacter appeared, neither for the plain spawn (nothing in the world 1.2 s
--- later) nor for the coordinate form (nothing to place, twice). :spawn therefore answers false
--- there rather than reporting a spawn it never saw. dumps/cxx/ has since ELIMINATED the three
--- explanations anyone had for that (the parameter list is exactly what is passed, the cheat
--- manager carries no gate of any kind, and the world enumeration really would have seen a pal);
--- what survives is written at TODO(pal-spawnmonster-signature) in core/spawn.lua. The toPlayer
--- route is not measured dead — it is simply UNWATCHED: its function is the one spawn name this
--- tree has confirmed on the installed binary, but a party/box summon puts nothing in the world
--- to count, so nobody has yet seen a pal arrive from it either. A
--- coordinate spawn is additionally a spawn-then-relocate, so even a true would not mean the
--- pal reached the coordinate — see :spawn below. The id reaches core/spawn exactly as it was
--- declared and is resolved there ("pack:Boss" -> the row spelling "pack_Boss"), so a
--- namespaced pal takes the same route as a literal one. Note that defining gives an EXISTING
--- CharacterID behaviour — Lua cannot add a brand-new creature row (that is PalSchema's job).
+-- ✅ THE WILD ROUTE WORKS, AND IT IS SLOW. Observed 2026-07-26 in a loaded save: the coordinate
+-- form spawned a pal and teleported it onto the requested point off by 0 cm, twice — but ~5.9 s
+-- after the call. SpawnMonster is ASYNCHRONOUS, so nothing a :spawn call can return says a pal
+-- exists: the boolean means THE NATIVE CALL WAS ISSUED, and the arrival is reported afterwards
+-- in the [PalForge.spawn] log by core/spawn's deferred passes. (This module used to say the
+-- opposite in bold — "measured DEAD" — because core/spawn checked for the pal in the statement
+-- after the call and once more at 1.2 s, and then wrote the miss down as a property of the
+-- build. The evidence and the corrected windows are at the top of core/spawn.lua.)
+-- STILL UNOBSERVED, and not to be assumed from the above: the PLAIN wild form (no coordinate).
+-- It makes the identical call, so it very probably works, but no run has yet watched it long
+-- enough to see the pal. The toPlayer route is unwatched for a different reason: its function
+-- is the one spawn name this tree has confirmed on the installed binary, but a party/box summon
+-- puts nothing in the world to count, so there is nothing to watch with. The id reaches
+-- core/spawn exactly as it was declared and is resolved there ("pack:Boss" -> the row spelling
+-- "pack_Boss"), so a namespaced pal takes the same route as a literal one. Note that defining
+-- gives an EXISTING CharacterID behaviour — Lua cannot add a brand-new creature row (that is
+-- PalSchema's job).
 --
 -- LAYOUT
 --   SPEC    — the shape of Pal{ ... }, declared as data (core/schema). It is PRIVATE to
@@ -165,12 +166,14 @@ local Events = schema.define("Pal.Spec.Events", {
     -- answer it — the probe mod that produced it had dropped this hook from its arming list,
     -- so there is no line there to be missing. Handlers stay idempotent until a post-load
     -- arming records a firing.
-    -- HOW TO GET THAT FIRING HAS CHANGED, and this is the 2026-07-26 addition: the obvious
-    -- trigger — arm the hook, then call Pal.get("ChickenPal"):spawn() and watch — is
-    -- UNAVAILABLE until TODO(pal-spawnmonster-signature) is closed, because that spawn now
-    -- provably produces no pal at all, so an empty log would prove nothing about the hook.
-    -- Use a trigger that does not go through the cheat manager: release a pal from the box,
-    -- capture one, or walk into a region that streams wild pals in.
+    -- HOW TO GET THAT FIRING IS BACK IN REACH, and this is the 2026-07-26 correction: the
+    -- obvious trigger — arm the hook, then call Pal.get("ChickenPal"):spawn(coord) and watch —
+    -- was written off here as unavailable "because that spawn provably produces no pal at all".
+    -- It does produce one; the same day's log shows the coordinate form placing a real pawn. So
+    -- the trigger works, with one condition that is the whole lesson: the pal arrives ~6 s after
+    -- the call, so WATCH FOR AT LEAST TEN SECONDS. A hook log that is empty at 1.2 s says
+    -- nothing about the hook. The box-release / capture / stream-in triggers remain fine and
+    -- have the advantage of not needing a cheat manager.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -345,26 +348,25 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 ---  :spawn{ at = coord, level =, toPlayer =, num = }
 ---  :spawn()                               -- default placement (wild, near player)
 ---
----⚠️ NO SPAWN ROUTE HAS BEEN OBSERVED TO WORK. The wild forms (coordinate and default) run
----UPalCheatManager:SpawnMonster, which in a live world with a real cheat manager runs, raises
----nothing and produces no pal (measured 2026-07-26). dumps/cxx/ has since eliminated the
----parameter-list, the class-gate and the blind-measurement explanations for that; what is left
----is TODO(pal-spawnmonster-signature) in core/spawn.lua. Expect false from them, and do not
----build a pack around a wild pal arriving until that entry is closed. The `toPlayer` form goes
----to a DIFFERENT object — APalPlayerState:RequestSpawnMonsterForPlayer, the one spawn function
----this tree has confirmed on the installed binary — so it is unwatched rather than measured
----dead, and it is the form worth trying first in a throwaway world.
+---`true` MEANS THE NATIVE CALL WAS ISSUED — core.signature matched the live declaration and the
+---call ran without raising — and nothing more. It is not a promise that a pal exists yet, and
+---on the coordinate form it is not a promise that one is at `at`. `false` means the call was
+---refused or raised, or that nothing was attempted at all (no cheat manager, no player state,
+---bad args).
 ---
----`true` means A NEW PAL ACTOR WAS OBSERVED in the world immediately after the call — never
----that it reached the coordinate you asked for: the coordinate form relocates it in a
----deferred pass that finishes long after this returns and reports only to the log. `false`
----means nothing was seen to spawn, or nothing was even attempted (no cheat manager, no player
----state, bad args, or core.signature refusing a call whose live declaration does not match the
----dump). The `toPlayer` form is the one exception: a party/box summon puts nothing in the
----world to look for, so there a `true` means only that the call was issued
----(core.spawn.palForPlayer says so at its own doc).
+---⚠️ SPAWNING IS ASYNCHRONOUS: THE PAL ARRIVES SECONDS LATER (~5.9 s when it was measured, on
+---2026-07-26). No synchronous return can describe that, which is why this one does not try.
+---Where the truth is: the [PalForge.spawn] log. The coordinate form's deferred pass prints
+---"placed new pal at (...); it reads back (...), off by N" — that same run recorded off by 0,
+---twice, so the coordinate route is measured EXACT. The plain wild form prints an arrival line
+---of its own, and the `toPlayer` form prints none at all because nothing here can enumerate a
+---party/box.
+---
+---If your pack has to REACT to the pal, do not gate on this boolean and do not poll for one
+---frame: use the onSpawned handler, or look for the pawn yourself over a window of ten seconds
+---or more.
 ---@param arg Coord|table|nil
----@return boolean spawned   # a new pal actor was observed (see above), NOT arrival at `at`
+---@return boolean issued   # the native call was issued (see above), NOT arrival, NOT `at`
 function Handle:spawn(arg)
     local opts = {}
     if type(arg) == "table" then

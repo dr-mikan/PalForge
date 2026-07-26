@@ -419,30 +419,40 @@ end)
 -- LIVE — needs a world. One pal per test, and never a mesh the player would wear.
 --=============================================================================
 
--- THESE THREE ASSERT FALSE ON PURPOSE. All three take the WILD route — UPalCheatManager
--- :SpawnMonster — which is measured dead on this build: it runs, raises nothing and produces no
--- PalCharacter, so :spawn observes the world and honestly answers false
--- (TODO(pal-spawnmonster-signature) at core/spawn.lua). Skipping on false instead — which is
--- what these used to do — would let all three pass in silence forever while the capability
--- stayed dead.
+-- THESE THREE USED TO ASSERT FALSE ON PURPOSE, on the belief that the wild route —
+-- UPalCheatManager:SpawnMonster — was measured dead on this build. It is not: on 2026-07-26 the
+-- coordinate form spawned a pal and placed it on the requested point off by 0 cm, ~5.9 s after
+-- the call, twice in one press. The route works and always did; what was broken was a verdict
+-- built on a world count taken in the statement after an ASYNCHRONOUS call. Those three false
+-- assertions were the notification the old comment promised, and this is them being honoured.
 --
--- STILL FALSE AFTER THE 2026-07-26 DUMP READ, and that is a finding rather than an omission:
--- dumps/cxx/ eliminated the three explanations for the outage (wrong parameter list, a gate on
--- the cheat-manager class, a world enumeration that could not see a pal) without producing a
--- better wild-spawn call, so core/spawn kept SpawnMonster and only put it behind
--- core.signature. Nothing here changed shape, so nothing here changes verdict.
+-- WHAT THEY ASSERT NOW, and it is everything that is synchronously true: that the call was
+-- ISSUED — core.signature matched SpawnMonster's live declaration on this build and the call ran
+-- without raising. That is the whole of core/spawn's new contract for the world routes.
 --
--- NOT COVERED, deliberately: the `toPlayer` form. core/spawn.palForPlayer now goes to a
--- different object (APalPlayerState:RequestSpawnMonsterForPlayer) and its `true` means only "the
--- call was issued" — a party/box summon leaves nothing in the world to measure, so a live test
--- of it would assert a side effect it cannot see while permanently adding a pal to the tester's
--- box. Its verdict is exercised without a world by the recorder tests above.
+-- WHERE THE ARRIVAL EVIDENCE LIVES, since none of it can be asserted from here: the
+-- [PalForge.spawn] log. A test function cannot block for six seconds — the suite runs on the
+-- game thread, off a keypress — so asserting a pal exists would mean either freezing the game or
+-- re-introducing the exact too-early measurement that produced the false alarm. core/spawn
+-- instead watches for up to 20 looks after each of these calls and writes what it finds:
+--   spawn.palAt: placed new pal at (...); it reads back (...), off by N (T s after the call)
+--   spawn.pal <id>: N new PalCharacter in the world T s after the call
+-- Read those lines after a live run; they arrive AFTER the suite has printed its summary.
 --
--- So today's truth is pinned, defect and all: the day something spawns, THESE TESTS FAIL, and
--- that failure is the notification that the TODO is closable. Do not weaken them to a type
--- check; a boolean assertion passes in both worlds and tells nobody anything.
+-- A FALSE HERE IS NOW A REAL FINDING, which is why it fails rather than skips: either the live
+-- declaration stopped matching (a game patch), or no PalCheatManager could be reached or
+-- constructed in this session. core/spawn logs which of the two it was.
+--
+-- COST: each of the three really does add ONE ChickenPal to the tester's world, now that we know
+-- they arrive. Nothing in-tree can despawn one; that is three chickens per live run, which is
+-- the price of testing a spawn at all.
+--
+-- NOT COVERED, deliberately: the `toPlayer` form. core/spawn.palForPlayer goes to a different
+-- object (APalPlayerState:RequestSpawnMonsterForPlayer) and nothing can watch a party/box, so a
+-- live test of it would assert a side effect it cannot see while permanently adding a pal to the
+-- tester's box. Its verdict is exercised without a world by the recorder tests above.
 
-s:test("a coordinate spawn reports false while no spawn route works -- TODO(pal-spawnmonster-signature)", function(t)
+s:test("a coordinate spawn issues the native call and reports it", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
@@ -450,35 +460,40 @@ s:test("a coordinate spawn reports false while no spawn route works -- TODO(pal-
     local pal = Pal.get(support.GAME.pal)   -- one chicken; nothing in-tree can despawn it
     local ok  = pal:spawn(coord)
     t:type(ok, "boolean", ":spawn reports a boolean verdict")
-    t:eq(ok, false, "a coordinate spawn must report false while SpawnMonster produces nothing; "
-        .. "a true here means a pal was OBSERVED to appear and this test is what needs updating")
+    t:eq(ok, true, "the call was issued: SpawnMonster's live declaration matched and it ran. "
+        .. "The pal itself is ~6 s away and the placement line in the [PalForge.spawn] log is "
+        .. "what says it arrived — nothing here can wait for it")
 
-    -- Independent of the outage, and the reason this test still earns its place: the
-    -- measurement :spawn's verdict is built on has to work. It enumerates the world before and
-    -- after the call, and that enumeration is what a working spawn would be detected BY — so
-    -- prove it functions even when it counts nothing new.
+    -- The enumeration this test still exists to exercise: FindAllOf("PalCharacter") is how the
+    -- deferred placement pass identifies the pal it has to move, and how it measures the
+    -- read-back. It is the one piece of that pass reachable from a synchronous test, so prove
+    -- it works even though the pal it will find is not here yet.
     local near = support.nearestPal(coord)
     if not near then t:skip("FindAllOf('PalCharacter') returned nothing enumerable") end
-    t:type(near.count, "number", "the world is enumerable, which is what a spawn is detected by")
+    t:type(near.count, "number", "the world is enumerable, which is what the placement pass runs on")
     t:type(near.dist, "number", "and a distance to the requested point is measurable")
     t:type(near.pos.x, "number", "the nearest pal reports a world position")
 end)
 
-s:test("the opts form reports false the same way -- TODO(pal-spawnmonster-signature)", function(t)
+s:test("the opts form issues the call the same way", function(t)
     support.needWorld(t)
     local coord = support.inFront(700.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
 
     local ok = Pal.get(support.GAME.pal):spawn{ at = coord, level = 3 }
     t:type(ok, "boolean", "the opts form reports a boolean verdict too")
-    t:eq(ok, false, "at + level goes through the same blocked call, so it answers false too")
+    t:eq(ok, true, "at + level reaches the same SpawnMonster call, so it is issued the same way")
 end)
 
-s:test("a spawn with no argument reports false as well -- TODO(pal-spawnmonster-signature)", function(t)
+s:test("a spawn with no argument issues the call as well", function(t)
     support.needWorld(t)
     local ok = Pal.get(support.GAME.pal):spawn()
     t:type(ok, "boolean", "the default form reports a boolean verdict")
-    t:eq(ok, false, "the wild route is the same SpawnMonster call, so it answers false too")
+    -- The plain wild route is the ONE spawn form whose pal has never actually been seen to
+    -- arrive: it makes the identical call, but every run that watched it looked at 1.2 s and
+    -- gave up. core/spawn now watches it on the same schedule that caught the coordinate form,
+    -- so the "spawn.pal ChickenPal: ..." line in the log of this very run is the answer.
+    t:eq(ok, true, "the wild route is the same SpawnMonster call, so it is issued the same way")
 end)
 
 s:test(":renderOn leaves the player pawn alone when there is no mesh to attach", function(t)

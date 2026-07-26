@@ -4,16 +4,19 @@
 -- that may or may not exist in the shipping build, a UFunction's real parameter list, a row
 -- struct's real column names. One press answers all of them at once.
 --
--- TWO OF THEM ARE THE WHOLE POINT OF THE NEXT RUN, because two public capabilities are dead
--- until they are answered and nothing else in the tree can answer them:
+-- ONE OF THEM IS THE WHOLE POINT OF THE NEXT RUN, because a public capability is dead until it
+-- is answered and nothing else in the tree can answer it:
 --   item-additem-signature      -- :give and :take, and every recipe and cost that needs them
---   pal-spawnmonster-signature  -- :spawn; nothing has ever spawned through this tree
--- Both are one printed parameter list away, and both blocks call nothing.
+-- It is one printed parameter list away, and its block calls nothing. It had a companion until
+-- 2026-07-26 — pal-spawnmonster-signature, ":spawn; nothing has ever spawned through this tree"
+-- — and that one is CLOSED: a live run spawned two pals and placed both on their exact
+-- coordinate, so the capability was never dead, only mis-measured (core/spawn.lua's header has
+-- the log). Its block was retargeted at what the close left open, pal-spawn-at-location.
 --
 -- The ids this covers, in the order they are printed: audio-akevent-play-signature,
 -- audio-bus-volume, audio-custom-file-loader, item-remove-call, item-additem-signature,
 -- item-inventory-count-readback, item-datatable-row-read, icons-row-read, icons-row-column,
--- pal-icon-row, skill-icon-key, pal-spawnmonster-signature, spawn-actor-conventions,
+-- pal-icon-row, skill-icon-key, pal-spawn-at-location, spawn-actor-conventions,
 -- spatial-saveid, mesh-static-setstaticmesh, mesh-texture-import,
 -- mesh-detach-destroycomponent, mesh-base-material, building-leftclick, building-break,
 -- building-break-source, skill-activate-source, skill-passive-source, effect-native-status,
@@ -827,36 +830,36 @@ end
 -- Spawn and world
 --=============================================================================
 
--- The other blocked capability, read the same way: nothing has ever spawned through this tree.
--- In a loaded save on 2026-07-26, cm:SpawnMonster(FName("ChickenPal"), level) completed without
--- raising and no new PalCharacter existed either immediately or 1.2 s later. The call reaches
--- the engine and does nothing.
+-- RETARGETED, 2026-07-26. This block used to be one of the two reasons to press the key:
+-- pal-spawnmonster-signature, "nothing has ever spawned through this tree". That item is CLOSED
+-- — a live run that day spawned two ChickenPals through core/spawn and teleported both onto
+-- their requested coordinate off by 0 cm. The call was never wrong; the verdict around it was
+-- (it looked for the pal one statement after an asynchronous call, and again at 1.2 s, against
+-- an arrival that takes ~5.9 s). The evidence is written out at the top of core/spawn.lua.
+-- Everything this block was going to read is therefore already answered: the parameter list
+-- (dumps/cxx/Pal.hpp:16176 (FName, int32), and the live run logged [evidence declared], which is
+-- core.signature reporting a successful walk of the real UFunction on the installed binary), the
+-- absence of any gate on UPalCheatManager, and the network-role question behind the
+-- authority hypothesis — which needed the outage to exist and is retired with it.
 --
--- ⚠️ THE QUESTION THIS BLOCK WAS WRITTEN FOR IS ANSWERED. It existed to read the declared
--- parameter list of SpawnMonster, on the theory that a missing trailing argument was being
--- marshalled as zero. dumps/cxx/Pal.hpp settled that on 2026-07-26 without a run:
---     :16176  void SpawnMonster(const FName CharacterID, int32 Level);
---     :16175  void SpawnMonsterForPlayer(const FName& CharacterID, int32 Num, int32 Level);
--- Those are exactly the two argument lists core/spawn.lua passes. The arity hypothesis is DEAD,
--- and so are its two companions: all 470 lines of `class UPalCheatManager` (Pal.hpp:16085-16554)
--- carry no gate, mode, target or enable flag and no _ToServer/_ServerInternal spawn twin; and
--- APalMonsterCharacter derives APalCharacter (:10167, :10195, :8956) with
--- dumps/reflection/04_live_objects.txt showing the FindAllOf("PalCharacter") sweep returning
--- BP_PinkCat_C out of a live world, so the world delta core/spawn measures would have seen a pal.
---
--- WHAT THE BLOCK IS FOR NOW. Two things the dump cannot supply. (1) The cheat manager's live
--- function list, which is still worth having: dumps/reflection/02_reflection.txt covers 21
--- /Script/Pal.* classes and PalCheatManager is not one of them, so nothing has ever confirmed
--- that SpawnMonster still EXISTS on the installed binary — the dump is a patch behind it (dumped
--- 2026-07-09, exe 2026-07-16, and the live reflection already shows names the dump lacks). (2)
--- The surviving hypothesis, which is WHERE the call must run: see the network-role section.
+-- WHAT IS OPEN, and what this block now asks: IS THERE A SPAWN THAT TAKES A LOCATION? Every
+-- coordinate spawn in this tree is spawn-then-teleport — SpawnMonster drops the pal beside the
+-- player and core/spawn chases it with up to 20 enumerations and a K2_TeleportTo. That works and
+-- is exact, but it costs a UObject sweep per look and it cannot place a pal the player is not
+-- standing near. One declaration taking an FVector would replace the whole chain. Nothing in
+-- either tree has ever listed UPalCheatManager's functions (dumps/reflection/02_reflection.txt
+-- covers 21 /Script/Pal.* classes and this is not one of them), so a spawn name nobody has tried
+-- may be sitting in it — and UPalCharacterManager::SpawnNewCharacter, the C++ bridge call that
+-- took a SpawnParameter struct, is the shape to look for.
+-- ⚠️ THE ID BELOW IS A PROPOSAL, not a filed one: plan/TODO.md knows pal-spawnmonster-signature,
+-- which is closed. Whoever files it owns the name.
 --
 -- It calls NOTHING, and that has not changed. Every line below finds an object, lists names, or
--- reads a property. Calling a UFunction with a guessed argument list is what closed the game on
--- the first run, and the two calls named in the closing notes are for a human in a throwaway
+-- reads a declaration. Calling a UFunction with a guessed argument list is what closed the game
+-- on the first run, and the one call named in the closing notes is for a human in a throwaway
 -- world, not for this file.
-local function pal_spawnmonster_signature()
-    probe.begin("pal-spawnmonster-signature")
+local function pal_spawn_at_location()
+    probe.begin("pal-spawn-at-location")
 
     -- Three ways to the object, in the order core/spawn.cheatManager itself tries them. Any one
     -- that answers is enough; all three are printed so a failure names which link broke.
@@ -885,46 +888,48 @@ local function pal_spawnmonster_signature()
     probe.section("every UFunction on the cheat manager, unfiltered — no dump in this tree has this list")
     probe.functions(probe.valid(cm) and classOf(cm) or cmcls, "PalCheatManager")
 
-    probe.section("the two spawn declarations — dumps/cxx says (FName, int32) and (FName, int32, int32)")
+    probe.section("the two spawn declarations, reprinted — the working call, so a patch that "
+        .. "changes it is noticed rather than assumed away")
     for _, fn in ipairs({ "SpawnMonster", "SpawnMonsterForPlayer" }) do
         if probe.valid(cm) then probe.params(cm, fn) end
         probe.params(cmcls, fn)
     end
 
-    -- The surviving hypothesis, read-only. Palworld routes every mutating debug action through
-    -- the server rather than the local object: APalPlayerController declares a _ToServer twin for
-    -- each (Debug_AddMoney_ToServer, Debug_Muteki_ToServer, Debug_ForceSpawnRarePal_ToServer, and
-    -- the general Debug_CheatCommand_ToServer(FString) at Pal.hpp:10970, with
-    -- Debug_ReceiveCheatCommand_ToClient coming back at :10956 — all confirmed live at
-    -- dumps/reflection/02_reflection.txt:190-213), and UPalCheatManager itself carries
-    -- EnableCommandToServer() (:16440) and CommandToServer(const FString) (:16501). Those exist
-    -- because a cheat issued without authority is not expected to do anything locally — which is
-    -- the observed behaviour exactly. Role and RemoteRole are plain UPROPERTYs on AActor
-    -- (Engine.hpp:7873, :7867), so this is a property read and nothing is invoked.
-    probe.section("network role — does this session have authority at all")
-    if probe.valid(pc) then
-        probe.read(pc, "Role")
-        probe.read(pc, "RemoteRole")
-        probe.read(pc, "bReplicates")
-    else
-        probe.line("VALUE no PalPlayerController to read a role from")
+    -- The open question: a spawn that takes a place. Anything with a Location/Position/Transform
+    -- parameter, or a name shaped like the C++ bridge's SpawnNewCharacter, would let core/spawn
+    -- drop the chase entirely. Four owners are plausible and none has been listed here before.
+    -- The boolean is CDO-or-class, and it is not decoration: classOf() on a CDO gives the class
+    -- to enumerate, while a /Script/Pal.<Class> path IS the class already — asking a UClass for
+    -- its class answers /Script/CoreUObject.Class and greps the wrong object entirely.
+    local SPAWN = { "spawn", "summon", "create", "appear" }
+    local WHERE = { "location", "position", "transform", "vector", "point", "coord", "place", "at" }
+    probe.section("spawn-shaped names on every class that could own one, and their declarations")
+    for _, t in ipairs({ { "/Script/Pal.PalCheatManager",      false },
+                         { "/Script/Pal.PalCharacterManager",  false },
+                         { "/Script/Pal.PalPlayerState",       false },
+                         { "/Script/Pal.Default__PalUtility",  true  } }) do
+        local o = probe.find(t[1])
+        local k = ((t[2] and o) and classOf(o)) or o
+        local hits = grep(k, t[1], "fn", SPAWN)
+        paramsFor(k, hits, 10)
     end
 
-    probe.note("WHAT TO PASTE BACK, in order of what it settles: (1) the Role/RemoteRole pair. "
-        .. "ROLE_Authority (3) on the controller kills the authority hypothesis outright and the "
-        .. "search moves to the CharacterID and the spawn location instead; anything lower makes "
-        .. "the server forward THE candidate fix. (2) whether SpawnMonster and "
-        .. "SpawnMonsterForPlayer appear in the unfiltered function list at all — the dump is one "
-        .. "patch older than the installed exe, and nothing has confirmed these two survive in it.")
-    probe.note("STILL OWED, and NOT done here because it writes to the world: only if the role "
-        .. "above is NOT authority, in a THROWAWAY world, console: local "
-        .. "pc=FindFirstOf('PalPlayerController'); local n=#FindAllOf('PalCharacter'); "
-        .. "pc:Debug_CheatCommand_ToServer('SpawnMonster ChickenPal 5'); "
-        .. "print(n, #FindAllOf('PalCharacter')) — a rise closes "
-        .. "TODO(pal-spawnmonster-signature), and no rise is one more elimination worth as much. "
-        .. "The argument is a single FString, which is the safest scalar there is to marshal.")
-    probe.note("The full function list matters as much as the two signatures: a spawn name nobody in "
-        .. "either tree has tried may be sitting in it.")
+    probe.section("and the reverse read: place-shaped parameters, on the one class we know spawns")
+    grep(probe.valid(cm) and classOf(cm) or cmcls, "PalCheatManager", "prop", WHERE)
+
+    probe.note("WHAT TO PASTE BACK: every PARAM line whose argument list contains a StructProperty "
+        .. "(an FVector/FTransform) next to a NameProperty. ONE such declaration replaces "
+        .. "core/spawn's spawn-then-teleport chain — up to 20 FindAllOf sweeps and a K2_TeleportTo "
+        .. "— with a single call, and lets a pack place a pal somewhere the player is not.")
+    probe.note("MISS: spawn-shaped names on all four classes and not one of them taking a place "
+        .. "means the chase IS the mechanism on this build, and core/spawn.palAt should be "
+        .. "documented as near-player-then-relocate rather than left looking provisional. That is "
+        .. "a complete answer, not a gap — the chase is measured exact (off by 0 cm, twice).")
+    probe.note("STILL OWED, and NOT done here because it writes to the world: whatever this block "
+        .. "finds has to be CALLED once in a throwaway world, with the types printed above and no "
+        .. "guessing — a struct pushed against an unread declaration is what closes the game. And "
+        .. "give it TEN SECONDS: the spawn already in use takes ~6 s to deliver its pal, so a "
+        .. "before/after count taken any sooner is the mistake that cost this tree weeks.")
     probe.finish()
 end
 
@@ -1428,10 +1433,13 @@ end
 -- run
 --=============================================================================
 
--- Every section, in plan/TODO.md order EXCEPT the first two, which are the reason to press
--- the key at all: item-additem-signature and pal-spawnmonster-signature are the only two
--- unknowns with a dead public capability behind them (:give / :take, and :spawn), and a run
--- that ends early for any reason must not be the run that lost them. They go first.
+-- Every section, in plan/TODO.md order EXCEPT the first, which is the reason to press the key
+-- at all: item-additem-signature is now the ONLY unknown here with a dead public capability
+-- behind it (:give / :take), and a run that ends early for any reason must not be the run that
+-- loses it. It goes first. It used to be one of two — pal-spawnmonster-signature sat beside it
+-- because :spawn was believed dead — and that item is closed: the spawn works and always did
+-- (core/spawn.lua's header carries the log). Its block lives on, retargeted, as
+-- pal-spawn-at-location, and it has no dead capability behind it, so it takes its turn.
 --
 -- Each one is pcall-guarded in M.run so a section that raises (a stale pointer, a class that
 -- answers strangely) cannot cost the other twenty-six their block. A pcall cannot save a run
@@ -1439,7 +1447,7 @@ end
 -- parameter types it has not printed first.
 local SECTIONS = {
     { "item-additem-signature",         item_additem_signature },
-    { "pal-spawnmonster-signature",     pal_spawnmonster_signature },
+    { "pal-spawn-at-location",          pal_spawn_at_location },
     { "audio-akevent-play-signature",   audio_akevent_play_signature },
     { "audio-bus-volume",               audio_bus_volume },
     { "audio-custom-file-loader",       audio_custom_file_loader },

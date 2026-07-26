@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (15)
+## Closed (17)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -88,15 +88,17 @@ without the game running.
 - **`mesh-skeletal-animclass`** — Mesh.Spec.animClass. All three assumptions confirmed: `SetAnimClass(UClass*)`, `SetAnimationMode(TEnumAsByte<EAnimationMode::Type>)`, and `EAnimationMode::AnimationBlueprint = 0`. The calls were already right, and the log line claiming "SetAnimClass is not on this component" was simply wrong. The real weak link turned out to be elsewhere and is recorded in its place: `SetAnimClass` wants an AnimBlueprintGeneratedClass, and the one live asset sweep on disk found zero loaded while the classes plainly exist — so what is unproven is the LoadAsset resolve, not the call.
 - **`mesh-texture-import`** — Mesh.Spec.texture. `Engine.hpp:14694` declares `UTexture2D* ImportFileAsTexture2D(UObject* WorldContextObject, FString Filename)` on UKismetRenderingLibrary. Both halves of the unknown are answered: the world context is a plain `UObject*`, so the actor already being passed qualifies, and the path is an FString — an ordinary Lua string, and NOT the FName shape that kills the process.
 - **`effect-native-status`** — Effect.Spec.nativeStatus. **Observed working in a loaded save**, 2026-07-26: `status.add AttackUp (EPalStatusID 26) [declared]`, the game reading the ailment back as present, then `status.remove` and the game reading it back as gone. The route is `PalCharacter.StatusComponent` -> `UPalStatusComponent::AddStatus(EPalStatusID)`, and the vocabulary that previously had no source anywhere on disk is `EPalStatusID`'s 38 names. One thing had to change to get there and it generalises: those parameters are declared **EnumProperty**, not ByteProperty — an `enum class`, not a legacy `enum` — and `core/signature.lua` refused three correct calls over the spelling until it learned the two marshal identically. Every `EPal*` argument in this tree is an enum class.
+- **`pal-spawnmonster-signature`** — Pal.Handle:spawn. **Observed working**, 2026-07-26. The call was never broken: `cm:SpawnMonster(FName("ChickenPal"), lv)` was issued with `[evidence declared]`, meaning `core/signature.lua` walked the real UFunction on the installed binary and matched it. What was broken was the VERDICT around it — a spawn that arrives after ~4-6 seconds was measured synchronously, and the miss was reported as a property of the build. Three hypotheses died with it, including the server-authority one, which had been invented to explain an observation that never happened. `:spawn` now returns whether the call was ISSUED, because arrival is seconds away and no caller can block; the arrival line follows in the log, with elapsed seconds.
+- **`pal-spawn-placement`** — core.spawn.palAt. **Observed end to end, twice, in the same press**: `placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0`. Every half that had never been seen is now seen — the pal appears, the nearest-to-player anchor picks the right one, `K2_TeleportTo` accepts it, and the read-back is exact rather than approximate.
 
-## Open (23)
+## Open (21)
 
 ### Pal
 
 #### `pal-icon-row` — Pal.Handle:iconOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/pal.lua:244
+- **Marked at:** Scripts/palforge/api/pal.lua:247
 
 **What a pack author sees**
 
@@ -194,84 +196,10 @@ F1 in a loaded world with a pal nearby prints both read-backs, the player's and 
 enum spelling question is settled — these parameters are `EnumProperty`, and `core/signature.lua`
 now accepts it.
 
-#### `pal-spawnmonster-signature` — Pal.Handle:spawn / core.spawn.pal / core.spawn.palAt
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/core/spawn.lua:279
-
-**What a pack author sees**
-
-`Pal{...}:spawn()` returns false and no pal appears. Nothing has ever spawned through PalForge.
-
-This was measured on 2026-07-26 in a loaded save, with a cheat manager that already existed
-(`CheatManagerEnabler` logged "CheatManager already exist") and on the game thread:
-`cm:SpawnMonster(FName("ChickenPal"), level)` completed **without raising**, no new
-`PalCharacter` existed a statement later, and none existed 1.2 s later either. The call reaches
-the engine and does nothing.
-
-**What is still unknown**
-
-The reflected parameter list of `UPalCheatManager::SpawnMonster` and `::SpawnMonsterForPlayer`
-on this build. Nothing in either tree has ever reflected it — `dumps/reflection/02_reflection.txt`
-covers 21 `/Script/Pal.*` classes and PalCheatManager is not one of them; its only trace anywhere
-is PalUtility's `.GetPalCheatManager`. The arity `core/spawn.lua` is written to,
-`SpawnMonster(FName CharacterID, int Level)`, comes from a CXXHeaderDump note about *some* build,
-not a measurement of this one.
-
-Why that is the suspect: the same run measured `AddItem_ServerInternal` declaring six parameters
-where PalForge passes four (`item-additem-signature`), and UE4SS accepts a short argument list
-silently — a missing trailing parameter is marshalled as zero. A `SpawnMonster` whose real list
-carries, say, a count or an enabling flag after `Level` would behave exactly like this: runs,
-raises nothing, spawns nothing.
-
-**What the probe prints**
-
-The cheat manager reached three ways (live object, the controller's `.CheatManager`, its
-`.CheatClass`), then its complete UFunction list — which no dump in this tree has — then every
-parameter of both spawn functions in declared order, with each one's name and property class. It
-calls neither: a guessed argument list faults natively, past `pcall`, and that is what crashed
-the first F5 run.
-
-#### `pal-spawn-placement` — Pal.Handle:spawn(coord) / core.spawn.palAt
-
-- **Probe:** F7
-- **Marked at:** Scripts/palforge/core/spawn.lua:408
-
-**What a pack author sees**
-
-:spawn(coord) returns true, but nobody has ever seen a pal actually arrive at the coordinate —
-the game drops it beside the player and PalForge's relocation runs on a retry chain long after
-the call returned, reporting only to the log.
-
-**What is still unknown**
-
-```text
-Relocate ONLY our freshly-spawned pal to (x,y,z). The native spawn drops it right at the
-player, so among pals absent from `before` we move the SINGLE one nearest the player's spawn
-position (px,py,pz) — never a batch, so wild pals that streamed in meanwhile are not dragged
-along (that was the "20 -> 40 floating pals" bug). Retries; the actor spawns deferred.
-Returns true ONLY when a new pal was found AND the move reported success. Nobody can
-receive that today — every call site is a retry timer that ran long after palAt returned —
-so the return exists for the log line to be honest and for a future caller to poll on.
-
-TODO(pal-spawn-placement): unobserved end to end — no run of this pass (found / moved /
-landed at the coordinate) is recorded anywhere in either tree.
-```
-
-**What the probe prints**
-
-In a loaded world, spawn at a distinctive point —
-Pal.get("ChickenPal"):spawn(require("palforge.core.player").coordinateOffset(600, 0, 50)) — or
-just press F1 (the pal suite's live coordinate test does exactly this). Then paste every
-[PalForge.spawn] line from UE4SS.log for the following 5 s: the "accepted; relocation to (x,y,z)
-scheduled" line, followed by ONE of "placed new pal at (x,y,z); it reads back (...), off by N" /
-"found the new pal but every relocate call failed" / "no new pal actor appeared to place". An
-"off by" under ~100 means the coordinate route works.
-
 #### `pal-spawned-hook` — Pal.Spec.Events.onSpawned
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/pal.lua:158
+- **Marked at:** Scripts/palforge/api/pal.lua:159
 
 **What a pack author sees**
 
@@ -1113,7 +1041,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `icons-row-read` — core.icons.resolve -> Item/Pal/Building/Skill Handle:iconOf()
 
 - **Probe:** F1
-- **Marked at:** Scripts/palforge/core/icons.lua:377
+- **Marked at:** Scripts/palforge/core/icons.lua:428
 
 **What a pack author sees**
 

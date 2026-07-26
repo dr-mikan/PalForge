@@ -334,6 +334,26 @@ local function pathOf(v)
     local ok, str = pcall(function() return v.ToString and v:ToString() end)
     if ok and type(str) == "string" and #str > 0 and str ~= "None" then return str end
 
+    -- 1b) RESOLVE IT. A soft pointer's whole job is to name an asset that may not be loaded, and
+    -- UE4SS's own userdata for one is undocumented — the run printed "TSoftObjectPtrUserdata"
+    -- with a protected metatable, so its members cannot be enumerated, only tried. If it can
+    -- hand over the object it points at, that object's full name IS the path, and this stops
+    -- being a struct-digging problem.
+    for _, get in ipairs({
+        function() return v:Get() end,
+        function() return v:LoadSynchronous() end,
+    }) do
+        local okr, obj = pcall(get)
+        if okr and obj ~= nil then
+            local okn, full = pcall(function() return obj:GetFullName() end)
+            if okn and type(full) == "string" and #full > 0 then
+                -- GetFullName is "Texture2D /Game/.../T_itemicon_Wood.T_itemicon_Wood"; the
+                -- caller wants the path, so drop the leading class name when there is one.
+                return (full:match("%s(%S+)$") or full)
+            end
+        end
+    end
+
     -- 2) TSoftObjectPtr -> FSoftObjectPath -> the name inside it. UE4 and UE5 spell that last
     --    step DIFFERENTLY and Palworld is UE5, which is why the first attempt at this missed:
     --      UE4   FSoftObjectPath { FName AssetPathName; FString SubPathString; }
@@ -378,15 +398,23 @@ local function readIcon(row, tableName)
                 -- nil that named no reason, so this prints the metatable's own keys: whatever
                 -- UE4SS binds onto this userdata is the next thing pathOf should try, and
                 -- guessing shapes one release at a time is what made this slow.
+                -- The metatable is protected (the run printed "<no readable metatable>"), so it
+                -- cannot be enumerated — but __index still answers. Ask for every name a soft
+                -- pointer plausibly exposes and report which ones exist, with their Lua type.
+                -- One run of this names the accessor and ends the guessing.
                 local keys = {}
-                pcall(function()
-                    local mt = getmetatable(v)
-                    local idx = mt and (type(mt.__index) == "table" and mt.__index or mt)
-                    if type(idx) == "table" then
-                        for k in pairs(idx) do keys[#keys + 1] = tostring(k) end
-                        table.sort(keys)
+                for _, name in ipairs({
+                    "Get", "LoadSynchronous", "ToString", "ToSoftObjectPath", "GetPathName",
+                    "GetAssetName", "GetLongPackageName", "GetAssetPathName", "GetAssetPathString",
+                    "IsValid", "IsNull", "IsPending",
+                    "ObjectID", "AssetPath", "AssetPathName", "SubPathString",
+                    "PackageName", "AssetName", "WeakPtr",
+                }) do
+                    local okm, member = pcall(function() return v[name] end)
+                    if okm and member ~= nil then
+                        keys[#keys + 1] = name .. ":" .. type(member)
                     end
-                end)
+                end
                 log.warn(string.format("icons: %s.%s is a %s that pathOf could not read (%s) — "
                     .. "the row IS readable, only this last unwrap is missing. It responds to: %s",
                     tableName, col, type(v), tostring(desc),

@@ -1,8 +1,11 @@
 -- palforge/test/probes/watch.lua — arms the live hooks and watches while YOU play (the F7 probe).
 --
--- Closes six plan/TODO.md items that no amount of reflection can settle, because each one asks
+-- Closes five plan/TODO.md items that no amount of reflection can settle, because each one asks
 -- "does the game CALL this when a human does that": item-craft-source, item-discard-source,
--- pal-spawned-hook, pal-spawned-fresh, skill-hit-source and pal-spawn-placement. It needs a
+-- pal-spawned-hook, pal-spawned-fresh and skill-hit-source. The sixth section, pal-spawn-
+-- placement, now runs as a REGRESSION check: that item closed on 2026-07-26 when the spawn was
+-- observed placing a pal on its exact coordinate, and this is where a build that breaks it, or a
+-- machine slower than the one it was measured on, would show up. It needs a
 -- LOADED SAVE with a workbench, a stack of Wood, a Berries and a pal in the box within reach:
 -- the probe arms hooks, prints a numbered list of actions, and then only YOU can make the game
 -- fire them. Budget about 60 s of play.
@@ -509,51 +512,60 @@ local function pal_spawn_placement()
     end
     probe.line("VALUE Pal.get('ChickenPal'):spawn(target) -> %s%s",
         tostring(spawned), err and ("  [" .. err .. "]") or "")
-    -- The word "accepted" used to be here, and it was the wrong word: nothing about this call
-    -- is accepted or refused. :spawn enumerates the world immediately before and immediately
-    -- after the native call and reports whether a PalCharacter that was not there a statement
-    -- ago is there now.
-    probe.note("false is the EXPECTED answer on this build — SpawnMonster runs, raises nothing "
-        .. "and no pal appears (TODO pal-spawnmonster-signature). A true means a new PalCharacter "
-        .. "was OBSERVED, which is the single most valuable line this whole probe can print. It "
-        .. "still does not mean a pal is standing AT the target: placement happens on a 400 ms "
-        .. "retry chain and reports only to the log, which is what the LATE line below reads.")
+    -- What this boolean means has changed twice. It was "accepted", which was wrong; then it was
+    -- a world count taken in the statement after the call, which was worse — the spawn is
+    -- ASYNCHRONOUS, so that count read 0 for spawns that worked and the whole route was written
+    -- off as dead on the strength of it. It now means what it can: the native call was issued.
+    probe.note("true is the EXPECTED answer, and it says only that the call was ISSUED — "
+        .. "core.signature matched SpawnMonster's live declaration and it ran. false means the "
+        .. "call was refused or raised, or there was no cheat manager to make it on, and the "
+        .. "[PalForge.spawn] lines above say which. The PAL is seconds away: on 2026-07-26 it "
+        .. "arrived ~5.9 s after the call, and the placement chain moved it onto the target off "
+        .. "by 0 cm. The LATE lines below are where that shows up.")
 
-    -- Read the world back once the retry chain has had its six tries (6 x 400 ms).
+    -- Read the world back LONG after the call. This used to fire at 5 s, which is EARLIER than
+    -- the only arrival anyone has timed (5.9 s) — it would have printed "the nearest pal is 600
+    -- cm away, probably just you" about a spawn that was seconds from landing on the target.
+    -- 12 s is double the measured arrival, and it is a nominal 12 s at that: LoopAsync +
+    -- ExecuteInGameThread stretch under load, so the real wait is longer, never shorter.
+    local READBACK_MS = 12000
     if type(LoopAsync) == "function" then
-        LoopAsync(5000, function()
+        LoopAsync(READBACK_MS, function()
             local body = function()
                 pcall(function()
                     local near = support.nearestPal(target)
                     if near then
-                        probe.line("LATE pal-spawn-placement: 5 s later the nearest PalCharacter to "
+                        probe.line("LATE pal-spawn-placement: %d s later the nearest PalCharacter to "
                             .. "(%.0f,%.0f,%.0f) is %.0f cm away (%d pals live). Under ~100 means "
-                            .. "the coordinate route WORKS; ~600 is probably just you.",
-                            target.x, target.y, target.z, near.dist, near.count)
+                            .. "the coordinate route WORKED here too; ~600 is probably just you.",
+                            READBACK_MS // 1000, target.x, target.y, target.z, near.dist, near.count)
                     else
-                        probe.line("LATE pal-spawn-placement: 5 s later no PalCharacter could be "
-                            .. "enumerated at all")
+                        probe.line("LATE pal-spawn-placement: %d s later no PalCharacter could be "
+                            .. "enumerated at all", READBACK_MS // 1000)
                     end
                 end)
             end
             if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(body) else body() end
             return true   -- one shot
         end)
-        probe.note("a LATE readback line prints ~5 s from now, AFTER this block's #### END.")
+        probe.note("a LATE readback line prints ~12 s from now, AFTER this block's #### END.")
     else
         probe.note("LoopAsync is unavailable this session, so no readback is scheduled — read the "
             .. "[PalForge.spawn] LATE lines instead.")
     end
 
     probe.note("PASTE every LATE [PalForge.spawn] line: exactly one of 'placed new pal at (...); "
-        .. "it reads back (...), off by N' / 'found the new pal but every relocate call failed' / "
-        .. "'no new pal actor appeared to place' settles this item.")
-    probe.note("A HIT ('off by' under ~100) means :spawn(coord) may be documented as PLACING a "
-        .. "creature and core/spawn.lua:246's TODO comes out.")
-    probe.note("A MISS ('every relocate call failed' -> none of K2_TeleportTo / K2_SetActorLocation "
-        .. "/ SetActorLocation moves a PalCharacter; 'no new pal actor appeared' -> the deferred "
-        .. "pass never sees the actor at all) forces the strategy change to the C++ SpawnPalAt "
-        .. "bridge, and :spawn(coord) must be documented as near-player only.")
+        .. "it reads back (...), off by N (T s after the call)' / 'found the new pal but "
+        .. "K2_TeleportTo did not report success' / 'no new pal actor appeared to place' is the "
+        .. "outcome, and the T is worth as much as the N.")
+    probe.note("pal-spawn-placement itself is CLOSED — it was observed end to end on 2026-07-26, "
+        .. "off by 0 cm twice — so this section is now a REGRESSION check plus a timing sample: "
+        .. "the one number nobody has more than two of is how long the pal takes to arrive on "
+        .. "hardware that is not the machine it was measured on.")
+    probe.note("A MISS ('K2_TeleportTo did not report success' -> the one declared relocate refuses "
+        .. "a PalCharacter here; 'no new pal actor appeared' -> nothing arrived within 20 looks, "
+        .. "which is ~2x the measured arrival) is a REOPENING, and the T on the surviving lines "
+        .. "is the first thing to look at.")
     probe.finish()
 end
 

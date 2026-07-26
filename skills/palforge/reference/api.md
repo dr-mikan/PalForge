@@ -154,7 +154,7 @@ Declared as `events = { onX = function(self, …) end }` inside `Pal{ … }`.
 | `:name()` | `string` | — |
 | `:renderOn(actor)` | `boolean` | Attach this pal's declared mesh to a live pawn (one-shot; core.mesh guards against re-stacking). |
 | `:skillsOf()` | `string[]` | The skill ids this pal owns (resolve them with Skill.get). |
-| `:spawn(arg)` | `boolean` | Spawn this pal. → a new pal actor was observed (see above), NOT arrival at `at` |
+| `:spawn(arg)` | `boolean` | Spawn this pal. → the native call was issued (see above), NOT arrival, NOT `at` |
 | `:teachAll(actor)` | `integer` | Put every skill this pal DECLARES onto a live character, so the game itself carries them. `skillsOf()` is what the author wrote; this is how that list reaches a real pal standing in the world. |
 
 Event forwarders (same names as the hooks above; they call the definition's
