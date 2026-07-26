@@ -42,7 +42,7 @@
 -- same MIDs. The one thing nobody has measured is which PARAMETER NAMES a Palworld
 -- material actually carries: the layer writes a candidate list and the names the material
 -- does not have are silent no-ops, so a tint can execute and still not be visible. That
--- open question is marked TODO(mesh-material-params) in core/mesh/base/renderer.lua.
+-- parameter names are measured and recorded in core/mesh/base/renderer.lua.
 --
 -- A live structure can also look around itself: `self:neighbors(radiusCm)` inside any
 -- instance hook returns every other tracked structure within that radius (core.spatial's
@@ -279,7 +279,7 @@ function Class:currentColor() return self.color end
 -- `def` is lowered with it and core/mesh's shared material layer writes it onto the
 -- component's dynamic material instances, but a write to a parameter the material does not
 -- carry is a silent no-op, so a declared tint is attempted rather than guaranteed
--- (TODO(mesh-material-params) in core/mesh/base/renderer.lua). Attachment failure IS
+-- (the names are measured now — see core/mesh/base/renderer.lua). Attachment failure IS
 -- reported: false, and no half-dressed component left behind.
 function Class:render()
     if not (self.actor and self.actor.IsValid and self.actor:IsValid()) then return false end
@@ -308,7 +308,7 @@ end
 -- spot if the mesh was attached without a colour. false means there was nothing to write
 -- to (no mesh of ours on the actor, or no colour). Which parameter name a Palworld
 -- material answers to is still unmeasured, so an executed write is not yet proof of a
--- visible change: see TODO(mesh-material-params) in core/mesh/base/renderer.lua.
+-- visible change: the names are measured, but no tint has been watched land.
 function Class:update()
     if not (self.actor and self.actor.IsValid and self.actor:IsValid()) then return false end
     local color = self:currentColor()

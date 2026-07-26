@@ -243,7 +243,7 @@ s:test("attachTo the live player pawn with an OBJ that is not on disk returns an
     t:eq(m:setColor(pawn, { 1, 1, 1, 1 }), false, "and there is no material to re-tint")
 end)
 
-s:test("the player's own materials name themselves and their parameters -- TODO(mesh-base-material) TODO(mesh-material-params)", function(t)
+s:test("the player's own materials name themselves and their parameters", function(t)
     local pawn = support.needWorld(t)
 
     -- READ-ONLY, and that is the point: this writes nothing to any material, any component

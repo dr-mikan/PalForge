@@ -93,87 +93,36 @@ end
 -- Candidate parameter names to probe on the (unknown) base material. Each is written in
 -- turn; the ones the material does not carry are silent no-ops.
 --
--- TODO(mesh-material-params): the dump CANNOT name a parameter and never will — a
--- CXXHeaderDump records the classes in the binary, and a material's parameter names are
--- asset data inside a .uasset. What the dump CAN do, and now has, is turn the probe from
--- "write six names and stare at the mesh" into a read with no writing in it at all:
+-- ANSWERED, 2026-07-26. The names were read off the player's own material in a live save and
+-- they are recorded above COLOR_PARAMS. The dump genuinely could not have told us — a
+-- CXXHeaderDump records classes, and which parameters an asset exposes is data inside a
+-- .uasset — so this was closed by reading the running game instead, which is what
+-- Renderer.describeMaterials exists to do. Point it at any actor to read its material names.
 --
---   Engine.hpp:17540  class UMaterialInstance : public UMaterialInterface
---   Engine.hpp:17548  TArray<FScalarParameterValue>  ScalarParameterValues
---   Engine.hpp:17549  TArray<FVectorParameterValue>  VectorParameterValues
---   Engine.hpp:17551  TArray<FTextureParameterValue> TextureParameterValues
---   Engine.hpp:7652   struct FVectorParameterValue { FMaterialParameterInfo ParameterInfo;
---                                                    FLinearColor ParameterValue; FGuid ... }
---   Engine.hpp:4038   struct FMaterialParameterInfo { FName Name; ... }
---
--- Those are reflected PROPERTIES, so a material instance that is already in the world can
--- simply be ASKED which parameters it carries, by name, without calling anything and
--- without touching a save. Renderer.describeMaterials below does exactly that, and
--- test/cases/mesh drives it against the live player pawn on F1.
---
--- Two things that read like answers and are not, so nobody spends a run on them:
---   * K2_GetVectorParameterValue (Engine.hpp:17583) cannot VALIDATE a name on a MID. A
---     dynamic instance stores whatever it is handed in its own override array, so it hands
---     back a bogus name's value just as happily as a real one. Read the parent instance's
---     arrays; do not interrogate the MID we made.
---   * a plain UMaterial has no such array — its parameters live in the expression graph,
---     which is not reflected. The names come off a material INSTANCE (a MIC on a real
---     asset), which is what a Palworld mesh actually carries: the game's own
---     UPalItemFlowSplineComponent declares GetBuildObjectMaterialInstanceNormal(
---     UMeshComponent*, int32) and GetMaterialInstanceVectorParameterValue(UMaterialInstance*,
---     FName) — Pal.hpp:21573 / :21572 — so build objects are instances read by parameter
---     name in the shipping game itself.
--- The three writes are settled and are not what is missing: Engine.hpp:17572 / :17576 /
--- :17574 declare SetVectorParameterValue(FName, FLinearColor), SetScalarParameterValue(
--- FName, float) and SetTextureParameterValue(FName, UTexture*) exactly as written below,
--- so "the write did not execute" is eliminated as an explanation for an unchanged mesh.
--- ⚠️ THESE ARE GUESSES AND THE SHAPE OF THEM IS NOW KNOWN TO BE WRONG. The first live read of
--- the player's own materials (2026-07-26) printed real parameter names off a
--- MaterialInstanceDynamic on CharacterMesh0:
---     Light Affect Emissive Intensity, Light Affect Emissive Min, Light Affect Emissive Max,
---     Base Emissive Intensity, Base Color Intensity
--- Palworld's parameters are Title Case WITH SPACES. Not one entry below has a space in it, so
--- none of them can match — the list is kept only so the failure is a miss rather than a crash,
--- and it should be REPLACED, not extended, by what describeMaterials prints on a real mesh.
--- "Base Color Intensity" is a scalar (an intensity), so the colour vector is something like
--- "Base Color" — but that is inference, and the read that would settle it is one press away.
-Renderer.COLOR_PARAMS    = { "Color", "BaseColor", "Tint", "BaseColorTint", "Albedo", "EmissiveColor" }
-Renderer.TEXTURE_PARAMS  = { "BaseColor", "Texture", "Albedo", "Diffuse", "BaseTexture", "MainTexture" }
+-- WHAT IS STILL OWED: nobody has watched a colour actually CHANGE. The three writes are
+-- declared exactly as called, so "the write did not execute" is eliminated, and the names are
+-- now real rather than guessed — but a tint landing on screen is a different observation from
+-- either of those, and it has not been made.
+Renderer.COLOR_PARAMS    = { "BaseColor", "Subsurface Color",
+                             "Color", "Tint", "BaseColorTint", "Albedo", "EmissiveColor" }
+Renderer.TEXTURE_PARAMS  = { "Base Texture", "Subsurface Texture", "Normal Map",
+                             "BaseColor", "Texture", "Albedo", "Diffuse", "MainTexture" }
 Renderer.EMISSIVE_PARAMS = { "EmissiveColor", "Emissive", "EmissiveColour" }
 
 -- Candidate base materials to PARENT a MID to, for a component whose element has NO
 -- material of its own (a fresh ProceduralMeshComponent section is the standing case:
 -- CreateAndSetMaterialInstanceDynamic returns nil there). StaticFindObject only returns
 -- ALREADY-LOADED objects, so we try several and take the first present.
--- TODO(mesh-base-material): the dump CANNOT answer this one either, and the reason is
--- worth stating once so nobody re-reads dumps/cxx/ hoping. A CXXHeaderDump lists the
--- classes compiled into the binary; whether /Engine/BasicShapes/BasicShapeMaterial was
--- COOKED INTO THE PAK is a property of the shipped content, and no header mentions an
--- asset path. dumps/reflection/05_assets.txt is the only live asset evidence in the tree
--- and it sweeps AnimMontage, AnimSequence, SkeletalMesh, StaticMesh, AkAudioEvent,
--- SoundBase, SoundWave and Texture2D — eight classes, no Material. So not one material in
--- this tree is known to be loadable, and the five paths below remain five guesses.
+-- ANSWERED, 2026-07-26, and by the same read. A material that is currently RENDERING is
+-- cooked and loadable by construction, which is what made this closable when an asset path
+-- could only ever be a guess: the player's own outfit material instance is now the first
+-- BASE_MATERIAL_CANDIDATES entry, and it carries the BaseColor vector parameter a tint needs.
 --
--- The API half IS settled: Engine.hpp:19841 declares
--- CreateAndSetMaterialInstanceDynamicFromMaterial(int32 ElementIndex, UMaterialInterface*
--- Parent) exactly as createMids calls it, so the moment a parent is found the parenting
--- call is right.
---
--- THE PROBE THAT WOULD CLOSE IT, and it needs no asset path at all. A material that is
--- currently RENDERING is by definition cooked, loaded and usable as a parent, and
--- Engine.hpp:19824 declares UPrimitiveComponent::GetMaterial(int32 ElementIndex) as the
--- way to reach it off any mesh component in the world. So: in a loaded save, take a
--- component that is visibly drawing (the player pawn's own .Mesh is the always-present
--- one; a nearby PalBuildObject's UStaticMeshComponent is the closest thing to what a
--- procedural marker wants to look like), call GetMaterial(0), and print
--- GetFullName() — that object path goes to the FRONT of the list below, and
--- Renderer.describeMaterials prints it together with the parameter names the same
--- material carries, which is the OTHER open mesh item. One read answers both.
--- Two cheaper checks worth running in the same breath, in this order:
---   1. Renderer.probeMaterials() — whether any of the five below happens to be loaded;
---   2. FindAllOf("MaterialInstanceConstant") — the sweep 05_assets.txt never did.
--- The one in-game record of this path is still "no-MID -> white".
+-- WHAT IS STILL OWED: the same as above — nobody has watched a procedural mesh come out tinted
+-- rather than white. And the honest caveat about the candidate itself is at the list.
 Renderer.BASE_MATERIAL_CANDIDATES = {
+    -- measured live, 2026-07-26, on BP_Player_Female_C.CharacterMesh0
+    "/Game/Pal/Model/Character/Player/Outfit/SK_Player_Female_Outfit_OldCloth001/v01/MI_Player_Female_Outfit_OldCloth001_v01_M01.MI_Player_Female_Outfit_OldCloth001_v01_M01",
     "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",       -- has a "Color" vector param
     "/Engine/EngineMaterials/EmissiveMeshMaterial.EmissiveMeshMaterial",
     "/Engine/EngineDebugMaterials/VertexColorViewMode_ColorOnly.VertexColorViewMode_ColorOnly",

@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (24)
+## Closed (26)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -97,8 +97,10 @@ without the game running.
 - **`ui-host-paths`** — native.ui.widget / UI.Handle:mount into the game's own UI. `WBP_PalOverallUILayout` declares `UCanvasPanel* CanvasPanel_Root`, and a UCanvasPanel is a UPanelWidget, so it answers `AddChild` with a `UCanvasPanelSlot`. Live-confirmed: an instance is alive under BP_PalGameInstance with its own WidgetTree (`dumps/reflection/03_widgets.txt:54`). Eliminated on the way: `UPalUIHUDLayoutBase` has **no widget members at all**, so the child "one level down" everyone was looking for never existed — it exposes `AddHUD` instead.
 - **`audio-bus-volume`** — Audio.Handle:setVolume. The dump overturned the item's own premise. `UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)` takes **no bus name**: the second parameter is the Wwise game object, so it scales what ONE emitter sends to its bus, at exactly the scope `PlayAkEventSoundByActor` posts on. It was filed as bus-global and is not. Three other overloads were found and rejected with reasons (needs a component our play route never returns / world-global / needs a bus name, and this build has zero AkAuxBus). Wired as `setVolume(volume, actor)`, actor-wide by construction, exactly like `:stop`. Audibility is owed — nobody has heard it.
 - **`item-remove-call`** — Item.Handle:take. **Observed working**, 2026-07-26, in the same press that proved give: `give Wood x3: 161 -> 164` then `take Wood x3: 164 -> 161`. A pack can charge a cost, and the items are CONSUMED rather than dropped — nothing lands at the player's feet to be picked straight back up, which is what made the DropItem route useless for this. The route is `APalWeaponBase::RequestConsumeItem(const FName&, int32)`, and the reason it went unfound for so long is that nobody thought to look on a WEAPON: the inventory's own class chain has no subtract, and neither does the container, the slot, or the cheat manager. The same weapon class declares `IsExistBulletInPlayerInventory`, so a weapon demonstrably reads and spends the owning PLAYER's bag. Both of the questions left open when it was wired are answered by that one press — it spends the id it is HANDED rather than the weapon's ammunition, and the weapon need only be spawned, not equipped. One real constraint remains and is reported as its own message: a player carrying nothing has no weapon actor to ask.
+- **`mesh-material-params`** — Mesh.Spec.color / texture / params, Mesh.Handle:setColor. The names were **read off the running game**, 2026-07-26, because a header dump never could have said them — a CXXHeaderDump records classes, and which parameters an asset exposes is data inside a `.uasset`. Following each MaterialInstanceDynamic on the player's `CharacterMesh0` up to its MaterialInstanceConstant gave: vector `BaseColor`, `Subsurface Color`; texture `Base Texture`, `MetallicRoughnessOcclusionSpecularTexture`, `Normal Map`, `Subsurface Texture`; scalar `Character CameraFade Distance`, `Occlusion Add`, `Roughness Add`, `Light Affect Subsurface Max`, `RefractionDepthBias`. Mostly Title Case WITH SPACES, which no guess had — except `BaseColor`, which was already in the colour list, so tinting had a real chance all along while the texture list had none. Still owed: nobody has watched a colour actually change.
+- **`mesh-base-material`** — the material a procedural mesh is parented to. Closed by the same read. `dumps/reflection/05_assets.txt` never swept Material, so not one material in this tree was known to be LOADABLE and five plausible `/Engine/` paths were five guesses. A material that is currently RENDERING is cooked and shipped by construction — the player's own outfit instance now leads the candidate list and carries the `BaseColor` vector a tint needs. It is a character shader hung on a procedural cube, which is odd and is said plainly at the list rather than hidden; a working material that looks wrong can be improved, an unloadable one cannot be used at all.
 
-## Open (14)
+## Open (12)
 
 ### Pal
 
@@ -218,7 +220,7 @@ and the BP class names printed.
 #### `item-craft-source` — Item.Spec.Events.onCraft (channel item.craft)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:111
+- **Marked at:** Scripts/palforge/api/item.lua:112
 
 **What a pack author sees**
 
@@ -271,7 +273,7 @@ present. Then craft one item at a workbench and paste which line fired with whic
 #### `item-datatable-row-read` — Item.Handle:iconOf / Item.Handle:recipeOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:180
+- **Marked at:** Scripts/palforge/api/item.lua:181
 
 **What a pack author sees**
 
@@ -319,7 +321,7 @@ Product_Count, WorkAmount, Material1_Id, Material1_Count.
 #### `item-discard-source` — Item.Spec.Events.onDiscard (channel item.discard)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:120
+- **Marked at:** Scripts/palforge/api/item.lua:121
 
 **What a pack author sees**
 
@@ -553,153 +555,6 @@ know whether UE4SS Lua in this build can construct a USoundWave at all. (5)
 print(#(FindAllOf('SoundWave') or {})) and #(FindAllOf('AkMediaAsset') or {}) — whether the
 shipping game has any instance of either class loaded is itself the answer about whether that
 pipeline is alive.
-
-#### `mesh-base-material` — Mesh.Spec.color / texture / material on kind="procedural" and kind="obj"; Mesh.Handle:setColor on a procedural mesh
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:138
-
-**What a pack author sees**
-
-A procedural OBJ mesh attaches and is visible but always white. The log says "no-MID(no material
-on the component and no base material loaded)", and every later :setColor on that actor returns
-false forever, because there is no material instance to write to. This is the one behaviour with
-an in-game record: PalLogistics extensions/pallogistics/init.lua:42 says "no-MID -> white".
-
-**What is still unknown**
-
-```text
-Candidate base materials to PARENT a MID to, for a component whose element has NO
-material of its own (a fresh ProceduralMeshComponent section is the standing case:
-CreateAndSetMaterialInstanceDynamic returns nil there). StaticFindObject only returns
-ALREADY-LOADED objects, so we try several and take the first present.
-TODO(mesh-base-material): every candidate below is an /Engine/ editor asset that a
-cooked shipping build may not contain at all — the one in-game record of this path is
-"no-MID -> white" — so a probe must find whether ANY loaded material can serve here.
-```
-
-**What the probe prints**
-
-In-world, first the cheap check: `require('palforge.core.mesh').probeMaterials()` and read the
-five `MATPROBE FOUND` / `MATPROBE -----` lines it prints. Then enumerate what IS loaded: `local
-n=0; for _, m in ipairs(FindAllOf('Material') or {}) do n=n+1; if n<=150 then print('MAT
-'..m:GetFullName()) end end; print('total Material', n)` and repeat for
-'MaterialInstanceConstant' and 'MaterialInterface'. For the first ~30 of them print whether a
-VectorParameterValues array is present and, if so, each `entry.ParameterInfo.Name:ToString()`.
-Report one loaded object path that carries a colour parameter — that path goes to the front of
-Renderer.BASE_MATERIAL_CANDIDATES.
-
-#### `mesh-material-params` — Mesh.Spec.color / texture / params on every kind, Mesh.Handle:setColor, Building.Instance:update(), Building.Handle:update(), Pal.Class:material()
-
-- **Probe:** F6
-- **Marked at:** Scripts/palforge/core/mesh/base/renderer.lua:96
-
-**What a pack author sees**
-
-setColor returns true and the log says "material [color-set]", but the mesh does not change
-colour. The call executed on a real dynamic material instance; the parameter name simply was not
-one the material carries. Six candidate names are written per slot and all six may miss.
-
-**What is still unknown**
-
-```text
-palforge/api/building.lua — PUBLIC building API + implementation (SELF-CONTAINED).
-
-A building is a placeable structure: workbenches, storage, machines, decorations —
-anything picked from the build menu and set into the world. Same shape as every other
-api module (call it to define, plus get / get_all + a Handle object with actions and
-grouped `events`).
-
-HOW IT INTEGRATES: Building{ ... } registers the definition class in object_manager
-under ("building", id). core/event owns the FULL building runtime and is the most
-complete 導線 in PalForge:
-* a RequestBuild_ToServer hook records the placement intent,
-* a ~500 ms reconstruction scan over FindAllOf("PalBuildObject") discovers the real
-actor, creates a live INSTANCE (def.cls:new{...}), persists it per world, and
-attaches the mesh on a later scan (deferred — attaching the frame it is placed
-crashes the game),
-* an OnBeginInteractBuilding hook drives the interact channel,
-* an OnCompleteBuild_ServerInternal hook drives onBuild — armed only once the world
-is ready, and dispatched to the DEFINITION rather than to an instance (see below),
-* the shared heartbeat drives onTick (per-instance tickInterval + circuit breaker).
-This is the one domain where a placed structure really does get its own stateful
-instance with save/load, and where onPlace / onLoad / onRightClick / onRemove / onTick /
-onWorldReady / onWorldLeft all fire for real.
-
-WIRED (live — see core/event installBuildingSource + installDispatch):
-onPlace      <- the scan, matched to a RequestBuild intent  (ctx.actor, ctx.pos, ctx.player)
-onLoad       <- the scan, every newly tracked structure     (ctx.reconstructed)
-onRightClick <- PalBuildObject:OnBeginInteractBuilding      (ctx.actor, ctx.player)
-onRemove     <- the scan's miss sweep                       (ctx.reason)
-onTick       <- the shared heartbeat                        (ctx.count; see tickInterval)
-onWorldReady / onWorldLeft <- the world-load watch, fired on every live instance
-onBuild      <- PalPlayerRecordData:OnCompleteBuild_ServerInternal (ctx.buildId,
-ctx.model) — DEFINITION-dispatched and armed late; see the next paragraph
-NOT WIRED: onLeftClick / onBreak. No native candidate has ever been found for either
-(the only proven click hook in the tree is a UMG widget button, and destruction is
-covered by the scan's miss sweep -> onRemove), so nothing emits them. They stay
-declarable so a pack's code is future-proof; they never fire.
-
-THE VISUAL LAYER, HONESTLY. A structure's `mesh` really is attached: core/mesh's static
-backend adds a UStaticMeshComponent and confirms the asset landed on it before claiming
-success. `color` / `texture` / `material` / `params` reach it too — the MID work is
-core/mesh/base/renderer's, shared by every backend — and :update() re-tints through the
-same MIDs. The one thing nobody has measured is which PARAMETER NAMES a Palworld
-material actually carries: the layer writes a candidate list and the names the material
-does not have are silent no-ops, so a tint can execute and still not be visible. That
-open question is marked TODO(mesh-material-params) in core/mesh/base/renderer.lua.
-
-A live structure can also look around itself: `self:neighbors(radiusCm)` inside any
-instance hook returns every other tracked structure within that radius (core.spatial's
-hash grid, re-bucketed first so a structure that moved is still found).
-
-The lifecycle receives the live INSTANCE as `self` (not the class): self.actor is the
-placed actor, self.pos its world position, self.state your persisted table, and
-self:save() writes it. onBuild is the ONE exception, and it has to be: it fires at
-build-COMPLETE, up to one scan (~500 ms) before the instance exists, and the game hands
-it a UPalMapObjectModel rather than the actor — so core/event dispatches it to the
-DEFINITION class instead (self.id and self:iconOf() are there; self.actor / self.pos /
-self.state / self:save() are NOT), matched by the game build id the definition claims.
-Its native hook also fires for every pre-existing structure during the world-load storm,
-where reading that model once produced a native access violation, so core/event arms it
-only after world.ready and never at mod load — which means it also stays silent in a
-session where the world never finishes loading. onPlace remains the safe placement hook;
-onBuild is the extra one, worth trying in a throwaway world first.
-
-onWorldReady fires on the live instances: the ready-watch opens core/event's worldReady
-gate, but world.ready is emitted by the FIRST reconstruction scan that completes after
-it, so the structures around the player are already tracked when the hook runs. It is a
-ONE-SHOT world-load moment, not a per-structure one — anything that streams in on a
-later scan misses it, so per-instance startup work belongs in onLoad.
-
-Building{
-id = "example:Bench", name = "Modded Bench", gridCm = 100,
-mesh  = { kind = "static", model = "/Game/.../SM_Bench.SM_Bench" },
-state = { uses = 0 },                       -- default persisted state
-events = {
-onPlace      = function(self, ctx) self.state.uses = 0; self:save() end,
-onRightClick = function(self, ctx) self.state.uses = self.state.uses + 1 end,
-onTick       = function(self, ctx) end,
-},
-}
-```
-
-**What the probe prints**
-
-Get hold of a real Palworld material. Either take a placed structure — `local a =
-(FindAllOf('PalBuildObject') or {})[1]` — or attach a static WorkBench mesh through PalForge and
-keep the component. From the component: `local n = comp:GetNumMaterials(); print('slots', n)`,
-then for each slot `local mat = comp:GetMaterial(i); print('SLOT '..i..' '..mat:GetFullName()..'
-class='..mat:GetClass():GetFName():ToString())`. Dump the material's parameter arrays: for each
-of VectorParameterValues / ScalarParameterValues / TextureParameterValues, `local arr;
-pcall(function() arr = mat[name] end)` and if present iterate it printing
-`entry.ParameterInfo.Name:ToString()` and the value. Also
-`mat:GetClass():ForEachProperty(function(pr) print('PROP '..pr:GetFName():ToString()..'
-'..pr:GetClass():GetFName():ToString()) end)`. Then the visual half: `local mid =
-comp:CreateAndSetMaterialInstanceDynamic(0)`, and for each candidate name in {Color, BaseColor,
-Tint, BaseColorTint, Albedo, EmissiveColor} plus every name harvested from
-VectorParameterValues, call `mid:SetVectorParameterValue(FName(name), {R=1,G=0,B=0,A=1})`, print
-the name, wait ~2s, and report WHICH name visibly turned the mesh red.
 
 #### `ui-menubutton-inner-slot` — native.ui.widget.menuButton (label alignment) — and therefore every TitleMenu entry
 
