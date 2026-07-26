@@ -10,18 +10,22 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: process.env.CI ? [['html'], ['list']] : 'list',
   use: {
-    baseURL: 'http://127.0.0.1:4321',
+    // Defaults to the local static export; set DOCS_BASE_URL (plus DOCS_BASE_PATH) to run
+    // the same suite against the published site.
+    baseURL: process.env.DOCS_BASE_URL ?? 'http://127.0.0.1:4321',
     trace: 'on-first-retry',
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     { name: 'mobile', use: { ...devices['Pixel 5'] } },
   ],
-  webServer: {
-    command: 'npm --prefix docs run serve',
-    url: 'http://127.0.0.1:4321/en/',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: 'pipe',
-  },
+  webServer: process.env.DOCS_BASE_URL
+    ? undefined
+    : {
+        command: 'npm --prefix docs run serve',
+        url: 'http://127.0.0.1:4321/en/',
+        reuseExistingServer: !process.env.CI,
+        timeout: 120_000,
+        stdout: 'pipe',
+      },
 });

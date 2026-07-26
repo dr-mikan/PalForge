@@ -1,25 +1,25 @@
 import { expect, test } from '@playwright/test';
-import { DOC_SLUGS, LOCALES, docUrl } from './pages';
+import { BASE, DOC_SLUGS, LOCALES, docUrl, siteUrl } from './pages';
 
 test.describe('entry points', () => {
   test('the root document points at the default locale', async ({ page }) => {
-    const response = await page.goto('/');
+    const response = await page.goto(siteUrl('/'));
     expect(response?.ok()).toBeTruthy();
     // `output: export` cannot emit a server redirect, so the root is a static bounce page.
-    await page.waitForURL(/\/en\/?$/, { timeout: 15_000 });
+    await page.waitForURL(new RegExp(`${BASE}/en/?$`), { timeout: 15_000 });
     await expect(page.getByRole('heading', { level: 1, name: 'PalForge' })).toBeVisible();
   });
 
   for (const locale of LOCALES) {
     test(`the ${locale} landing page renders`, async ({ page }) => {
-      await page.goto(`/${locale}/`);
+      await page.goto(siteUrl(`/${locale}/`));
       await expect(page.getByRole('heading', { level: 1, name: 'PalForge' })).toBeVisible();
       await expect(page.getByRole('link', { name: /GitHub/i }).first()).toBeVisible();
     });
 
     test(`the ${locale} landing page links into the docs`, async ({ page }) => {
-      await page.goto(`/${locale}/`);
-      await page.locator(`a[href^="/${locale}/docs"]`).first().click();
+      await page.goto(siteUrl(`/${locale}/`));
+      await page.locator(`a[href^="${siteUrl(`/${locale}/docs`)}"]`).first().click();
       await page.waitForURL(new RegExp(`/${locale}/docs`));
       await expect(page.locator('article h1').first()).toBeVisible();
     });
@@ -153,7 +153,7 @@ test.describe('mermaid', () => {
 
 test.describe('search', () => {
   test('the static index is published and covers both locales', async ({ request }) => {
-    const res = await request.get('/api/search');
+    const res = await request.get(siteUrl('/api/search'));
     expect(res.status()).toBe(200);
     const data = await res.json();
     expect(data.type).toBe('i18n');

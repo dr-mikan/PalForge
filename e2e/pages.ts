@@ -20,6 +20,14 @@ export const DOC_SLUGS = [
   'guides/first-content-pack',
 ] as const;
 
+// Empty against the local static server, `/PalForge` against GitHub Pages. Set
+// DOCS_BASE_PATH together with DOCS_BASE_URL to point the suite at the published site.
+export const BASE = process.env.DOCS_BASE_PATH ?? '';
+
+export function siteUrl(path: string): string {
+  return `${BASE}${path}`;
+}
+
 export function docUrl(locale: string, slug: string): string {
-  return slug ? `/${locale}/docs/${slug}/` : `/${locale}/docs/`;
+  return siteUrl(slug ? `/${locale}/docs/${slug}/` : `/${locale}/docs/`);
 }
