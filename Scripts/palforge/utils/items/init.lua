@@ -218,6 +218,33 @@ local function recheckLater(resolved, before, asked)
     end)
 end
 
+-- Print the DECLARATION of every route that could write to an inventory, once per session, on
+-- the path where the chosen one has just failed.
+--
+-- This is the last question left about give. Everything else is eliminated: the id is known (the
+-- inventory counts it), there is room (0.0 of 300.0), the cheat manager is the player's own
+-- (its path is nested under the controller that outers it), the call is declared and executes,
+-- and the count has not moved 2.8 s later so it is not the asynchrony that fooled us about
+-- spawning. A cheat that runs and reaches nothing is what a shipping-build stub looks like.
+--
+-- So stop asking the cheat manager and read the inventory's OWN write instead.
+-- AddItem_ServerInternal has been the known blocker since the first in-game run — it declares
+-- SIX parameters where PalForge knew four — and the reason it was never read is that the probe
+-- written to read it printed "function absent" for everything, a lookup bug fixed since.
+-- core.signature can walk a live UFunction now, and its detail line prints the whole shape:
+-- every parameter, in order, with its name and property class. One line ends a question that
+-- has outlasted every other item in this file.
+local describedRoutes = false
+local function describeWriteRoutes()
+    if describedRoutes then return end
+    describedRoutes = true
+    local inv
+    if not pcall(function() inv = playerInventory() end) then return end
+    for _, fn in ipairs({ "AddItem_ServerInternal", "RequestAddItem_ForDebug" }) do
+        sig.describe(inv, fn)
+    end
+end
+
 -- Which cheat manager we are holding, and what it is outered to. Logged once per session on the
 -- give path, because "the call ran and nothing happened" cannot distinguish a wrong object from
 -- a full inventory, and the two need opposite fixes.
@@ -323,6 +350,7 @@ function M.give(itemId, count)
         --     raises nothing and moves nothing.
         describeCheatManager(cm)
         recheckLater(resolved, before, count)
+        describeWriteRoutes()
         local now, max
         pcall(function()
             local inv = playerInventory()

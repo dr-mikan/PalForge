@@ -226,6 +226,18 @@ function M.check(owner, fnName, expected)
     return "declared", fn, string.format("%s matches (%s) — [%s]", fnName, how, table.concat(shape, ", "))
 end
 
+---Log a function's DECLARATION as this build states it, and call nothing.
+---
+---`M.check` already builds that string, but only ever prints it as part of a refusal — so a
+---function whose shape is the question rather than the obstacle had no way to be asked. This is
+---that way. It is how a six-parameter list gets read without guessing five of them first.
+---@return string level
+function M.describe(owner, fnName)
+    local level, _, detail = M.check(owner, fnName, {})
+    log.info(string.format("declaration of %s: %s", fnName, detail))
+    return level
+end
+
 ---Call `owner:fnName(...)` only if `M.check` allows it.
 ---
 ---Returns ok, result, level. `ok` false with level "absent" means the call was REFUSED and the
