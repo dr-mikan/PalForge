@@ -40,16 +40,24 @@
 -- direct call is what is wired — correct on a single-player or host session, and the read-back
 -- below is what will say if it is not enough elsewhere.
 --
--- TODO(pal-skills-equip): unknown whether these writes LAND. Everything else is settled — the
--- route from an actor, the four write calls and their matching read-backs, and the 309-value
--- EPalWazaID vocabulary that had no source anywhere before. What no run has done is call one.
--- Because every write here is verified by reading the character back, one press of F1 in a
--- loaded world answers it without ambiguity: a true means the skill was SEEN on the character,
--- not that a call did not raise. Two things to watch in the log — the evidence level (an
--- EnumProperty build spells EPalWazaID differently from a ByteProperty one, which shows up as a
--- refusal rather than a crash), and a "declared" call that still does not land, which would
--- point at server authority and make APalPlayerController's AddEquipWaza_ToServer the next
--- read (it takes an FPalInstanceID struct, so core.signature will not fire it unattended).
+-- READING IS CONFIRMED, 2026-07-26, on a live BP_SheepBall_C:
+--     skills: the nearest pal carries 3 active, 1 passive, 3 equipable, 0 mastered
+-- The whole route answers — actor -> PalUtility -> individual parameters -> four getters — and
+-- those numbers are a real pal's real loadout.
+--
+-- What made that take several runs is worth keeping. FindAllOf("PalCharacter") is too wide: the
+-- hierarchy is APalMonsterCharacter : APalNPC : APalCharacter, so it matches villagers and
+-- merchants too, and an NPC has no equipped move. Asking one of those reported zeros that looked
+-- exactly like a broken reader. Ask PalMonsterCharacter.
+--
+-- TODO(pal-skills-equip): unknown whether the WRITES land. AddEquipWaza fires with evidence
+-- "declared" and the read-back did not show the move — but that read-back came from an NPC, so
+-- it proved nothing either way and the question is open again on its own terms. Note the same
+-- correction applies to the crash: the one run that performed a write was followed by the game
+-- closing 1.4 s later, and that write also went to a probably-NPC target. Putting an equipped
+-- MOVE on a villager is a far more plausible way to destabilise the game than putting one on a
+-- pal. The write test is opt-in behind _G.PALFORGE_TEST_WRITE_WAZA until someone chooses to
+-- spend a throwaway save on it.
 local log       = require("palforge.utils.log").scope("character")
 local signature = require("palforge.core.signature")
 

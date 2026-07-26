@@ -135,17 +135,35 @@ raises. "ChickenPal" is a confirmed row of that table (674 rows on disk).
 works, the pal really does carry it — every write here is verified by reading the character back,
 so a true is never "the call ran".
 
-**⚠️ Writing a move to a live pal correlates with a crash**
+**Reading a pal's skills WORKS** — confirmed 2026-07-26 on a live `BP_SheepBall_C`:
+
+```text
+skills: the nearest pal carries 3 active, 1 passive, 3 equipable, 0 mastered
+```
+
+The whole route answers: actor → `PalUtility` → individual parameters → four getters, with a
+real pal's real loadout coming back. `Skill.Handle:skillsOn(actor)` is usable today.
+
+That took several runs for a reason worth keeping: `FindAllOf("PalCharacter")` is too wide.
+`APalMonsterCharacter : APalNPC : APalCharacter`, so it matches villagers and merchants too, and
+an NPC has no equipped move. Asking one of those reported zeros that looked exactly like a
+broken reader. **Ask `PalMonsterCharacter`.**
+
+**⚠️ Writing a move correlates with a crash — but the target may have been wrong**
 
 The first run that did it — `AddEquipWaza` firing with evidence `declared`, the read-back not
 showing the move, `RemoveEquipWaza` firing — was followed about 1.4 seconds later by Palworld
 closing, part way through the mesh suite. The run before it, with no pal nearby, completed.
 
-That is a correlation and not a proof: several other things happen in that window, and the log
-ends with no Lua error, which is what a native fault looks like from here. But the risk is
-one-sided — this writes into a character in a real save through a call whose effect has never
-been observed — so the write is now **opt-in** and F1 no longer performs it. To run it
-deliberately, on a throwaway save:
+It is now known that the write did not necessarily go to a pal: it used the old search, and the
+read-back it consulted afterwards was an NPC's empty list — which is also why it concluded the
+write had not landed. Putting an equipped MOVE on a villager is a far more plausible way to
+destabilise the game than putting one on a pal, so the crash may say nothing about this
+capability and everything about that target.
+
+The search is fixed and the experiment has not been re-run. It stays **opt-in** anyway: the
+correlation is unexplained rather than explained away, this writes into a character in a real
+save, and F1 is a key that gets pressed constantly. To run it deliberately, on a throwaway save:
 
 ```lua
 _G.PALFORGE_TEST_WRITE_WAZA = true   -- then press F1
@@ -177,19 +195,6 @@ active skills, which is what `Pal{ skills = { ... } }` can contain and what
 `core.character.wazaNames()` lists. Active skills are an enum and passives are FNames — a real
 distinction a caller cannot paper over, so `:teach` routes on which one the id is rather than on
 the skill's declared `kind`.
-
-**The lead worth chasing first: the READ says zero**
-
-`skills: the nearest pal carries 0 active and 0 passive`. A real Palworld pal has equipped
-moves, so a pal reporting none means the read is not reaching what it should — and if the read
-is landing on the wrong object, so is the write, which would explain the whole item without
-server authority coming into it at all. The route resolves and answers, so this is not "no
-parameter object"; it is the wrong one, or the right one before its moves are populated.
-
-Read next, in this order: whether `GetIndividualCharacterParameterByActor` returns the same
-object as the pal's own `GetCharacterParameterComponent():GetIndividualParameter()`, and what
-`GetEquipableWaza()` and `GetMasteredWaza()` say on the same object. If those are non-empty
-while `GetEquipWaza()` is empty, the read is fine and the pal genuinely has nothing equipped.
 
 **What the probe prints**
 

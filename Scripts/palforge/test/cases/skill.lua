@@ -434,17 +434,21 @@ s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)",
     end
 end)
 
--- OFF BY DEFAULT, AND THE REASON IS A CRASH. The first run of this test with a real pal out
--- wrote Human_Punch onto that pal — AddEquipWaza fired with evidence "declared", the read-back
--- did not show it, RemoveEquipWaza fired — and Palworld closed about 1.4 seconds later, part
--- way through the mesh suite. The run before it, with no pal nearby, completed.
+-- OFF BY DEFAULT, AND THE REASON IS A CRASH — with a detail that has since changed its meaning.
+-- The one run that performed this write was followed by Palworld closing about 1.4 seconds
+-- later; the run before it, which wrote nothing, completed.
 --
--- That is a CORRELATION, not a proof: the suite does several other things in that window, and
--- the log ends without a Lua error, which is what a native fault looks like from here. But the
--- direction of the risk is one-sided. This test writes to a character in the player's real save
--- through a call whose effect has never been observed, and F1 is a key the user presses
--- constantly. A test that MIGHT take the game down is not worth running unattended for a
--- question that can wait.
+-- What is now known: that write did NOT necessarily go to a pal. It used the old nearbyPal,
+-- which searched PalCharacter and so matched villagers and merchants as readily as pals — and
+-- the read-back it consulted afterwards was an NPC's empty list, which is why it concluded the
+-- write had not landed. Writing an equipped MOVE onto a villager is a far more plausible way to
+-- destabilise the game than writing one onto a pal, so the crash may say nothing about this
+-- capability and everything about that target. The search is fixed; the experiment has not been
+-- re-run.
+--
+-- It stays opt-in anyway. The correlation is unexplained rather than explained away, this writes
+-- into a character in the player's real save, and F1 is a key they press constantly. A test that
+-- MIGHT take the game down is not worth running unattended for a question that can wait.
 --
 -- To run it deliberately, set the flag from the UE4SS console and press F1:
 --     _G.PALFORGE_TEST_WRITE_WAZA = true
