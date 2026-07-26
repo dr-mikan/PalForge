@@ -23,7 +23,7 @@
 --     here in Lua. That is enough to drive a skill from your own code — e.g. from a Pal's
 --     onTick, a building's onRightClick, or a keybind.
 --   * Nothing here reaches the engine EXCEPT :iconOf, and that one lookup has never been
---     observed to return a value (see TODO(skill-icon-key) below).
+--     keyed by PAL id rather than by skill id (see the note above Class:iconOf).
 -- Wiring a native source later means adding the channel AND the dispatch that resolves it
 -- to a definition, in core/event.lua — the handlers below are then reached unchanged, but
 -- that dispatch does not exist yet either. The three unknowns are marked in place, one per
@@ -147,9 +147,11 @@ function Class:onUnequip(owner, ctx) end
 --     the curated "FlameThrower". No icon table in that catalog is keyed by skill id.
 --   * READ. No artifact in either tree has ever read a DataTable row VALUE from Lua on this
 --     build (the catalog dumper read row NAMES only), so even a matching key is unproven.
--- TODO(skill-icon-key): unknown whether ANY loaded UDataTable exposes a row read to UE4SS
--- Lua here, and if so which column of DT_partnerSkillIconDataTable holds the texture — until
--- that is answered this call cannot be told from "no such row".
+-- The icon table read WORKS as of 2026-07-26: core/icons read DT_partnerSkillIconDataTable in a
+-- live save and 311 of 311 rows carry an icon. What remains is not a read at all but a KEYING
+-- fact this file already records: that table is keyed by PAL id, not by skill id, so only a
+-- pal-derived partner skill can ever hit it. A passive skill has no row there and falls back to
+-- the declared icon by design, which is the correct answer rather than a missing one.
 function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.skill, self.id) end)
     if ok and tex ~= nil then return tex end

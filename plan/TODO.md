@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (19)
+## Closed (21)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -92,38 +92,12 @@ without the game running.
 - **`pal-spawn-placement`** — core.spawn.palAt. **Observed end to end, twice, in the same press**: `placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0`. Every half that had never been seen is now seen — the pal appears, the nearest-to-player anchor picks the right one, `K2_TeleportTo` accepts it, and the read-back is exact rather than approximate.
 - **`icons-row-read`** — core.icons.resolve, and every domain's `:iconOf()`. **Observed working**, 2026-07-26, on every icon table at once: 674/674 pal, 1183/1207 item, 567/571 building, 311/311 partner skill. (The item table's 24 blanks are rows that genuinely carry no icon; six of the seven tables are at or near 100%.) Three wrong turns, each worth remembering: the row accessors are not UFunctions and not on `UDataTable` — UE4SS binds them itself; the value in an icon column is a `TSoftObjectPtr` userdata that answers none of the nineteen member names a soft pointer could plausibly expose, so the struct cannot be opened from Lua; and the string column that replaces it delivers its elements wrapped in **RemoteUnrealParam**, with the real value behind `:get()` — which is what made the array read the right LENGTH with nothing in it. `utils/items` had been unwrapping correctly all along.
 - **`item-additem-signature`** — Item.Handle:give. **Observed working**, 2026-07-26: `give Wood x3: 140 -> 143`, with the game's own pickup event firing beside it (`Wood onObtain: count=3`) — two independent witnesses in a real save. The whole project was blocked on ONE argument. The live declaration is `(FName StaticItemId, int32 Count, bool IsAssignPassive, float LogDelay, bool bNotifyLog) -> EPalItemOperationResult` — five arguments and a return, where `dumps/cxx/Pal.hpp` has four and no `bNotifyLog` at all, because the dump predates the installed binary by one game patch. UE4SS counts the return as a slot, which is where "expected 6 parameters, received 4" came from. It also ANSWERS, with a named `EPalItemOperationResult`, so a refusal now explains itself instead of being inferred from a count that did not move — the thing the cheat-manager route could never do, and the reason establishing that `GetItem` reaches nothing took five in-game runs.
+- **`pal-icon-row`** — Pal.Handle:iconOf. Closed with `icons-row-read`: DT_PalCharacterIconDataTable read 674 of 674 rows in a live save, so a vanilla pal id resolves to the game's own artwork and the declared `icon` is the fallback it was always described as.
+- **`skill-icon-key`** — Skill.Handle:iconOf. Same read, 311 of 311 rows on DT_partnerSkillIconDataTable. What is left is not a read but a KEYING fact already recorded in core/icons: that table is keyed by PAL id, not skill id, so only a pal-derived partner skill can hit it. A passive skill has no row there and falls back to its declared icon — the correct answer rather than a missing one.
 
-## Open (19)
+## Open (17)
 
 ### Pal
-
-#### `pal-icon-row` — Pal.Handle:iconOf
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/pal.lua:247
-
-**What a pack author sees**
-
-Always returns the icon the author declared, and nil when none was declared — for a vanilla id
-like "ChickenPal" the live lookup contributes nothing, even though the row exists.
-
-**What is still unknown**
-
-```text
-The paldeck / capture-UI icon: look the id up in the pal character icon DataTable,
-falling back to the declared self.icon on any miss.
-TODO(pal-icon-row): the DataTable ROW READ core/icons performs has never been observed to
-return anything on this build, so in practice this is the fallback and nothing else.
-```
-
-**What the probe prints**
-
-FindAllOf("DataTable"); pick the one whose o:GetFName():ToString() ==
-"DT_PalCharacterIconDataTable". (a) Print its columns exactly as the dumper does:
-dt.RowStruct:ForEachProperty(function(p) print(p:GetFName():ToString()) end). (b) Then call
-dt:GetDataTableRowFromName(FName("ChickenPal")) and dt:FindRow(FName("ChickenPal"), "probe",
-false), printing type() and tostring() of each result and the pcall error message when one
-raises. "ChickenPal" is a confirmed row of that table (674 rows on disk).
 
 #### `pal-skills-equip` — Skill.Handle:teach / :forget, Pal.Handle:teachAll
 
@@ -540,80 +514,6 @@ with a NAMED move (e.g. a fire attack) and, separately, with a plain melee hit, 
 be diffed. PASTE BACK: the full field list of every param struct plus their values for both
 cases — we need to see whether any field holds a skill/waza row FName and, if so, its exact
 name.
-
-#### `skill-icon-key` — Skill.Handle:iconOf
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/api/skill.lua:150
-
-**What a pack author sees**
-
-Returns the declared `icon` (usually nil) for essentially every skill. It reaches the engine —
-core/icons finds the live UDataTable for real via FindAllOf("DataTable") — but no icon has ever
-been observed coming back, and a nil is indistinguishable from "no such row".
-
-**What is still unknown**
-
-```text
-palforge/api/skill.lua — PUBLIC skill API + implementation (SELF-CONTAINED).
-
-A skill is what a Pal can do: an active attack or a passive trait. Same shape as every
-other api module (call it to define, plus get / get_all + a Handle object with actions
-and grouped `events`).
-
-HOW IT INTEGRATES: Skill{ ... } registers the definition class in object_manager under
-("skill", id), so it is discoverable (Skill.get / Skill.get_all / core.registry) and a
-Pal declares which skills it owns by id (Pal{ skills = { ... } }).
-
-HONEST STATE OF THE 導線: there is NO native skill source WIRED. The two hooks that were
-actually armed in game (PalPlayerController:PlaySkill and :SkillDamageReactionComponent_
-ProcessDamage_ToServer) fired 0 times, and Lua cannot inject a row into the skill
-DataTables (that is PalSchema's job). The reflection dump has since named several
-unarmed candidates on classes that are proven loaded — see the per-hook markers below —
-so "no candidate exists" is no longer the blocker; "none has been observed firing" is.
-So:
-* NOTHING fires these handlers automatically — core/event.lua declares no skill
-channel (M.CHANNELS is world / building / pal / item / tick) and nothing in the tree
-emits one, so a declared `events` table is inert until you call into it yourself.
-* What DOES work is MANUAL invocation: :activate(owner) / :hit(target) /
-:equip(owner) / :unequip(owner) run the handler now, with the cooldown enforced
-here in Lua. That is enough to drive a skill from your own code — e.g. from a Pal's
-onTick, a building's onRightClick, or a keybind.
-* Nothing here reaches the engine EXCEPT :iconOf, and that one lookup has never been
-observed to return a value (see TODO(skill-icon-key) below).
-Wiring a native source later means adding the channel AND the dispatch that resolves it
-to a definition, in core/event.lua — the handlers below are then reached unchanged, but
-that dispatch does not exist yet either. The three unknowns are marked in place, one per
-hook, with the probe that would settle each.
-
-local Fireball = Skill{
-id = "example:Fireball", kind = "active", element = "fire",
-cooldown = 3.0, power = 50,
-events = { onActivate = function(skill, owner, ctx) --[[ ... ]] end },
-}
-Fireball:activate(myPalActor)      -- runs onActivate unless still cooling down
-```
-
-**What the probe prints**
-
-In a fully loaded world, UE4SS Lua console. STEP 1 (get the table): `local dt; for _, o in
-ipairs(FindAllOf("DataTable") or {}) do if o:IsValid() and o:GetFName():ToString() ==
-"DT_partnerSkillIconDataTable" then dt = o end end; print("found", dt ~= nil, dt and
-dt:GetFullName())`. STEP 2 (columns — this is the whole of fact (b)): `local rs = dt.RowStruct;
-print("rowstruct", rs and rs:GetFName():ToString()); rs:ForEachProperty(function(p) print("COL",
-p:GetFName():ToString(), p:GetClass():GetFName():ToString()) end)` (the idiom already written at
-dump/dump.lua:59). STEP 3 (what the table can do): `dt:GetClass():ForEachFunction(function(f)
-print("FN", f:GetFName():ToString()) end)` walking GetSuperStruct to nil. STEP 4 (fact (a) — try
-to read row "Alpaca", which the dump proves is a real row): print the ok flag and the result of
-each of `pcall(function() return dt:GetDataTableRowFromName(FName("Alpaca")) end)`,
-`pcall(function() return dt:GetDataTableRowFromName("Alpaca") end)`, `pcall(function() return
-dt:FindRow(FName("Alpaca"), "probe", false) end)`, and also via the CDO
-`StaticFindObject("/Script/Engine.Default__DataTableFunctionLibrary")` for any GetDataTableRow*
-function STEP 3 revealed. STEP 5 (for any non-nil row): print `type(row)`, and when userdata
-print `row:GetClass():GetFName():ToString()` plus, for every column name from STEP 2,
-`tostring(row[col])` and `row[col].ToString and row[col]:ToString()`. PASTE BACK: the full
-column list with class names, which of the four read calls returned non-nil, and the value of
-every column for row "Alpaca".
 
 #### `skill-passive-source` — Skill.Spec.Events.onEquip / Skill.Spec.Events.onUnequip
 

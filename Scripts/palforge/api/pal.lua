@@ -244,8 +244,9 @@ end
 
 -- The paldeck / capture-UI icon: look the id up in the pal character icon DataTable,
 -- falling back to the declared self.icon on any miss.
--- TODO(pal-icon-row): the DataTable ROW READ core/icons performs has never been observed to
--- return anything on this build, so in practice this is the fallback and nothing else.
+-- The icon table read WORKS as of 2026-07-26: core/icons read DT_PalCharacterIconDataTable in a
+-- live save and 674 of 674 rows carry an icon. So a vanilla pal id resolves to the game's own
+-- artwork here, and the declared `icon` really is the fallback it was always described as.
 function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.pal, self.id) end)
     if ok and tex ~= nil then return tex end
