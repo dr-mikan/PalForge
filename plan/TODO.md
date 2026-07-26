@@ -110,7 +110,7 @@ bound there can never be pressed — which is where `watch` sat, unreachable and
 it. The bindings are printed at startup now, so a key the game has taken is visible in the
 log rather than looking like a probe that found nothing.
 
-## Closed (31)
+## Closed (32)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -149,8 +149,9 @@ without the game running.
 - **`skill-activate-source`** — Skill.Spec.Events.onActivate. **Observed live**, 2026-07-26, in real combat: `skill.activate carried its first event from source "PalActionBase:OnBeginAction"`. The source that works is the ACTION OBJECT, not a utility that builds one — a pal's move IS a `UPalActionWazaBase` and carries its own `EPalWazaID`, so hooking it puts the identity a handler needs on `self` rather than in someone else's argument list. `PlayActionByWazaID` stays armed as the control that proved it: it registered successfully and carried nothing while a pal fought and killed another pal, which is what sent the search to the action side.
 - **`pal-spawned-hook`** — Pal.Spec.Events.onSpawned. **Observed live**, 2026-07-26, from BOTH new sources: `PalNPC:OnCompletedInitParam` and `PalPlayerCharacter:OnCompleteInitializeParameter`. They are the bound TARGETS of the initialise broadcast, not the broadcaster — which was hooked first, registered fine, and never carried anything. That is the general lesson and it is worth keeping: RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
 - **`skill-passive-source`** — Skill.Spec.Events.onEquip. **Observed live**, 2026-07-26: `skill.equip carried its first event from source "AddPassiveSkill"`. The write that triggered it came from PalForge itself — `core/character.addSkill` put a passive on a live `BP_ChickenPal_C` and read it back — which is a useful property in its own right: the source catches a pack's own writes as well as the game's. It also confirms the passive half of `pal-skills-equip` on the way past. `SetupSkillFromSelf` stays armed beside it and has carried nothing yet, so which call the GAME uses when a player changes a passive at a bench is still open — the log names the source, so one bench visit settles it.
+- **`ui-menubutton-inner-slot`** — native.ui.widget.menuButton label alignment. **Answered negatively**, 2026-07-27, by reading the button class's own template tree: `HorizontalBox_0` IS in a `WBP_Title_MenuButton` and its slot is a `CanvasPanelSlot`. The name was never stale — the slot is simply the one kind that cannot do this. A CanvasPanelSlot declares no `SetHorizontalAlignment` (`UMG.hpp:350-374`) where the other five slot classes do, so `core/signature` refused the call every time, correctly, and the label has always stayed centred. The alignment it DOES declare takes an `FVector2D`, and a struct argument is the shape that faults inside UE4SS marshalling. The struct-free alternative is `SetAutoSize` plus an offset write — a lot of machinery and a new failure mode for a cosmetic nobody asked for. The function is deleted rather than left to be refused forever: a refusal logged on every button build reads like a defect and is not one.
 
-## Open (7)
+## Open (6)
 
 ### Pal
 
@@ -351,47 +352,6 @@ know whether UE4SS Lua in this build can construct a USoundWave at all. (5)
 print(#(FindAllOf('SoundWave') or {})) and #(FindAllOf('AkMediaAsset') or {}) — whether the
 shipping game has any instance of either class loaded is itself the answer about whether that
 pipeline is alive.
-
-#### `ui-menubutton-inner-slot` — native.ui.widget.menuButton (label alignment) — and therefore every TitleMenu entry
-
-- **Probe:** F8
-- **Marked at:** Scripts/palforge/native/ui/_widget.lua:426
-
-**What a pack author sees**
-
-A title-menu entry's label may sit centred where the game's own entries sit left.
-leftAlignButtonContent calls SetAnchors/SetAlignment on HorizontalBox_0's Slot inside a pcall;
-if that slot is not a CanvasPanelSlot both calls raise and are swallowed, and nobody has ever
-observed which happens. Cosmetic only — the label is legible either way, and clickableRow does
-not depend on it.
-
-**What is still unknown**
-
-```text
-Force a freshly created WBP_Title_MenuButton's inner content to the left so labels align
-regardless of the button's outer width. Cosmetic and best-effort: SetAnchors/SetAlignment
-exist on a CanvasPanelSlot, and nobody has recorded what HorizontalBox_0's Slot actually
-is inside that button — on any other slot class both calls raise inside the pcall and the
-label simply stays centred. Left as-is rather than guessed at: the label is still legible
-either way, and clickableRow does not depend on it (it overlays its own left-aligned text).
-TODO(ui-menubutton-inner-slot): unknown — the CLASS of `HorizontalBox_0`.Slot inside a
-created WBP_Title_MenuButton, which decides whether these two calls do anything at all.
-```
-
-**What the probe prints**
-
-At the title screen: `local lib =
-StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary"); local pc =
-FindFirstOf("PalPlayerController"); local btn = lib:Create(pc, StaticFindObject("/Game/Pal/Bluep
-rint/UI/UserInterface/Title/WBP_Title_MenuButton.WBP_Title_MenuButton_C"), pc)`. Depth-first
-find the child named "HorizontalBox_0" (GetChildrenCount/GetChildAt + nested WidgetTree descent)
-and print `'created inner slot = ' .. tostring(inner.Slot:GetClass():GetFullName())`. Do the
-same for a NATIVE entry's HorizontalBox_0 reached through
-FindFirstOf("PalUITitleBase").WidgetTree.RootWidget and print `'native inner slot = ' .. ...` —
-if they differ, that is the answer. While that tree is walked, also print every node as `depth,
-GetFName():ToString(), GetClass():GetFullName()` so the three literals TitleMenu matches by name
-("VerticalBox_0", "SizeBox_4", "WBP_Title_MenuButton_ExitGame") are re-confirmed on the current
-game version at the same time.
 
 #### `ui-update-event` — UI.Handle:autoRefresh(ms) — polling is the only refresh driver PalForge has
 

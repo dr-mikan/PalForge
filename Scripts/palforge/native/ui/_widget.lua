@@ -75,6 +75,9 @@ M.PATHS = {
     invisibleButton = "/Game/Pal/Blueprint/UI/System/Style/WBP_PalInvisibleButton.WBP_PalInvisibleButton_C",
     menuButtonLabel = "Test_Content",      -- label widget inside WBP_Title_MenuButton
     menuButtonClick = "WBP_PalInvisibleButton",
+    -- Kept as a NAME even though nothing calls it any more: the probe proved this really is
+    -- the button's inner box, and the next reader deserves that fact rather than an absence.
+    -- Its slot is a CanvasPanelSlot, which cannot be aligned without a struct call.
     menuButtonInner = "HorizontalBox_0",
     gameUILayout    = "PalPrimaryGameLayoutBase",  -- the live in-game UI root, by native class
     gameUIRoot      = "CanvasPanel_Root",          -- its root UCanvasPanel: the injection host
@@ -172,13 +175,23 @@ end
 -- initializes the widget's own WidgetTree, unlike StaticConstructObject). Use for
 -- any WBP_/BP_ widget from the game.
 function M.create(pc, classPath)
-    local lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
     local cls = StaticFindObject(classPath)
+    if not (cls and cls:IsValid()) then
+        return nil, "class not loaded: " .. tostring(classPath)
+    end
+    return M.createFromClass(pc, cls, classPath)
+end
+
+---Build a widget from a class OBJECT rather than a path. Split out because the useful button
+---class has no path worth citing — it is whichever one this world has loaded — and a live
+---instance hands over its class directly. `label` is only for the error message.
+function M.createFromClass(pc, cls, label)
+    local lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
     if not (lib and lib:IsValid() and cls and cls:IsValid() and pc and pc:IsValid()) then
-        return nil, "create prerequisites missing for " .. tostring(classPath)
+        return nil, "create prerequisites missing for " .. tostring(label or "<class>")
     end
     local w = lib:Create(pc, cls, pc)
-    if not (w and w:IsValid()) then return nil, "Create failed for " .. tostring(classPath) end
+    if not (w and w:IsValid()) then return nil, "Create failed for " .. tostring(label or "<class>") end
     return w
 end
 
@@ -428,72 +441,67 @@ function M.screen(pc, opts)
     end
     return screen
 end
-
--- ---- Palworld game widgets ----
-
--- Force a freshly created WBP_Title_MenuButton's inner content to the left so labels align
--- regardless of the button's outer width. Cosmetic and best-effort: the label is legible either
--- way, and clickableRow does not depend on it (it overlays its own left-aligned text).
+-- ANSWERED, 2026-07-27, and negatively — which is still an answer. The probe read the button's
+-- own template tree and reported:
 --
--- THIS USED TO CALL SetAnchors + SetAlignment, AND THAT WAS THE WRONG CALL TO MAKE. dumps/cxx
--- says so twice over:
---   * Those two exist on UCanvasPanelSlot and on NO other slot class in the whole of UMG
---     (UMG.hpp:364-365). UHorizontalBoxSlot (:734), UVerticalBoxSlot (:1800), UOverlaySlot
---     (:1056) and USizeBoxSlot (:1328) declare SetHorizontalAlignment / SetVerticalAlignment /
---     SetPadding instead, and UPanelSlot itself (:1067) declares no setter at all. So on five of
---     the six slot classes the old pair could never have done anything.
---   * Both take STRUCTS — SetAnchors(FAnchors), SetAlignment(FVector2D). A struct argument on an
---     unread declaration is the category that faults inside UE4SS marshalling, where pcall does
---     NOT catch it and the process dies. The pcall around them was never protection.
+--   HorizontalBox_0 IS in a WBP_Title_MenuButton and its slot is a CanvasPanelSlot.
 --
--- What replaces them is one ENUM call: SetHorizontalAlignment(TEnumAsByte<EHorizontalAlignment>),
--- declared by every box/overlay/size slot, with HAlign_Left = 1 confirmed at
--- SlateCore_enums.hpp:91-97 (which is where M.HALIGN's numbers come from). It goes through
--- core/signature, so if this slot IS a CanvasPanelSlot the live parameter walk finds no such
--- function and the call is REFUSED and logged rather than made — and that log line is itself the
--- answer to the question below, from an ordinary session instead of a probe.
+-- So the name was never stale; the slot is simply the one kind that cannot do this. A
+-- CanvasPanelSlot declares no SetHorizontalAlignment (UMG.hpp:350-374) — the other five slot
+-- classes do — so core/signature refused the call every time and logged it, correctly, and the
+-- label has always stayed centred.
 --
--- TODO(ui-menubutton-inner-slot): still unknown — whether a widget named `HorizontalBox_0` is
--- in a WBP_Title_MenuButton's tree AT ALL, and if so which slot class it occupies.
--- dumps/cxx/WBP_Title_MenuButton.hpp:11-15 lists the button's five declared widget members —
--- Image_161, Image_Icon_Appeal, SizeBox_Icon, Test_Content, WBP_PalInvisibleButton — and
--- HorizontalBox_0 is not among them, while the two names this file DOES match by string are.
--- That is not proof of absence (a widget with "Is Variable" unchecked gets no member and still
--- exists in the WidgetTree), so what is owed is one line off a real button: no HorizontalBox_0
--- means the name is stale and the whole function should go; a slot whose class gets logged means
--- it is real and the alignment is settled.
+-- The alignment it DOES declare, SetAlignment, takes an FVector2D, and a struct argument is the
+-- shape that faults inside UE4SS marshalling where pcall cannot see it. The struct-free
+-- alternative is SetAutoSize plus an offset write, which is a lot of machinery and a new failure
+-- mode for a cosmetic nobody asked for.
 --
--- NARROWED, 2026-07-26: this no longer needs the title screen. A UWidgetBlueprintGeneratedClass
--- carries the designer hierarchy on the class itself (dumps/cxx/UMG.hpp:1977 `UWidgetTree*
--- WidgetTree`), with every widget's Slot already assigned — so the answer is a PROPERTY READ on
--- the class, with nothing created. test/probes/uislot.lua does exactly that from a loaded save
--- (autorun: `pf_uislot`). The ONE thing that can still leave this open is LoadAsset: in-world the
--- title class is not resident (dumps/reflection/03_widgets.txt lists WBP_Title_MenuBG_C and
--- WBP_Title_WorldSelectButton_C but no WBP_Title_MenuButton_C), so if neither LoadAsset form
--- pulls it in, the fallback is still probes/title.lua at the main menu.
-local function leftAlignButtonContent(btn)
-    local inner = M.findByName(btn, M.PATHS.menuButtonInner)
-    if not alive(inner) then return false end
-    local slot
-    pcall(function() slot = inner.Slot end)
-    if not alive(slot) then return false end
-    -- ByteProperty: UE spells an enum parameter either ByteProperty or EnumProperty and
-    -- signature treats the two as equivalent, so naming one covers both.
-    local ok = sig.call(slot, "SetHorizontalAlignment", { "ByteProperty" }, M.HALIGN.LEFT)
-    return ok == true
-end
+-- So the function is gone rather than left to be refused forever. A refusal logged on every
+-- button build reads like a defect and is not one.
 
 -- Clone the game's title menu button as a clickable row. Returns (button, invBtn,
 -- clickName). `onClick` is routed through the shared click router; clickName is that
 -- registration's key — keep it and pass it to releaseClicks when you drop the button.
 -- `tree` is UNUSED: WidgetBlueprintLibrary:Create outers the widget itself, so a BP widget
+-- A button class that exists HERE. Not a path, because the useful one has no path anyone can
+-- cite: the title-menu button is only resident at the title screen, and a declared UI mounting
+-- into the game's own HUD asked for it and got "create prerequisites missing" — the class is
+-- simply not loaded in a world.
+--
+-- What IS in a world: 240 live CommonButtonBase instances, and the probe named their classes —
+-- WBP_PalCommonButton_C and WBP_PalInvisibleButton_C. A live instance carries its own class, so
+-- asking the world for one is both cheaper than a path and correct by construction: if the
+-- lookup answers, the class is loaded, because something is standing there made of it.
+--
+-- This is one route, not a fallback chain. The title screen has live buttons too, so the same
+-- question — "what button class is loaded right now" — is the right question everywhere.
+M.BUTTON_CLASSES = { "WBP_PalCommonButton_C", "WBP_PalInvisibleButton_C" }
+
+function M.buttonClass()
+    for _, name in ipairs(M.BUTTON_CLASSES) do
+        local inst = M.findFirst(name)
+        if alive(inst) then
+            local cls; pcall(function() cls = inst:GetClass() end)
+            if alive(cls) then return cls, name end
+        end
+    end
+    -- The title-menu class by path, for the title screen, where the in-world ones may not be up
+    -- yet. Same question, different moment; it is the only path form kept.
+    local cls; pcall(function() cls = StaticFindObject(M.PATHS.menuButton) end)
+    if alive(cls) then return cls, "WBP_Title_MenuButton_C" end
+    return nil, nil
+end
+
 -- needs no WidgetTree. The parameter is kept only so every builder here reads the same way.
 function M.menuButton(tree, pc, label, onClick)
-    local btn, e = M.create(pc, M.PATHS.menuButton)
-    if not btn then return nil, e end
+    local cls, clsName = M.buttonClass()
+    if not cls then
+        return nil, "no button class is loaded — no live CommonButtonBase and no title-menu class"
+    end
+    local btn, e = M.createFromClass(pc, cls)
+    if not btn then return nil, (tostring(e) .. " [" .. tostring(clsName) .. "]") end
     local lbl = M.findByName(btn, M.PATHS.menuButtonLabel)
     if alive(lbl) then pcall(function() lbl:SetText(FText(label)) end) end
-    leftAlignButtonContent(btn)
     local inv = M.findByName(btn, M.PATHS.menuButtonClick)
     local clickName
     if inv and onClick then

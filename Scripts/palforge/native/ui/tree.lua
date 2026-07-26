@@ -116,7 +116,8 @@ end
 -- slots — the parent's half of a child's layout
 --=============================================================================
 
--- Alignment goes through core/signature, exactly as _widget.leftAlignButtonContent does:
+-- Alignment goes through core/signature, so a slot class that does not declare it logs a
+-- named refusal instead of raising:
 -- SetHorizontalAlignment / SetVerticalAlignment are declared by every box, overlay, border
 -- and size slot (UMG.hpp:734, :1056, :287, :1328, :1800) and by NO canvas slot — a
 -- UCanvasPanelSlot has SetAnchors/SetAlignment instead (:364-365), both struct calls. So a
