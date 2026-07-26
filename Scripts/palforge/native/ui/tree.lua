@@ -1,3 +1,18 @@
+-- OBSERVED WORKING, 2026-07-27. A declared tree really does draw inside the game's own UI:
+--
+--   pf_uidecl: MOUNTED into PalPrimaryGameLayoutBase.CanvasPanel_Root | slot=CanvasPanelSlot
+--     | root=Border ...WBP_PalOverallUILayout_C...CanvasPanel_Root.Border_2147458111
+--
+-- and the panel was visible on screen. That was the load-bearing gap: everything about hosting
+-- inside the game's canvas was paper until this line — the class declares the panel, a
+-- UCanvasPanel is a UPanelWidget, an instance was live in the widget dump — and none of that is
+-- the same as watching a widget appear. It appears.
+--
+-- Two things that had to be right at once are therefore both right: a fresh CanvasPanelSlot
+-- gives the tree a drawable size, and the button node builds from a class the world actually
+-- has (see _widget.buttonClass — the title-menu class is not loaded in a world, which is what
+-- the first attempt died on).
+--
 -- PalForge native.ui.tree: turn a DECLARED node tree into real widgets, and keep it in
 -- step. api/ui declares the vocabulary (UI.VBox / UI.Label / UI.Button — pure data, no
 -- engine anywhere in it); this file is the only place that data meets UMG.
