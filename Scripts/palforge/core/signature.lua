@@ -131,6 +131,25 @@ end
 -- reading the declaration
 --=============================================================================
 
+-- Property class names that mean the same thing at the argument boundary. UE spells an enum
+-- two ways — ByteProperty for a legacy `enum`, EnumProperty for an `enum class` — and which one
+-- a given UFunction declares is not something a caller can know or should have to. The first
+-- live run refused three correct calls over exactly this (AddEquipWaza, RemoveEquipWaza,
+-- GetExecutionStatus all declare EnumProperty where the dump's `enum class` reads as a byte),
+-- and refusing a call whose argument marshals identically is a false alarm, not safety.
+local EQUIVALENT = {
+    ByteProperty = { EnumProperty = true },
+    EnumProperty = { ByteProperty = true },
+    -- An FString and an FName are NOT equivalent and never will be: that confusion is the one
+    -- that faults natively and closed the game.
+}
+
+local function sameKind(want, got)
+    if want == got then return true end
+    local also = EQUIVALENT[want]
+    return also ~= nil and also[got] == true
+end
+
 -- The property's class name ("NameProperty", "IntProperty", ...). UE4SS spells this different
 -- ways on different builds, so try each and take the first that yields a string rather than
 -- assuming one shape.
@@ -199,7 +218,7 @@ function M.check(owner, fnName, expected)
             return "absent", fn, string.format("%s declares %d properties, fewer than the %d "
                 .. "arguments expected — [%s]", fnName, #params, #expected, table.concat(shape, ", "))
         end
-        if got.kind ~= kind then
+        if not sameKind(kind, got.kind) then
             return "absent", fn, string.format("%s parameter %d is %s, not the expected %s — [%s]",
                 fnName, i, got.kind, kind, table.concat(shape, ", "))
         end
@@ -219,6 +238,22 @@ function M.call(owner, fnName, expected, ...)
     if level == "absent" then
         log.err(string.format("refused %s: %s", fnName, detail))
         return false, nil, level
+    end
+
+    -- An ObjectProperty parameter takes a live engine object and nothing else. A plain Lua
+    -- table cannot be pushed into one, and UE4SS reports that as a bare "[push_objectproperty]
+    -- Error" from inside the call — which the first live run produced three times, from tests
+    -- that pass {} on purpose to prove the no-world path is fail-soft. It is caught, but the
+    -- message names neither the argument nor the reason. Checking here turns it into a sentence.
+    for i, kind in ipairs(expected) do
+        if kind == "ObjectProperty" then
+            local arg = select(i, ...)
+            if arg ~= nil and type(arg) ~= "userdata" then
+                log.warn(string.format("refused %s: argument %d must be a live engine object, got %s",
+                    fnName, i, type(arg)))
+                return false, nil, "absent"
+            end
+        end
     end
 
     -- Call through `owner:fnName(...)`, NOT through the UFunction object the check just found.

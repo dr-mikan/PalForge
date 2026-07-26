@@ -22,15 +22,12 @@
 --     a last-resort fallback (discovery is cheaper), written in the "Package.Object" form
 --     LoadAsset wants — the convention that works in core/sound/native.lua.
 --   * The ICON COLUMN of each table is now MEASURED, not inferred — see ICON_COLUMNS_BY_TABLE.
---   * READING THE VALUE no longer goes through a row at all. UDataTable has zero functions on
---     this build, so every row accessor this module used to try was called on an object that
---     does not have it; the real accessors are statics on UDataTableFunctionLibrary, which take
---     the table as their first argument. The column read that replaces them is described in
---     full above iconMap. Its sibling on the same library is proven in production here, but
---     the column call itself has NOT been observed yet, so a nil still means "the read did not
---     fire", never "there is no such row".
---   So: this module finds the table for real, knows which column holds the texture, and now
---   calls an accessor that exists. What is left to confirm is one live run.
+--   * READING THE VALUE goes through UE4SS's OWN binding on UDataTable, not through a
+--     reflected UFunction. UDataTable declares zero functions on this build, so every accessor
+--     this module used to try was called on an object that genuinely does not have it; UE4SS
+--     binds FindRow / GetRowNames / GetRowMap / GetAllRows / ForEachRow itself, and FindRow
+--     takes a plain Lua string. See the block above findRow. It has NOT been observed
+--     answering yet, so a nil still means "the read did not fire", never "there is no row".
 --
 -- Strictly fail-soft. Every engine call is inside a pcall, any miss at any step returns nil,
 -- and each domain's iconOf() then falls back to the declared `icon`. Nothing throws when the
@@ -281,161 +278,77 @@ local function findTable(name)
 end
 
 -- ---------------------------------------------------------------------------
--- reading the icon column
+-- reading the icon
 --
--- READING A ROW VALUE IS THE WRONG QUESTION, and asking it is why this module returned nil
--- for every vanilla id. The row accessors this code used to try — dt:GetDataTableRowFromName,
--- dt:FindRow — are not members of UDataTable at all. dumps/cxx/Engine.hpp dumps the whole
--- class and it declares FIVE PROPERTIES AND ZERO FUNCTIONS:
+-- UE4SS BINDS A ROW READER ONTO UDataTable ITSELF, and that is the answer this module spent a
+-- long time not finding. It is not a UFunction, which is why every reflection sweep missed it —
+-- dumps/cxx/Engine.hpp shows UDataTable declaring five properties and ZERO functions, so the
+-- accessors this code used to try were called on an object that genuinely does not have them.
+-- UE4SS provides its own (ue4ss/Docs/lua-api/classes/udatatable.md):
 --
---     class UDataTable : public UObject
---     { UScriptStruct* RowStruct; uint8 bStripFromClientBuilds; ... };   // no functions
+--     dt:FindRow(string RowName)  -> UScriptStruct | nil   -- by REFERENCE into the table
+--     dt:GetRowNames()            -> { "Wood", ... }
+--     dt:GetRowMap()              -> { [name] = row }
+--     dt:GetAllRows()             -> { { Name =, Data = }, ... }
+--     dt:ForEachRow(function(name, row) end)
 --
--- Every one of those calls was made on an object that has no such method, which is exactly
--- what "nil, and we cannot tell why" looks like from Lua. The real accessors are statics on a
--- different class, and they take the table as their FIRST ARGUMENT (dumps/cxx/Engine.hpp,
--- class UDataTableFunctionLibrary):
+-- Note what FindRow takes: a plain Lua STRING, because it is UE4SS's own binding rather than a
+-- marshalled UFunction call. Passing FName("Wood") here is the wrong type for this route, and
+-- the old code's three-argument dt:FindRow(key, "palforge.icons", false) was the C++ template's
+-- signature, which is not what is bound. One string argument is the whole call.
 --
---     void GetDataTableRowNames(UDataTable* Table, TArray<FName>& OutRowNames);
---     bool GetDataTableRowFromName(UDataTable* Table, FName RowName, FTableRowBase& OutRow);
---     TArray<FString> GetDataTableColumnAsString(const UDataTable* DataTable, FName PropertyName);
---     bool DoesDataTableRowExist(UDataTable* Table, FName RowName);
---
--- The row-VALUE one is still not usable, for the reason the old comment here worked out
--- correctly: GetDataTableRowFromName is CustomThunk with a wildcard out-struct whose real type
--- comes from Blueprint bytecode, so a reflected call can only offer the declared FTableRowBase
--- and the thunk rejects it. That analysis was right; it was aimed at the wrong receiver.
---
--- SO THIS READS A COLUMN INSTEAD OF A ROW. GetDataTableColumnAsString has no wildcard and no
--- out-param: it takes an object and an FName and returns an array of plain strings, one per
--- row, in RowMap order — and GetDataTableRowNames walks the same RowMap in the same order, so
--- the two arrays line up index for index. Zipping them gives id -> icon path for the whole
--- table in two calls, and never needs a row struct in Lua at all.
---
--- WHY THE SIBLING IS THE EVIDENCE: GetDataTableRowNames on this same library is PROVEN on this
--- build — utils/items/init.lua drives the live technology tables through it in production, and
--- the catalog dumper read 390 tables with it. The column accessor is the same library, the same
--- CDO, the same reflection surface, and its two arguments are an object pointer and an FName,
--- both of which this tree marshals successfully every day.
---
--- NOT YET OBSERVED. No run has called GetDataTableColumnAsString yet, so a nil from here still
--- means "the read did not fire", not "there is no such row". The call is made through
--- core.signature, which refuses it outright unless the function really is declared on the live
--- class, and logs which evidence level it fired on.
-local signature = require("palforge.core.signature")
+-- The row that comes back is the struct dumps/cxx/Pal.hpp declares, with one field:
+--     FPalEditorItemIconTableRow  { TSoftObjectPtr<UTexture2D> Icon; }
+--     FPalCharacterIconDataRow    { TSoftObjectPtr<UTexture2D> Icon; }
+--     FPalBuildObjectIconData     { TSoftObjectPtr<UTexture2D> SoftIcon; }
+-- so indexing it by the measured column name (ICON_COLUMNS_BY_TABLE) yields a soft object
+-- pointer — an asset PATH, which is exactly what a caller hands to LoadAsset.
 
--- The id as an FName. Reflected Palworld calls take FName, never a raw string: passing a bare
--- Lua string where an FName is declared faults inside UE4SS's argument marshalling, and that
--- fault is native — pcall does not catch it and the game closes. Returns nil when there is no
--- engine, and every caller treats that as "cannot read", not as a reason to try a string.
-local function nameArg(id)
-    local ok, n = pcall(function()
-        if type(FName) == "function" then return FName(id) end
-        return nil
-    end)
-    if ok and n ~= nil then return n end
-    return nil
+-- The id as a plain string for FindRow. Kept as a named function because the temptation to
+-- "also try FName" is exactly what this route does not want: FindRow is a UE4SS binding taking
+-- a Lua string, and a marshalled Palworld UFunction taking an FName is a different thing that
+-- lives elsewhere. Do not merge them.
+local function rowKey(id)
+    return (type(id) == "string" and #id > 0) and id or nil
 end
 
--- The DataTableFunctionLibrary CDO, resolved once. false records a resolve that already failed
--- so the lookup is not repeated on every icon.
-local dtLib = nil
-local function library()
-    if dtLib == nil then
-        local ok, lib = pcall(StaticFindObject, "/Script/Engine.Default__DataTableFunctionLibrary")
-        dtLib = (ok and lib) or false
-    end
-    return dtLib or nil
-end
-
--- Flatten a UE4SS TArray into a plain Lua list of strings. UE4SS hands arrays back in three
--- shapes depending on build and element type, so all three are tried — the same coping this
--- tree already does for row names in utils/items. FName elements are ToString'd; anything that
--- is neither string nor FName-like is skipped rather than guessed at.
-local function toList(arr)
-    if arr == nil then return {} end
-    local out = {}
-    local function push(v)
-        if type(v) == "string" then
-            out[#out + 1] = v
-        elseif type(v) == "userdata" then
-            local ok, s = pcall(function() return v.ToString and v:ToString() end)
-            if ok and type(s) == "string" then out[#out + 1] = s end
-        end
-    end
-    if pcall(function() arr:ForEach(function(_, v) push(v) end) end) and #out > 0 then return out end
-    local n; pcall(function() n = #arr end)
-    if type(n) == "number" and n > 0 then
-        for i = 1, n do local v; pcall(function() v = arr[i] end); push(v) end
-        if #out > 0 then return out end
-        for i = 1, n do local v; pcall(function() v = arr:Get(i - 1) end); push(v) end
-    end
-    return out
-end
-
--- Every row name of `tbl`, in RowMap order. Uses the accessor this tree has already proven in
--- production; the out-array is passed AND the return read, because UE4SS fills one or the other
--- depending on build.
-local function rowNames(tbl)
-    local lib = library()
-    if not lib then return {} end
-    local out = {}
-    local ok, ret = pcall(function() return lib:GetDataTableRowNames(tbl, out) end)
-    if not ok then return {} end
-    local names = toList(ret)
-    if #names == 0 then names = toList(out) end
-    return names
-end
-
--- id -> icon string for one table, built once per table object and kept for the session. The
--- icon tables are fixed assets once loaded (PalSchema injects its rows before play), so a
--- successful build is reusable; a FAILED build is not cached, so a call made before the table
--- finished loading is simply retried on the next one.
-local iconMaps = setmetatable({}, { __mode = "k" })
-
--- TODO(icons-row-read): unknown whether GetDataTableColumnAsString is REFLECTED on this build.
--- The question has changed shape completely and is now one yes/no away from closing: the
--- accessor and its owner are settled (dumps/cxx/Engine.hpp, UDataTableFunctionLibrary), its two
--- arguments are an object pointer and an FName — both marshalled successfully by this tree
--- every day — and its sibling GetDataTableRowNames is already driven in production from
--- utils/items. What no run has done is call it. core.signature refuses it unless the live class
--- declares it, so the F5 log answers this in one line: "declared"/"present" plus a row count is
--- the close, and "refused ... is not declared on this build" means the whole library is
--- unreflected here and icon resolution has no route at all.
-local function iconMap(tbl, tableName)
-    local cached = iconMaps[tbl]
-    if cached then return cached end
-
-    local names = rowNames(tbl)
-    if #names == 0 then return nil end
-
+-- Read the texture ref off a row, using that table's measured column (ICON_COLUMNS_BY_TABLE).
+-- A soft object pointer that exposes ToString is normalised to its path string; an empty string
+-- or "None" means the column is present but unset, so we move on rather than hand back a lie.
+-- An object handle with no ToString comes back as-is (callers only need a truthy handle).
+-- Anything that is neither string nor userdata — a stray number or bool — is not an icon.
+local function readIcon(row, tableName)
     for _, col in ipairs(columnsFor(tableName)) do
-        local key = nameArg(col)
-        if key then
-            local ok, values, level = signature.call(library(), "GetDataTableColumnAsString",
-                { "ObjectProperty", "NameProperty" }, tbl, key)
-            if ok then
-                local vals = toList(values)
-                -- The two arrays are only zippable if they really are the same walk of the same
-                -- RowMap. A length mismatch means they are not, and pairing them anyway would
-                -- hand out confidently wrong icons — the one failure mode worse than nil.
-                if #vals == #names then
-                    local map = {}
-                    for i, id in ipairs(names) do
-                        local v = vals[i]
-                        if type(v) == "string" and #v > 0 and v ~= "None" then map[id] = v end
-                    end
-                    log.info(string.format("icons: %s column %s read (%d/%d rows carry an icon) [%s]",
-                        tableName, col, (function() local n = 0; for _ in pairs(map) do n = n + 1 end; return n end)(),
-                        #names, level))
-                    iconMaps[tbl] = map
-                    return map
+        local ok, v = pcall(function() return row[col] end)
+        if ok and v ~= nil then
+            if type(v) == "userdata" then
+                local oks, str = pcall(function() return v.ToString and v:ToString() end)
+                if oks and type(str) == "string" then
+                    if #str > 0 and str ~= "None" then return str end
+                else
+                    return v
                 end
-                log.warn(string.format("icons: %s column %s returned %d values for %d rows — "
-                    .. "not the same row walk, so it is not paired", tableName, col, #vals, #names))
+            elseif type(v) == "string" and #v > 0 and v ~= "None" then
+                return v
             end
         end
     end
+    return nil
+end
+
+-- TODO(icons-row-read): unknown whether UE4SS's UDataTable:FindRow binding answers on this
+-- build. The route is no longer in doubt — it is documented in the UE4SS install shipped with
+-- the game (Docs/lua-api/classes/udatatable.md), it takes a plain string, and the row struct it
+-- returns is declared in dumps/cxx/Pal.hpp with the exact column this module already measured.
+-- What no run has done is call it: the first live run never reached a row read at all, because
+-- the code was then going through UDataTableFunctionLibrary and its row-name accessor answered
+-- nothing. One F1 in a loaded world settles it — a resolved icon path for Wood closes the item,
+-- and "FindRow is not bound on this build" is equally an answer.
+local function findRow(tbl, id)
+    local key = rowKey(id)
+    if not key then return nil end
+    local ok, row = pcall(function() return tbl:FindRow(key) end)
+    if ok and row ~= nil then return row end
     return nil
 end
 
@@ -463,9 +376,9 @@ function M.resolve(spec, id)
     for _, name in ipairs(namesOf(spec)) do
         local tbl = findTable(name)
         if tbl then
-            local map = iconMap(tbl, name)
-            if map then
-                local tex = map[id]
+            local row = findRow(tbl, id)
+            if row ~= nil then
+                local tex = readIcon(row, name)
                 if tex ~= nil then return tex end
             end
         end

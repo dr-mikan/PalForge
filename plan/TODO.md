@@ -17,13 +17,32 @@ what was called. One keypress in a loaded save answers all four.
 
 | Item | The line to look for |
 | --- | --- |
-| `item-additem-signature` | `give Wood x3 ... [declared]` and a count that moved |
+| `item-additem-signature` | `give Wood x3 ... [declared]` and a count that MOVED |
 | `effect-native-status` | `status.add AttackUp (EPalStatusID 26) [declared]` |
 | `pal-skills-equip` | `addSkill Human_Punch (EPalWazaID 1) [declared] -> equipped` |
-| `icons-row-read` | `icons: DT_ItemIconDataTable column Icon read (N/M rows carry an icon)` |
+| `icons-row-read` | a resolved icon path for `Wood` |
 
-A `refused ... is not declared on this build` line is just as good an answer: it names the lookup
-that failed, which is the fact the item is waiting on.
+A `refused ...` line is just as good an answer: it names what the live build declared, which is
+the fact the item is waiting on.
+
+### What the first F1 run already settled
+
+**Enum arguments are `EnumProperty` here, not `ByteProperty`.** Three correct calls were refused
+over the spelling alone — `AddEquipWaza`, `RemoveEquipWaza`, `GetExecutionStatus` all declare
+`WazaID:EnumProperty` / `statusID:EnumProperty`. `core/signature.lua` now treats the two as
+equivalent, since a legacy `enum` and an `enum class` marshal identically. FString and FName are
+NOT equivalent and never will be — that confusion is the one that faults natively.
+
+**Reading a character's skills works.** `skills: the pawn carries 0 active and 0 passive` — the
+whole route (actor -> PalUtility -> individual parameters -> two getters) answered on a real
+pawn. If a WRITE still fails now that the enum spelling is fixed, the problem is authority, not
+reach.
+
+**Two cheat-manager calls ran and did nothing.** `SpawnMonster(ChickenPal, lv 1) ran [evidence
+declared] and NOTHING spawned`, and `GetItem executed [evidence declared] and the count did not
+rise (135 -> 135)`. Same shape, two different functions: the declaration matched, the call
+raised nothing, the world did not change. That is now a measured pattern rather than a
+suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 ## How to close one
 
