@@ -43,3 +43,6 @@ dumps/*
 !dumps/reflection/
 !dumps/catalog/
 !dumps/cxx/
+# Written into the DEPLOYED copy by tools/deploy.sh so a stale in-game run is visible in
+# the log. Never part of the source tree.
+Scripts/palforge/build.lua

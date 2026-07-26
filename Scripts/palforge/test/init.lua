@@ -60,6 +60,16 @@ local reg     = require("palforge.core.keyboard.base.registory")
 local support = require("palforge.test.support")
 local log     = require("palforge.utils.log").scope("test")
 
+-- The build stamp tools/deploy.sh writes next to the modules it copies. Printed at the top of
+-- every run, because Lua that is already loaded STAYS loaded: deploying new files changes
+-- nothing in a running game until F9. A log whose stamp predates the deploy you just did is not
+-- evidence about the code you just wrote — it has cost a full round of debugging more than once.
+-- Absent (a source tree run, or a hand copy) is reported as such rather than faked.
+local function buildStamp()
+    local ok, stamp = pcall(require, "palforge.build")
+    return (ok and type(stamp) == "string") and stamp or "unstamped (not deployed by tools/deploy.sh)"
+end
+
 local M = {}
 
 M.support = support
@@ -144,7 +154,8 @@ function M.run(which)
     if names == nil then names = M.suites() end
     if type(names) == "string" then names = { names } end
 
-    log.info(string.format("running %d suite(s): %s", #names, table.concat(names, ", ")))
+    log.info(string.format("build %s | running %d suite(s): %s",
+        buildStamp(), #names, table.concat(names, ", ")))
     support.announce("tests: running " .. #names .. " suite(s)")
 
     local results = T.run(names)
