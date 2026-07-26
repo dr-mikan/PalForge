@@ -362,4 +362,25 @@ s:test("give adds to the live inventory and take drops it back out, both measure
         tostring(afterGive), tostring(afterTake), tostring(gave), tostring(removed)))
 end)
 
+s:test("a vanilla item's icon comes back from the game's own table -- TODO(icons-row-read)", function(t)
+    support.needWorld(t)
+
+    -- This is the whole of icons-row-read, asked as a question a pack author would ask: can
+    -- PalForge reuse the game's own artwork? Wood is a vanilla id that is certainly in the item
+    -- icon table, and the handle declares no icon of its own, so anything that comes back came
+    -- from the game.
+    local wood = Item.get(support.GAME.item)
+    t:eq(wood.icon, nil, "the lookup handle declares no icon, so a result can only be the game's")
+
+    local tex = wood:iconOf()
+    if tex == nil then
+        t:skip("the icon column could not be read — the [signature] log line for "
+            .. "GetDataTableColumnAsString says whether the accessor is declared on this build, "
+            .. "and that line IS the finding")
+    end
+    t:type(tex, "string", "an icon resolves to an asset path")
+    t:truthy(#tex > 0, "and the path is not empty")
+    support.log(string.format("icons: %s -> %s", support.GAME.item, tostring(tex)))
+end)
+
 return s

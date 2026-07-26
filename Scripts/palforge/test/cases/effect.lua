@@ -569,9 +569,9 @@ s:test("applies to the live player pawn and takes it off again", function(t)
         onExpire = function(_, _, ctx) reason = ctx.reason end,
     } }
 
-    -- Assertions run under pcall so the pawn never keeps an application when one fails;
-    -- a PalForge effect is pure bookkeeping (no native ailment is toggled), so the pawn
-    -- is left exactly as it was found.
+    -- Assertions run under pcall so the pawn never keeps an application when one fails.
+    -- This effect declares no nativeStatus, so nothing native is toggled and the pawn is
+    -- left exactly as it was found; the ailment path is exercised by the test below.
     local ok, err = pcall(function()
         t:eq(h:apply(pawn), true, "a userdata target applies like any other")
         t:eq(applied, 1)
@@ -591,6 +591,40 @@ s:test("applies to the live player pawn and takes it off again", function(t)
     if not ok then error(err, 0) end
     t:eq(reason, "removed")
     t:falsy(h:isActive(pawn))
+end)
+
+s:test("a nativeStatus effect toggles the game's own ailment on the live pawn -- TODO(effect-native-status)", function(t)
+    local pawn = support.needWorld(t)
+
+    -- AttackUp is chosen deliberately: it is a BUFF, so a run that somehow leaves it behind
+    -- has done the tester a small favour rather than poisoning them. Nothing in this suite
+    -- may set Poison, Burn or Coma on a real save.
+    local STATUS = "AttackUp"
+    t:truthy(status.known(STATUS), STATUS .. " must be an ailment this build declares")
+
+    -- Ask the question directly first, before any effect is involved: can this pawn's status
+    -- component be reached and read at all? nil is UNKNOWN, so it is a skip and not a failure —
+    -- a build that will not answer is not a defect in the effect layer.
+    local before = status.isActive(pawn, STATUS)
+    if before == nil then
+        t:skip("the status component could not be read on this pawn — see the [signature] log line "
+            .. "for which lookup failed; that line IS the finding")
+    end
+    if before then t:skip("the pawn already has " .. STATUS .. "; a clean before/after is not possible") end
+
+    local h = Effect{ id = support.id("effect"), duration = 60.0, nativeStatus = STATUS }
+
+    -- Under pcall so the ailment is always taken back off, including when an assertion raises.
+    local ok, err = pcall(function()
+        t:eq(h:apply(pawn), true, "the effect applies")
+        t:eq(status.isActive(pawn, STATUS), true,
+            "and the game itself now reports " .. STATUS .. " on the pawn. A false here means the "
+            .. "call fired but the ailment did not stick — check the [signature] evidence level")
+    end)
+
+    t:eq(h:remove(pawn), true, "the effect comes off")
+    if not ok then error(err, 0) end
+    t:eq(status.isActive(pawn, STATUS), false, "and the ailment goes with it")
 end)
 
 return s

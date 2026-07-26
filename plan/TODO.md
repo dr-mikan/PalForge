@@ -9,19 +9,35 @@ Each item names that fact and the key that measures it. The probes are code, in
 `Scripts/palforge/test/probes/`, and the same id appears as a `-- TODO(<id>)` marker at the line
 a future implementer will open.
 
+## Press F1 first
+
+Four of the items below no longer need a probe at all: the API suite exercises them against a
+real world and `core/signature.lua` logs, for every engine call, whether the live build declared
+what was called. One keypress in a loaded save answers all four.
+
+| Item | The line to look for |
+| --- | --- |
+| `item-additem-signature` | `give Wood x3 ... [declared]` and a count that moved |
+| `effect-native-status` | `status.add AttackUp (EPalStatusID 26) [declared]` |
+| `pal-skills-equip` | `addSkill Human_Punch (EPalWazaID 1) [declared] -> equipped` |
+| `icons-row-read` | `icons: DT_ItemIconDataTable column Icon read (N/M rows carry an icon)` |
+
+A `refused ... is not declared on this build` line is just as good an answer: it names the lookup
+that failed, which is the fact the item is waiting on.
+
 ## How to close one
 
 1. Load a save and press the key in the item's **Probe** line.
 2. Copy what the probe wrote to `UE4SS.log` — it brackets its output with `#### BEGIN <id>`
    and `#### END <id>`.
 3. The missing fact is then known and the implementation follows from it. Delete the marker.
-4. Press **F1** to re-run the 300-check API suite, and **F9** to reload without restarting.
+4. Press **F1** to re-run the 304-check API suite, and **F9** to reload without restarting.
 
 ## Keys
 
 | Key | What it does | What you need on screen |
 | --- | --- | --- |
-| F1 | The API test suite, the regression net | Anything. World-gated checks skip |
+| F1 | The API test suite — and, in a loaded world, the measurement that closes four items below | Anything. World-gated checks skip |
 | F5 | Reflection dump: classes, functions, parameters, DataTable rows | A loaded save |
 | F6 | Everything that needs a live pal: mesh, animation, materials | A pal near you |
 | F7 | Arms hooks and watches for 60 s while you act | A save, then craft / drop / spawn |
@@ -1085,7 +1101,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 
 #### `icons-row-read` — core.icons.resolve -> Item/Pal/Building/Skill Handle:iconOf()
 
-- **Probe:** F5
+- **Probe:** F1
 - **Marked at:** Scripts/palforge/core/icons.lua:396
 
 **What a pack author sees**
@@ -1129,8 +1145,9 @@ NAMES (`Icon`, `Icon`, `SoftIcon`) from the shipping binary.
 
 **What the probe prints**
 
-The F5 run answers this without a dedicated block: `core.signature` refuses the call unless the
-live class declares it, so one line settles it. `declared`/`present` plus a row count closes the
+F1 in a loaded world. The suite asks the question a pack author would — can PalForge reuse the
+game's own artwork for `Wood`? — and `core.signature` logs whether
+`GetDataTableColumnAsString` is declared here. `declared`/`present` plus a row count closes the
 item; `refused ... is not declared on this build` means the library is unreflected here and icon
 resolution has no route at all, which is equally an answer.
 

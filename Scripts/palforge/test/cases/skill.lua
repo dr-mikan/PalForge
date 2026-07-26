@@ -394,4 +394,51 @@ s:test("equip is still your own bookkeeping and never touches the game", functio
     t:eq(sk.teach ~= nil, true, "the game-facing pair exists alongside it")
 end)
 
+--=============================================================================
+-- LIVE — needs a world. These are what turn pal-skills-equip from a hypothesis
+-- into an answer, so they are written to be informative even when they fail.
+--=============================================================================
+
+s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)", function(t)
+    local pawn = support.needWorld(t)
+
+    -- The read half on its own is worth a test: it walks the whole route — an actor, through
+    -- PalUtility, to the character's individual parameters, and back out through two different
+    -- getters. If this works and a write below does not, the problem is authority, not reach.
+    local skills = character.skillsOn(pawn)
+    if skills == nil then
+        t:skip("the character parameters could not be read on this pawn — the [signature] log line "
+            .. "names which lookup failed, and that line IS the finding")
+    end
+    t:type(skills.active, "table", "the active-skill list comes back as a list")
+    t:type(skills.passive, "table", "and so does the passive one")
+    support.log(string.format("skills: the pawn carries %d active and %d passive",
+        #skills.active, #skills.passive))
+end)
+
+s:test("an active skill can be taught and taken back off -- TODO(pal-skills-equip)", function(t)
+    local pawn = support.needWorld(t)
+    if character.skillsOn(pawn) == nil then t:skip("character parameters unreadable on this pawn") end
+
+    -- Human_Punch is chosen deliberately: it is the plainest move in the game and the pawn
+    -- conceptually has it already, so a run that somehow leaves it behind changes nothing a
+    -- player would notice. Nothing in this suite may teach a real save a legendary move.
+    local SKILL = "Human_Punch"
+    local sk = Skill.get(SKILL)
+    local had = false
+    for _, n in ipairs(character.skillsOn(pawn).active) do if n == SKILL then had = true end end
+    if had then t:skip("the pawn already has " .. SKILL .. "; a clean before/after is not possible") end
+
+    -- Under pcall so the skill is always taken back off, including when an assertion raises.
+    local ok, err = pcall(function()
+        t:eq(sk:teach(pawn), true, "teach reports true only when the read-back SAW the skill on "
+            .. "the character. A false means the write did not land — check the [signature] "
+            .. "evidence level: 'declared' plus a false points at server authority")
+    end)
+
+    local gone = sk:forget(pawn)
+    if not ok then error(err, 0) end
+    t:eq(gone, true, "and forget takes it off again, verified the same way")
+end)
+
 return s
