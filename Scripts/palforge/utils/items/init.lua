@@ -163,13 +163,40 @@ local ITEM_CHEAT_PARAMS = { "NameProperty", "IntProperty" }
 -- only ever USES a cheat manager that already exists (including the one core/spawn
 -- attached to the controller) — it builds no engine objects of its own. Raises when there
 -- is none, so the caller's pcall reports which step failed.
+-- The cheat manager, PREFERRING THE PLAYER'S OWN. The order matters and the old one was
+-- backwards: it took FindFirstOf("PalCheatManager") first, which is whichever instance the
+-- engine happens to list, and only fell back to the controller's. A UCheatManager reaches the
+-- player through its OUTER — UE's own cheats are written against GetOuterAPlayerController() —
+-- so an instance that is not this controller's can execute a world cheat perfectly (SpawnMonster
+-- puts a pal in the world and demonstrably works) while an inventory cheat quietly reaches
+-- nobody. That is the exact shape of the open give() failure, so ask the controller first.
 local function cheatManager()
-    local cm; pcall(function() cm = FindFirstOf("PalCheatManager") end)
+    local cm
+    pcall(function() cm = FindFirstOf("PalPlayerController").CheatManager end)
     if cm and cm:IsValid() then return cm end
     cm = nil
-    pcall(function() cm = FindFirstOf("PalPlayerController").CheatManager end)
+    pcall(function() cm = FindFirstOf("PalCheatManager") end)
     assert(cm and cm:IsValid(), "PalCheatManager not available (needs CheatManagerEnabler)")
     return cm
+end
+
+-- Which cheat manager we are holding, and what it is outered to. Logged once per session on the
+-- give path, because "the call ran and nothing happened" cannot distinguish a wrong object from
+-- a full inventory, and the two need opposite fixes.
+local describedCM = false
+local function describeCheatManager(cm)
+    if describedCM then return end
+    describedCM = true
+    local function nameOf(o)
+        local ok, n = pcall(function() return o:GetFullName() end)
+        return ok and tostring(n) or "?"
+    end
+    local outer, ctrlCM
+    pcall(function() outer = cm:GetOuter() end)
+    pcall(function() ctrlCM = FindFirstOf("PalPlayerController").CheatManager end)
+    log.info(string.format("items: cheat manager %s | outer %s | is the controller's own: %s",
+        nameOf(cm), outer and nameOf(outer) or "?",
+        tostring(ctrlCM ~= nil and rawequal(ctrlCM, cm))))
 end
 
 -- The live count of `itemId` in the local player's inventory, or nil when it cannot be read
@@ -245,9 +272,25 @@ function M.give(itemId, count)
         return false
     end
     if after <= before then
+        -- "Unknown item id, or no room" is two very different answers and the log was giving
+        -- neither. Both are cheap to distinguish and neither guess is worth another run:
+        --   * the id is fine if the inventory can COUNT it — `before` is a real number here, so
+        --     "Wood" is a StaticItemId this build knows;
+        --   * room is readable directly. PalPlayerInventoryData declares GetNowItemWeight and
+        --     GetMaxItemWeight, and a player at the cap is exactly the case where a cheat runs,
+        --     raises nothing and moves nothing.
+        describeCheatManager(cm)
+        local now, max
+        pcall(function()
+            local inv = playerInventory()
+            now = tonumber(inv:GetNowItemWeight())
+            max = tonumber(inv:GetMaxItemWeight())
+        end)
         log.warn(string.format("give %s x%d: GetItem executed [evidence %s] and the count did "
-            .. "not rise (%d -> %d) — unknown item id, or the inventory had no room",
-            resolved, count, level, before, after))
+            .. "not rise (%d -> %d). The id is known — the inventory counted %d of them — so the "
+            .. "remaining candidates are weight (now %s of %s) and a cheat that is not reaching "
+            .. "this player's inventory",
+            resolved, count, level, before, after, before, tostring(now), tostring(max)))
         return false
     end
     log.info(string.format("give %s x%d: %d -> %d [evidence %s]",
