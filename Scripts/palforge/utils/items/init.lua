@@ -47,7 +47,6 @@
 -- without raising.
 local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
-local poll           = require("palforge.core.poll")
 local sig            = require("palforge.core.signature")
 
 local M = {}
@@ -194,27 +193,15 @@ local function resultOk(v)
     return n == 0 or n == 1
 end
 
--- TODO(item-additem-signature): THE INVENTORY-DATA ROUTE IS STILL UNREAD. Unknown what the SIX
--- parameters of /Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal ARE on this build —
--- their order, their types, and which of them carries the item id and which the count.
--- This is no longer what blocks giving an item: give and take go through the cheat manager
--- above and do not touch this call. What it still blocks is writing an inventory DIRECTLY —
--- without a cheat manager, and so without the CheatManagerEnabler mod that arms one — plus
--- reading back an EPalItemOperationResult, which is the only "did the add succeed" the game
--- ever states rather than leaving to a before/after count.
--- What is known: dumps/cxx/Pal.hpp:27053 declares FOUR parameters (const FName StaticItemId,
--- const int32 Count, bool IsAssignPassive, const float LogDelay) returning
--- EPalItemOperationResult — and the live build answered "UFunction expected 6 parameters,
--- received 4". So the dump is BEHIND the installed binary on this class, and the arity error
--- proves nothing about the four it does list either: UE4SS rejected the call before binding any
--- argument, so it says the DECLARATION has six slots, not that the first four were right.
--- Nothing already dumped can answer it: dumps/reflection/02_reflection.txt lists function NAMES
--- only, and the F5 probe written to print this exact parameter list printed "PARAM
--- AddItem_ServerInternal -> function absent" instead (dumps/f5-partial-run.txt, block
--- item-remove-call — a bug in the probe helper, being fixed separately). Only a real read of the
--- live UFunction's parameter list closes it — every property in declared order, with its name,
--- class name and whether it is a return/out param. core.signature.paramsOf IS that read: on a
--- build that walks a UFunction's properties it answers in one call.
+-- CLOSED (was item-additem-signature). The declaration was read off the LIVE build and give
+-- works: "give Wood x3: 140 -> 143", with the game's own pickup event firing beside it
+-- ("Wood onObtain: count=3"). Two independent witnesses, in a real save.
+--
+-- The fact that blocked it for the whole project was one argument. The live declaration is
+--   [StaticItemId:NameProperty, Count:IntProperty, IsAssignPassive:BoolProperty,
+--    LogDelay:FloatProperty, bNotifyLog:BoolProperty, ReturnValue:EnumProperty]
+-- five arguments and a return, where dumps/cxx/Pal.hpp has four and no bNotifyLog at all. UE4SS
+-- counts the return as a slot, which is where "expected 6 parameters, received 4" came from.
 
 -- The cheat manager (admin API). Two-step resolve ported from core/spawn: the singleton
 -- first, then the local PlayerController's own CheatManager — which is where it lives in
@@ -251,60 +238,6 @@ end
 -- declares a LogDelay, so the inventory-data path has a delay concept in it — and it has never
 -- been tested. An add that lands after the second reading looks exactly like an add that never
 -- happened.
---
--- It rides the shared heartbeat (core/poll.lua) and creates no timer of its own. Asking UE4SS
--- for a timer per watch — and then tearing it down while its queued bodies were still in
--- flight — is what removed the engine tick hook three times in one afternoon, each time
--- silently killing every keybind in the mod.
-local function recheckLater(resolved, before, asked)
-    poll.every("items.give delayed re-read", function(elapsed, ticks)
-        if ticks < 3 then return false end   -- ~1.5 s on the 500 ms heartbeat
-        do
-            do
-                local later = liveCount(resolved)
-                if later and before and later > before then
-                    log.info(string.format("items: %s DID land, late — %d -> %d, %.1f s after "
-                        .. "the call. The add is asynchronous and give()'s immediate check is too "
-                        .. "early; that is a fixable verdict, not a broken cheat",
-                        resolved, before, later, elapsed))
-                else
-                    log.info(string.format("items: %s still %s after %.1f s (asked for %d) — not "
-                        .. "a timing problem, so GetItem is reaching nothing on this build",
-                        resolved, tostring(later), elapsed, asked))
-                end
-            end
-        end
-        return true   -- one look is the whole question
-    end)
-end
-
--- Print the DECLARATION of every route that could write to an inventory, once per session, on
--- the path where the chosen one has just failed.
---
--- This is the last question left about give. Everything else is eliminated: the id is known (the
--- inventory counts it), there is room (0.0 of 300.0), the cheat manager is the player's own
--- (its path is nested under the controller that outers it), the call is declared and executes,
--- and the count has not moved 2.8 s later so it is not the asynchrony that fooled us about
--- spawning. A cheat that runs and reaches nothing is what a shipping-build stub looks like.
---
--- So stop asking the cheat manager and read the inventory's OWN write instead.
--- AddItem_ServerInternal has been the known blocker since the first in-game run — it declares
--- SIX parameters where PalForge knew four — and the reason it was never read is that the probe
--- written to read it printed "function absent" for everything, a lookup bug fixed since.
--- core.signature can walk a live UFunction now, and its detail line prints the whole shape:
--- every parameter, in order, with its name and property class. One line ends a question that
--- has outlasted every other item in this file.
-local describedRoutes = false
-local function describeWriteRoutes()
-    if describedRoutes then return end
-    describedRoutes = true
-    local inv
-    if not pcall(function() inv = playerInventory() end) then return end
-    for _, fn in ipairs({ "AddItem_ServerInternal", "RequestAddItem_ForDebug" }) do
-        sig.describe(inv, fn)
-    end
-end
-
 -- Which cheat manager we are holding, and what it is outered to. Logged once per session on the
 -- give path, because "the call ran and nothing happened" cannot distinguish a wrong object from
 -- a full inventory, and the two need opposite fixes.
@@ -418,7 +351,6 @@ function M.give(itemId, count)
         --   * room is readable directly. PalPlayerInventoryData declares GetNowItemWeight and
         --     GetMaxItemWeight, and a player at the cap is exactly the case where a cheat runs,
         --     raises nothing and moves nothing.
-        recheckLater(resolved, before, count)
         local now, max
         pcall(function()
             local inv = playerInventory()
@@ -565,13 +497,18 @@ function M.take(itemId, count)
         return false
     end
     if after >= before then
-        log.warn(string.format("take %s x%d: AddItem_ServerInternal answered %s and the count did "
-            .. "not fall (%d -> %d) — unknown item id, or the drop was refused",
-            resolved, num, level, before, after))
+        -- Reaching here means the inventory answered Success or SuccessNoOperation and the count
+        -- did not move: a call that is legal and inert. The result code is what says which, and
+        -- it is the fact this line exists to carry — it printed `level` until now, which is the
+        -- same word on every path and told nobody anything.
+        log.warn(string.format("take %s x%d: AddItem_ServerInternal(Count=-%d) answered %s and "
+            .. "the count did not fall (%d -> %d). A negative Count is accepted and does nothing, "
+            .. "so it is not how this build subtracts — see TODO(item-remove-call)",
+            resolved, num, num, resultName(result), before, after))
         return false
     end
-    log.info(string.format("take %s x%d: %d -> %d, dropped on the ground at the player's feet "
-        .. "[evidence %s]", resolved, num, before, after, level))
+    log.info(string.format("take %s x%d: %d -> %d [evidence %s, result %s]",
+        resolved, num, before, after, level, resultName(result)))
     return true
 end
 

@@ -966,7 +966,7 @@ end
 --                params ONLY, and read them positionally: the live build rejected a call to
 --                this function with "expected 6 parameters, received 4", so it declares two
 --                more than that library and dumps/cxx/Pal.hpp:27053 list, and nothing here
---                knows what they are (TODO(item-additem-signature) in utils/items — which is
+--                knows what they are (that is settled now: the add takes five arguments and is
 --                also why utils.items.give no longer CALLS this; it goes through the cheat
 --                manager). A hook only reads what is handed to it, so the extra parameters cost
 --                this source nothing. Its weakness is the mirror of the get-log's strength: the

@@ -65,7 +65,7 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F7 changes anything, and it says so before it arms a hook.
 
-## Closed (18)
+## Closed (19)
 
 Six were settled from the reflection dumps in `dumps/`, without touching the game. Two more were
 settled inside a loaded save by the first F5 run (`dumps/f5-partial-run.txt`). The last six were settled by
@@ -91,8 +91,9 @@ without the game running.
 - **`pal-spawnmonster-signature`** — Pal.Handle:spawn. **Observed working**, 2026-07-26. The call was never broken: `cm:SpawnMonster(FName("ChickenPal"), lv)` was issued with `[evidence declared]`, meaning `core/signature.lua` walked the real UFunction on the installed binary and matched it. What was broken was the VERDICT around it — a spawn that arrives after ~4-6 seconds was measured synchronously, and the miss was reported as a property of the build. Three hypotheses died with it, including the server-authority one, which had been invented to explain an observation that never happened. `:spawn` now returns whether the call was ISSUED, because arrival is seconds away and no caller can block; the arrival line follows in the log, with elapsed seconds.
 - **`pal-spawn-placement`** — core.spawn.palAt. **Observed end to end, twice, in the same press**: `placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0`. Every half that had never been seen is now seen — the pal appears, the nearest-to-player anchor picks the right one, `K2_TeleportTo` accepts it, and the read-back is exact rather than approximate.
 - **`icons-row-read`** — core.icons.resolve, and every domain's `:iconOf()`. **Observed working**, 2026-07-26, on every icon table at once: 674/674 pal, 1183/1207 item, 567/571 building, 311/311 partner skill. (The item table's 24 blanks are rows that genuinely carry no icon; six of the seven tables are at or near 100%.) Three wrong turns, each worth remembering: the row accessors are not UFunctions and not on `UDataTable` — UE4SS binds them itself; the value in an icon column is a `TSoftObjectPtr` userdata that answers none of the nineteen member names a soft pointer could plausibly expose, so the struct cannot be opened from Lua; and the string column that replaces it delivers its elements wrapped in **RemoteUnrealParam**, with the real value behind `:get()` — which is what made the array read the right LENGTH with nothing in it. `utils/items` had been unwrapping correctly all along.
+- **`item-additem-signature`** — Item.Handle:give. **Observed working**, 2026-07-26: `give Wood x3: 140 -> 143`, with the game's own pickup event firing beside it (`Wood onObtain: count=3`) — two independent witnesses in a real save. The whole project was blocked on ONE argument. The live declaration is `(FName StaticItemId, int32 Count, bool IsAssignPassive, float LogDelay, bool bNotifyLog) -> EPalItemOperationResult` — five arguments and a return, where `dumps/cxx/Pal.hpp` has four and no `bNotifyLog` at all, because the dump predates the installed binary by one game patch. UE4SS counts the return as a slot, which is where "expected 6 parameters, received 4" came from. It also ANSWERS, with a named `EPalItemOperationResult`, so a refusal now explains itself instead of being inferred from a count that did not move — the thing the cheat-manager route could never do, and the reason establishing that `GetItem` reaches nothing took five in-game runs.
 
-## Open (20)
+## Open (19)
 
 ### Pal
 
@@ -127,7 +128,7 @@ raises. "ChickenPal" is a confirmed row of that table (674 rows on disk).
 #### `pal-skills-equip` — Skill.Handle:teach / :forget, Pal.Handle:teachAll
 
 - **Probe:** F1
-- **Marked at:** Scripts/palforge/core/character.lua:43
+- **Marked at:** Scripts/palforge/core/character.lua:53
 
 **What a pack author sees**
 
@@ -240,7 +241,7 @@ and the BP class names printed.
 #### `item-craft-source` — Item.Spec.Events.onCraft (channel item.craft)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:110
+- **Marked at:** Scripts/palforge/api/item.lua:107
 
 **What a pack author sees**
 
@@ -293,7 +294,7 @@ present. Then craft one item at a workbench and paste which line fired with whic
 #### `item-datatable-row-read` — Item.Handle:iconOf / Item.Handle:recipeOf
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:169
+- **Marked at:** Scripts/palforge/api/item.lua:166
 
 **What a pack author sees**
 
@@ -341,7 +342,7 @@ Product_Count, WorkAmount, Material1_Id, Material1_Count.
 #### `item-discard-source` — Item.Spec.Events.onDiscard (channel item.discard)
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/api/item.lua:115
+- **Marked at:** Scripts/palforge/api/item.lua:112
 
 **What a pack author sees**
 
@@ -393,49 +394,10 @@ the lines and the sign of a2 for each. If nothing fires for (a)/(b), reflect
 cls:ForEachFunction(fn -> print(fn:GetFName():ToString())) and paste every name matching
 Discard|Drop|Remove|Sub|Consume|Trash|Throw.
 
-#### `item-additem-signature` — utils.items, the direct inventory write
-
-- **Probe:** F5
-- **Marked at:** Scripts/palforge/utils/items/init.lua:136
-
-**What a pack author sees**
-
-Nothing, if the cheat manager is available — `:give` and `:take` work through it. This matters
-when it is NOT: the cheat manager needs `CheatManagerEnabler`, and without it both helpers say
-so and return false. A direct write to the inventory object would need no such dependency, and
-would report an `EPalItemOperationResult` saying exactly why an add failed (inventory full,
-unknown id, container mismatch) instead of PalForge inferring it from a count that did not move.
-
-**What is still unknown**
-
-What the SIX parameters of `/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal` are on
-this build. The first in-game run answered `UFunction expected 6 parameters, received 4`, and
-note what that does NOT say: UE4SS rejected the call before binding any argument, so it tells us
-the declaration has six slots and nothing about whether the four PalForge passed were the right
-four in the right order.
-
-**This is the one place the header dump is provably behind the running game.** `dumps/cxx/Pal.hpp:27053`
-declares it with four parameters:
-
-```text
-EPalItemOperationResult AddItem_ServerInternal(const FName StaticItemId, const int32 Count,
-                                              bool IsAssignPassive, const float LogDelay);
-```
-
-The live build wants six. That gap — dump generated 2026-07-09, `Palworld-Win64-Shipping.exe`
-dated 2026-07-16 — is the concrete reason every dump-derived signature in this tree is checked
-against the live object by `core/signature.lua` before it is called, rather than trusted.
-
-**What the probe prints**
-
-Every parameter of `AddItem_ServerInternal` in declared order, asked of both the live inventory
-and its class, plus the two sibling add routes this build declares (`RequestAddItem_ForDebug` on
-the same class, `RequestAddItem_ToServer` on the network component). It calls none of them.
-
 #### `item-remove-call` — Item.Handle:take
 
 - **Probe:** F5
-- **Marked at:** Scripts/palforge/api/item.lua:41
+- **Marked at:** Scripts/palforge/api/item.lua:37
 
 **What a pack author sees**
 
@@ -1047,7 +1009,7 @@ build menu, and return to the title screen, and paste which paths fired and in w
 #### `pal-spawned-fresh` — Pal{ events = { onSpawned } } / event.on("pal.spawned")
 
 - **Probe:** F7
-- **Marked at:** Scripts/palforge/core/event.lua:928
+- **Marked at:** Scripts/palforge/core/event.lua:937
 
 **What a pack author sees**
 

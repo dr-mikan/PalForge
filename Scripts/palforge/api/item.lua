@@ -22,30 +22,27 @@
 --
 -- ACTIONS — read this before planning anything around :give or :take.
 --   * :count WORKS and is measured. It reads the live inventory through the game's own
---     CountItemNum, which was observed in a loaded save answering 135 for Wood. nil means
---     "could not read", never "none".
---   * :give adds through UPalCheatManager:GetItem(FName StaticItemId, int32 Count) and then
---     MEASURES the result — true means the inventory count was seen to RISE, false means the
---     call was refused, did not execute, or moved nothing that could be observed. It no longer
---     touches PalPlayerInventoryData:AddItem_ServerInternal, the call that answered "UFunction
---     expected 6 parameters, received 4" on the first in-game run and had therefore never once
---     executed (TODO(item-additem-signature) in utils/items is still open — that route is
---     unread, it is simply no longer the only one).
---   * :take removes through UPalCheatManager:DropItem(const FName StaticItemId, const int32
---     Num), measured the same way — true only when the count was seen to FALL. ⚠️ A DROP IS NOT
---     A DELETE: the items leave the inventory and land on the ground at the player's feet,
---     where they can be picked back up. That is a real removal from the inventory, which is
---     what :take promises, but a pack taking a payment this way leaves the payment lying there.
---     There is no delete to use instead — the whole inventory class chain (69 + 13 + 1
---     functions, base classes walked) declares nothing that subtracts an item (utils.items.take,
---     TODO(item-remove-call)).
---   * ⚠️ NEITHER WRITE HAS BEEN OBSERVED IN GAME YET. The two cheats come from UE4SS's
---     CXXHeaderDump of this install (dumps/cxx/Pal.hpp:16398 and :16453) and are reached
---     through core.signature, which checks the LIVE declaration before an argument is
---     marshalled and logs the evidence it rested on; the cheat manager itself and the
---     FName-plus-int marshalling are the ones PalForge already unlocks technologies through on
---     this build. So the mechanism is well evidenced and the outcome is not yet witnessed:
---     expect a verdict that was measured rather than assumed, and read the log line.
+--     CountItemNum, observed in a loaded save answering 135 for Wood. nil means "could not
+--     read", never "none".
+--   * :give WORKS and is measured. It writes through the inventory's own
+--     PalPlayerInventoryData:AddItem_ServerInternal and then reads the count back — true means
+--     the count was seen to RISE, false means the inventory refused and said why (it answers a
+--     named EPalItemOperationResult, which the log carries). Observed in a real save:
+--     "give Wood x3: 140 -> 143", with the game's own pickup event firing beside it
+--     ("Wood onObtain: count=3").
+--   * :take DOES NOT WORK YET, and reports false rather than pretending. No removal route is
+--     known on this build: the inventory's whole class chain declares nothing that subtracts an
+--     item, and a NEGATIVE Count through the add — the standing hypothesis, now finally
+--     testable — is accepted and does nothing at all. So a pack cannot charge a cost yet. See
+--     TODO(item-remove-call) in utils/items for what has been eliminated and what is left.
+--
+-- WHAT THAT COST, since it shaped this file for a long time. The add was blocked on ONE
+-- argument. The live declaration is five parameters and a return —
+-- (FName StaticItemId, int32 Count, bool IsAssignPassive, float LogDelay, bool bNotifyLog) —
+-- where dumps/cxx/Pal.hpp has four and no bNotifyLog at all, because the dump was generated one
+-- game patch before the installed binary. UE4SS counts the return as a slot, which is where
+-- "UFunction expected 6 parameters, received 4" came from. Reading the live declaration is what
+-- core.signature is for, and it is why nothing here is called on a dump's word.
 --
 -- WHAT IS DECLARATIVE, NOT LIVE — read this before believing a field did something:
 --   * name / description / category / maxStack / recipe are metadata PalForge stores and
