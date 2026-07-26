@@ -1303,24 +1303,51 @@ local function installItemSource()
         return out
     end
 
-    ---Resolve one FPalItemSlotId to the item id sitting in it right now, or nil.
+    ---Resolve one FPalItemSlotId to the item id sitting in it right now.
+    ---
+    ---Returns the id, or nil plus WHICH STEP FAILED. That second return is not decoration: the
+    ---first live firing of this hook reported "the slot could not be resolved" and named none of
+    ---the five things that could have gone wrong, which is the exact shape of diagnostic that has
+    ---cost this project a run at a time all day. Every member name below is verified against
+    ---dumps/cxx/Pal.hpp — FPalItemSlotId{ContainerId,SlotIndex}, FPalContainerId{ID},
+    ---UPalContainerBase{ID}, UPalItemContainerMultiHelper{Containers} — so a failure here is a
+    ---live-state fact, not a typo, and the message has to say which one.
+    ---@return string? id, string? failedStep
     local function slotItemId(slotId)
         local wanted, index
         pcall(function() wanted = slotId.ContainerId.ID end)   -- FPalContainerId wraps one FGuid
         pcall(function() index = slotId.SlotIndex end)
-        if wanted == nil or type(index) ~= "number" then return nil end
-        for _, c in ipairs(playerContainers()) do
+        if wanted == nil then return nil, "slotId.ContainerId.ID unreadable" end
+        if type(index) ~= "number" then
+            return nil, "slotId.SlotIndex is " .. type(index) .. ", not a number"
+        end
+
+        local containers = playerContainers()
+        if #containers == 0 then
+            return nil, "the player's inventory helper listed no containers"
+        end
+        for _, c in ipairs(containers) do
             local cid; pcall(function() cid = c.ID.ID end)
             if guidEq(cid, wanted) then
                 local slot; pcall(function() slot = c:Get(index) end)
-                if slot ~= nil then
-                    local id; pcall(function() id = slot.ItemId.StaticId:ToString() end)
-                    if id and id ~= "" and id ~= "None" then return id end
+                if slot == nil then
+                    return nil, string.format("container matched but Get(%d) answered nil", index)
                 end
-                return nil    -- right container, empty or unreadable slot: do not keep looking
+                local id; pcall(function() id = slot.ItemId.StaticId:ToString() end)
+                if id == nil then return nil, "slot.ItemId.StaticId unreadable" end
+                if id == "" or id == "None" then
+                    -- The likeliest cause, and worth naming rather than lumping in with a
+                    -- failure: this is a PRE hook, but the client may already have cleared the
+                    -- slot locally before the server RPC is sent. If that is what this is, the
+                    -- id has to come from somewhere other than the slot.
+                    return nil, string.format("slot %d in the matched container is already empty "
+                        .. "(id %q) — the slot may be cleared before the RPC is sent", index, id)
+                end
+                return id
             end
         end
-        return nil
+        return nil, string.format("no container of the player's %d matched the dropped slot's id",
+            #containers)
     end
 
     -- One line per session, not per drop: an unresolvable slot is a standing fact about the
@@ -1331,10 +1358,11 @@ local function installItemSource()
         pcall(function() slotId = entry.SlotId end)
         pcall(function() num = entry.Num end)
         if slotId == nil then return end
-        local id = slotItemId(slotId)
+        local id, why = slotItemId(slotId)
         if not id then
             if not discardMissLogged then
                 discardMissLogged = true
+                log.warn("item.discard: " .. tostring(why or "the slot could not be resolved"))
                 log.warn("item.discard: the dropped slot could not be resolved to an item id "
                     .. "(see TODO(item-discard-source)); the channel stays silent this session")
             end

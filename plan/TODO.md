@@ -65,6 +65,14 @@ suspicion, and it is what `pal-spawnmonster-signature` is about.
 
 Only F8 changes anything, and it says so before it arms a hook.
 
+**Every probe also has a console command**, because a key the game has claimed binds
+successfully and then never fires — which from the log is indistinguishable from a probe that
+ran and found nothing. Open the UE4SS console window and type one:
+
+```text
+pf_tests   pf_watch   pf_reflect   pf_pal   pf_title
+```
+
 **F7 is Palworld's own volume key** and the game claims it before UE4SS sees it, so a probe
 bound there can never be pressed — which is where `watch` sat, unreachable and silent about
 it. The bindings are printed at startup now, so a key the game has taken is visible in the

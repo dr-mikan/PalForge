@@ -256,6 +256,37 @@ for _, p in ipairs(M.PROBES) do
         { desc = string.format("probe %s (%s) - needs %s", p.name, p.desc, p.needs) })
 end
 
+-- A CONSOLE COMMAND FOR EVERY PROBE, so a key the game has taken can never block one again.
+-- F7 turned out to be Palworld's own volume control: the bind succeeded, the key never arrived,
+-- and from the log that was indistinguishable from a probe that ran and found nothing. Keys are
+-- convenient and they are not ours to reserve; a command is.
+--
+--   pf_watch     pf_reflect     pf_pal     pf_title     pf_tests
+--
+-- Open the UE4SS console (its GUI window) and type one. Same work, same output, no key involved.
+local function installCommands()
+    if type(RegisterConsoleCommandHandler) ~= "function" then
+        log.warn("console commands unavailable this session; the keys above are the only way in")
+        return
+    end
+    local function register(name, run)
+        pcall(function()
+            RegisterConsoleCommandHandler(name, function()
+                if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(run) else run() end
+                return true
+            end)
+        end)
+    end
+    register("pf_tests", function() M.run() end)
+    for _, p in ipairs(M.PROBES) do
+        register("pf_" .. p.name, function() M.probe(p.name) end)
+    end
+    local names = { "pf_tests" }
+    for _, p in ipairs(M.PROBES) do names[#names + 1] = "pf_" .. p.name end
+    log.info("console commands: " .. table.concat(names, "  "))
+end
+installCommands()
+
 -- Print the bindings once, at load. A key the GAME has already claimed still binds successfully
 -- here and simply never fires — that is how `watch` sat unreachable on Palworld's volume key —
 -- so the log has to carry which key is on what, or a probe that cannot be pressed looks exactly
