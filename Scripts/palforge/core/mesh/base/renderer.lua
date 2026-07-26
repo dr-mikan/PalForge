@@ -127,6 +127,16 @@ end
 -- :17574 declare SetVectorParameterValue(FName, FLinearColor), SetScalarParameterValue(
 -- FName, float) and SetTextureParameterValue(FName, UTexture*) exactly as written below,
 -- so "the write did not execute" is eliminated as an explanation for an unchanged mesh.
+-- ⚠️ THESE ARE GUESSES AND THE SHAPE OF THEM IS NOW KNOWN TO BE WRONG. The first live read of
+-- the player's own materials (2026-07-26) printed real parameter names off a
+-- MaterialInstanceDynamic on CharacterMesh0:
+--     Light Affect Emissive Intensity, Light Affect Emissive Min, Light Affect Emissive Max,
+--     Base Emissive Intensity, Base Color Intensity
+-- Palworld's parameters are Title Case WITH SPACES. Not one entry below has a space in it, so
+-- none of them can match — the list is kept only so the failure is a miss rather than a crash,
+-- and it should be REPLACED, not extended, by what describeMaterials prints on a real mesh.
+-- "Base Color Intensity" is a scalar (an intensity), so the colour vector is something like
+-- "Base Color" — but that is inference, and the read that would settle it is one press away.
 Renderer.COLOR_PARAMS    = { "Color", "BaseColor", "Tint", "BaseColorTint", "Albedo", "EmissiveColor" }
 Renderer.TEXTURE_PARAMS  = { "BaseColor", "Texture", "Albedo", "Diffuse", "BaseTexture", "MainTexture" }
 Renderer.EMISSIVE_PARAMS = { "EmissiveColor", "Emissive", "EmissiveColour" }
@@ -387,6 +397,36 @@ function Renderer.describeOneComponent(comp, say, out)
             }
             out[#out + 1] = rec
             say(string.format("MATDESC [%d] %s (%s)", elem, rec.material, rec.class))
+            -- FOLLOW .Parent UP. A MaterialInstanceDynamic's arrays hold only what has been
+            -- OVERRIDDEN on it, so "vector: (none)" on a MID says nothing about the material —
+            -- only that nobody set a vector on that instance. The authored values live on the
+            -- MaterialInstanceConstant it derives from (Engine.hpp:17544 declares
+            -- `UMaterialInterface* Parent` on UMaterialInstance), so walk up until the arrays
+            -- stop being empty or the chain ends. Bounded, because a cycle here would hang F1.
+            local parent, depth = mat, 0
+            while depth < 6 do
+                local up; pcall(function() up = parent.Parent end)
+                if not isLive(up) then break end
+                parent, depth = up, depth + 1
+                local pv = paramNames(parent, "VectorParameterValues")
+                local ps = paramNames(parent, "ScalarParameterValues")
+                local pt = paramNames(parent, "TextureParameterValues")
+                local pname, pcls
+                pcall(function() pname = parent:GetFullName() end)
+                pcall(function() pcls = parent:GetClass():GetFName():ToString() end)
+                say(string.format("MATDESC [%d]   parent[%d] %s (%s)", elem, depth,
+                    tostring(pname or "?"), tostring(pcls or "?")))
+                if #pv > 0 or #ps > 0 or #pt > 0 then
+                    say(string.format("MATDESC [%d]   parent[%d] vector: %s", elem, depth,
+                        #pv > 0 and table.concat(pv, ", ") or "(none)"))
+                    say(string.format("MATDESC [%d]   parent[%d] scalar: %s", elem, depth,
+                        #ps > 0 and table.concat(ps, ", ") or "(none)"))
+                    say(string.format("MATDESC [%d]   parent[%d] texture: %s", elem, depth,
+                        #pt > 0 and table.concat(pt, ", ") or "(none)"))
+                    rec.parentVector, rec.parentScalar, rec.parentTexture = pv, ps, pt
+                    break
+                end
+            end
             say(string.format("MATDESC [%d]   vector: %s", elem,
                 #rec.vector > 0 and table.concat(rec.vector, ", ") or "(none)"))
             say(string.format("MATDESC [%d]   scalar: %s", elem,
