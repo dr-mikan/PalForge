@@ -47,6 +47,7 @@
 -- `asset` is accepted as an alias for `model`: this file's original TODO named the field
 -- `asset` while every caller passes `model`.
 local Renderer = require("palforge.core.mesh.base.renderer")
+local assets   = require("palforge.core.mesh.assets")
 local sig      = require("palforge.core.signature")
 local log      = require("palforge.utils.log").scope("mesh")
 
@@ -59,20 +60,12 @@ local StaticMesh = Renderer:extend("StaticMeshRenderer")
 -- cannot walk a UFunction's properties.
 local SET_STATIC_MESH_PARAMS = { "ObjectProperty" }
 
--- Loaded UStaticMesh assets cached by path (load once, reuse forever). Same resolve
--- order proven for the AkAudioEvent assets in core/sound/native.lua: LoadAsset pulls in
--- an asset that isn't loaded yet, StaticFindObject catches the already-loaded case.
-local assetCache = {}
-local function loadAsset(path)
-    if type(path) ~= "string" or #path == 0 then return nil end
-    local a = assetCache[path]
-    if a and a:IsValid() then return a end
-    a = nil
-    pcall(function() if type(LoadAsset) == "function" then a = LoadAsset(path) end end)
-    if not (a and a:IsValid()) then pcall(function() a = StaticFindObject(path) end) end
-    if a and a:IsValid() then assetCache[path] = a; return a end
-    return nil
-end
+-- Resolving `model` is core.mesh.assets' job now, and this backend asks it for a
+-- "StaticMesh" specifically. The private six-line loadAsset that used to sit here took
+-- anything at all and handed it to a typed setter — see that module's header for why the
+-- class check matters more than the load does. core/mesh/assets.lua also carries the
+-- KNOWN-GOOD /Game/... paths (assets.SM.ChestWood and friends), each measured off this build.
+local ASSET_CLASS = "StaticMesh"
 
 -- Read the mesh back off a component. ONE path, because the dump leaves only one: the
 -- UProperty `class UStaticMesh* StaticMesh` (dumps/cxx/Engine.hpp:21693). This used to try
@@ -108,8 +101,12 @@ function StaticMesh:attach(actor, spec)
         log.err("static: spec carries no model path")
         return false
     end
-    local asset = loadAsset(model)
-    if not asset then log.err("static: cannot resolve mesh " .. model); return false end
+    -- THE PRIMARY ROUTE: a /Game/... path, loaded and class-checked. The error string is
+    -- deliberately the resolver's own — it distinguishes "that path is not in the pak" from
+    -- "that path IS an asset, just not a UStaticMesh", and the second one is the mistake a
+    -- pack actually makes (naming an SK_ mesh with kind = "static", or the reverse).
+    local asset, rerr = assets.load(model, { class = ASSET_CLASS })
+    if not asset then log.err("static: " .. tostring(rerr)); return false end
 
     local comp
     local ok, aerr = pcall(function()
@@ -159,7 +156,13 @@ function StaticMesh:attach(actor, spec)
     -- backend could paint. `always` is off — the mesh's authored materials stay as they
     -- are unless the spec asked for something.
     local st = self:dressMaterial(comp, actor, spec, {})
-    if st ~= "none" then log.info("static: material [" .. st .. "] on " .. model) end
+    -- ALWAYS logged, not only when a material was written. Two questions used to be
+    -- indistinguishable in a log — "did the path resolve" and "did the component take it" —
+    -- and the read-back above has already answered the second by the time this runs, so one
+    -- line naming the resolved object closes both. assets.describe prints the class, which is
+    -- what makes a wrong-kind declaration obvious on sight.
+    log.info(string.format("static: %s on a new UStaticMeshComponent%s",
+        assets.describe(asset), st ~= "none" and (" material [" .. st .. "]") or ""))
     return true
 end
 

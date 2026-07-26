@@ -65,7 +65,7 @@ means — most of this api is fail-soft, so a `false` is information, not an exc
 | [Effect](#effect) | `Effect{ … }` | `.get(id)` `.get_all()` `.activeOn(target)` | 10 methods | 4/4 | An effect is a status applied to a character (a player or a Pal): buffs, debuffs,… |
 | [Audio](#audio) | `Audio{ … }` | `.get(id)` `.get_all()` `.bgm(spec)` `.se(spec)` | 7 methods | — | Audio is one playable sound: background music or a one-shot effect. |
 | [Mesh](#mesh) | `Mesh{ … }` | `.get(id)` `.get_all()` | 6 methods | — | A mesh is the VISUAL a definition wears: a model asset plus how to paint it. |
-| [UI](#ui) | `UI{ … }` | `.get(id)` `.get_all()` | 10 methods | — | A UI element is something drawn on screen out of Palworld's own native UMG kit. |
+| [UI](#ui) | `UI{ … }` | `.get(id)` `.get_all()` | 12 methods | — | A UI element is something drawn on screen out of Palworld's own native UMG kit. |
 | [Player](#player) | — | `.character()` `.coordinate()` `.coordinateOffset(dx, dy, dz)` | — | — | PUBLIC player API. Thin facade over utils/player. |
 
 ## Validation — exactly what is rejected, and the message you get
@@ -115,7 +115,7 @@ A pal is a spawnable creature.
 | `name` | `string` | — | shown in UI (defaults to id) |
 | `description` | `string` | — | one-line description, for UI and tooling |
 | `skills` | `table` | each element `string` | skill ids this pal owns (see Skill) |
-| `mesh` | `table` | shape [Mesh.Spec](#meshspec) | the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle) |
+| `mesh` | `table` | shape [Mesh.Spec](#meshspec) | the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned |
 | `material` | `table` | shape [Pal.Spec.Material](#palspecmaterial) | material override applied to that mesh |
 | `color` | `table` | — | base tint { r, g, b, a } (shorthand for material.color) |
 | `texture` | `string` | — | png path applied to the mesh (shorthand for material.texture) |
@@ -152,7 +152,7 @@ Declared as `events = { onX = function(self, …) end }` inside `Pal{ … }`.
 | `:iconOf()` | `any?` | texture ref from the icon DataTable, else the declared icon |
 | `:mesh()` | `table?` | — |
 | `:name()` | `string` | — |
-| `:renderOn(actor)` | `boolean` | Attach this pal's declared mesh to a live pawn (one-shot; core.mesh guards against re-stacking). |
+| `:renderOn(actor)` | `boolean` | Attach this pal's declared mesh to a live pawn (one-shot; core.mesh guards against re-stacking). YOU DO NOT NORMALLY CALL THIS. |
 | `:skillsOf()` | `string[]` | The skill ids this pal owns (resolve them with Skill.get). |
 | `:spawn(arg)` | `boolean` | Spawn this pal. → the native call was issued (see above), NOT arrival, NOT `at` |
 | `:teachAll(actor)` | `integer` | Put every skill this pal DECLARES onto a live character, so the game itself carries them. `skillsOf()` is what the author wrote; this is how that list reaches a real pal standing in the world. |
@@ -280,7 +280,7 @@ Same fields as [`Mesh.Spec`](#meshspec), with 3 differences:
 | field | changed | here | in `Mesh.Spec` |
 |---|---|---|---|
 | `kind` | default | `static` | `skeletal` |
-| `model` | doc | UStaticMesh asset path, or an OBJ path for the procedural backend | USkeletalMesh / UStaticMesh object path; for procedural / obj, an absolute .obj file path |
+| `model` | doc | UStaticMesh asset path, or an OBJ path for the procedural backend | a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an absolute .obj file path |
 | `offset` | doc | { x, y, z } offset from the actor's origin | { x, y, z } offset from the mesh's normal position, in cm |
 
 ### Building.Spec.Material
@@ -506,14 +506,14 @@ A mesh is the VISUAL a definition wears: a model asset plus how to paint it.
 |---|---|---|---|
 | `id` | `string` | checked | mesh id, e.g. "pack:name" (required when defined directly; omit when inline) |
 | `kind` | `string` | = `skeletal`, one of `procedural` `static` `skeletal` `obj` | which core.mesh backend renders it |
-| `model` | `string` | **required** | USkeletalMesh / UStaticMesh object path; for procedural / obj, an absolute .obj file path |
-| `animClass` | `string` | — | ABP_*_C animation blueprint path (skeletal only) |
+| `model` | `string` | **required** | a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an absolute .obj file path |
+| `animClass` | `string` | — | a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only |
 | `scale` | `number` | — | uniform scale applied to the attached mesh |
 | `offset` | `table` | — | { x, y, z } offset from the mesh's normal position, in cm |
-| `texture` | `string` | — | absolute path to a png applied to the mesh |
+| `texture` | `string` | — | a /Game/... UTexture2D path (see Mesh.assets.T), or an absolute path to a png of your own |
 | `color` | `table` | — | tint { r, g, b, a } in 0..1 |
 | `material` | `string` | — | base material asset path to instance from |
-| `params` | `table` | — | extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = "<abs png>" } } |
+| `params` | `table` | — | extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = "/Game/... or <abs png>" } } |
 
 ### Mesh.Handle
 
@@ -546,10 +546,107 @@ A UI element is something drawn on screen out of Palworld's own native UMG kit.
 | `id` | `string` | **required**, checked | element id, e.g. "pack:Panel" |
 | `name` | `string` | — | human label (defaults to id) |
 | `description` | `string` | — | one-line description, for UI and tooling |
+| `root` | `UI.Node` | checked | the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question |
+| `host` | `UI.Spec.Host\|"screen"\|"game"` | checked | where to mount when mount() is given no root: "screen" (a viewport layer of our own), "game" (the game's own in-game UI root canvas), or { widget = <class>, panel = <member> } for a panel the game already draws |
 | `render` | `fun(self: UI.Handle, root: any): boolean?` | — | build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted |
 | `update` | `fun(self: UI.Handle)` | — | refresh the already-built widgets (self); runs on each :refresh() |
 | `destroy` | `fun(self: UI.Handle)` | — | remove the widgets render() built (self); runs on :unmount() |
 | `data` | `table` | — | default fields shared by every instance of this element |
+
+### UI.Node.VBox
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `children` | `UI.Node[]` | checked | the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} } |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.HBox
+
+Identical to [`UI.Node.VBox`](#uinodevbox) — same fields, same rules.
+
+### UI.Node.Overlay
+
+Identical to [`UI.Node.VBox`](#uinodevbox) — same fields, same rules.
+
+### UI.Node.ScrollBox
+
+Identical to [`UI.Node.VBox`](#uinodevbox) — same fields, same rules.
+
+### UI.Node.Border
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `children` | `UI.Node[]` | checked | the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} } |
+| `color` | `table` | — | background tint { r, g, b, a } in 0..1 |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.SizeBox
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `children` | `UI.Node[]` | checked | the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} } |
+| `width` | `number` | — | fixed width in slate units |
+| `height` | `number` | — | fixed height in slate units |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.Label
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `text` | `string\|number\|fun(self: UI.Handle): any` | — | BINDABLE - what it says |
+| `size` | `number` | — | font size (default 16) |
+| `color` | `table` | — | text colour { r, g, b, a } in 0..1 |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.Button
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `text` | `string\|number\|fun(self: UI.Handle): any` | — | BINDABLE - what it says |
+| `onClick` | `fun(self: UI.Handle, ctx: table)` | — | clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget) |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Node.GameWidget
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `class` | `string` | **required**, checked | Blueprint widget class path, e.g. "/Game/Pal/Blueprint/UI/.../WBP_Foo.WBP_Foo_C" |
+| `text` | `string\|number\|fun(self: UI.Handle): any` | — | BINDABLE - what it says |
+| `textChild` | `string` | — | name of the child widget that carries the text |
+| `clickChild` | `string` | — | name of the child widget that receives clicks |
+| `onClick` | `fun(self: UI.Handle, ctx: table)` | — | clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget) |
+| `name` | `string` | — | look the built widget up later with UI.Handle:find("<name>") |
+| `visible` | `boolean\|fun(self: UI.Handle): boolean` | — | BINDABLE - false COLLAPSES it, so it stops taking layout space too |
+| `hAlign` | `string` | one of `fill` `left` `center` `right` | horizontal alignment in the parent's slot |
+| `vAlign` | `string` | one of `fill` `top` `center` `bottom` | vertical alignment in the parent's slot |
+| `padding` | `number\|table` | — | slot padding: one number for all four sides, or { left =, top =, right =, bottom = } |
+
+### UI.Spec.Host
+
+| field | type | rules | meaning |
+|---|---|---|---|
+| `widget` | `string` | **required**, checked | the host widget's CLASS name. FindFirstOf matches subclasses, so name the native base ("PalPrimaryGameLayoutBase", not "WBP_PalOverallUILayout_C") |
+| `panel` | `string` | — | the panel inside it that takes our children: a declared member (read as a property), else a widget of that name in its tree. Omitted: the widget itself is the panel |
 
 ### UI.Handle
 
@@ -558,7 +655,9 @@ A UI element is something drawn on screen out of Palworld's own native UMG kit.
 | `:autoMount(root, ms)` | `boolean` | Poll every `ms` milliseconds off the same heartbeat, but drive the WHOLE lifecycle: while the element is down this retries mount(root) — so an element whose host UI does not exist yet (the title screen at load)… |
 | `:autoRefresh(ms)` | `boolean` | Poll refresh() every `ms` milliseconds off core/event's heartbeat (opt-in; there is no confirmed native UI-update event to hook). |
 | `:description()` | `string?` | — |
+| `:find(name)` | `userdata?` | The live widget a node in the declared tree claimed with `name = "..."` — the imperative escape hatch out of a declarative element. nil until it is mounted, and nil again once it is not: a widget outlives neither. |
 | `:isMounted()` | `boolean` | — |
+| `:lastError()` | `string?` | Why the last mount attempt gave up, as a sentence, or nil if the last one succeeded. |
 | `:mount(root)` | `boolean` | Mount this element under `root` (render once). |
 | `:name()` | `string` | — |
 | `:new(spec)` | `UI.Handle` | A fresh, independently-mountable instance of this element. `spec` becomes its state. |
@@ -567,7 +666,21 @@ A UI element is something drawn on screen out of Palworld's own native UMG kit.
 | `:unmount()` | — | Take the element down: runs destroy() so it removes its own widgets, then forgets the rendered state so a later mount() renders afresh. Also cancels autoRefresh/autoMount. |
 
 `UI.Class` methods (what `self` resolves inside a handler that gets a
-definition or an instance): `:destroy()` `:isMounted()` `:mount(root)` `:refresh()` `:render(root)` `:unmount()` `:update()`.
+definition or an instance): `:destroy()` `:destroyTree()` `:find(name)` `:isMounted()` `:mount(root)` `:refresh()` `:releaseHost()` `:render(root)` `:renderTree(root)` `:unmount()` `:update()` `:updateTree()`.
+
+### palforge.ui
+
+| field | type | meaning |
+|---|---|---|
+| `VBox` | `fun(spec:` | UI.Node.VBox): UI.Node # a column |
+| `HBox` | `fun(spec:` | UI.Node.HBox): UI.Node # a row |
+| `Overlay` | `fun(spec:` | UI.Node.Overlay): UI.Node # children stacked on top of each other |
+| `ScrollBox` | `fun(spec:` | UI.Node.ScrollBox): UI.Node # a scrolling column |
+| `Border` | `fun(spec:` | UI.Node.Border): UI.Node # a tinted frame around ONE child |
+| `SizeBox` | `fun(spec:` | UI.Node.SizeBox): UI.Node # a fixed size around ONE child |
+| `Label` | `fun(spec:` | UI.Node.Label): UI.Node # text |
+| `Button` | `fun(spec:` | UI.Node.Button): UI.Node # the game's own menu button, clickable |
+| `GameWidget` | `fun(spec:` | UI.Node.GameWidget): UI.Node # any Blueprint widget the game ships |
 
 ## Player
 

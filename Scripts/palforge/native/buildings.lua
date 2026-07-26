@@ -1,23 +1,50 @@
--- PalForge native.buildings: the HYBRID catalog for placeable structures. ONE file
--- per data domain, replacing the old native/building/ subdirectory.
---
---   (a) M.CATALOG  — every real DT_BuildObjectDataTable_Common row id from the dump.
---   (b) M.get(id)  — a lazy, cached Building handle for ANY catalog id (nil otherwise).
---   (c) CURATED    — a few hand-written definitions (mesh + lifecycle).
---
--- Only the CURATED definitions call Building{ ... } at load, so they self-register into
--- object_manager; the CATALOG stays plain DATA and get(id) defines on demand. That is why
--- requiring this file never registers the hundreds of catalog ids.
+-- PalForge native.buildings: the catalog of the game's OWN placeable structures, declared
+-- through api/building the same way a pack declares its own.
 --
 --   local buildings = require("palforge.native.buildings")
---   buildings.get("PalBoxV2")   -- lazy handle    buildings.WorkBench:unlock()  -- curated
+--   buildings.PalBoxV2:instances()      -- a NAMED handle for every row the game has
+--   buildings.get("PalBoxV2")           -- the same handle, by id string
+--   buildings.WorkBench:unlock()        -- curated: carries a mesh and a display name
+--
+--   (a) M.CATALOG  — every DT_BuildObjectDataTable_Common row id, 498 of them.
+--   (b) M.<Name>   — a Building handle per row, built on first read. native/_catalog.lua owns
+--                    the naming rule; for this table it is the identity, because every one of
+--                    the 498 ids is already a Lua identifier.
+--   (c) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
+--   (d) CURATED    — a few hand-written definitions (mesh + display name).
+--
+-- Only the CURATED definitions call Building{ ... } at load, so only they self-register into
+-- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- requiring this file never registers the hundreds of catalog ids.
+--
+-- WHAT A LAZY NATIVE HANDLE HONESTLY DOES, because a Building handle carries more actions than
+-- a bare vanilla id can back:
+--   * :instances() / :unlock() / the lifecycle handlers are REAL for every id here. Each one is
+--     a build-object row, so core/event's building runtime resolves placed actors to it and the
+--     technology row unlock takes the same id.
+--   * :render() returns 0 and that is correct, not a failure. Building.Handle:render attaches
+--     PalForge's OWN declared mesh to the live actors (api/building.lua:284) and a lazy handle
+--     declares none — the game is already drawing the structure's real mesh. Only the curated
+--     entries below, and a definition of your own, have a mesh to attach.
+--   * :iconOf() DOES answer for real: core/icons reads DT_BuildObjectIconDataTable keyed by
+--     exactly these row ids (567 of 571 rows carry an icon, measured 2026-07-26). Nothing has
+--     to be declared for that — the id IS the key.
+--   * :name() answers the id, not the in-game name. The localised one is a DT_BuildObjectNameText
+--     row VALUE, and reading a row value from Lua is still unsolved on this build (the
+--     item-datatable-row-read marker in api/item.lua). A curated entry names itself by hand.
 
 local Building = require("palforge.api.building")
+local catalog  = require("palforge.native._catalog")
 
 local M = {}
 
--- CATALOG (DATA): every DT_BuildObjectDataTable_Common row id (dump/01_datatables.txt).
--- GENERATED — do not hand-edit; regenerate from a fresh dump.
+-- The one DataTable this catalog stands for. Named rather than described so a regeneration
+-- cannot pick a different table by accident.
+M.TABLE = "DT_BuildObjectDataTable_Common"
+
+-- CATALOG (DATA): every DT_BuildObjectDataTable_Common row id — all 498 of them, verified
+-- against dumps/catalog/datatables/DT_BuildObjectDataTable_Common.json (count 498, exact set
+-- match, 2026-07-26). GENERATED — do not hand-edit; regenerate from a fresh dump.
 M.CATALOG = {
   "FarmBlockV2_wheet", "FarmBlockV2_tomato", "FarmBlockV2_Lettuce", "FarmBlockV2_Berries", "FarmBlockV2_Carrot", "FarmBlockV2_Onion",
   "FarmBlockV2_Potato", "PalFoodBox", "Wooden_foundation", "Wooden_wall", "Wood_WindowWall", "Wood_TriangleWall",
@@ -104,14 +131,22 @@ M.CATALOG = {
   "Clinic", "Ancient_Clinic", "Ancient_Spa", "Ancient_AirConditioner", "Ancient_MedicalPalBed", "OilPump02",
 }
 
--- membership set + on-demand cache for get().
-local set = {}
-for _, id in ipairs(M.CATALOG) do set[id] = true end
+-- Membership set + on-demand cache for get(), plus the alias table the naming rule produces
+-- (empty here: all 498 ids are already Lua identifiers, so every name is its own id). One pass,
+-- the same one that used to build `set` alone.
+local set, aliases, unnamed = catalog.index(M.CATALOG)
 local cache = {}
+
+---Names that are NOT ids — a second spelling for a row the game names with punctuation.
+---Empty for this catalog; see native/_catalog.lua rule (2).
+M.ALIASES = aliases
+---Rows with no named field, and why. Empty for this catalog; see rules (3) and (4).
+M.UNNAMED = unnamed
 
 -- get(id): a Building wrapper for ANY real catalog id, built on first use + cached.
 -- Returns nil if id is not a known build-object row. defining sets .id and registers
--- the class into object_manager. NOT called eagerly — nothing walks the whole catalog.
+-- the class into object_manager. NOT called eagerly — nothing walks the whole catalog,
+-- and neither does reading a named field, which comes through here.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
@@ -152,9 +187,21 @@ M.PalBox = Building{
 -- Pre-seed curated into the get() set + cache so get(id) returns the curated handle
 -- (mesh/lifecycle intact) rather than a bare one, and so get("WorkBench") resolves even
 -- though the DT row is spelled "Workbench".
+--
+-- NOTE what this makes of the named fields, because the two spellings are BOTH real and mean
+-- different things. `buildings.WorkBench` is the curated handle on the blueprint id the runtime
+-- dispatches by; `buildings.Workbench` is the DataTable row, whose lazy handle is what the icon
+-- table answers to. Neither is a typo for the other and neither is hidden. The same holds for
+-- M.PalBox, which is a nickname rather than an id — `buildings.PalBoxV2` is the row's own name
+-- and resolves to this very handle through the cache below.
 for _, h in ipairs({ M.WorkBench, M.PalBox }) do
     set[h.id] = true
     cache[h.id] = h
 end
+
+-- LAST: hang the lazy named fields off the module. After the curated definitions, so the
+-- rule-(4) shadow check sees the module's complete own surface. See native/_catalog.lua.
+catalog.expose(M, { set = set, aliases = aliases, unnamed = unnamed,
+                    get = M.get, label = "native.buildings" })
 
 return M

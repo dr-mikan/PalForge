@@ -4,7 +4,7 @@
 #   <seconds> <name>  run that many seconds after the world is ready
 #
 # The names are the pf_* actions:
-#   pf_tests pf_spawn pf_teach pf_reflect pf_pal pf_watch pf_title pf_uislot pf_uievents
+#   pf_tests pf_spawn pf_teach pf_reflect pf_pal pf_watch pf_title pf_uislot pf_uievents pf_mesh
 # Lines starting with # are ignored. Delete a line to stop it running.
 #
 # THIS SESSION'S GOAL: settle skill.hit and skill.equip without catching a pal.
@@ -18,6 +18,24 @@
 # NOW: the last UI slot question. Read-only, one shot, no in-game action needed. The 10 s delay
 # lets the game's own UI widgets come up, because the probe cross-checks against them.
 10 pf_uislot
+
+# THE MESH CHAIN, END TO END — nothing to do but LOOK. 15 s after the world is ready it
+# resolves every catalogued /Game/... path, then hangs a shipped wooden chest (SM_ChestWood)
+# in front of your character with a red tint declared, waits 30 s, and destroys it again.
+#   a chest in front of you           the whole chain works: path -> LoadAsset -> SetStaticMesh
+#                                     -> a component you can see. It has never been watched.
+#   the chest is RED                  the dynamic material instance and the measured parameter
+#                                     names work too.
+#   a chest that is NOT red           mesh yes, material names no — the MATDESC lines it prints
+#                                     are the names that asset really carries.
+#   no chest, `attachTo -> true`      it is attached where you cannot see it; raise OFFSET.z in
+#                                     test/init.lua's pf_mesh and run again.
+#   no chest, `attachTo -> false`     the [mesh] line above it names the step that refused.
+# The ASSET OK / ASSET MISS lines at the top are the other half: `ASSET OK ABP.PinkCat` is the
+# first time an animation blueprint has ever been resolved from a path in this tree.
+# It touches only a component of PalForge's own and destroys it again — your character's own
+# mesh, materials and save are never written to.
+15 pf_mesh
 
 # ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----
 #

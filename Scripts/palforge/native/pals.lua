@@ -1,24 +1,58 @@
--- PalForge native.pals: the HYBRID catalog for spawnable creatures (Pals). ONE file
--- per data domain, replacing the old native/pal/ subdirectory.
---
---   (a) M.CATALOG  — every real DT_PalMonsterParameter_Common row id from the dump.
---   (b) M.get(id)  — a lazy, cached Pal handle for ANY catalog id (nil otherwise).
---   (c) CURATED    — the two DEMO creatures (with live lifecycle log hooks).
---
--- Only the CURATED class tables (with a string .id) are registered at game start; the
--- CATALOG (a list) and get (a function) are skipped, so init never bulk-registers the
--- hundreds of pal ids. get(id) builds on demand.
+-- PalForge native.pals: the catalog of the game's OWN creatures, declared through api/pal the
+-- same way a pack declares its own.
 --
 --   local pals = require("palforge.native.pals")
---   pals.get("BlueSkyDragon")   -- lazy handle    pals.Chicken:spawn()  -- curated demo
+--   pals.BlueSkyDragon:spawn()      -- a NAMED handle for every row the game has
+--   pals.get("BlueSkyDragon")       -- the same handle, by id string
+--   pals.Chicken:spawn()            -- curated demo: carries a mesh and lifecycle log hooks
+--
+--   (a) M.CATALOG  — every DT_PalMonsterParameter_Common row id, 753 of them.
+--   (b) M.<Name>   — a Pal handle per row, built on first read. native/_catalog.lua owns the
+--                    naming rule; for this table it is the identity, because every one of the
+--                    753 ids is already a Lua identifier.
+--   (c) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
+--   (d) CURATED    — the two DEMO creatures (with live lifecycle log hooks).
+--
+-- Only the CURATED definitions call Pal{ ... } at load, so only they self-register into
+-- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- requiring this file never registers the hundreds of pal ids.
+--
+-- WHAT A LAZY NATIVE HANDLE HONESTLY DOES:
+--   * :spawn() is real for every id here — it hands the CharacterID to the game's own spawn
+--     route. Read api/pal.lua's :spawn contract before believing its return: `true` means the
+--     native call was ISSUED, the pal arrives seconds later, and the log is where the truth is.
+--   * THE CATALOG IS NOT A LIST OF WILD ANIMALS. It is every row of the monster table, which
+--     includes encounter variants the game only ever places itself: BOSS_* (field alphas),
+--     RAID_*, GYM_*, PREDATOR_*, SUMMON_*, POLICE_*, Quest_*, and the *_Oilrig / *_BossRush /
+--     *_Tower series. Spawning one is a real call with a real id and it will behave like the
+--     encounter it is, not like a catchable pal. None are curated away: leaving a row out would
+--     make it look unsupported when it is merely specialised, and nothing is built until asked.
+--   * :iconOf() DOES answer for real, and needs nothing declared: core/icons reads
+--     DT_PalIconDataTable keyed by exactly these row ids (674 of 674 rows carry an icon,
+--     measured 2026-07-26).
+--   * :renderOn(actor) returns false for a lazy handle, and that is correct rather than broken.
+--     It attaches PalForge's OWN declared mesh (api/pal.lua:393) and a lazy handle declares
+--     none — the game is already drawing the creature. The two curated demos below have one.
+--   * :name() answers the id; the localised name is a DataTable row VALUE and reading one from
+--     Lua is still unsolved on this build (the marker in api/item.lua).
+--   * the lifecycle handlers (onSpawned / onDamaged / onDeath / onCaptured / onTick) only fire
+--     for a definition that DECLARES them. A lazy handle declares none, so it is a way to act
+--     ON a pal, not a way to be told about one. Declare your own Pal{ id = "...", events = ... }
+--     under the same id to be dispatched to — which replaces the registration, see
+--     test/cases/definitions.
 
-local Pal = require("palforge.api.pal")
-local log = require("palforge.utils.log").scope("native.pals")
+local Pal     = require("palforge.api.pal")
+local catalog = require("palforge.native._catalog")
+local log     = require("palforge.utils.log").scope("native.pals")
 
 local M = {}
 
--- CATALOG (DATA): every DT_PalMonsterParameter_Common row id (dump/01_datatables.txt).
--- GENERATED — do not hand-edit; regenerate from a fresh dump.
+-- The one DataTable this catalog stands for.
+M.TABLE = "DT_PalMonsterParameter_Common"
+
+-- CATALOG (DATA): every DT_PalMonsterParameter_Common row id — all 753 of them, verified
+-- against dumps/catalog/datatables/DT_PalMonsterParameter_Common.json (count 753, exact set
+-- match, 2026-07-26). GENERATED — do not hand-edit; regenerate from a fresh dump.
 M.CATALOG = {
   "RAID_NightLady", "RAID_NightLady_Dark", "RAID_NightLady_Dark_2", "RAID_KingBahamut_Dragon", "RAID_KingBahamut_Dragon_2", "GYM_WorldTreeDragon",
   "GYM_WorldTreeDragon_2", "GYM_BlackGriffon", "GYM_ElecPanda", "GYM_Horus", "GYM_LilyQueen", "GYM_ThunderDragonMan",
@@ -148,12 +182,20 @@ M.CATALOG = {
   "PREDATOR_Umihebi_Fire_Quest", "AmaterasuWolf_Dark_Quest_Friend", "AmaterasuWolf_Dark_Quest_Enemy",
 }
 
-local set = {}
-for _, id in ipairs(M.CATALOG) do set[id] = true end
+-- Membership set + on-demand cache for get(), plus the alias table the naming rule produces
+-- (empty here: all 753 ids are already Lua identifiers, so every name is its own id). One pass,
+-- the same one that used to build `set` alone.
+local set, aliases, unnamed = catalog.index(M.CATALOG)
 local cache = {}
+
+---Names that are NOT ids. Empty for this catalog; see native/_catalog.lua rule (2).
+M.ALIASES = aliases
+---Rows with no named field, and why. Empty for this catalog; see rules (3) and (4).
+M.UNNAMED = unnamed
 
 -- get(id): a Pal wrapper for ANY real catalog id, built on first use + cached; nil if
 -- id is not a known monster row. defining sets .id and registers into object_manager.
+-- Reading a named field comes through here, so it is just as lazy.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
@@ -216,9 +258,20 @@ M.SheepBall = Pal{
 
 -- Pre-seed curated so get(id) returns the curated handle (hooks intact), and so
 -- get("SheepBall") resolves even though the DT row is spelled "Sheepball".
+--
+-- NOTE what this makes of the named fields. `M.Chicken` is a NICKNAME — "Chicken" is not a row
+-- id, so it names nothing but this hand-written definition, while `pals.ChickenPal` is the row's
+-- own name and resolves to this very handle through the cache below. `M.SheepBall` is the
+-- blueprint spelling the runtime dispatches by; `pals.Sheepball` is the DataTable row, whose
+-- lazy handle is what the icon table answers to. Neither pair is a typo and neither is hidden.
 for _, h in ipairs({ M.Chicken, M.SheepBall }) do
     set[h.id] = true
     cache[h.id] = h
 end
+
+-- LAST: hang the lazy named fields off the module. After the curated definitions, so the
+-- rule-(4) shadow check sees the module's complete own surface. See native/_catalog.lua.
+catalog.expose(M, { set = set, aliases = aliases, unnamed = unnamed,
+                    get = M.get, label = "native.pals" })
 
 return M

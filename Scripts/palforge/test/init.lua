@@ -176,6 +176,99 @@ pf_spawn = function()
     end)
 end,
 
+-- pf_mesh — THE ONE ACTION THAT PUTS A GAME ASSET ON SCREEN.
+--
+-- Everything about the mesh chain has been "declared correctly" for a while and nothing has
+-- been WATCHED. This settles that in one run, in three stages, and each stage's log line means
+-- something different:
+--
+--   [1] RESOLVE (read-only). core.mesh.assets tries every catalogued /Game/... path and prints
+--       `ASSET OK`/`ASSET MISS` with the class of whatever came back. This is the half no dump
+--       could ever settle for the animation blueprints — 05_assets.txt:803 says
+--       `AnimBlueprint classes : 0 loaded` and dumps/cxx ships ABP_Player.hpp, so the question
+--       has always been the RESOLVE, and `ASSET OK ABP.PinkCat -> AnimBlueprintGeneratedClass
+--       ...` is the line that closes it. `ASSET MISS ABP.*` closes it the other way and says
+--       loading an asset does not bring its generated class in.
+--
+--   [2] ATTACH, through the PUBLIC api. `Mesh{ ... }:attachTo(player)`, not a core call — the
+--       point is the pack-facing 導線, so it goes the way a pack goes. `kind = "static"` adds a
+--       component OF OURS to the player and touches nothing the player already wears; a
+--       skeletal attach would swap the player's own body, which nothing unattended may do to
+--       someone's save. A red tint is declared as well, so one look answers two questions.
+--
+--   [3] LOOK, then UNDO. 30 s on the clock (core.poll, elapsed — never a tick count), then
+--       :detach destroys the component again. WHAT TO LOOK FOR, in order of what it proves:
+--         * a wooden chest floating in front of you  -> path -> LoadAsset -> SetStaticMesh ->
+--           a visible component. The whole chain works. This has never been seen.
+--         * the chest is RED                          -> the dynamic material instance and the
+--           measured parameter names work too (base/renderer.lua's COLOR_PARAMS).
+--         * a chest but NOT red                       -> mesh chain yes, material names no —
+--           read the MATDESC block this prints for the names that asset really carries.
+--         * nothing at all, with `attachTo -> true`   -> it attached somewhere you cannot see;
+--           the offset below is relative to the pawn, so raise OFFSET.z and run it again.
+--         * nothing at all, with `attachTo -> false`  -> the log line above it says which step.
+pf_mesh = function()
+    local Mesh = require("palforge.api.mesh")
+    local mesh = require("palforge.core.mesh")
+    local poll = require("palforge.core.poll")
+
+    -- [1] resolve every catalogued path. Read-only; loads packages and touches no actor.
+    log.info("pf_mesh [1/3] resolving every known /Game/... path (read-only)")
+    local found = mesh.probeAssets(support.log)
+    local ok, miss = 0, 0
+    for _, r in ipairs(found) do if r.ok then ok = ok + 1 else miss = miss + 1 end end
+    log.info(string.format("pf_mesh [1/3] %d resolved, %d did not, of %d catalogued paths",
+        ok, miss, #found))
+
+    local pawn = support.player()
+    if not pawn then
+        log.warn("pf_mesh [2/3] no player pawn, so nothing can be dressed - the resolve above "
+            .. "is still the answer to the asset half")
+        return
+    end
+
+    -- [2] attach, through the public api, exactly as a pack would write it.
+    -- ChestWood is the single strongest path in the catalog: the live loaded-object sweep
+    -- printed it (05_assets.txt:1628) AND the game was rendering it off a real
+    -- BP_BuildObject_ItemChest_C's StaticMeshComponent (04_live_objects.txt:6).
+    local OFFSET = { x = 150, y = 0, z = 120 }
+    local handle = Mesh{
+        id    = support.id("mesh_live"),
+        kind  = "static",
+        model = mesh.assets.SM.ChestWood,
+        scale = 1.0,
+        offset = OFFSET,
+        color = { 1.0, 0.15, 0.15, 1.0 },
+    }
+    local attached = handle:attachTo(pawn)
+    log.info(string.format("pf_mesh [2/3] attachTo -> %s | %s at +%d,+%d,+%d from you",
+        tostring(attached), mesh.assets.SM.ChestWood, OFFSET.x, OFFSET.y, OFFSET.z))
+    if not attached then
+        log.warn("pf_mesh [2/3] nothing was attached - the [mesh] log line just above names "
+            .. "the step that refused (resolve, AddComponentByClass, SetStaticMesh, read-back)")
+        return
+    end
+
+    -- What the asset's OWN materials are called. This is the same read that found BaseColor
+    -- and 'Base Texture' on the player, pointed at a shipped prop instead: if the tint below
+    -- does not land, these are the names it should have been writing.
+    mesh.describeMaterials(pawn, support.log)
+
+    -- [3] look at it, then take it off again. Bounded on ELAPSED SECONDS, never on ticks:
+    -- the heartbeat's bodies drain in bursts and a tick budget can expire in one second
+    -- (core/poll.lua's own warning).
+    log.info("pf_mesh [3/3] LOOK IN FRONT OF YOU - it comes off again in 30 s")
+    support.announce("pf_mesh: a chest should be in front of you (red if the tint landed)")
+    poll.every("pf_mesh detach", function(elapsed)
+        if elapsed < 30 then return false end
+        local gone = handle:detach(pawn)
+        log.info(string.format("pf_mesh [3/3] detach -> %s (true = K2_DestroyComponent ran and "
+            .. "the component is off; false = it did not, and the chest is still there)",
+            tostring(gone)))
+        return true
+    end)
+end,
+
 pf_teach = function()
     local character = require("palforge.core.character")
     local pal, cls = support.nearbyPal()
@@ -345,7 +438,7 @@ end
 -- and from the log that was indistinguishable from a probe that ran and found nothing. Keys are
 -- convenient and they are not ours to reserve; a command is.
 --
---   pf_watch     pf_reflect     pf_pal     pf_title     pf_tests
+--   pf_watch     pf_reflect     pf_pal     pf_title     pf_tests     pf_mesh
 --
 -- Open the UE4SS console (its GUI window) and type one. Same work, same output, no key involved.
 local function installCommands()

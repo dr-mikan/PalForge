@@ -32,6 +32,36 @@
 -- material that happens to be loaded (supply one with `material` if the default guesses
 -- miss), while a static or skeletal asset arrives with authored materials and is instanced
 -- directly. `animClass` is skeletal-only, as marked.
+--
+-- POINTING AT A GAME ASSET IS THE MAIN CASE, and `Mesh.assets` is where the paths live:
+--
+--   Pal{ id = "pack:Boss",   mesh = { model = Mesh.assets.SK.PinkCat,
+--                                     animClass = Mesh.assets.ABP.PinkCat } }
+--   Building{ id = "pack:Statue", mesh = { model = Mesh.assets.SM.ChestWood } }
+--
+-- Both defaults already line up with those tables — Mesh.Spec fills kind = "skeletal" (a
+-- creature body) and Building.Spec.Mesh fills kind = "static" (a prop) — so the two lines
+-- above need no `kind` and neither does the shorter `mesh = { model = "/Game/..." }` form.
+-- Every entry in Mesh.assets was observed in THIS build; core/mesh/assets.lua cites where.
+-- The mesh, its materials and its textures all arrive together, because a cooked asset
+-- carries its own material slots and those slots carry their own textures — nothing has to
+-- be imported for the game's own art to render. What a spec's `texture` / `color` add is an
+-- OVERRIDE on top of that, through the dynamic material instance — and `texture` points at an
+-- asset too, so a re-skin needs no file on the player's disk either:
+--
+--   Mesh{ id = "pack:heli", model = Mesh.assets.SK.AttackHelicopter,
+--         params = { texture = { ["Base Texture"] = Mesh.assets.T.HelicopterBase,
+--                                ["Normal Map"]   = Mesh.assets.T.HelicopterNormal } } }
+--
+-- Those parameter names are MEASURED off a running game (core/mesh/base/renderer.lua), and
+-- `texture` accepts either a /Game/... path or an absolute .png of your own; the string's
+-- shape decides which route it takes, and only one of the two can ever apply to it.
+--
+-- A path that does not resolve, or resolves to the wrong class (an SM_ static mesh declared
+-- on a pal, whose kind defaults to skeletal), is a logged English error and a false — never
+-- a raw object handed to a typed engine setter. That check is not politeness: a UStaticMesh
+-- is NOT a USkinnedAsset (they are siblings, dumps/cxx/Engine.hpp:20511 vs :21631) and a
+-- wrong argument type faults inside UE4SS's marshalling where pcall cannot see it.
 
 local om     = require("palforge.core.object_manager")
 local mesh   = require("palforge.core.mesh")
@@ -56,15 +86,17 @@ local Spec = schema.define("Mesh.Spec", {
     { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
                    default = "skeletal", doc = "which core.mesh backend renders it" },
     { "model",     type = "string", required = true,
-                   doc = "USkeletalMesh / UStaticMesh object path; for procedural / obj, an absolute .obj file path" },
-    { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
+                   doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an absolute .obj file path" },
+    { "animClass", type = "string",
+                   doc = "a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only" },
     { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
     { "offset",    type = "table",  doc = "{ x, y, z } offset from the mesh's normal position, in cm" },
-    { "texture",   type = "string", doc = "absolute path to a png applied to the mesh" },
+    { "texture",   type = "string",
+                   doc = "a /Game/... UTexture2D path (see Mesh.assets.T), or an absolute path to a png of your own" },
     { "color",     type = "table",  doc = "tint { r, g, b, a } in 0..1" },
     { "material",  type = "string", doc = "base material asset path to instance from" },
     { "params",    type = "table",
-                   doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"<abs png>\" } }" },
+                   doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"/Game/... or <abs png>\" } }" },
 }, { handle = "Mesh.Handle" })   -- a Mesh.Handle satisfies this shape too (see __spec below)
 
 --=============================================================================
@@ -196,6 +228,28 @@ function Handle:source() return self._cls:source() end
 function Handle:model() return self._cls.model end
 ---@return string
 function Handle:kind() return self._cls.kind or "skeletal" end
+
+--=============================================================================
+-- the ASSET catalog — /Game/... paths that are known to exist in this build
+--=============================================================================
+
+---Known-good game asset paths plus the resolver behind them. A pack reaches everything it
+---needs through this one table:
+---
+---  Mesh.assets.SM.<name>    UStaticMesh paths       (kind = "static")
+---  Mesh.assets.SK.<name>    USkeletalMesh paths     (kind = "skeletal")
+---  Mesh.assets.ABP.<name>   AnimBlueprintGeneratedClass paths (`animClass`)
+---  Mesh.assets.T.<name>     UTexture2D paths        (`texture`, `params.texture`)
+---  Mesh.assets.MI.<name>    material instance paths (`material`)
+---  Mesh.assets.palMesh(n)   the conventional SK_ path for a monster folder name
+---  Mesh.assets.palAnim(n)   the conventional ABP _C path for the same
+---  Mesh.assets.load(p, o)   resolve one yourself -> obj, or nil + why
+---  Mesh.assets.probe(sink)  try them all and report (read-only)
+---
+---Every table entry was OBSERVED in this build — either in the live loaded-object sweep or
+---read off a live actor's own component — and core/mesh/assets.lua cites which for each. The
+---two builder functions return a path SHAPE and are documented as the weaker claim they are.
+Mesh.assets = mesh.assets
 
 Mesh.Class = Class   -- the base class (used for subclassing / override detection)
 return Mesh

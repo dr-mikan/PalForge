@@ -106,17 +106,21 @@
 --       id          = "NewPal",
 --       name        = "New Pal",
 --       description = "the one that greets you",
---       -- a real, dump-confirmed skeletal path (dumps/reflection/05_assets.txt):
+--       -- A DECLARED MESH RENDERS ITSELF: nothing below calls renderOn, and the pawn still
+--       -- wears this the moment it spawns. See the note in define().
 --       mesh        = Mesh{ id = "newpal:body",
---                           model = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal" },
+--                           model     = Mesh.assets.SK.PinkCat,
+--                           animClass = Mesh.assets.ABP.PinkCat },
 --       events      = {
 --           onSpawned = function(pal, ctx)
---               pal:renderOn(ctx.actor)
 --               Audio.get("AKE_BGM_Title"):play()   -- get, not define: a handler runs often
 --           end,
 --       },
 --   }
 --   pal:spawn(Player.coordinate())
+--
+-- Mesh.assets is the catalog of /Game/... paths measured off this build (core/mesh/assets.lua);
+-- an inline `mesh = { model = "/Game/..." }` is the same thing without naming it.
 
 local om      = require("palforge.core.object_manager")
 local spawn   = require("palforge.core.spawn")
@@ -190,7 +194,7 @@ local Spec = schema.define("Pal.Spec", {
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "skills",      type = "table", arrayOf = "string", doc = "skill ids this pal owns (see Skill)" },
     { "mesh",        type = "table", of = Mesh,
-                     doc = "the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)" },
+                     doc = "the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned" },
     { "material",    type = "table", of = Material, doc = "material override applied to that mesh" },
     { "color",       type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
     { "texture",     type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
@@ -286,6 +290,34 @@ local function define(spec)
     for name, handler in pairs(spec.events or {}) do           -- onSpawned, ...
         cls[name] = function(_, ...) return handler(handle, ...) end
     end
+    -- A DECLARED MESH RENDERS ITSELF. Until now `mesh = { model = ... }` stored a string and
+    -- nothing else: renderOn existed, and every pal that wanted to be seen had to write
+    -- `events = { onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end }` by hand. That
+    -- is boilerplate for the one thing declaring a mesh can possibly have meant, so declaring
+    -- it is now the whole of it — which is what makes `Pal{ id = "pack:Boss", mesh = { model =
+    -- Mesh.assets.SK.PinkCat } }` a complete, working definition.
+    --
+    -- ON SPAWN, not on the tick sweep. pal.spawned is the moment a pawn has finished its
+    -- parameter init (core/event.lua's three-source dedupe), which is the earliest point at
+    -- which its .Mesh component is real. The tick sweep would also reach the pawn, once every
+    -- PAL_SCAN_MS forever, and paying that for a mesh that only ever needs setting once is the
+    -- wrong trade — so this is on the one channel that fires once per pawn and nowhere else.
+    --
+    -- Buildings needed no equivalent: core/event.lua:486 already defers `inst:render()` onto a
+    -- placed structure, so `Building{ mesh = { model = ... } }` has always drawn itself. This
+    -- closes the same gap on the pal side.
+    --
+    -- The author's own onSpawned still runs, and runs AFTER: a handler that wants to move,
+    -- rename or re-tint the pawn should find the mesh already on it. mesh.attachOnce guards
+    -- against re-stacking, so a second spawn event for one pawn costs nothing, and the whole
+    -- thing is pcall'd — a mesh that will not resolve must never cost a pal its lifecycle.
+    if type(spec.mesh) == "table" and spec.mesh.model then
+        local declared = cls.onSpawned   -- the author's forwarder, or Class's inert default
+        cls.onSpawned = function(self, ctx, ...)
+            pcall(function() handle:renderOn(ctx and ctx.actor) end)
+            return declared(self, ctx, ...)
+        end
+    end
     -- Registration is what makes the definition reachable: core/event resolves a spawned
     -- pawn to THIS class through it, and Pal.get hands it back. om.register never throws
     -- (it answers nil + reason) and neither argument can be wrong here — "pal" is a declared
@@ -379,8 +411,11 @@ function Handle:spawn(arg)
 end
 
 ---Attach this pal's declared mesh to a live pawn (one-shot; core.mesh guards against
----re-stacking). Pals get no tracked instance, so the caller supplies the actor — typically
----`ctx.actor` inside onSpawned, or inside onTick if the sweep is how you find your pawns.
+---re-stacking).
+---
+---YOU DO NOT NORMALLY CALL THIS. A definition that declares a `mesh` attaches it itself on
+---pal.spawned (see define()), so this is the manual route for a pawn PalForge did not spawn,
+---for a pawn found through the onTick sweep, and for re-applying after a detach.
 ---Fail-soft false when there is no mesh or no valid actor.
 ---NOTE: the material fields (color / texture / params / material) are lowered into the
 ---mesh spec and every backend now runs them through core.mesh's dynamic-material layer,

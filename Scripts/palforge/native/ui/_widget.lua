@@ -302,14 +302,44 @@ end
 -- belongs to the in-game UI. An element that wants it should ride :autoMount, exactly as a
 -- title-screen element does.
 function M.gameUIRoot()
-    local layout = M.findFirst(M.PATHS.gameUILayout)
-    if not layout then
-        return nil, "no " .. M.PATHS.gameUILayout .. " live (title screen, or still loading)"
+    return M.hostPanel(M.PATHS.gameUILayout, M.PATHS.gameUIRoot)
+end
+
+-- The same two steps for ANY panel the game already draws: find a live widget by CLASS, then
+-- reach the panel inside it that will take our children. gameUIRoot is this call with the one
+-- pair of names PalForge had measured; a pack that wants to extend a different screen names its
+-- own pair and gets the same fail-soft contract (panel, or nil + a sentence).
+--
+--   widget.hostPanel("PalPrimaryGameLayoutBase", "CanvasPanel_Root")   -- the in-game UI root
+--   widget.hostPanel("PalUITitleBase", "VerticalBox_0")                -- the title button column
+--
+-- THE PANEL IS READ AS A PROPERTY FIRST, then searched for by name. Both halves are deliberate
+-- and each covers the other's blind spot:
+--   * a declared member is at a known offset and answers immediately — that is the route
+--     WBP_PalOverallUILayout's CanvasPanel_Root takes (dumps/cxx/WBP_PalOverallUILayout.hpp:9),
+--     and a tree walk would find the same object more slowly and could find a different one;
+--   * a widget whose designer "Is Variable" box is unchecked gets NO member and still exists in
+--     the WidgetTree — the same fact recorded against HorizontalBox_0 at the TODO further down
+--     this file — so the name search is what reaches those, and TitleMenu already finds
+--     VerticalBox_0 that way (title_menu.lua:147).
+-- `panelName` omitted means the found widget IS the panel; it is returned as-is and whether it
+-- takes children is answered by the first AddChild, not guessed at here.
+---@return userdata? panel, string? reason
+function M.hostPanel(className, panelName)
+    if type(className) ~= "string" or #className == 0 then
+        return nil, "hostPanel: a host widget CLASS name is required"
     end
+    local host = M.findFirst(className)
+    if not host then
+        return nil, "no " .. className .. " live (title screen, or still loading)"
+    end
+    if panelName == nil then return host end
+
     local panel
-    pcall(function() panel = layout[M.PATHS.gameUIRoot] end)
+    pcall(function() panel = host[panelName] end)
+    if not alive(panel) then panel = M.findByName(host, panelName) end
     if not alive(panel) then
-        return nil, M.PATHS.gameUILayout .. " has no live " .. M.PATHS.gameUIRoot
+        return nil, className .. " has no live " .. panelName
     end
     return panel
 end

@@ -1,0 +1,428 @@
+-- PalForge native.ui.tree: turn a DECLARED node tree into real widgets, and keep it in
+-- step. api/ui declares the vocabulary (UI.VBox / UI.Label / UI.Button — pure data, no
+-- engine anywhere in it); this file is the only place that data meets UMG.
+--
+-- THE SPLIT, AND WHY IT IS EXACTLY HERE. api/ui.lua has never made an engine call, which
+-- is what lets test/cases/ui.lua prove the whole lifecycle with no game running. Putting
+-- the node CONSTRUCTORS there and the widget CONSTRUCTION here keeps that property: a
+-- declared tree can be built, validated, nested and inspected headlessly, and the first
+-- thing that can fail for a game-shaped reason is `tree.mount`, which is reached through a
+-- lazy require from api/ui and returns nil + a sentence rather than raising.
+--
+--   node (pure table, api/ui)  ->  tree.mount  ->  widgets (_widget.lua)  ->  a host panel
+--
+-- WHAT A "BUILT" TREE IS. One table, returned by mount and handed back to update/destroy:
+--   root    the widget the tree's root node became (what was added to the host)
+--   slot    the host's slot for it, when the host handed one back
+--   byName  every node that declared `name`, as name -> live widget (UI.Handle:find)
+--   binds   one record per DYNAMIC field: { get = fn, set = fn, widget = w, last = value }
+--   clicks  the click-router keys this tree registered, so destroy can release exactly
+--           its own and no other element's
+--
+-- BINDINGS, i.e. why a field may be a function. A declared tree is built once; if the only
+-- way to change what it says were to rebuild it, :refresh() would be dead weight for every
+-- declarative element and a panel would have to be torn down to show a new number. So a
+-- bindable field (`text`, `visible`) accepts a function, it is called with the ELEMENT
+-- INSTANCE as its argument, and update() re-calls it and writes the result only when it
+-- CHANGED. That last part is the syncEntry discipline from title_menu.lua:77-99, for the
+-- same reason: a heartbeat refresh over an unchanged panel should cost comparisons, not
+-- native calls.
+--
+-- ALL OR NOTHING. A node that will not build fails the whole mount: everything already
+-- built is dropped, the click keys are released, and mount returns nil + which node failed
+-- and why. api/ui turns that into `render -> false`, which leaves the element UNMOUNTED so
+-- :autoMount retries it — the shape a host that is not up yet needs (api/ui.lua:115-124).
+-- A half-built panel that latched as mounted could never be repaired by retrying.
+--
+-- WHAT IS PROVEN AND WHAT IS NOT. Every widget call below is one this tree already makes
+-- somewhere that shipped: the primitives are _widget.lua's (verified in-game 2026-07-17,
+-- poc/V6-ui-native), the button is exactly native/ui/button.lua's route, and constructing a
+-- native primitive with a GAME-OWNED panel as its outer is what title_menu.lua:112 does for
+-- every entry it injects. What nobody has watched is a declared tree drawing inside
+-- WBP_PalOverallUILayout's CanvasPanel_Root: the host is confirmed to EXIST and to be a
+-- UPanelWidget (dumps/cxx/WBP_PalOverallUILayout.hpp:9, live instance at
+-- dumps/reflection/03_widgets.txt:54), and nothing has yet been seen to appear in it.
+
+local widget = require("palforge.native.ui._widget")
+local sig    = require("palforge.core.signature")
+
+local M = {}
+
+local alive = widget.alive
+
+-- Slate alignment, named as a pack author writes it. The integers are _widget.HALIGN /
+-- VALIGN, which read them off SlateCore_enums.hpp:91-97.
+local HALIGN = { fill = widget.HALIGN.FILL, left = widget.HALIGN.LEFT,
+                 center = widget.HALIGN.CENTER, right = widget.HALIGN.RIGHT }
+local VALIGN = { fill = widget.VALIGN.FILL, top = widget.VALIGN.TOP,
+                 center = widget.VALIGN.CENTER, bottom = widget.VALIGN.BOTTOM }
+
+-- ESlateVisibility (dumps/cxx/UMG_enums.hpp:48-55). COLLAPSED, not Hidden, for a false:
+-- Hidden keeps the widget's space in the layout and Collapsed does not, and a row that
+-- vanishes leaving a hole is not what `visible = false` reads as.
+local VISIBLE, COLLAPSED = 0, 1
+
+--=============================================================================
+-- pure helpers — no engine call, so the suite can check them headlessly
+--=============================================================================
+
+---Resolve a possibly-BOUND value. A function is the binding form: it is called with the
+---element instance and its return is the value. A raising binding yields nil plus the
+---error text rather than taking the refresh down — it runs on every heartbeat, and one bad
+---frame must not stop the other bindings in the same tree.
+---@return any value, string? err
+function M.valueOf(v, self)
+    if type(v) ~= "function" then return v end
+    local ok, r = pcall(v, self)
+    if ok then return r end
+    return nil, tostring(r)
+end
+
+---An FMargin-shaped table from a number (all four sides) or a { left =, top =, ... } table.
+---nil for anything else, which is how a node with no padding skips the call entirely.
+---
+---This is the ONE struct-shaped argument this file passes, and it is deliberate rather than
+---an oversight of the rule in core/signature.lua: SetPadding(FMargin) with exactly the four
+---field names below is already in the shipped title-menu path (title_menu.lua:40-41,
+---_widget.lua:574-575) and has run in game without incident, where SetAnchors(FAnchors) /
+---SetAlignment(FVector2D) were removed from that same file for being unread struct calls.
+---The difference that matters is that FMargin's four floats are named here in full, so
+---UE4SS has a complete table to marshal rather than a partial one. It stays inside a pcall
+---and it stays optional: a node that declares no padding makes no such call.
+function M.margin(p)
+    if type(p) == "number" then return { Left = p, Top = p, Right = p, Bottom = p } end
+    if type(p) ~= "table" then return nil end
+    return { Left   = tonumber(p.left   or p.Left)   or 0,
+             Top    = tonumber(p.top    or p.Top)    or 0,
+             Right  = tonumber(p.right  or p.Right)  or 0,
+             Bottom = tonumber(p.bottom or p.Bottom) or 0 }
+end
+
+--=============================================================================
+-- writers — one per bindable field, so update() and build() write the same way
+--=============================================================================
+
+local function setText(w, v)
+    local s = (v == nil) and "" or tostring(v)
+    return pcall(function() w:SetText(FText(s)) end) == true
+end
+
+local function setVisible(w, v)
+    local mode = (v == false or v == nil) and COLLAPSED or VISIBLE
+    return pcall(function() w:SetVisibility(mode) end) == true
+end
+
+--=============================================================================
+-- slots — the parent's half of a child's layout
+--=============================================================================
+
+-- Alignment goes through core/signature, exactly as _widget.leftAlignButtonContent does:
+-- SetHorizontalAlignment / SetVerticalAlignment are declared by every box, overlay, border
+-- and size slot (UMG.hpp:734, :1056, :287, :1328, :1800) and by NO canvas slot — a
+-- UCanvasPanelSlot has SetAnchors/SetAlignment instead (:364-365), both struct calls. So a
+-- node that asks for alignment inside the game's own canvas host gets a logged refusal
+-- naming what the slot really declares, instead of a raise or a silent no-op.
+-- ByteProperty covers both spellings: signature treats it and EnumProperty as equivalent.
+local function applySlot(slot, node)
+    if type(slot) ~= "userdata" then return false end   -- `true` = placed, no slot to style
+    if node.hAlign then
+        sig.call(slot, "SetHorizontalAlignment", { "ByteProperty" }, HALIGN[node.hAlign])
+    end
+    if node.vAlign then
+        sig.call(slot, "SetVerticalAlignment", { "ByteProperty" }, VALIGN[node.vAlign])
+    end
+    local m = M.margin(node.padding)
+    if m then
+        -- Both forms, as every slot write in this tree does: UE4SS setters sometimes no-op
+        -- where the property write lands, and vice versa (see _widget.sizeBox).
+        pcall(function() slot:SetPadding(m) end)
+        pcall(function() slot.Padding = m end)
+    end
+    return true
+end
+
+-- Which kinds hold their child through SetContent rather than AddChild. UBorder and USizeBox
+-- are UContentWidgets (UMG.hpp:247, :1291 -> :505), and SetContent is what the shipped
+-- screen frame and title-menu entry use (_widget.lua:384-386, title_menu.lua:113).
+local CONTENT = { border = true, sizebox = true }
+
+-- Put `child` into `parent` and return something to style: the slot when one came back,
+-- `true` when the child was placed but this build handed back no slot, nil when it was not
+-- placed at all. SetContent is DECLARED to return a UPanelSlot (UMG.hpp:507) and the
+-- shipped call sites ignore it, so no run has ever confirmed it answers here — hence the
+-- middle case, which loses the styling and keeps the child.
+local function attach(parentNode, parentWidget, childWidget)
+    if CONTENT[parentNode.kind] then
+        local ok, slot = pcall(function() return parentWidget:SetContent(childWidget) end)
+        if not ok then return nil end
+        return slot or true
+    end
+    return widget.addChild(parentWidget, childWidget)
+end
+
+--=============================================================================
+-- makers — node kind -> one live widget
+--
+-- Each raises on failure (error, not a return): buildNode pcalls them, so a raise becomes
+-- the reason string in mount's second return. `ctx` carries the construct outer, the
+-- element instance the bindings read, and a lazily-found player controller.
+--=============================================================================
+
+local MAKE = {}
+
+MAKE.vbox    = function(_, ctx) return widget.vbox(ctx.outer) end
+MAKE.hbox    = function(_, ctx) return widget.hbox(ctx.outer) end
+MAKE.overlay = function(_, ctx) return widget.overlay(ctx.outer) end
+MAKE.scroll  = function(_, ctx) return widget.scrollBox(ctx.outer) end
+MAKE.border  = function(node, ctx) return widget.border(ctx.outer, node.color) end
+MAKE.sizebox = function(node, ctx) return widget.sizeBox(ctx.outer, node.width, node.height) end
+
+-- The player controller a Blueprint widget has to be created for. Found once per mount and
+-- kept on ctx: WidgetBlueprintLibrary:Create needs one (_widget.create), and a tree with
+-- five buttons should not do five FindFirstOf calls.
+local function controller(ctx)
+    if ctx.pc == nil then ctx.pc = widget.findFirst("PalPlayerController") or false end
+    if not ctx.pc then error("no PalPlayerController to own a Blueprint widget", 0) end
+    return ctx.pc
+end
+
+-- Record a binding when the field was declared as a function. `last` is what was just
+-- written, so the first refresh only writes if the value has actually moved since.
+local function bind(built, node, field, setter, w, current)
+    if type(node[field]) ~= "function" then return end
+    built.binds[#built.binds + 1] =
+        { get = node[field], set = setter, widget = w, last = current, field = field }
+end
+
+MAKE.label = function(node, ctx, built)
+    local text = M.valueOf(node.text, ctx.self)
+    local w = widget.text(ctx.outer, (text == nil) and "" or tostring(text), node.size, node.color)
+    bind(built, node, "text", setText, w, text)
+    return w
+end
+
+-- A button is the GAME'S own WBP_Title_MenuButton, wired through the shared click router —
+-- the identical route native/ui/button.lua takes, so a declared button and an imperative
+-- one are the same widget with the same click path and there is only one thing to reason
+-- about. The label alignment inside it is the one open cosmetic unknown
+-- (TODO(ui-menubutton-inner-slot) at _widget.lua:426).
+--
+-- The handler is called as onClick(self, ctx) — `self` is the ELEMENT INSTANCE, so a button
+-- can read and write the same state its siblings' bindings display, and ctx names the node
+-- and the widget that was clicked. That is the house shape for events (Pal / Building /
+-- Item all pass (self, ctx)), and it is what makes one declared tree reusable across
+-- instances: the node is shared, `self` is not.
+MAKE.button = function(node, ctx, built)
+    local pc = controller(ctx)
+    local text = M.valueOf(node.text, ctx.self)
+    local clickCtx = { node = node, name = node.name }
+    local onClick = node.onClick and function()
+        node.onClick(ctx.self, clickCtx)
+    end or nil
+
+    local btn, inv, key = widget.menuButton(ctx.outer, pc, (text == nil) and "" or tostring(text), onClick)
+    if not btn then error("menuButton: " .. tostring(inv), 0) end
+    clickCtx.widget = btn
+    if key then built.clicks[#built.clicks + 1] = key end
+
+    -- A dynamic label writes to the button's label CHILD, not to the button: the text lives
+    -- on Test_Content inside it (_widget.PATHS.menuButtonLabel).
+    if type(node.text) == "function" then
+        local lbl = widget.findByName(btn, widget.PATHS.menuButtonLabel)
+        if alive(lbl) then bind(built, node, "text", setText, lbl, text) end
+    end
+    return btn
+end
+
+-- Any Blueprint widget the game already ships, cloned by class path. This is the escape
+-- hatch for "use the game's own component": the node names the class, which child carries
+-- the label, and which child is the clickable one, because those three names differ per
+-- widget and nothing can guess them (WBP_Title_MenuButton's are Test_Content and
+-- WBP_PalInvisibleButton — dumps/cxx/WBP_Title_MenuButton.hpp:14-15).
+MAKE.gamewidget = function(node, ctx, built)
+    local pc = controller(ctx)
+    local clickCtx = { node = node, name = node.name }
+    local text = M.valueOf(node.text, ctx.self)
+    local w, key = widget.cloneGameWidget(ctx.outer, pc, node.class, {
+        label      = (text ~= nil) and tostring(text) or nil,
+        labelChild = node.textChild,
+        clickChild = node.clickChild,
+        onClick    = node.onClick and function() node.onClick(ctx.self, clickCtx) end or nil,
+    })
+    if not w then error("clone " .. tostring(node.class) .. ": " .. tostring(key), 0) end
+    clickCtx.widget = w
+    if key then built.clicks[#built.clicks + 1] = key end
+    if type(node.text) == "function" and node.textChild then
+        local lbl = widget.findByName(w, node.textChild)
+        if alive(lbl) then bind(built, node, "text", setText, lbl, text) end
+    end
+    return w
+end
+
+---The node kinds this file can build. api/ui declares the same set as specs; this is the
+---list a caller can check against without loading the engine half.
+---@return table<string, boolean>
+function M.kinds()
+    local out = {}
+    for k in pairs(MAKE) do out[k] = true end
+    return out
+end
+
+--=============================================================================
+-- build
+--=============================================================================
+
+-- Build one node and everything under it. Returns the widget, or nil + a reason that names
+-- the node kind and the path it failed on.
+local function buildNode(node, ctx, built)
+    local maker = MAKE[node.kind]
+    if not maker then return nil, "no builder for node kind " .. tostring(node.kind) end
+
+    local ok, w = pcall(maker, node, ctx, built)
+    if not ok then return nil, string.format("%s: %s", node.kind, tostring(w)) end
+    if not alive(w) then return nil, node.kind .. ": built nothing" end
+    if node.name then built.byName[node.name] = w end
+
+    if node.visible ~= nil then
+        local v = M.valueOf(node.visible, ctx.self)
+        setVisible(w, v)
+        bind(built, node, "visible", setVisible, w, v)
+    end
+
+    for i, child in ipairs(node.children or {}) do
+        local cw, why = buildNode(child, ctx, built)
+        if not cw then
+            return nil, string.format("%s -> child %d: %s", node.kind, i, tostring(why))
+        end
+        local slot = attach(node, w, cw)
+        if not slot then
+            return nil, string.format("%s did not accept child %d (a %s)", node.kind, i, child.kind)
+        end
+        applySlot(slot, child)
+    end
+    return w
+end
+
+---Build `node` and put it into `ctx.host`. Returns the built tree, or nil + a reason.
+---
+---ctx = { host  = the panel this tree hangs in (must answer AddChild),
+---        outer = the UObject the primitives are constructed under (default: the host),
+---        self  = the element instance handed to every binding and click handler }
+---
+---ABOUT `outer`. Every native primitive needs a construct outer, and a UUserWidget of our
+---own has a WidgetTree to be that (_widget.screen builds one — the crux recorded at
+---_widget.lua:265-275). A panel belonging to the GAME has no such thing to hand us, so the
+---outer is the host panel itself, which is what title_menu.lua:112 already does for every
+---entry it injects into the title screen's own VerticalBox. The outer decides ownership and
+---naming, not parenting: the widget is kept alive by the slot that holds it.
+---@return table? built, string? reason
+function M.mount(node, ctx)
+    if type(node) ~= "table" or type(node.kind) ~= "string" then
+        return nil, "no root node was declared"
+    end
+    ctx = ctx or {}
+    if not ctx.host then return nil, "no host panel to mount into" end
+    ctx.outer = ctx.outer or ctx.host
+
+    local built = { byName = {}, binds = {}, clicks = {} }
+    local w, why = buildNode(node, ctx, built)
+    if not w then
+        M.destroy(built)     -- release whatever the partial build already registered
+        return nil, why
+    end
+
+    local slot = widget.addChild(ctx.host, w)
+    if not slot then
+        built.root = w
+        M.destroy(built)
+        return nil, "the host did not accept the tree's root — is it a UPanelWidget?"
+    end
+    built.root, built.slot = w, slot
+    applySlot(slot, node)
+    return built
+end
+
+---Re-evaluate every binding and write the ones that changed. Returns true plus how many
+---writes were made (0 is the normal case for an idle panel).
+---@return boolean ok, integer written
+function M.update(built, self)
+    if type(built) ~= "table" then return false, 0 end
+    local n = 0
+    for _, b in ipairs(built.binds or {}) do
+        if alive(b.widget) then
+            local v = M.valueOf(b.get, self)
+            if v ~= b.last then
+                if b.set(b.widget, v) then b.last = v; n = n + 1 end
+            end
+        end
+    end
+    return true, n
+end
+
+---Take a built tree back off screen: release exactly the click-router keys it registered
+---(never another element's — that is why the keys are recorded per tree) and remove its
+---root, which takes every descendant with it. True when a live root was really removed.
+function M.destroy(built)
+    if type(built) ~= "table" then return false end
+    if built.clicks and #built.clicks > 0 then
+        pcall(function() widget.releaseClicks(built.clicks) end)
+    end
+    local w = built.root
+    built.root, built.slot = nil, nil
+    built.byName, built.binds, built.clicks = {}, {}, {}
+    if not alive(w) then return false end
+    return pcall(function() w:RemoveFromParent() end) == true
+end
+
+--=============================================================================
+-- hosts — where a declared tree goes
+--=============================================================================
+
+---Resolve a UI.Spec `host` declaration to something mountable. Returns
+---{ panel, outer, screen?, what } or nil + a reason, and the reason is the thing worth
+---reading: "no PalPrimaryGameLayoutBase live (title screen, or still loading)" is not a
+---failure, it is an element waiting for its host, which is what :autoMount is for.
+---
+---  "screen"                      a viewport layer of our own (_widget.screen)
+---  "game"                        the game's OWN in-game UI root canvas (_widget.gameUIRoot)
+---  { widget = ..., panel = ... } any live widget class, and the panel inside it
+---
+---`"screen"` is built with dim = false ON PURPOSE: _widget.screen's default frame is a
+---fullscreen dim plus an inset panel, and a frame the author did not declare is not
+---composition. A declared tree that wants one writes it — UI.Border{ UI.SizeBox{ ... } } —
+---and gets exactly the frame it can see in its own source.
+---@return table? host, string? reason
+function M.host(spec)
+    if spec == "screen" then
+        local screen, why = widget.screen(nil, { dim = false })
+        if not screen then return nil, tostring(why) end
+        return { panel = screen.root, outer = screen.tree, screen = screen,
+                 what = "a viewport layer of our own" }
+    end
+    if spec == "game" then
+        local panel, why = widget.gameUIRoot()
+        if not panel then return nil, tostring(why) end
+        return { panel = panel, outer = panel,
+                 what = widget.PATHS.gameUILayout .. "." .. widget.PATHS.gameUIRoot }
+    end
+    if type(spec) == "table" then
+        local panel, why = widget.hostPanel(spec.widget, spec.panel)
+        if not panel then return nil, tostring(why) end
+        return { panel = panel, outer = panel,
+                 what = tostring(spec.widget) .. (spec.panel and ("." .. spec.panel) or "") }
+    end
+    return nil, "unknown host: " .. tostring(spec)
+end
+
+---Give back a host that was CREATED for an element — today only the "screen" one, which is
+---a viewport layer nobody else owns. A host that was FOUND (the game's own panels) is not
+---ours to take down: the element removed its own widgets from it in destroy(), and that is
+---the whole of its footprint.
+function M.releaseHost(host)
+    if type(host) ~= "table" or not host.screen then return false end
+    local screen = host.screen
+    host.screen = nil
+    return widget.hide(screen)
+end
+
+return M

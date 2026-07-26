@@ -52,6 +52,7 @@
 --     offset = { x, y, z }, color = { r,g,b,a }, texture = "<abs png>",
 --     material = "<base material path>", params = { ... } }
 local Renderer = require("palforge.core.mesh.base.renderer")
+local assets   = require("palforge.core.mesh.assets")
 local sig      = require("palforge.core.signature")
 local log      = require("palforge.utils.log").scope("mesh")
 
@@ -64,18 +65,24 @@ local SkeletalMesh = Renderer:extend("SkeletalMeshRenderer")
 -- whose UE4SS will not walk a UFunction's properties.
 local MESH_SETTER_PARAMS = { "ObjectProperty", "BoolProperty" }
 
--- loaded assets cached by path (USkeletalMesh and the ABP UClass alike)
-local assetCache = {}
-local function loadAsset(path)
-    if type(path) ~= "string" or #path == 0 then return nil end
-    local a = assetCache[path]
-    if a and a:IsValid() then return a end
-    a = nil
-    pcall(function() if type(LoadAsset) == "function" then a = LoadAsset(path) end end)
-    if not (a and a:IsValid()) then pcall(function() a = StaticFindObject(path) end) end
-    if a and a:IsValid() then assetCache[path] = a; return a end
-    return nil
-end
+-- WHAT THE SETTER'S PARAMETER ACTUALLY ACCEPTS, and it is not "a mesh". Engine.hpp:20862
+-- says `USkinnedAsset* NewMesh`, and the class ladder makes that a real restriction rather
+-- than a formality: `USkeletalMesh : USkinnedAsset : UStreamableRenderAsset` (:20511, :20802)
+-- but `UStaticMesh : UStreamableRenderAsset` (:21631) — SIBLINGS. A UStaticMesh is not a
+-- USkinnedAsset and never was, so handing one to this call is a wrong argument TYPE, which is
+-- the failure mode that faults inside UE4SS's marshalling where pcall cannot catch it.
+--
+-- That was reachable from ordinary pack code until now: Mesh.Spec defaults `kind` to
+-- "skeletal", so `Pal{ mesh = { model = "/Game/.../SM_ChestWood.SM_ChestWood" } }` — a
+-- perfectly reasonable thing to type — resolved a UStaticMesh and passed it straight in. The
+-- resolve is class-checked for exactly that reason and the mismatch is an English error.
+local ASSET_CLASS = "SkinnedAsset"
+
+-- The class SetAnimClass wants. `UAnimBlueprintGeneratedClass : UBlueprintGeneratedClass :
+-- UClass` (Engine.hpp:10073, :11168), and dumps/reflection/04_live_objects.txt:15 confirms the
+-- name from the other end: reading AnimClass off a live pawn printed
+-- `AnimBlueprintGeneratedClass /Game/Pal/Blueprint/Character/Player/ABP_Player.ABP_Player_C`.
+local ANIM_CLASS = "AnimBlueprintGeneratedClass"
 
 -- Resolve the actor's skeletal mesh component. ONE route: the reflected UProperty
 -- `class USkeletalMeshComponent* Mesh` on ACharacter (dumps/cxx/Engine.hpp:8156), which
@@ -178,8 +185,11 @@ function SkeletalMesh:attach(actor, spec)
                 .. "dumps/cxx/Engine.hpp:8156) - it is probably not an APalCharacter")
             return false
         end
-        local mesh = loadAsset(model)
-        if not mesh then log.err("skeletal: cannot resolve mesh " .. model); return false end
+        -- THE PRIMARY ROUTE: a /Game/... path, loaded and class-checked (see ASSET_CLASS).
+        -- core/mesh/assets.lua carries the measured ones — assets.SK.PinkCat is the entry
+        -- whose mesh AND animation blueprint were read off the same live pawn.
+        local mesh, merr = assets.load(model, { class = ASSET_CLASS })
+        if not mesh then log.err("skeletal: " .. tostring(merr)); return false end
 
         -- capture EVERYTHING we are about to change, before changing it (see header)
         if originalOf[actor] == nil then
@@ -215,19 +225,25 @@ function SkeletalMesh:attach(actor, spec)
         -- Optional matching anim class: force AnimationBlueprint mode, then bind the ABP so
         -- the new skeleton is actually driven (an un-driven skinned mesh can cull to nothing).
         --
-        -- The weak link here is no longer the two calls (see below) but this RESOLVE. What
-        -- SetAnimClass wants is an AnimBlueprintGeneratedClass — the "…_C" object, not the
-        -- ABP asset — and the one live sweep on disk that looked for those found none:
-        -- dumps/reflection/05_assets.txt:803, `AnimBlueprint classes : 0 loaded`. The
-        -- generated classes plainly exist in this build (dumps/cxx carries ABP_Player.hpp,
-        -- ABP_MonsterBase.hpp and more), so it is a question of whether LoadAsset pulls one
-        -- in on demand, not of whether they are there. Nobody has tried.
+        -- THE RESOLVE WAS THE WEAK LINK AND IT IS NOW A REAL ROUTE. What SetAnimClass wants is
+        -- an AnimBlueprintGeneratedClass — the "…_C" object — and the old code asked plain
+        -- LoadAsset for it. That very probably could not work and it explains
+        -- dumps/reflection/05_assets.txt:803 (`AnimBlueprint classes : 0 loaded`) recorded in a
+        -- session where ABP_PinkCat_C was demonstrably driving a live pawn: the generated class
+        -- is not the package's own asset object, so loading `ABP_X.ABP_X_C` as an asset asks for
+        -- something that is not there to load. assets.loadClass splits it — LOAD the asset
+        -- `ABP_X.ABP_X`, then LOOK UP the object `ABP_X.ABP_X_C` that loading it brought in —
+        -- and class-checks the result, so what reaches SetAnimClass is a UClass or nothing.
+        -- See core/mesh/assets.lua's header for the full argument.
+        --
+        -- STILL UNOBSERVED: no run has resolved one. What has been measured is the PATH SHAPE,
+        -- read off live pawns (04_live_objects.txt:15 and :21) and recorded as assets.ABP.
         local animPath = spec.animClass or spec.anim
         if type(animPath) == "string" and #animPath > 0 then
-            local anim = loadAsset(animPath)
+            local anim, aerr = assets.loadClass(animPath, { class = ANIM_CLASS })
             if not anim then
-                log.warn("skeletal: cannot resolve animClass " .. animPath .. " - the swapped "
-                    .. "mesh keeps the pawn's existing animation blueprint")
+                log.warn("skeletal: animClass dropped, the swapped mesh keeps the pawn's "
+                    .. "existing animation blueprint - " .. tostring(aerr))
             else
                 -- Both calls are declared on USkeletalMeshComponent, which is what
                 -- `actor.Mesh` is, and both take exactly one argument:
@@ -241,13 +257,30 @@ function SkeletalMesh:attach(actor, spec)
                 -- arguments are scalars a wrong declaration could not fault on (a byte and
                 -- an object pointer), the calls are unchanged, and animClass is an optional
                 -- extra whose failure must never cost the mesh swap that already succeeded.
+                -- What made the object argument safe to pass on a bare pcall is the class
+                -- check above; before it, "not a UClass" was the likeliest thing to arrive.
                 pcall(function() mc:SetAnimationMode(0) end)
                 if not pcall(function() mc:SetAnimClass(anim) end) then
-                    -- Not "the name is missing" any more — it is declared. A raise here is
-                    -- the engine or UE4SS refusing the argument, most likely because what
-                    -- loadAsset returned is not a UClass.
-                    log.warn("skeletal: SetAnimClass raised on a declared function - "
-                        .. "animClass dropped (is " .. animPath .. " a _C class object?)")
+                    log.warn("skeletal: SetAnimClass raised on a declared function with a "
+                        .. "verified AnimBlueprintGeneratedClass argument - animClass dropped")
+                else
+                    -- READ IT BACK. `UClass* GetAnimClass()` — Engine.hpp:20732, zero
+                    -- arguments, the getter that pairs with the setter — so "the call ran" and
+                    -- "the class is on the component" stop being the same sentence. This is
+                    -- the same discipline the mesh setter above already gets from
+                    -- GetSkinnedAsset, and it is why the log line below can name a fact.
+                    -- A component that will not answer is a "cannot tell", not a failure.
+                    local bound; pcall(function() bound = mc:GetAnimClass() end)
+                    local boundName = assets.live(bound) and nameOf(bound) or nil
+                    local wantName  = nameOf(anim)
+                    if boundName and wantName and boundName ~= wantName then
+                        log.warn("skeletal: SetAnimClass ran and the component still reports "
+                            .. boundName)
+                    else
+                        log.info("skeletal: animClass " .. assets.describe(anim)
+                            .. (boundName and " (read back off the component)"
+                                          or " (the component would not read it back)"))
+                    end
                 end
             end
         end
@@ -275,7 +308,10 @@ function SkeletalMesh:attach(actor, spec)
         -- declared nothing leaves the pal's materials untouched (setColor makes the MID
         -- later if it is ever asked to).
         local st = self:dressMaterial(mc, actor, spec, {})
-        log.info("skeletal: set " .. model .. " via " .. via
+        -- assets.describe rather than the declared string: it prints the CLASS of what
+        -- actually landed, so a log line is evidence about the object instead of an echo of
+        -- what the pack typed.
+        log.info("skeletal: set " .. assets.describe(mesh) .. " via " .. via
             .. (st ~= "none" and (" material [" .. st .. "]") or ""))
         return true
     end)

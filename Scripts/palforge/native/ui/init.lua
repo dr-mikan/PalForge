@@ -20,8 +20,19 @@
 --   local host = ui.widget.gameUIRoot()
 --   if host then ui.Button:new{ label = "Mods", onClick = openMods }:mount(host) end
 
+--   -- OR, declared rather than built: the tree is the element, and it finds its own host.
+--   local VBox, Label, Button = UI.VBox, UI.Label, UI.Button
+--   UI{ id = "pack:Panel", host = "game",
+--       root = VBox{ Label{ text = "Supplies" }, Button{ text = "Take one", onClick = f } } }
+--       :new{}:autoMount(nil, 2000)
+--
+-- `tree` is what turns that declaration into widgets. It is re-exported for the same reason
+-- `widget` is — so it is reachable without an underscore module — but a pack should not need
+-- it: api/ui calls it, and what a pack writes is the declaration.
+
 local M = {}
 M.widget    = require("palforge.native.ui._widget")
+M.tree      = require("palforge.native.ui.tree")
 M.Button    = require("palforge.native.ui.button")
 M.TitleMenu = require("palforge.native.ui.title_menu")
 return M

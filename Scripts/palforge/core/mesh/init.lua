@@ -8,7 +8,16 @@
 --   M.attachOnce(actor, spec)        -- attach once per actor (guarded); gated by M.ENABLED
 --   M.setColor(actor, color, kind)   -- re-tint an attached mesh (kind is an optional hint)
 --   M.detach(actor)                  -- remove again what an attach put on `actor`
+--   M.assets                         -- core.mesh.assets: the /Game/... resolver + catalog
 --   M.ENABLED                        -- global kill-switch for runtime meshes
+--
+-- WHERE AN ASSET COMES FROM. `spec.model` is a /Game/... OBJECT PATH for the static and
+-- skeletal backends and an absolute .obj FILE PATH for the procedural one, and the object
+-- path is the primary case: it names something already cooked into the game's own pak, so
+-- there is nothing for a player to install and nothing to parse at runtime. M.assets does
+-- that resolve for both backends — one implementation, class-checked — and carries the
+-- handful of paths that are known to exist in this build (M.assets.SM.ChestWood,
+-- M.assets.SK.PinkCat, M.assets.ABP.PinkCat, ...). See core/mesh/assets.lua for provenance.
 --
 -- setColor and detach can't dispatch on `spec.kind` — they are handed a {r,g,b,a} colour
 -- table or nothing at all — so a successful attach RECORDS which backend dressed the
@@ -42,6 +51,10 @@ local renderers = {
     skeletal   = require("palforge.core.mesh.skeletal"),
 }
 renderers.obj = renderers.procedural  -- alias: "obj" is the procedural OBJ backend
+
+-- The asset layer, re-exported so a pack that has core.mesh already does not have to know
+-- the submodule path. This is the one place a KNOWN-GOOD /Game/... path lives.
+M.assets = require("palforge.core.mesh.assets")
 
 -- Pick the backend for a spec. A spec without an explicit `.kind` falls back to the
 -- default backend, preserving the old flat-module behaviour exactly.
@@ -106,6 +119,17 @@ end
 -- ---- on the old flat module) ----
 function M.parseObj(path) return renderers.procedural.parseObj(path) end
 function M.probeMaterials(extra) return renderers.procedural.probeMaterials(extra) end
+
+-- Resolve a /Game/... path the way a backend would, without attaching anything. `class` is
+-- the short UE class name to require ("StaticMesh", "SkinnedAsset"); omit it to accept
+-- whatever is there. Returns the object, or nil + the reason — which is the same string a
+-- failed attach logs, so a pack can check a path before it declares one.
+function M.resolve(path, class) return M.assets.load(path, { class = class }) end
+
+-- Try every catalogued path and report what resolved. READ-ONLY. This is what pf_mesh runs
+-- first, and what to run after a game patch: a path that has stopped resolving says so in
+-- one line rather than turning into a silent no-render.
+function M.probeAssets(sink) return M.assets.probe(sink) end
 
 -- READ which materials an actor is wearing and which parameter names they carry, writing
 -- nothing. This is a DIAGNOSTIC, not a capability, and it exists because both open mesh

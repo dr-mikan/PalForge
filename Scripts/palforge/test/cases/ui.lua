@@ -481,4 +481,221 @@ s:test("with a world loaded there is an owner for our widgets", function(t)
     t:truthy(widget.owner(), "a PlayerController or GameInstance is findable in a live world")
 end)
 
+--=============================================================================
+-- the DECLARATIVE tree: nodes are data, and every mistake is caught at the call site
+--
+-- Not one case here touches the engine, which is the property the split exists for: the node
+-- constructors live in api/ui and hold no widget code, so a whole panel can be declared,
+-- nested, mis-declared and inspected with no game running. The cases that would BUILD one skip
+-- themselves in a live session, exactly as the screen and Button cases above do.
+--=============================================================================
+
+local VBox, HBox, Label, Button = UI.VBox, UI.HBox, UI.Label, UI.Button
+local Border, SizeBox = UI.Border, UI.SizeBox
+
+s:test("a node carries its kind and its validated fields, and nothing else", function(t)
+    local n = Label{ text = "Supplies", size = 18, name = "title" }
+    t:eq(n.kind, "label", "the node knows which widget it becomes")
+    t:eq(n.text, "Supplies", "declared fields are on the node")
+    t:eq(n.size, 18, "all of them")
+    t:eq(n.name, "title", "including the name find() will use")
+    t:eq(n.children, nil, "a leaf has no children key at all, not an empty one")
+    t:eq(tostring(UI.VBox), "UI.VBox", "a constructor names itself")
+    t:eq(UI.VBox.kind, "vbox", "and says what it builds without being called")
+end)
+
+s:test("positional entries ARE the children, in the order they were written", function(t)
+    local n = VBox{
+        Label{ text = "one" },
+        Label{ text = "two" },
+        Button{ text = "three" },
+    }
+    t:eq(n.kind, "vbox", "the container is a vbox")
+    t:eq(#n.children, 3, "three children went in")
+    t:eq(n.children[1].text, "one", "in source order")
+    t:eq(n.children[3].kind, "button", "whatever kind each one is")
+end)
+
+s:test("children nest arbitrarily and stay plain data", function(t)
+    local n = VBox{ padding = 8,
+        Border{ color = { 0.1, 0.1, 0.1, 1 },
+            HBox{
+                Label{ text = "left" },
+                SizeBox{ width = 120, Label{ text = "right" } },
+            },
+        },
+    }
+    t:eq(n.padding, 8, "a named field sits beside the positional children")
+    local hbox = n.children[1].children[1]
+    t:eq(hbox.kind, "hbox", "the border's one child is the row")
+    t:eq(hbox.children[2].children[1].text, "right", "and the tree reads to the bottom")
+end)
+
+s:test("`children = { ... }` says the same thing, for a tree built by a loop", function(t)
+    local kids = {}
+    for i = 1, 3 do kids[i] = Label{ text = "row " .. i } end
+    local n = VBox{ children = kids }
+    t:eq(#n.children, 3, "an explicit children list is accepted")
+    t:eq(n.children[2].text, "row 2", "with the same contents")
+end)
+
+s:test("writing children BOTH ways at once is refused rather than merged", function(t)
+    t:errors(function() VBox{ Label{}, children = { Label{} } } end,
+        "children given BOTH positionally and as `children`")
+end)
+
+s:test("how many children a node holds is enforced where it is written", function(t)
+    t:errors(function() Label{ Button{ text = "x" } } end, "UI.Label holds no children")
+    t:errors(function() Button{ Label{} } end, "UI.Button holds no children")
+    t:errors(function() Border{ Label{}, Label{} } end, "UI.Border holds ONE child, 2 given")
+    t:errors(function() SizeBox{ Label{}, Label{} } end, "UI.SizeBox holds ONE child")
+    -- and the shapes that ARE legal raise nothing
+    t:truthy(Border{ Label{} }, "one child in a border is fine")
+    t:truthy(VBox{}, "an empty container is fine — it is a panel with nothing in it yet")
+end)
+
+s:test("an unknown field on a node is a hard error with a did-you-mean", function(t)
+    t:errors(function() Label{ tetx = "Supplies" } end, "did you mean \"text\"?")
+    t:errors(function() VBox{ colour = {} } end, "unknown field \"colour\"")
+    t:errors(function() Button{ onclick = function() end } end, "did you mean \"onClick\"?")
+end)
+
+s:test("a field of the wrong type, and a value outside its list, are both refused", function(t)
+    t:errors(function() Label{ size = "big" } end, "expects number, got string")
+    t:errors(function() Label{ hAlign = "sideways" } end, "must be one of")
+    t:errors(function() UI.GameWidget{} end, "field \"class\" is required")
+end)
+
+s:test("a child that is not a node is refused, and the message names what builds one", function(t)
+    t:errors(function() VBox{ { kind = "label", text = "hand-rolled" } } end,
+        "child 1 is a table, not a node")
+    t:errors(function() VBox{ "just a string" } end, "child 1 is a string, not a node")
+    t:errors(function() UI{ id = support.id("ui_badroot"), root = { kind = "vbox" } } end,
+        "must be a node built by one of")
+end)
+
+s:test("every node kind api/ui publishes has a builder in native/ui/tree", function(t)
+    -- The two halves are declared in different files on purpose (one is pure data, one is the
+    -- only place that touches UMG), so this is the seam where "I added a spec and forgot the
+    -- maker" would otherwise show up as a runtime failure on someone's screen.
+    local makers = native.tree.kinds()
+    local n = 0
+    for name, ctor in pairs(UI) do
+        if type(ctor) == "table" and ctor.kind then
+            n = n + 1
+            t:truthy(makers[ctor.kind], "native/ui/tree can build UI." .. name)
+        end
+    end
+    t:truthy(n >= 9, "and every published constructor was checked (" .. n .. ")")
+end)
+
+s:test("every node spec is in the schema registry, so the type generator emits it", function(t)
+    for _, name in ipairs({ "UI.Node.VBox", "UI.Node.Label", "UI.Node.Button",
+                            "UI.Node.GameWidget", "UI.Spec.Host" }) do
+        t:truthy(schema.get(name), name .. " is declared through core/schema")
+    end
+    local label = schema.get("UI.Node.Label")
+    t:truthy(label:field("text"), "a Label declares text")
+    t:truthy(label:field("hAlign").values, "and hAlign carries its allowed values, so the editor lists them")
+end)
+
+--=============================================================================
+-- declared ELEMENTS: root, host, and the seams they fill
+--=============================================================================
+
+s:test("`root` installs the declarative seams in place of a hand-written render", function(t)
+    local El = UI{ id = support.id("ui_decl"), root = VBox{ Label{ text = "hi" } } }
+    local el = El:new{}
+    t:eq(el:state().render, UI.Class.renderTree, "render is the tree renderer")
+    t:eq(el:state().update, UI.Class.updateTree, "update re-evaluates the bindings")
+    t:eq(el:state().destroy, UI.Class.destroyTree, "destroy takes the tree back down")
+    t:eq(el:state().rootNode.kind, "vbox", "and the declared tree is on the class")
+end)
+
+s:test("declaring both `root` and `render` is refused at define time", function(t)
+    t:errors(function()
+        UI{ id = support.id("ui_both"), root = VBox{}, render = function() end }
+    end, "declares BOTH `root` and `render`")
+end)
+
+s:test("update and destroy COMPOSE with the tree instead of replacing it", function(t)
+    local updated, destroyed = 0, 0
+    local El = UI{ id = support.id("ui_compose"),
+                   root    = VBox{ Label{ text = "x" } },
+                   update  = function() updated = updated + 1 end,
+                   destroy = function() destroyed = destroyed + 1 end }
+    local el = El:new{}
+    -- Called directly: with nothing built, the tree half is a no-op and what is under test is
+    -- that the author's half still runs — a declared tree must not silently eat it.
+    el:state():update()
+    t:eq(updated, 1, "the author's update ran alongside the binding pass")
+    el:state():destroy()
+    t:eq(destroyed, 1, "and the author's destroy ran alongside the teardown")
+end)
+
+s:test("a declared element that cannot build reports false and says why", function(t)
+    if widget.owner() then
+        t:skip("an owner exists — building a real tree from a test is what this file refuses to do")
+    end
+    local El = UI{ id = support.id("ui_nobuild"), root = VBox{ Label{ text = "hi" } } }
+    local el = El:new{}
+    t:eq(el:lastError(), nil, "nothing has failed yet")
+    t:eq(el:mount(fakeRoot()), false, "with no UMG to construct from, nothing was built")
+    t:eq(el:isMounted(), false, "so the element stays unmounted and :autoMount can retry")
+    t:type(el:lastError(), "string", "and the reason is kept rather than swallowed")
+    t:truthy(el:lastError():find("vbox", 1, true),
+        "naming the node that failed: " .. tostring(el:lastError()))
+    t:eq(el:find("anything"), nil, "find() answers nil on an element with no live tree")
+end)
+
+s:test("`host` is resolved by mount, and a host that is not up leaves render unreached", function(t)
+    if widget.owner() then t:skip("an owner exists — host \"screen\" would really draw") end
+    local rendered = 0
+    local El = UI{ id = support.id("ui_host"), host = "screen",
+                   render = function() rendered = rendered + 1 end }
+    local el = El:new{}
+    t:eq(el:mount(), false, "no owner, so there is no viewport layer to make")
+    t:eq(rendered, 0, "and render was never reached — the host is resolved first")
+    t:truthy(el:lastError():find("no owner", 1, true),
+        "with the reason the toolkit gave: " .. tostring(el:lastError()))
+end)
+
+s:test("the game's own UI is a host name, and a junk one is refused at define time", function(t)
+    -- "game" is CanvasPanel_Root inside WBP_PalOverallUILayout — the same two names
+    -- widget.gameUIRoot() resolves, asserted against the dump further up this file.
+    t:truthy(UI{ id = support.id("ui_hostgame"), host = "game" }, "\"game\" is a host")
+    t:truthy(UI{ id = support.id("ui_hostscreen"), host = "screen" }, "so is \"screen\"")
+    t:truthy(UI{ id = support.id("ui_hosttbl"),
+                 host = { widget = "PalUITitleBase", panel = "VerticalBox_0" } },
+             "and so is any widget class plus the panel inside it")
+    t:errors(function() UI{ id = support.id("ui_hostbad"), host = "hud" } end,
+        "is not a host name")
+    t:errors(function() UI{ id = support.id("ui_hostbad2"), host = { panel = "VerticalBox_0" } } end,
+        "field \"widget\" is required")
+end)
+
+s:test("a bound field is a function of the INSTANCE, which is what makes one tree reusable",
+function(t)
+    -- The binding contract, checked where it is decided rather than through a live widget:
+    -- native/ui/tree.valueOf is what build() and update() both call.
+    local text = function(self) return "Wood x" .. self.wood end
+    t:eq(native.tree.valueOf(text, { wood = 3 }), "Wood x3", "a binding reads the instance")
+    t:eq(native.tree.valueOf(text, { wood = 4 }), "Wood x4", "a second instance sees its own state")
+    t:eq(native.tree.valueOf("static", { wood = 1 }), "static", "a plain value is passed through")
+
+    local v, err = native.tree.valueOf(function() error("bad binding", 0) end, {})
+    t:eq(v, nil, "a binding that raises yields nil")
+    t:type(err, "string", "plus the error, so the refresh can carry on with the others")
+end)
+
+s:test("slot padding is expanded to the four sides UMG names", function(t)
+    local m = native.tree.margin(6)
+    t:eq(m.Left, 6, "one number pads every side")
+    t:eq(m.Bottom, 6, "including the bottom")
+    m = native.tree.margin({ left = 1, top = 2 })
+    t:eq(m.Left, 1, "a table names the sides it wants")
+    t:eq(m.Right, 0, "and the ones it does not are zero, never nil")
+    t:eq(native.tree.margin(nil), nil, "no padding declared means no call to make")
+end)
+
 return s

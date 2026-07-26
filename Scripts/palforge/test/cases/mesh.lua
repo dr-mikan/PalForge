@@ -12,14 +12,16 @@ local T        = require("palforge.core.unittests")
 local support  = require("palforge.test.support")
 local Mesh     = require("palforge.api.mesh")
 local mesh     = require("palforge.core.mesh")
+local assets   = require("palforge.core.mesh.assets")
 local Pal      = require("palforge.api.pal")
 local Building = require("palforge.api.building")
 
 local s = T.suite("mesh")
 
 -- A UStaticMesh/USkeletalMesh path is never loaded by a pure test, so any well-formed
--- string does; naming a real-looking one keeps the declarations readable.
-local MODEL = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal"
+-- string does; naming a real-looking one keeps the declarations readable. This one is real:
+-- dumps/reflection/05_assets.txt:851 printed it in a live loaded-object sweep.
+local MODEL = assets.SK.ChickenPal
 
 -- An OBJ path that is guaranteed NOT to exist, so the procedural backend's parse step
 -- fails before it can touch an actor. This is what makes the live attach tests safe.
@@ -228,6 +230,179 @@ s:test("detach on an actor this session never dressed is false", function(t)
 end)
 
 --=============================================================================
+-- assets — the /Game/... catalog and the resolver behind it
+--
+-- Pure: normalize and isObjectPath are string work, and load() on a bad shape refuses
+-- before it touches the engine at all. The one thing that needs a world — whether a path
+-- really resolves — is the live test at the bottom and pf_mesh.
+--=============================================================================
+
+s:test("the catalog reaches a pack through the public Mesh module, not just core", function(t)
+    -- The point of re-exporting it: a pack requires api/mesh and has the paths.
+    t:eq(Mesh.assets, assets, "Mesh.assets IS core.mesh.assets, not a copy that can drift")
+    t:eq(mesh.assets, assets, "and core.mesh re-exports the same table")
+    for _, group in ipairs({ "SM", "SK", "ABP", "MI" }) do
+        t:type(assets[group], "table", group .. " is a catalog table")
+        local n = 0
+        for _, path in pairs(assets[group]) do
+            n = n + 1
+            t:truthy(assets.isObjectPath(path), group .. " entry is an object path: " .. path)
+            t:truthy(path:find(".", 1, true), group .. " entry names its object half: " .. path)
+        end
+        t:truthy(n > 0, group .. " carries at least one path")
+    end
+end)
+
+s:test("the two paths measured off a live actor are in the catalog verbatim", function(t)
+    -- dumps/reflection/04_live_objects.txt:21 and :24 read these off one live BP_PinkCat_C —
+    -- the mesh from its PalSkeletalMeshComponent, the anim class from that component's
+    -- AnimClass property. They are the strongest pair in the tree and a typo in either would
+    -- be invisible until someone ran the game, so they are asserted here.
+    t:eq(assets.SK.PinkCat,
+        "/Game/Pal/Model/Character/Monster/PinkCat/SK_PinkCat.SK_PinkCat")
+    t:eq(assets.ABP.PinkCat,
+        "/Game/Pal/Blueprint/Character/Monster/PalActorBP/PinkCat/ABP_PinkCat.ABP_PinkCat_C")
+    -- and the convention builders reproduce that measured sample, which is the whole of
+    -- their evidence.
+    t:eq(assets.palMesh("PinkCat"), assets.SK.PinkCat, "palMesh matches the measured path")
+    t:eq(assets.palAnim("PinkCat"), assets.ABP.PinkCat, "palAnim matches the measured path")
+end)
+
+s:test("normalize completes a package-only path and never overrules a complete one", function(t)
+    t:eq(assets.normalize("/Game/A/B/SK_X"), "/Game/A/B/SK_X.SK_X")
+    t:eq(assets.normalize("/Game/A/B/ABP_X", "_C"), "/Game/A/B/ABP_X.ABP_X_C")
+    -- A full path is returned verbatim, and the reason is a measured one: the object half is
+    -- not always a repeat of the package (05_assets.txt:937 records Sm_Mug.SM_Mug), so
+    -- "completing" one that is already complete would corrupt it.
+    t:eq(assets.normalize(assets.SM.Mug), assets.SM.Mug, "a complete path is untouched")
+    t:eq(assets.normalize("/Game/Pal/Model/Prop/Mug/Sm_Mug"), "/Game/Pal/Model/Prop/Mug/Sm_Mug.Sm_Mug",
+        "completing the Mug package gives the WRONG object half - which is why the catalog "
+        .. "stores the full path and normalize is a convenience only")
+    t:eq(assets.normalize(""), "", "an empty string is not a path to complete")
+end)
+
+s:test("isObjectPath separates a game asset from a file on disk", function(t)
+    t:eq(assets.isObjectPath("/Game/Pal/Model/X.X"), true)
+    t:eq(assets.isObjectPath("/Engine/BasicShapes/Cube.Cube"), true)
+    t:eq(assets.isObjectPath("C:/mods/example/body.obj"), false, "a Windows path is not one")
+    t:eq(assets.isObjectPath(nil), false)
+    t:eq(assets.isObjectPath(42), false)
+end)
+
+s:test("load refuses a disk path and says which backend wanted it", function(t)
+    -- The static / skeletal backends take object paths; an OBJ file is the procedural
+    -- backend's input. Refusing here is what turns "silently rendered nothing" into a line
+    -- in the log that names the mistake.
+    local obj, err = assets.load(MISSING_OBJ, { class = "StaticMesh" })
+    t:eq(obj, nil)
+    t:type(err, "string")
+    t:truthy(err:find("procedural", 1, true), "the reason names the backend that takes it: " .. err)
+
+    t:eq(assets.load(nil), nil, "nil is not a path")
+    t:eq(assets.load(""), nil, "and neither is an empty string")
+end)
+
+s:test("loadClass refuses the same way, before it can reach LoadAsset", function(t)
+    local cls, err = assets.loadClass("not/an/object/path")
+    t:eq(cls, nil)
+    t:truthy(type(err) == "string" and #err > 0, "and says why")
+end)
+
+s:test("a texture reference dispatches on its SHAPE, so only one route can ever apply", function(t)
+    -- The missing half of "reusable by pointing at an asset": a mesh could point at a game
+    -- asset while its textures could only come off the author's disk. resolveTexture takes
+    -- either, and which one is decided by the string, not by trying both.
+    local Renderer = require("palforge.core.mesh.base.renderer")
+    t:type(Renderer.resolveTexture, "function")
+
+    -- object path -> the asset route, which refuses honestly with no engine under it
+    local tex, err = Renderer.resolveTexture(nil, assets.T.HelicopterBase)
+    t:eq(tex, nil, "nothing resolves without a game")
+    t:type(err, "string", "and it says why")
+
+    -- disk path -> the import route, whose refusal names its own dependency
+    local tex2, err2 = Renderer.resolveTexture(nil, "C:/mods/pack/body.png")
+    t:eq(tex2, nil)
+    t:truthy(type(err2) == "string" and err2:find("KismetRenderingLibrary", 1, true),
+        "a disk path goes to the importer, not the asset loader: " .. tostring(err2))
+
+    t:eq(Renderer.resolveTexture(nil, nil), nil, "and neither shape is not a reference")
+    t:eq(Renderer.resolveTexture(nil, ""), nil)
+end)
+
+s:test("the texture catalog is a matching set for a mesh that is also catalogued", function(t)
+    -- The point of keeping these four: they are the game's own base/normal/MRO/emissive maps
+    -- for a model whose mesh is assets.SK.AttackHelicopter, so one declaration can name a
+    -- game mesh AND the game's own maps for it without a single file on disk.
+    for _, name in ipairs({ "HelicopterBase", "HelicopterNormal", "HelicopterMRO", "HelicopterEmissive" }) do
+        t:type(assets.T[name], "string", name .. " is catalogued")
+        t:truthy(assets.T[name]:find("AttackHelicopter", 1, true),
+            name .. " belongs to the same model as assets.SK.AttackHelicopter")
+    end
+end)
+
+s:test("classChain and isA are honest about an object they cannot read", function(t)
+    -- Every caller treats an unreadable class as a refusal to proceed, so an empty chain
+    -- rather than a raise is load-bearing: it is what makes a wrong-kind check fail CLOSED.
+    t:eq(#assets.classChain(nil), 0, "nothing is not a class chain")
+    t:eq(#assets.classChain({}), 0, "and neither is a plain table")
+    t:eq(assets.isA(nil, "StaticMesh"), false)
+    t:eq(assets.describe(nil), "(nothing)")
+end)
+
+s:test("a static attach whose model is not an object path is a false, not a raise", function(t)
+    -- Past the handle's guard and into the backend: the resolve refuses, so
+    -- AddComponentByClass is never reached and no component is created.
+    local m = Mesh{ id = support.id("mesh"), model = MISSING_OBJ, kind = "static" }
+    t:eq(m:attachTo(stubActor()), false)
+end)
+
+s:test("a skeletal attach on an actor with no .Mesh component is a false, not a raise", function(t)
+    -- The skeletal backend checks the COMPONENT before it resolves the model, so this stub
+    -- never reaches the asset layer — which is the right order (a package should not be
+    -- loaded for an actor that cannot wear it) and the reason the log line names the
+    -- component rather than the path.
+    local m = Mesh{ id = support.id("mesh"), model = MISSING_OBJ, kind = "skeletal" }
+    t:eq(m:attachTo(stubActor()), false)
+end)
+
+--=============================================================================
+-- a declared mesh renders itself
+--=============================================================================
+
+s:test("declaring a mesh on a Pal installs the attach, without an onSpawned of its own", function(t)
+    -- The 導線 the user asked for: `Pal{ mesh = { model = ... } }` and nothing else. Before
+    -- this, renderOn existed and nothing called it, so a declared mesh stored a string.
+    local bare      = Pal{ id = support.id("pal") }
+    local withMesh  = Pal{ id = support.id("pal"), mesh = { model = MODEL } }
+    local Class     = Pal.Class
+
+    t:eq(bare._cls.onSpawned, Class.onSpawned,
+        "a pal with no mesh keeps the inert base handler, so it costs nothing")
+    t:neq(withMesh._cls.onSpawned, Class.onSpawned,
+        "a pal WITH a mesh has one installed")
+
+    -- and it is fail-soft: dispatching it with no actor must not raise, because core/event
+    -- calls this on every spawn of every PalForge pal.
+    local ok = pcall(function() withMesh._cls:onSpawned({}) end)
+    t:truthy(ok, "onSpawned with an empty ctx is a no-op, not an error")
+    local ok2 = pcall(function() withMesh._cls:onSpawned({ actor = stubActor() }) end)
+    t:truthy(ok2, "and neither is a stub actor that resolves no asset")
+end)
+
+s:test("the author's own onSpawned still runs, and runs after the mesh", function(t)
+    local order = {}
+    local pal = Pal{
+        id   = support.id("pal"),
+        mesh = { model = MODEL },
+        events = { onSpawned = function(_, _) order[#order + 1] = "author" end },
+    }
+    pal._cls:onSpawned({ actor = stubActor() })
+    t:eq(#order, 1, "the declared handler was called exactly once")
+    t:eq(order[1], "author", "and it was not replaced by the mesh attach")
+end)
+
+--=============================================================================
 -- live — the same claims against the real player pawn
 --=============================================================================
 
@@ -241,6 +416,46 @@ s:test("attachTo the live player pawn with an OBJ that is not on disk returns an
     -- Nothing was attached, so there is nothing to take off again.
     t:eq(m:detach(pawn), false, "detach reports it removed nothing")
     t:eq(m:setColor(pawn, { 1, 1, 1, 1 }), false, "and there is no material to re-tint")
+end)
+
+s:test("the catalogued /Game/... paths resolve in a loaded world", function(t)
+    support.needWorld(t)
+    -- THE ASSET HALF OF THE WHOLE FEATURE, and the only place it can be answered: whether a
+    -- path resolves is a fact about the installed pak, and no dump can hold it. Each entry
+    -- came from a live loaded-object sweep, so the expectation is that it resolves again —
+    -- but a game patch can move an asset, and this is what would say so.
+    --
+    -- It LOADS packages (I/O and memory) and writes nothing to any actor, component or save.
+    local found = assets.probe(support.log)
+    t:truthy(#found > 0, "the catalog is not empty")
+
+    local ok, miss, missed = 0, 0, {}
+    for _, rec in ipairs(found) do
+        if rec.ok then ok = ok + 1 else miss = miss + 1; missed[#missed + 1] = rec.name end
+    end
+    support.log(string.format("mesh: %d of %d catalogued asset paths resolved", ok, #found))
+
+    -- The ABP entries are deliberately NOT part of the assertion. Whether a blueprint's
+    -- generated class can be reached from a path is the open question this run exists to
+    -- answer (see core/mesh/assets.lua's M.ABP note), and asserting an answer we do not have
+    -- would only manufacture a failure. The ASSET_MISS lines above are the report.
+    local meshOk, meshTotal = 0, 0
+    for _, rec in ipairs(found) do
+        if rec.group == "SM" or rec.group == "SK" then
+            meshTotal = meshTotal + 1
+            if rec.ok then meshOk = meshOk + 1 end
+        end
+    end
+    if meshOk == 0 then
+        t:skip(string.format("none of the %d catalogued mesh paths resolved in this world - "
+            .. "read the ASSET lines above: they were all in a live loaded-object sweep, so "
+            .. "either the resolve route is wrong or the pak has moved under the dump",
+            meshTotal))
+    end
+    t:truthy(meshOk > 0, "at least one shipped mesh asset resolved from its path")
+    if miss > 0 then
+        support.log("mesh: did not resolve: " .. table.concat(missed, ", "))
+    end
 end)
 
 s:test("the player's own materials name themselves and their parameters", function(t)

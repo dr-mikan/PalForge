@@ -1,24 +1,55 @@
--- PalForge native.items: the HYBRID catalog for inventory content. ONE file per data
--- domain, replacing the old native/item/ subdirectory.
---
---   (a) M.CATALOG  — every real DT_ItemDataTable_Common row id from the dump.
---   (b) M.get(id)  — a lazy, cached Item handle for ANY catalog id (nil otherwise).
---   (c) CURATED    — a few hand-written definitions with live lifecycle hooks.
---
--- Only the CURATED class tables (with a string .id) are registered at game start; the
--- CATALOG (a list) and get (a function) are skipped, so init never bulk-registers the
--- thousands of item ids. get(id) builds on demand.
+-- PalForge native.items: the catalog of the game's OWN inventory content, declared through
+-- api/item the same way a pack declares its own.
 --
 --   local items = require("palforge.native.items")
---   items.get("Arrow_Fire")   -- lazy handle     items.Wood:give(5)  -- curated
+--   items.Arrow_Fire:give(20)      -- a NAMED handle for every row the game has
+--   items.get("Arrow_Fire")        -- the same handle, by id string
+--   items.Wood:give(5)             -- curated: carries an onObtain handler
+--
+--   (a) M.CATALOG  — every DT_ItemDataTable_Common row id, 2466 of them.
+--   (b) M.<Name>   — an Item handle per row, built on first read. native/_catalog.lua owns the
+--                    naming rule; for this table it is the identity, because every one of the
+--                    2466 ids is already a Lua identifier.
+--   (c) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
+--   (d) CURATED    — a few hand-written definitions with live lifecycle hooks.
+--
+-- Only the CURATED definitions call Item{ ... } at load, so only they self-register into
+-- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- requiring this file never registers the thousands of catalog ids.
+--
+-- WHAT A LAZY NATIVE HANDLE HONESTLY DOES. The three ACTIONS are the real thing and are
+-- measured (api/item.lua's ACTIONS block): :count reads the live inventory through the game's
+-- own CountItemNum, :give writes through AddItem_ServerInternal, :take consumes through
+-- RequestConsumeItem, and all three report the measurement rather than the call. Every id here
+-- is a real DT_ItemDataTable_Common row, so all three mean something for all 2466.
+--
+-- The QUERIES are a different matter and must not be read as facts about the game:
+--   * :maxStack() answers 1 and :category() answers "material" for a lazy handle. Those are
+--     Item.Spec's DEFAULTS (api/item.lua:136-140), not the row's MaxStackCount column. The real
+--     values are DT_ItemDataTable row VALUES and reading a row value from Lua is still unsolved
+--     on this build — see the item-datatable-row-read marker in api/item.lua. Deliberately NOT
+--     papered over by guessing per-id numbers here: a made-up 9999 would be indistinguishable
+--     from a measured one.
+--   * :name() answers the id, not the localised in-game name (a DT_ItemNameText row value, same
+--     unsolved read). The curated entries below name themselves by hand.
+--   * :recipeOf() answers nil even though DT_ItemRecipeDataTable_Common has a row for most of
+--     these. Same read.
+--   * :iconOf() DOES answer for real, and needs nothing declared: core/icons reads
+--     DT_ItemIconDataTable keyed by exactly these row ids — 1183 of 1207 rows carry an icon,
+--     measured 2026-07-26. The 1259 catalog ids with no icon row fall back to nil, honestly.
 
-local Item = require("palforge.api.item")
-local log  = require("palforge.utils.log").scope("native.items")
+local Item    = require("palforge.api.item")
+local catalog = require("palforge.native._catalog")
+local log     = require("palforge.utils.log").scope("native.items")
 
 local M = {}
 
--- CATALOG (DATA): every DT_ItemDataTable_Common row id (dump/01_datatables.txt).
--- GENERATED — do not hand-edit; regenerate from a fresh dump.
+-- The one DataTable this catalog stands for.
+M.TABLE = "DT_ItemDataTable_Common"
+
+-- CATALOG (DATA): every DT_ItemDataTable_Common row id — all 2466 of them, verified against
+-- dumps/catalog/datatables/DT_ItemDataTable_Common.json (count 2466, exact set match,
+-- 2026-07-26). GENERATED — do not hand-edit; regenerate from a fresh dump.
 M.CATALOG = {
   "Money", "AnimalSkin", "AnimalSkin2", "Arrow", "Arrow_Poison", "Arrow_Fire",
   "AssaultRifle_Default1", "Scales", "Scales2", "Axe_Tier_00", "Axe_Tier_01", "Axe_Tier_02",
@@ -433,12 +464,20 @@ M.CATALOG = {
   "Blueprint_Otomo_DFDragon_ElementBoost_1", "PalPassiveSkillChange_Consumable_MutationPal_Babysitter", "PalPassiveSkillChange_Consumable_MutationPal_Mutant", "PalPassiveSkillChange_Consumable_MutationPal_Immortal", "PalPassiveSkillChange_Consumable_MutationPal_ExplosionResist", "PalPassiveSkillChange_Consumable_RideJumpCount_Increase2",
 }
 
-local set = {}
-for _, id in ipairs(M.CATALOG) do set[id] = true end
+-- Membership set + on-demand cache for get(), plus the alias table the naming rule produces
+-- (empty here: all 2466 ids are already Lua identifiers, so every name is its own id). One
+-- pass, the same one that used to build `set` alone.
+local set, aliases, unnamed = catalog.index(M.CATALOG)
 local cache = {}
+
+---Names that are NOT ids. Empty for this catalog; see native/_catalog.lua rule (2).
+M.ALIASES = aliases
+---Rows with no named field, and why. Empty for this catalog; see rules (3) and (4).
+M.UNNAMED = unnamed
 
 -- get(id): an Item wrapper for ANY real catalog id, built on first use + cached; nil
 -- if id is not a known item row. defining sets .id and registers into object_manager.
+-- Reading a named field comes through here, so it is just as lazy.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
@@ -492,10 +531,17 @@ M.Arrow = Item{
     maxStack    = 999,
 }
 
--- Pre-seed curated so get(id) returns the curated handle (hooks intact).
+-- Pre-seed curated so get(id) returns the curated handle (hooks intact). All three are named
+-- exactly as their row is, so the curated field and the named field are the same field — the
+-- hand-written declaration simply gets there first, and the lazy path never overwrites it.
 for _, h in ipairs({ M.Wood, M.Berries, M.Arrow }) do
     set[h.id] = true
     cache[h.id] = h
 end
+
+-- LAST: hang the lazy named fields off the module. After the curated definitions, so the
+-- rule-(4) shadow check sees the module's complete own surface. See native/_catalog.lua.
+catalog.expose(M, { set = set, aliases = aliases, unnamed = unnamed,
+                    get = M.get, label = "native.items" })
 
 return M

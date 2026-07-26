@@ -7,12 +7,15 @@
 --
 --   local effects = require("palforge.native.effects")
 --   effects.Burn:apply(target)          -- curated: carries a duration and a tick interval
---   effects.get("Sleep"):apply(target)  -- any of the 38, built on first use
---   effects.get("Sleep"):remove(target)
+--   effects.Sleep:apply(target)         -- a NAMED handle for every one of the 38
+--   effects.get("Sleep"):remove(target) -- the same handle, by id string
 --
 --   (a) M.CATALOG  — every ailment name this build declares, in the game's own spelling.
---   (b) M.get(id)  — a lazy, cached Effect handle for any catalog id; nil for anything else.
---   (c) M.Poison / M.Burn / M.Freeze — the three with hand-written timings.
+--   (b) M.<Name>   — an Effect handle per ailment, built on first read. native/_catalog.lua
+--                    owns the naming rule; for this list it is the identity, because every one
+--                    of the 38 EPalStatusID names is already a Lua identifier.
+--   (c) M.get(id)  — the same handles by id string; nil for anything else.
+--   (d) M.Poison / M.Burn / M.Freeze — the three with hand-written timings.
 --
 -- WHAT AN APPLICATION DOES. Two things happen and they are worth keeping apart: PalForge runs
 -- its own schedule (duration, interval, stacking, expiry) off core/event's heartbeat, and the
@@ -32,8 +35,9 @@
 -- make it look unsupported when it is merely strange, and M.get builds nothing until it is
 -- asked for. The ones a pack usually wants are Poison, Stun, Sleep, Burn, Freeze, Electrical,
 -- Darkness, Wetness, AttackUp and DefenseUp.
-local Effect = require("palforge.api.effect")
-local status = require("palforge.core.status")
+local Effect  = require("palforge.api.effect")
+local catalog = require("palforge.native._catalog")
+local status  = require("palforge.core.status")
 
 local M = {}
 
@@ -42,9 +46,15 @@ local M = {}
 -- The hand-written list this replaces held three of the thirty-eight.
 M.CATALOG = status.names()
 
-local set = {}
-for _, id in ipairs(M.CATALOG) do set[id] = true end
+-- Membership set + on-demand cache for get(), plus the alias table the naming rule produces
+-- (empty here: all 38 enum names are already Lua identifiers, so every name is its own id).
+local set, aliases, unnamed = catalog.index(M.CATALOG)
 local cache = {}
+
+---Names that are NOT ids. Empty for this catalog; see native/_catalog.lua rule (2).
+M.ALIASES = aliases
+---Ailments with no named field, and why. Empty for this catalog; see rules (3) and (4).
+M.UNNAMED = unnamed
 
 ---An Effect handle for any known ailment name, built on first use and cached; nil for a name
 ---this build does not declare. The handle carries `nativeStatus`, which is what makes applying
@@ -74,10 +84,17 @@ M.Burn   = Effect{ id = "Burn",   nativeStatus = "Burn",   duration = 5.0,  inte
 M.Freeze = Effect{ id = "Freeze", nativeStatus = "Freeze", duration = 3.0 }
 
 -- Pre-seed the curated ones so get(id) hands back the timed handle rather than building a
--- second, durationless definition under the same id.
+-- second, durationless definition under the same id. All three are named exactly as the enum
+-- value is, so the curated field and the named field are the same field — the hand-written
+-- declaration simply gets there first, and the lazy path never overwrites it.
 for _, h in ipairs({ M.Poison, M.Burn, M.Freeze }) do
     set[h.id] = true
     cache[h.id] = h
 end
+
+-- LAST: hang the lazy named fields off the module. After the curated definitions, so the
+-- rule-(4) shadow check sees the module's complete own surface. See native/_catalog.lua.
+catalog.expose(M, { set = set, aliases = aliases, unnamed = unnamed,
+                    get = M.get, label = "native.effects" })
 
 return M

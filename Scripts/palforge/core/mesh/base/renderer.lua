@@ -1,8 +1,10 @@
 -- PalForge core.mesh.base.renderer: the abstract renderer contract PLUS the material
 -- layer every backend shares. Every mesh backend (procedural OBJ, static UStaticMesh,
 -- skeletal USkeletalMesh) extends this and overrides what it implements.
--- One PalForge dep: core.signature, for the two native calls here that no run has ever
--- watched succeed (K2_DestroyComponent, ImportFileAsTexture2D).
+-- Two PalForge deps: core.signature, for the two native calls here that no run has ever
+-- watched succeed (K2_DestroyComponent, ImportFileAsTexture2D); and core.mesh.assets, which
+-- is how a `texture` field can name one of the GAME'S OWN textures instead of a PNG the
+-- player has to install (see resolveTexture).
 --
 -- Contract:
 --   renderer:attach(actor, spec)    -> attach a mesh to `actor` from `spec`
@@ -54,6 +56,7 @@
 -- the ones the material does not carry are no-ops (see the TODO at COLOR_PARAMS). Every
 -- call is individually pcall'd; the layer never throws.
 local signature = require("palforge.core.signature")
+local assets    = require("palforge.core.mesh.assets")
 
 local Renderer = {}
 Renderer.__index = Renderer
@@ -417,6 +420,35 @@ function Renderer.importTexture(worldCtx, absPath)
     return nil, "ImportFileAsTexture2D ran and returned nothing importable"
 end
 
+-- A texture a spec named, whichever of the two things it named. Returns tex, or nil + reason.
+--
+-- TWO KINDS OF STRING, and the dispatch is on the SHAPE of the reference, not on a chain of
+-- attempts: a UE object path starts with "/" and nothing else does, so exactly one of these
+-- can apply to any given string and the other is never tried.
+--
+--   "/Game/.../T_X.T_X"        a texture the game already ships. Cooked, in the pak, no file
+--                              for a player to install and no importer in the way — the same
+--                              argument that makes a /Game/ MESH the primary route. It is the
+--                              missing half of "reusable by pointing at an asset": a mesh
+--                              pointed at an asset while its textures could only ever come
+--                              off disk.
+--   "C:/mods/pack/body.png"    a PNG of the author's own, through ImportFileAsTexture2D.
+--
+-- The asset route is also the STRONGER of the two by evidence: it is StaticFindObject and
+-- LoadAsset, both of which this tree uses successfully every session, where the import route
+-- has a correct signature and no observation behind it (see importTexture above).
+--
+-- `UTexture2D : UTexture : UStreamableRenderAsset` (dumps/cxx/Engine.hpp:21972, :21950), and
+-- SetTextureParameterValue takes a `UTexture*` (:17574), so "Texture" is the class to require
+-- — a render target or a 2D texture both satisfy it, and a mesh handed here by mistake does not.
+function Renderer.resolveTexture(worldCtx, ref)
+    if type(ref) ~= "string" or #ref == 0 then return nil, "no texture reference" end
+    if assets.isObjectPath(ref) then
+        return assets.load(ref, { class = "Texture" })
+    end
+    return Renderer.importTexture(worldCtx, ref)
+end
+
 -- Destroy a component a backend created. Shared because procedural and static both add a
 -- component of their own and both have to be able to take it off again; one copy means
 -- one place where the evidence lives.
@@ -542,11 +574,12 @@ function Renderer:writeMaterial(mids, def, worldCtx)
 
     local function eachMid(fn) for _, mid in ipairs(mids) do pcall(fn, mid) end end
 
-    -- texture (imported PNG) — try the known texture param names
+    -- texture — a /Game/... asset or a PNG off disk (Renderer.resolveTexture dispatches on
+    -- the shape), written to the known texture param names
     if def.texture then
-        local tex, terr = Renderer.importTexture(worldCtx, def.texture)
+        local tex, terr = Renderer.resolveTexture(worldCtx, def.texture)
         if tex then
-            status[#status + 1] = "tex-imported"
+            status[#status + 1] = assets.isObjectPath(def.texture) and "tex-asset" or "tex-imported"
             for _, name in ipairs(self.TEXTURE_PARAMS) do
                 eachMid(function(mid) mid:SetTextureParameterValue(FName(name), tex) end)
             end
@@ -587,8 +620,12 @@ function Renderer:writeMaterial(mids, def, worldCtx)
             end
         end
         if type(def.params.texture) == "table" then
+            -- Same two shapes as def.texture above, and this is where a game texture matters
+            -- most: the parameter names are MEASURED ("Base Texture", "Normal Map",
+            -- "MetallicRoughnessOcclusionSpecularTexture"), so a pack can dress a mesh in a
+            -- full set of the game's own maps by naming four /Game/... paths.
             for name, p in pairs(def.params.texture) do
-                local tex = Renderer.importTexture(worldCtx, p)
+                local tex = Renderer.resolveTexture(worldCtx, p)
                 if tex then eachMid(function(mid) mid:SetTextureParameterValue(FName(name), tex) end) end
             end
         end

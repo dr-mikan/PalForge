@@ -1,27 +1,85 @@
--- PalForge native.skills: the HYBRID catalog for Pal skills. ONE file per data domain,
--- replacing the old native/skill/ subdirectory. The CATALOG groups the row ids of BOTH
--- skill tables named in the dump target list:
---   * DT_PassiveSkill_Main_Common  (passive traits)
---   * DT_PartnerSkillParameter     (partner skills, keyed by encounter: RAID_/GYM_/BOSS_)
---
---   (a) M.CATALOG  — every real row id from those two tables, grouped.
---   (b) M.get(id)  — a lazy, cached Skill handle for ANY catalog id (nil otherwise).
---   (c) CURATED    — the hand-written Fireball definition.
---
--- Only the CURATED class tables (with a string .id) are registered at game start; the
--- CATALOG (a list) and get (a function) are skipped, so init never bulk-registers the
--- thousands of skill ids. get(id) builds on demand.
+-- PalForge native.skills: the catalog of the game's OWN skill rows, declared through api/skill
+-- the same way a pack declares its own. It stands for BOTH skill tables in the dump target list,
+-- kept APART rather than merged into one anonymous list, because which table a row came from is
+-- the only thing that makes its `kind` honest:
+--   * DT_PassiveSkill_Main_Common  (1905 rows) — passive traits.  kind = "passive"
+--   * DT_PartnerSkillParameter     ( 682 rows) — partner skills.  kind = "active"
 --
 --   local skills = require("palforge.native.skills")
---   skills.get("BOSS_FireKirin")   -- lazy handle    skills.Fireball:activate(owner)
+--   skills.Legend:kind()             --> "passive"   (a NAMED handle for every row)
+--   skills.BOSS_FireKirin:kind()     --> "active"
+--   skills.get("BOSS_FireKirin")     -- the same handle, by id string
+--   skills.CraftSpeed_3              -- an ALIAS: the row's real id is "CraftSpeed*3"
+--   skills.Fireball:activate(owner)  -- curated
+--
+--   (a) M.PASSIVE / M.PARTNER — the two source tables, each its own list.
+--   (b) M.CATALOG  — both of them, merged, in that order. The shape this file has always
+--                    published; kept so nothing downstream has to care about the split.
+--   (c) M.<Name>   — a Skill handle per row, built on first read. native/_catalog.lua owns the
+--                    naming rule; it is the identity for 2585 of the 2587 ids and produces two
+--                    aliases (M.ALIASES) for the two the game spells with a "*".
+--   (d) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
+--   (e) M.tableOf(id) — which DataTable a row came from.
+--   (f) CURATED    — the hand-written Fireball definition.
+--
+-- Only the CURATED definition calls Skill{ ... } at load, so only it self-registers into
+-- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- requiring this file never registers the thousands of skill ids.
+--
+-- WHAT A LAZY NATIVE HANDLE HONESTLY DOES:
+--   * :kind() is now TRUE of the row rather than a default. It used to answer "active" for all
+--     2585 ids because Skill.Spec's default is "active" and get(id) passed nothing — which was
+--     a lie about 1905 passive-trait rows. It is now read from the table the id came from.
+--   * :teach(actor) / :forget(actor) are real, and they DO NOT consult `kind` at all. The game
+--     stores active moves and passives separately and api/skill routes by asking whether the id
+--     is an EPalWazaID name (core.character.wazaNames()); anything else goes in as a passive by
+--     name. So `kind` describes the row, and :teach describes what the game will do with it —
+--     they can disagree, and when they do the game is right. Notably: a DT_PartnerSkillParameter
+--     row is named after a PAL ("BOSS_FireKirin"), which is not an EPalWazaID, so :teach on one
+--     asks the game for a passive of that name and will normally be refused. It reports false
+--     rather than pretending.
+--   * :element() / :power() / :cooldown() answer nil for a lazy handle, deliberately. They are
+--     framework-side metadata; the game's own numbers are DataTable row VALUES and reading one
+--     from Lua is still unsolved on this build (the marker in api/item.lua). No guesses here.
+--   * :activate / :hit / :equip / :unequip run YOUR handlers, and a lazy handle declares none.
+--     Declare your own Skill{ id = "...", events = ... } under the same id to be dispatched to.
+--   * :iconOf() answers only for the pal-named partner rows, and that is a KEYING fact, not a
+--     failure: DT_partnerSkillIconDataTable is keyed by PAL id (311 rows), so 303 of the 2587
+--     ids can ever hit it and every passive row misses by construction. See api/skill.lua:190.
 
-local Skill = require("palforge.api.skill")
+local Skill   = require("palforge.api.skill")
+local catalog = require("palforge.native._catalog")
 
 local M = {}
 
--- CATALOG (DATA): every DT_PassiveSkill_Main_Common + DT_PartnerSkillParameter row id
--- (dump/01_datatables.txt), grouped. GENERATED — do not hand-edit; regenerate.
-M.CATALOG = {
+-- The two DataTables this catalog stands for, and the Skill.Spec `kind` that is TRUE of a row
+-- from each. Named rather than described so a regeneration cannot pick a different table by
+-- accident, and so get(id) has one place to read the kind from.
+M.TABLES = {
+    passive = "DT_PassiveSkill_Main_Common",
+    partner = "DT_PartnerSkillParameter",
+}
+local KIND_OF_TABLE = {
+    -- A trait row. The game equips these as passives and that is what they are.
+    [M.TABLES.passive] = "passive",
+    -- A partner skill is INVOKED — the pal does it on command — so of the two values
+    -- Skill.Spec allows ("active" | "passive") it is the active one. That is a classification,
+    -- not a measurement: nothing in the dumps says a partner skill goes through the same
+    -- machinery as an EPalWazaID move, and :teach's routing does not consult it (see above).
+    [M.TABLES.partner] = "active",
+}
+
+-- PASSIVE (DATA): every DT_PassiveSkill_Main_Common row id — all 1905 of them, verified against
+-- dumps/catalog/datatables/DT_PassiveSkill_Main_Common.json (count 1905, exact set match,
+-- 2026-07-26). These are the trait rows: what a pal is BORN with or is given with
+-- character.addSkill. GENERATED — do not hand-edit; regenerate from a fresh dump.
+--
+-- Two of them are why native/_catalog.lua has a naming rule at all: CraftSpeed*3 and
+-- CraftSpeed*5 are spelled with a "*", which is not a Lua identifier character. The catalog
+-- this replaces simply LEFT THEM OUT — it claimed 2585 rows where the game has 2587 — and they
+-- are back here, reachable as skills.CraftSpeed_3 / skills.CraftSpeed_5 (M.ALIASES) and, as
+-- always, by their real id through get("CraftSpeed*3").
+M.PASSIVE = {
   "TestSkill1", "TestSkill2", "TestSkill3", "TestSkill4", "TestSkill5", "TestSkill6",
   "TestSkill7", "TestSkill8", "HP_ACC_up1", "HP_ACC_up2", "HP_ACC_up3", "HP_ACC_up4",
   "Attack_ACC_up1", "Attack_ACC_up2", "Attack_ACC_up3", "Attack_ACC_up4", "Attack_ACC_up1_Armor", "Attack_ACC_up2_Armor",
@@ -339,132 +397,181 @@ M.CATALOG = {
   "AvoidDurationUp_PartnerSkill_RedFlowerBird_4", "AvoidDurationUp_PartnerSkill_RedFlowerBird_5", "GrassRabbitMan_PartnerSkill", "Mothman_PlayerInflictEffect_PartnerSkill_1", "Mothman_PlayerInflictEffect_PartnerSkill_2", "Mothman_PlayerInflictEffect_PartnerSkill_3",
   "Mothman_PlayerInflictEffect_PartnerSkill_4", "Mothman_PlayerInflictEffect_PartnerSkill_5", "AttackRateHPThreshold_PartnerSkill_1", "AttackRateHPThreshold_PartnerSkill_2", "AttackRateHPThreshold_PartnerSkill_3", "AttackRateHPThreshold_PartnerSkill_4",
   "AttackRateHPThreshold_PartnerSkill_5", "Dummy_Ganesha_CoolTime", "Dummy_ClownRabbit_CoolTime", "Invalid_ToxicGas_EquipSkill", "PlayerSP_DecreaseRate_Passive", "AutoHPRegeneRate_Passive",
-  "ReloadSpeedUp_Passive", "RAID_NightLady", "RAID_NightLady_Dark", "RAID_NightLady_Dark_2", "RAID_KingBahamut_Dragon", "RAID_KingBahamut_Dragon_2",
-  "GYM_BlackGriffon", "GYM_ElecPanda", "GYM_Horus", "GYM_LilyQueen", "GYM_ThunderDragonMan", "GYM_MoonQueen",
-  "GYM_BlackGriffon_2", "GYM_BlackGriffon_2_Avatar", "GYM_ElecPanda_2", "GYM_Horus_2", "GYM_LilyQueen_2", "GYM_ThunderDragonMan_2",
-  "GYM_MoonQueen_2", "GYM_MoonQueen_2_Servant", "BadCatgirl", "BlueberryFairy", "BOSS_Alpaca", "BOSS_AmaterasuWolf",
-  "BOSS_Anubis", "BOSS_BadCatgirl", "BOSS_Baphomet", "BOSS_Baphomet_Dark", "BOSS_Bastet", "BOSS_Bastet_Ice",
-  "BOSS_BerryGoat", "BOSS_BirdDragon", "BOSS_BirdDragon_Ice", "BOSS_BlackCentaur", "BOSS_BlackFurDragon", "BOSS_BlackGriffon",
-  "BOSS_BlackMetalDragon", "BOSS_BlueberryFairy", "BOSS_BlueDragon", "BOSS_BluePlatypus", "BOSS_Boar", "BOSS_CaptainPenguin",
-  "BOSS_Carbunclo", "BOSS_CatBat", "BOSS_CatMage", "BOSS_CatMage_Fire", "BOSS_CatVampire", "BOSS_ChickenPal",
-  "BOSS_ColorfulBird", "BOSS_CowPal", "BOSS_CuteButterfly", "BOSS_CuteFox", "BOSS_CuteMole", "BOSS_DarkCrow",
-  "BOSS_DarkMutant", "BOSS_DarkScorpion", "BOSS_DarkScorpion_Ground", "BOSS_Deer", "BOSS_Deer_Ground", "BOSS_DreamDemon",
-  "BOSS_DrillGame", "BOSS_Eagle", "BOSS_ElecCat", "BOSS_ElecLion", "BOSS_ElecPanda", "BOSS_FairyDragon",
-  "BOSS_FairyDragon_Water", "BOSS_FengyunDeeper", "BOSS_FireKirin", "BOSS_FireKirin_Dark", "Boss_FlameBambi", "BOSS_FlameBuffalo",
-  "BOSS_FlowerDinosaur", "BOSS_FlowerDinosaur_Electric", "BOSS_FlowerDoll", "BOSS_FlowerRabbit", "BOSS_FlyingManta", "BOSS_FoxMage",
-  "BOSS_FoxMage_Dark", "BOSS_Ganesha", "BOSS_Garm", "BOSS_GhostBeast", "BOSS_GoldenHorse", "BOSS_Gorilla",
-  "BOSS_Gorilla_Ground", "BOSS_GrassMammoth", "BOSS_GrassMammoth_Ice", "BOSS_GrassPanda", "BOSS_GrassPanda_Electric", "BOSS_GrassRabbitMan",
-  "BOSS_HadesBird", "BOSS_HadesBird_Electric", "BOSS_HawkBird", "BOSS_Hedgehog", "BOSS_Hedgehog_Ice", "BOSS_HerculesBeetle",
-  "BOSS_HerculesBeetle_Ground", "BOSS_Horus", "BOSS_IceDeer", "BOSS_IceFox", "BOSS_IceHorse", "BOSS_IceHorse_Dark",
-  "BOSS_JetDragon", "BOSS_Kelpie", "BOSS_Kelpie_Fire", "BOSS_KingAlpaca", "BOSS_KingAlpaca_Ice", "BOSS_KingBahamut",
-  "BOSS_KingBahamut_Dragon", "BOSS_Kirin", "BOSS_Kirin_Ice", "BOSS_Kitsunebi", "Boss_LavaGirl", "Boss_LazyCatFish",
-  "BOSS_LazyDragon", "BOSS_LazyDragon_Electric", "BOSS_LilyQueen", "BOSS_LilyQueen_Dark", "BOSS_LittleBriarRose", "BOSS_LizardMan",
-  "BOSS_LizardMan_Fire", "BOSS_Manticore", "BOSS_Manticore_Dark", "BOSS_Monkey", "BOSS_Monkey_Ice", "BOSS_Monkey_Fire",
-  "BOSS_MopBaby", "BOSS_MopKing", "BOSS_Mutant", "BOSS_NaughtyCat", "BOSS_NegativeKoala", "BOSS_NegativeOctopus",
-  "BOSS_NightFox", "BOSS_Penguin", "BOSS_PinkCat", "BOSS_PinkLizard", "BOSS_PinkRabbit", "BOSS_PlantSlime",
-  "BOSS_PlantSlime_Flower", "BOSS_QueenBee", "BOSS_RaijinDaughter", "BOSS_RedArmorBird", "BOSS_RobinHood", "BOSS_RobinHood_Ground",
-  "BOSS_Ronin", "BOSS_Ronin_Dark", "BOSS_SaintCentaur", "BOSS_SakuraSaurus", "BOSS_SakuraSaurus_Water", "BOSS_Serpent",
-  "BOSS_Serpent_Ground", "BOSS_SharkKid", "BOSS_SharkKid_Fire", "BOSS_SheepBall", "BOSS_SkyDragon", "BOSS_SkyDragon_Grass",
-  "BOSS_SoldierBee", "BOSS_Suzaku", "BOSS_Suzaku_Water", "BOSS_SweetsSheep", "BOSS_SweetsSheep_Ground", "BOSS_TentacleTurtle",
-  "BOSS_ThunderBird", "BOSS_ThunderBird_Ice", "BOSS_ThunderDog", "BOSS_ThunderDog_Ice", "BOSS_ThunderDragonMan", "BOSS_Umihebi",
-  "BOSS_Umihebi_Fire", "BOSS_VioletFairy", "BOSS_VolcanicMonster", "BOSS_VolcanicMonster_Ice", "BOSS_WeaselDragon", "BOSS_WeaselDragon_Fire",
-  "BOSS_Werewolf", "BOSS_WhiteMoth", "BOSS_WhiteTiger", "BOSS_WindChimes", "BOSS_WindChimes_Ice", "BOSS_WizardOwl",
-  "Boss_WoolFox", "BOSS_Yeti", "BOSS_Yeti_Grass", "BOSS_NightLady", "BOSS_NightLady_Dark", "BOSS_MoonQueen",
-  "BOSS_KendoFrog", "BOSS_LeafPrincess", "BOSS_MushroomDragon", "BOSS_MushroomDragon_Dark", "BOSS_SmallArmadillo", "BOSS_FeatherOstrich",
-  "BOSS_ScorpionMan", "BOSS_ScorpionMan_Electric", "BOSS_WingGolem", "BOSS_CandleGhost", "BOSS_GuardianDog", "BOSS_SifuDog",
-  "BOSS_MimicDog", "BOSS_DarkAlien", "BOSS_WhiteAlienDragon", "BOSS_VolcanoDragon", "BOSS_DarkMechaDragon", "BOSS_GhostRabbit",
-  "BOSS_GhostRabbit_Grass", "BOSS_NightBlueHorse", "BOSS_NightBlueHorse_Neutral", "BOSS_WhiteShieldDragon", "BOSS_BlackPuppy", "BOSS_BlackPuppy_Ice",
-  "BOSS_WhiteDeer", "BOSS_WhiteDeer_Dark", "BOSS_KingWhale", "BOSS_MysteryMask", "BOSS_HoodGhost", "BOSS_Sekhmet",
-  "BOSS_GrimGirl", "BOSS_PurpleSpider", "BOSS_BlueThunderHorse", "BOSS_RockBeast", "BOSS_RockBeast_Ice", "BOSS_OctopusGirl",
-  "BOSS_OctopusGirl_Neutral", "BOSS_IceNarwhal", "BOSS_JellyfishFairy", "BOSS_BerryGoat_Dark", "BOSS_Kitsunebi_Ice", "BOSS_RaijinDaughter_Water",
-  "BOSS_SnowTigerBeastman", "BOSS_Werewolf_Ice", "BOSS_WhiteTiger_Ground", "BOSS_Horus_Water", "BOSS_FengyunDeeper_Electric", "BOSS_AmaterasuWolf_Dark",
-  "BOSS_PinkRabbit_Grass", "BOSS_GhostAnglerFish", "BOSS_IceWitch", "BOSS_ClownRabbit", "BOSS_LegendDeer", "BOSS_LeafMomonga",
-  "BOSS_IceCrocodile", "BOSS_CactusDoll", "BOSS_CactusDoll_Dark", "BOSS_StuffedShark", "BOSS_IceSeal", "BOSS_Plesiosaur",
-  "BOSS_TropicalOstrich", "BOSS_SnowPeafowl", "BOSS_CubeTurtle", "BOSS_JellyfishGhost", "BOSS_MoonChild", "BOSS_SamuraiDog",
-  "BOSS_PoseidonOrca", "BOSS_NegativeOctopus_Neutral", "BOSS_Penguin_Electric", "BOSS_CaptainPenguin_Black", "BOSS_FlyingManta_Thunder", "BOSS_BluePlatypus_Fire",
-  "BOSS_LazyCatfish_Gold", "BOSS_TentacleTurtle_Ground", "BOSS_KendoFrog_Dark", "BOSS_BlueDragon_Ice", "BOSS_IceNarwhal_Fire", "BOSS_GhostAnglerFish_Fire",
-  "BOSS_StuffedShark_Fire", "BOSS_MummyPal", "BOSS_KingSunfish", "BOSS_KingSunfish_Thunder", "BOSS_ElecSnail", "BOSS_ElecSnail_Fire",
-  "BOSS_GrassGolem", "BOSS_GrassGolem_Dark", "BOSS_GhostDragon", "BOSS_GhostDragon_Fire", "BOSS_DomeArmorDragon", "BrownRabbit",
-  "ElecLion", "GoldenHorse", "TentacleTurtle", "TentacleTurtle_Ground", "Anubis", "Baphomet",
-  "Baphomet_Dark", "Bastet", "Bastet_Ice", "Boar", "Carbunclo", "ColorfulBird",
-  "Deer", "Deer_Ground", "DrillGame", "Eagle", "ElecPanda", "Ganesha",
-  "Garm", "Gorilla", "Gorilla_Ground", "Hedgehog", "Hedgehog_Ice", "Kirin",
-  "Kirin_Ice", "Kitsunebi", "LittleBriarRose", "Mutant", "Penguin", "Penguin_Electric",
-  "RaijinDaughter", "SharkKid", "SharkKid_Fire", "Sheepball", "Umihebi", "Umihebi_Fire",
-  "Werewolf", "WindChimes", "WindChimes_Ice", "Suzaku", "Suzaku_Water", "FireKirin",
-  "FireKirin_Dark", "FairyDragon", "FairyDragon_Water", "SweetsSheep", "SweetsSheep_Ground", "WhiteTiger",
-  "Alpaca", "Serpent", "Serpent_Ground", "DarkCrow", "BlueDragon", "BlueDragon_Ice",
-  "PinkCat", "NegativeKoala", "FengyunDeeper", "VolcanicMonster", "VolcanicMonster_Ice", "GhostBeast",
-  "RobinHood", "RobinHood_Ground", "LazyDragon", "LazyDragon_Electric", "AmaterasuWolf", "LizardMan",
-  "LizardMan_Fire", "BluePlatypus", "BluePlatypus_Fire", "BlackFurDragon", "BirdDragon", "BirdDragon_Ice",
-  "ChickenPal", "FlowerDinosaur", "FlowerDinosaur_Electric", "ElecCat", "IceHorse", "IceHorse_Dark",
-  "GrassMammoth", "GrassMammoth_Ice", "CatVampire", "SakuraSaurus", "SakuraSaurus_Water", "Horus",
-  "KingBahamut", "KingBahamut_Dragon", "BerryGoat", "IceDeer", "BlackGriffon", "WhiteMoth",
-  "CuteFox", "FoxMage", "FoxMage_Dark", "PinkLizard", "WizardOwl", "Kelpie",
-  "Kelpie_Fire", "NegativeOctopus", "NegativeOctopus_Neutral", "CowPal", "Yeti", "Yeti_Grass",
-  "VioletFairy", "HawkBird", "FlowerRabbit", "LilyQueen", "LilyQueen_Dark", "QueenBee",
-  "SoldierBee", "CatBat", "GrassPanda", "GrassPanda_Electric", "FlameBuffalo", "ThunderDog",
-  "ThunderDog_Ice", "CuteMole", "BlackMetalDragon", "GrassRabbitMan", "IceFox", "JetDragon",
-  "DreamDemon", "Monkey", "Monkey_Ice", "Monkey_Fire", "Manticore", "Manticore_Dark",
-  "KingAlpaca", "KingAlpaca_Ice", "PlantSlime", "PlantSlime_Flower", "DarkMutant", "MopBaby",
-  "MopKing", "CatMage", "CatMage_Fire", "PinkRabbit", "ThunderBird", "ThunderBird_Ice",
-  "HerculesBeetle", "HerculesBeetle_Ground", "SaintCentaur", "NightFox", "CaptainPenguin", "CaptainPenguin_Black",
-  "WeaselDragon", "WeaselDragon_Fire", "SkyDragon", "SkyDragon_Grass", "HadesBird", "HadesBird_Electric",
-  "RedArmorBird", "Ronin", "Ronin_Dark", "FlyingManta", "FlyingManta_Thunder", "BlackCentaur",
-  "FlowerDoll", "NaughtyCat", "CuteButterfly", "DarkScorpion", "DarkScorpion_Ground", "ThunderDragonMan",
-  "WoolFox", "LazyCatfish", "LazyCatfish_Gold", "LavaGirl", "FlameBambi", "NightLady",
-  "NightLady_Dark", "MoonQueen", "KendoFrog", "KendoFrog_Dark", "LeafPrincess", "MushroomDragon",
-  "MushroomDragon_Dark", "SmallArmadillo", "CandleGhost", "ScorpionMan", "ScorpionMan_Electric", "WingGolem",
-  "GuardianDog", "SifuDog", "FeatherOstrich", "MimicDog", "DarkAlien", "WhiteAlienDragon",
-  "VolcanoDragon", "DarkMechaDragon", "GhostRabbit", "GhostRabbit_Grass", "NightBlueHorse", "NightBlueHorse_Neutral",
-  "WhiteShieldDragon", "BlackPuppy", "BlackPuppy_Ice", "WhiteDeer", "WhiteDeer_Dark", "KingWhale",
-  "MysteryMask", "HoodGhost", "Sekhmet", "ElecLizard", "GrimGirl", "PurpleSpider",
-  "BlueThunderHorse", "RockBeast", "RockBeast_Ice", "OctopusGirl", "OctopusGirl_Neutral", "IceNarwhal",
-  "IceNarwhal_Fire", "JellyfishFairy", "GYM_SnowTigerBeastman", "GYM_SnowTigerBeastman_2", "SUMMON_DarkAlien", "SUMMON_DarkAlien_MAX",
-  "SUMMON_WhiteAlienDragon", "SUMMON_WhiteAlienDragon_MAX", "PREDATOR_AmaterasuWolf", "PREDATOR_BirdDragon", "PREDATOR_DrillGame", "PREDATOR_FairyDragon",
-  "PREDATOR_FeatherOstrich", "PREDATOR_FlowerDinosaur", "PREDATOR_Garm", "PREDATOR_GhostBeast", "PREDATOR_GoldenHorse", "PREDATOR_Gorilla",
-  "PREDATOR_GrassPanda", "PREDATOR_GrimGirl", "PREDATOR_Horus_Water", "PREDATOR_LazyDragon", "PREDATOR_Manticore_Dark", "PREDATOR_MushroomDragon",
-  "PREDATOR_MysteryMask", "PREDATOR_NightBlueHorse", "PREDATOR_PinkLizard", "PREDATOR_PurpleSpider", "PREDATOR_RedArmorBird", "PREDATOR_ScorpionMan",
-  "PREDATOR_SifuDog", "PREDATOR_ThunderDog", "PREDATOR_Umihebi_Fire", "PREDATOR_VolcanicMonster_Ice", "PREDATOR_Werewolf_Ice", "PREDATOR_WhiteTiger_Ground",
-  "PREDATOR_Yeti", "PREDATOR_HadesBird_Electric", "PREDATOR_Ronin_Dark", "PREDATOR_CandleGhost", "PREDATOR_Baphomet_Dark", "RAID_DarkMechaDragon",
-  "RAID_DarkMechaDragon_2", "Kitsunebi_Ice", "BerryGoat_Dark", "PinkRabbit_Grass", "Werewolf_Ice", "AmaterasuWolf_Dark",
-  "RaijinDaughter_Water", "WhiteTiger_Ground", "FengyunDeeper_Electric", "Horus_Water", "SnowTigerBeastman", "WingGolem_Oilrig",
-  "DarkAlien_Oilrig", "Horus_Oilrig", "Baphomet_Dark_Oilrig", "HadesBird_Oilrig", "LizardMan_Oilrig", "GhostAnglerfish",
-  "GhostAnglerfish_Fire", "IceWitch", "ClownRabbit", "LegendDeer", "LeafMomonga", "SmallYeti",
-  "IceCrocodile", "CactusDoll", "CactusDoll_Dark", "StuffedShark", "StuffedShark_Fire", "IceSeal",
-  "Plesiosaur", "TropicalOstrich", "GrassGolem", "GrassGolem_Dark", "SnowPeafowl", "CubeTurtle",
-  "JellyfishGhost", "ThunderFluffyBird", "MoonChild", "SamuraiDog", "PoseidonOrca", "YakushimaMonster001",
-  "YakushimaMonster001_Blue", "YakushimaMonster001_Red", "YakushimaMonster001_Purple", "YakushimaMonster001_Pink", "YakushimaMonster001_Rainbow", "YakushimaMonster002",
-  "YakushimaMonster003", "YakushimaMonster003_Purple", "YakushimaBoss001", "BOSS_YakushimaBoss001", "YakushimaBoss001_Small", "RAID_YakushimaBoss001_Green",
-  "RAID_YakushimaBoss002", "RAID_YakushimaBoss002_Hand_Left", "RAID_YakushimaBoss002_Hand_Right", "Quest_Farmer03_SheepBall", "Quest_Farmer03_PinkCat", "GYM_ElecPanda_Otomo",
-  "RAID_YakushimaBoss002_Head", "RAID_YakushimaBoss002_2", "RAID_YakushimaBoss002_Hand_Left_2", "RAID_YakushimaBoss002_Hand_Right_2", "RAID_YakushimaBoss002_Head_2", "RAID_YakushimaBoss001_Green_2",
-  "MummyPal", "KingSunfish", "KingSunfish_Thunder", "MonochromeQueen", "ElecSnail", "ElecSnail_Fire",
-  "RAID_LegendDeer", "RAID_LegendDeer_2", "ClioneTwins", "FoxExorcist", "LanternButler", "DarkFlameFox",
-  "OniGhostGirl", "SnakeGirl", "SwordCutlassfish", "GhostDragon", "GhostDragon_Fire", "DomeArmorDragon",
-  "POLICE_ThunderDog", "POLICE_HawkBird", "BOSS_ClioneTwins", "FluffyBird", "BOSS_FluffyBird", "CloverFairy",
-  "BOSS_CloverFairy", "BOSS_FlowerDoll_Fire", "FlowerDoll_Fire", "BOSS_SnakeGirl", "BOSS_SwordCutlassfish", "SwordCutlassfish_Fire",
-  "BOSS_SwordCutlassfish_Fire", "SumoDog", "BOSS_SumoDog", "MushroomLady", "BOSS_MushroomLady", "ThiefBird",
-  "BOSS_ThiefBird", "SleeveRabbit", "BOSS_SleeveRabbit", "KabukiMan", "BOSS_KabukiMan", "LotusDragon",
-  "BOSS_LotusDragon", "BOSS_FoxExorcist", "VenusFlytrap", "BOSS_VenusFlytrap", "BOSS_ElecLizard", "BOSS_MonochromeQueen",
-  "ElecSnail_Ground", "BOSS_ElecSnail_Ground", "BlueSkyDragon", "BOSS_BlueSkyDragon", "PandaGirl", "BOSS_PandaGirl",
-  "LongCat", "BOSS_LongCat", "ElecPomeranian", "BOSS_ElecPomeranian", "CubeTurtle_Neutral", "BOSS_CubeTurtle_Neutral",
-  "GrassMinotaur_Ice", "BOSS_GrassMinotaur_Ice", "VolcanoDragon_Ice", "BOSS_VolcanoDragon_Ice", "BOSS_BrownRabbit", "BOSS_OniGhostGirl",
-  "GrassMinotaur", "BOSS_GrassMinotaur", "FlowerPrince", "BOSS_FlowerPrince", "WingGolem_Fire", "BOSS_WingGolem_Fire",
-  "WhiteMoth_Neutral", "BOSS_WhiteMoth_Neutral", "IceSeal_Ground", "BOSS_IceSeal_Ground", "Mothman", "BOSS_SmallYeti",
-  "BOSS_Mothman", "BOSS_ThunderFluffyBird", "GhostBlackCat", "BOSS_GhostBlackCat", "DandelionGirl", "BOSS_DandelionGirl",
-  "RedFlowerBird", "BOSS_RedFlowerBird", "BOSS_DarkFlameFox", "BOSS_KingWhale_otomo", "BOSS_LanternButler",
+  "ReloadSpeedUp_Passive", "CraftSpeed*3", "CraftSpeed*5",
 }
 
-local set = {}
-for _, id in ipairs(M.CATALOG) do set[id] = true end
+-- PARTNER (DATA): every DT_PartnerSkillParameter row id — all 682 of them, verified against
+-- dumps/catalog/datatables/DT_PartnerSkillParameter.json (count 682, exact set match,
+-- 2026-07-26). These are keyed by the PAL that owns the partner skill, which is why they read
+-- as creature names and encounter prefixes (BOSS_/GYM_/RAID_/PREDATOR_) rather than as move
+-- names. NO ROW APPEARS IN BOTH TABLES — measured, the intersection is empty — so every id in
+-- this catalog has exactly one source and exactly one honest `kind`.
+-- GENERATED — do not hand-edit; regenerate from a fresh dump.
+M.PARTNER = {
+  "RAID_NightLady", "RAID_NightLady_Dark", "RAID_NightLady_Dark_2", "RAID_KingBahamut_Dragon", "RAID_KingBahamut_Dragon_2", "GYM_BlackGriffon",
+  "GYM_ElecPanda", "GYM_Horus", "GYM_LilyQueen", "GYM_ThunderDragonMan", "GYM_MoonQueen", "GYM_BlackGriffon_2",
+  "GYM_BlackGriffon_2_Avatar", "GYM_ElecPanda_2", "GYM_Horus_2", "GYM_LilyQueen_2", "GYM_ThunderDragonMan_2", "GYM_MoonQueen_2",
+  "GYM_MoonQueen_2_Servant", "BadCatgirl", "BlueberryFairy", "BOSS_Alpaca", "BOSS_AmaterasuWolf", "BOSS_Anubis",
+  "BOSS_BadCatgirl", "BOSS_Baphomet", "BOSS_Baphomet_Dark", "BOSS_Bastet", "BOSS_Bastet_Ice", "BOSS_BerryGoat",
+  "BOSS_BirdDragon", "BOSS_BirdDragon_Ice", "BOSS_BlackCentaur", "BOSS_BlackFurDragon", "BOSS_BlackGriffon", "BOSS_BlackMetalDragon",
+  "BOSS_BlueberryFairy", "BOSS_BlueDragon", "BOSS_BluePlatypus", "BOSS_Boar", "BOSS_CaptainPenguin", "BOSS_Carbunclo",
+  "BOSS_CatBat", "BOSS_CatMage", "BOSS_CatMage_Fire", "BOSS_CatVampire", "BOSS_ChickenPal", "BOSS_ColorfulBird",
+  "BOSS_CowPal", "BOSS_CuteButterfly", "BOSS_CuteFox", "BOSS_CuteMole", "BOSS_DarkCrow", "BOSS_DarkMutant",
+  "BOSS_DarkScorpion", "BOSS_DarkScorpion_Ground", "BOSS_Deer", "BOSS_Deer_Ground", "BOSS_DreamDemon", "BOSS_DrillGame",
+  "BOSS_Eagle", "BOSS_ElecCat", "BOSS_ElecLion", "BOSS_ElecPanda", "BOSS_FairyDragon", "BOSS_FairyDragon_Water",
+  "BOSS_FengyunDeeper", "BOSS_FireKirin", "BOSS_FireKirin_Dark", "Boss_FlameBambi", "BOSS_FlameBuffalo", "BOSS_FlowerDinosaur",
+  "BOSS_FlowerDinosaur_Electric", "BOSS_FlowerDoll", "BOSS_FlowerRabbit", "BOSS_FlyingManta", "BOSS_FoxMage", "BOSS_FoxMage_Dark",
+  "BOSS_Ganesha", "BOSS_Garm", "BOSS_GhostBeast", "BOSS_GoldenHorse", "BOSS_Gorilla", "BOSS_Gorilla_Ground",
+  "BOSS_GrassMammoth", "BOSS_GrassMammoth_Ice", "BOSS_GrassPanda", "BOSS_GrassPanda_Electric", "BOSS_GrassRabbitMan", "BOSS_HadesBird",
+  "BOSS_HadesBird_Electric", "BOSS_HawkBird", "BOSS_Hedgehog", "BOSS_Hedgehog_Ice", "BOSS_HerculesBeetle", "BOSS_HerculesBeetle_Ground",
+  "BOSS_Horus", "BOSS_IceDeer", "BOSS_IceFox", "BOSS_IceHorse", "BOSS_IceHorse_Dark", "BOSS_JetDragon",
+  "BOSS_Kelpie", "BOSS_Kelpie_Fire", "BOSS_KingAlpaca", "BOSS_KingAlpaca_Ice", "BOSS_KingBahamut", "BOSS_KingBahamut_Dragon",
+  "BOSS_Kirin", "BOSS_Kirin_Ice", "BOSS_Kitsunebi", "Boss_LavaGirl", "Boss_LazyCatFish", "BOSS_LazyDragon",
+  "BOSS_LazyDragon_Electric", "BOSS_LilyQueen", "BOSS_LilyQueen_Dark", "BOSS_LittleBriarRose", "BOSS_LizardMan", "BOSS_LizardMan_Fire",
+  "BOSS_Manticore", "BOSS_Manticore_Dark", "BOSS_Monkey", "BOSS_Monkey_Ice", "BOSS_Monkey_Fire", "BOSS_MopBaby",
+  "BOSS_MopKing", "BOSS_Mutant", "BOSS_NaughtyCat", "BOSS_NegativeKoala", "BOSS_NegativeOctopus", "BOSS_NightFox",
+  "BOSS_Penguin", "BOSS_PinkCat", "BOSS_PinkLizard", "BOSS_PinkRabbit", "BOSS_PlantSlime", "BOSS_PlantSlime_Flower",
+  "BOSS_QueenBee", "BOSS_RaijinDaughter", "BOSS_RedArmorBird", "BOSS_RobinHood", "BOSS_RobinHood_Ground", "BOSS_Ronin",
+  "BOSS_Ronin_Dark", "BOSS_SaintCentaur", "BOSS_SakuraSaurus", "BOSS_SakuraSaurus_Water", "BOSS_Serpent", "BOSS_Serpent_Ground",
+  "BOSS_SharkKid", "BOSS_SharkKid_Fire", "BOSS_SheepBall", "BOSS_SkyDragon", "BOSS_SkyDragon_Grass", "BOSS_SoldierBee",
+  "BOSS_Suzaku", "BOSS_Suzaku_Water", "BOSS_SweetsSheep", "BOSS_SweetsSheep_Ground", "BOSS_TentacleTurtle", "BOSS_ThunderBird",
+  "BOSS_ThunderBird_Ice", "BOSS_ThunderDog", "BOSS_ThunderDog_Ice", "BOSS_ThunderDragonMan", "BOSS_Umihebi", "BOSS_Umihebi_Fire",
+  "BOSS_VioletFairy", "BOSS_VolcanicMonster", "BOSS_VolcanicMonster_Ice", "BOSS_WeaselDragon", "BOSS_WeaselDragon_Fire", "BOSS_Werewolf",
+  "BOSS_WhiteMoth", "BOSS_WhiteTiger", "BOSS_WindChimes", "BOSS_WindChimes_Ice", "BOSS_WizardOwl", "Boss_WoolFox",
+  "BOSS_Yeti", "BOSS_Yeti_Grass", "BOSS_NightLady", "BOSS_NightLady_Dark", "BOSS_MoonQueen", "BOSS_KendoFrog",
+  "BOSS_LeafPrincess", "BOSS_MushroomDragon", "BOSS_MushroomDragon_Dark", "BOSS_SmallArmadillo", "BOSS_FeatherOstrich", "BOSS_ScorpionMan",
+  "BOSS_ScorpionMan_Electric", "BOSS_WingGolem", "BOSS_CandleGhost", "BOSS_GuardianDog", "BOSS_SifuDog", "BOSS_MimicDog",
+  "BOSS_DarkAlien", "BOSS_WhiteAlienDragon", "BOSS_VolcanoDragon", "BOSS_DarkMechaDragon", "BOSS_GhostRabbit", "BOSS_GhostRabbit_Grass",
+  "BOSS_NightBlueHorse", "BOSS_NightBlueHorse_Neutral", "BOSS_WhiteShieldDragon", "BOSS_BlackPuppy", "BOSS_BlackPuppy_Ice", "BOSS_WhiteDeer",
+  "BOSS_WhiteDeer_Dark", "BOSS_KingWhale", "BOSS_MysteryMask", "BOSS_HoodGhost", "BOSS_Sekhmet", "BOSS_GrimGirl",
+  "BOSS_PurpleSpider", "BOSS_BlueThunderHorse", "BOSS_RockBeast", "BOSS_RockBeast_Ice", "BOSS_OctopusGirl", "BOSS_OctopusGirl_Neutral",
+  "BOSS_IceNarwhal", "BOSS_JellyfishFairy", "BOSS_BerryGoat_Dark", "BOSS_Kitsunebi_Ice", "BOSS_RaijinDaughter_Water", "BOSS_SnowTigerBeastman",
+  "BOSS_Werewolf_Ice", "BOSS_WhiteTiger_Ground", "BOSS_Horus_Water", "BOSS_FengyunDeeper_Electric", "BOSS_AmaterasuWolf_Dark", "BOSS_PinkRabbit_Grass",
+  "BOSS_GhostAnglerFish", "BOSS_IceWitch", "BOSS_ClownRabbit", "BOSS_LegendDeer", "BOSS_LeafMomonga", "BOSS_IceCrocodile",
+  "BOSS_CactusDoll", "BOSS_CactusDoll_Dark", "BOSS_StuffedShark", "BOSS_IceSeal", "BOSS_Plesiosaur", "BOSS_TropicalOstrich",
+  "BOSS_SnowPeafowl", "BOSS_CubeTurtle", "BOSS_JellyfishGhost", "BOSS_MoonChild", "BOSS_SamuraiDog", "BOSS_PoseidonOrca",
+  "BOSS_NegativeOctopus_Neutral", "BOSS_Penguin_Electric", "BOSS_CaptainPenguin_Black", "BOSS_FlyingManta_Thunder", "BOSS_BluePlatypus_Fire", "BOSS_LazyCatfish_Gold",
+  "BOSS_TentacleTurtle_Ground", "BOSS_KendoFrog_Dark", "BOSS_BlueDragon_Ice", "BOSS_IceNarwhal_Fire", "BOSS_GhostAnglerFish_Fire", "BOSS_StuffedShark_Fire",
+  "BOSS_MummyPal", "BOSS_KingSunfish", "BOSS_KingSunfish_Thunder", "BOSS_ElecSnail", "BOSS_ElecSnail_Fire", "BOSS_GrassGolem",
+  "BOSS_GrassGolem_Dark", "BOSS_GhostDragon", "BOSS_GhostDragon_Fire", "BOSS_DomeArmorDragon", "BrownRabbit", "ElecLion",
+  "GoldenHorse", "TentacleTurtle", "TentacleTurtle_Ground", "Anubis", "Baphomet", "Baphomet_Dark",
+  "Bastet", "Bastet_Ice", "Boar", "Carbunclo", "ColorfulBird", "Deer",
+  "Deer_Ground", "DrillGame", "Eagle", "ElecPanda", "Ganesha", "Garm",
+  "Gorilla", "Gorilla_Ground", "Hedgehog", "Hedgehog_Ice", "Kirin", "Kirin_Ice",
+  "Kitsunebi", "LittleBriarRose", "Mutant", "Penguin", "Penguin_Electric", "RaijinDaughter",
+  "SharkKid", "SharkKid_Fire", "Sheepball", "Umihebi", "Umihebi_Fire", "Werewolf",
+  "WindChimes", "WindChimes_Ice", "Suzaku", "Suzaku_Water", "FireKirin", "FireKirin_Dark",
+  "FairyDragon", "FairyDragon_Water", "SweetsSheep", "SweetsSheep_Ground", "WhiteTiger", "Alpaca",
+  "Serpent", "Serpent_Ground", "DarkCrow", "BlueDragon", "BlueDragon_Ice", "PinkCat",
+  "NegativeKoala", "FengyunDeeper", "VolcanicMonster", "VolcanicMonster_Ice", "GhostBeast", "RobinHood",
+  "RobinHood_Ground", "LazyDragon", "LazyDragon_Electric", "AmaterasuWolf", "LizardMan", "LizardMan_Fire",
+  "BluePlatypus", "BluePlatypus_Fire", "BlackFurDragon", "BirdDragon", "BirdDragon_Ice", "ChickenPal",
+  "FlowerDinosaur", "FlowerDinosaur_Electric", "ElecCat", "IceHorse", "IceHorse_Dark", "GrassMammoth",
+  "GrassMammoth_Ice", "CatVampire", "SakuraSaurus", "SakuraSaurus_Water", "Horus", "KingBahamut",
+  "KingBahamut_Dragon", "BerryGoat", "IceDeer", "BlackGriffon", "WhiteMoth", "CuteFox",
+  "FoxMage", "FoxMage_Dark", "PinkLizard", "WizardOwl", "Kelpie", "Kelpie_Fire",
+  "NegativeOctopus", "NegativeOctopus_Neutral", "CowPal", "Yeti", "Yeti_Grass", "VioletFairy",
+  "HawkBird", "FlowerRabbit", "LilyQueen", "LilyQueen_Dark", "QueenBee", "SoldierBee",
+  "CatBat", "GrassPanda", "GrassPanda_Electric", "FlameBuffalo", "ThunderDog", "ThunderDog_Ice",
+  "CuteMole", "BlackMetalDragon", "GrassRabbitMan", "IceFox", "JetDragon", "DreamDemon",
+  "Monkey", "Monkey_Ice", "Monkey_Fire", "Manticore", "Manticore_Dark", "KingAlpaca",
+  "KingAlpaca_Ice", "PlantSlime", "PlantSlime_Flower", "DarkMutant", "MopBaby", "MopKing",
+  "CatMage", "CatMage_Fire", "PinkRabbit", "ThunderBird", "ThunderBird_Ice", "HerculesBeetle",
+  "HerculesBeetle_Ground", "SaintCentaur", "NightFox", "CaptainPenguin", "CaptainPenguin_Black", "WeaselDragon",
+  "WeaselDragon_Fire", "SkyDragon", "SkyDragon_Grass", "HadesBird", "HadesBird_Electric", "RedArmorBird",
+  "Ronin", "Ronin_Dark", "FlyingManta", "FlyingManta_Thunder", "BlackCentaur", "FlowerDoll",
+  "NaughtyCat", "CuteButterfly", "DarkScorpion", "DarkScorpion_Ground", "ThunderDragonMan", "WoolFox",
+  "LazyCatfish", "LazyCatfish_Gold", "LavaGirl", "FlameBambi", "NightLady", "NightLady_Dark",
+  "MoonQueen", "KendoFrog", "KendoFrog_Dark", "LeafPrincess", "MushroomDragon", "MushroomDragon_Dark",
+  "SmallArmadillo", "CandleGhost", "ScorpionMan", "ScorpionMan_Electric", "WingGolem", "GuardianDog",
+  "SifuDog", "FeatherOstrich", "MimicDog", "DarkAlien", "WhiteAlienDragon", "VolcanoDragon",
+  "DarkMechaDragon", "GhostRabbit", "GhostRabbit_Grass", "NightBlueHorse", "NightBlueHorse_Neutral", "WhiteShieldDragon",
+  "BlackPuppy", "BlackPuppy_Ice", "WhiteDeer", "WhiteDeer_Dark", "KingWhale", "MysteryMask",
+  "HoodGhost", "Sekhmet", "ElecLizard", "GrimGirl", "PurpleSpider", "BlueThunderHorse",
+  "RockBeast", "RockBeast_Ice", "OctopusGirl", "OctopusGirl_Neutral", "IceNarwhal", "IceNarwhal_Fire",
+  "JellyfishFairy", "GYM_SnowTigerBeastman", "GYM_SnowTigerBeastman_2", "SUMMON_DarkAlien", "SUMMON_DarkAlien_MAX", "SUMMON_WhiteAlienDragon",
+  "SUMMON_WhiteAlienDragon_MAX", "PREDATOR_AmaterasuWolf", "PREDATOR_BirdDragon", "PREDATOR_DrillGame", "PREDATOR_FairyDragon", "PREDATOR_FeatherOstrich",
+  "PREDATOR_FlowerDinosaur", "PREDATOR_Garm", "PREDATOR_GhostBeast", "PREDATOR_GoldenHorse", "PREDATOR_Gorilla", "PREDATOR_GrassPanda",
+  "PREDATOR_GrimGirl", "PREDATOR_Horus_Water", "PREDATOR_LazyDragon", "PREDATOR_Manticore_Dark", "PREDATOR_MushroomDragon", "PREDATOR_MysteryMask",
+  "PREDATOR_NightBlueHorse", "PREDATOR_PinkLizard", "PREDATOR_PurpleSpider", "PREDATOR_RedArmorBird", "PREDATOR_ScorpionMan", "PREDATOR_SifuDog",
+  "PREDATOR_ThunderDog", "PREDATOR_Umihebi_Fire", "PREDATOR_VolcanicMonster_Ice", "PREDATOR_Werewolf_Ice", "PREDATOR_WhiteTiger_Ground", "PREDATOR_Yeti",
+  "PREDATOR_HadesBird_Electric", "PREDATOR_Ronin_Dark", "PREDATOR_CandleGhost", "PREDATOR_Baphomet_Dark", "RAID_DarkMechaDragon", "RAID_DarkMechaDragon_2",
+  "Kitsunebi_Ice", "BerryGoat_Dark", "PinkRabbit_Grass", "Werewolf_Ice", "AmaterasuWolf_Dark", "RaijinDaughter_Water",
+  "WhiteTiger_Ground", "FengyunDeeper_Electric", "Horus_Water", "SnowTigerBeastman", "WingGolem_Oilrig", "DarkAlien_Oilrig",
+  "Horus_Oilrig", "Baphomet_Dark_Oilrig", "HadesBird_Oilrig", "LizardMan_Oilrig", "GhostAnglerfish", "GhostAnglerfish_Fire",
+  "IceWitch", "ClownRabbit", "LegendDeer", "LeafMomonga", "SmallYeti", "IceCrocodile",
+  "CactusDoll", "CactusDoll_Dark", "StuffedShark", "StuffedShark_Fire", "IceSeal", "Plesiosaur",
+  "TropicalOstrich", "GrassGolem", "GrassGolem_Dark", "SnowPeafowl", "CubeTurtle", "JellyfishGhost",
+  "ThunderFluffyBird", "MoonChild", "SamuraiDog", "PoseidonOrca", "YakushimaMonster001", "YakushimaMonster001_Blue",
+  "YakushimaMonster001_Red", "YakushimaMonster001_Purple", "YakushimaMonster001_Pink", "YakushimaMonster001_Rainbow", "YakushimaMonster002", "YakushimaMonster003",
+  "YakushimaMonster003_Purple", "YakushimaBoss001", "BOSS_YakushimaBoss001", "YakushimaBoss001_Small", "RAID_YakushimaBoss001_Green", "RAID_YakushimaBoss002",
+  "RAID_YakushimaBoss002_Hand_Left", "RAID_YakushimaBoss002_Hand_Right", "Quest_Farmer03_SheepBall", "Quest_Farmer03_PinkCat", "GYM_ElecPanda_Otomo", "RAID_YakushimaBoss002_Head",
+  "RAID_YakushimaBoss002_2", "RAID_YakushimaBoss002_Hand_Left_2", "RAID_YakushimaBoss002_Hand_Right_2", "RAID_YakushimaBoss002_Head_2", "RAID_YakushimaBoss001_Green_2", "MummyPal",
+  "KingSunfish", "KingSunfish_Thunder", "MonochromeQueen", "ElecSnail", "ElecSnail_Fire", "RAID_LegendDeer",
+  "RAID_LegendDeer_2", "ClioneTwins", "FoxExorcist", "LanternButler", "DarkFlameFox", "OniGhostGirl",
+  "SnakeGirl", "SwordCutlassfish", "GhostDragon", "GhostDragon_Fire", "DomeArmorDragon", "POLICE_ThunderDog",
+  "POLICE_HawkBird", "BOSS_ClioneTwins", "FluffyBird", "BOSS_FluffyBird", "CloverFairy", "BOSS_CloverFairy",
+  "BOSS_FlowerDoll_Fire", "FlowerDoll_Fire", "BOSS_SnakeGirl", "BOSS_SwordCutlassfish", "SwordCutlassfish_Fire", "BOSS_SwordCutlassfish_Fire",
+  "SumoDog", "BOSS_SumoDog", "MushroomLady", "BOSS_MushroomLady", "ThiefBird", "BOSS_ThiefBird",
+  "SleeveRabbit", "BOSS_SleeveRabbit", "KabukiMan", "BOSS_KabukiMan", "LotusDragon", "BOSS_LotusDragon",
+  "BOSS_FoxExorcist", "VenusFlytrap", "BOSS_VenusFlytrap", "BOSS_ElecLizard", "BOSS_MonochromeQueen", "ElecSnail_Ground",
+  "BOSS_ElecSnail_Ground", "BlueSkyDragon", "BOSS_BlueSkyDragon", "PandaGirl", "BOSS_PandaGirl", "LongCat",
+  "BOSS_LongCat", "ElecPomeranian", "BOSS_ElecPomeranian", "CubeTurtle_Neutral", "BOSS_CubeTurtle_Neutral", "GrassMinotaur_Ice",
+  "BOSS_GrassMinotaur_Ice", "VolcanoDragon_Ice", "BOSS_VolcanoDragon_Ice", "BOSS_BrownRabbit", "BOSS_OniGhostGirl", "GrassMinotaur",
+  "BOSS_GrassMinotaur", "FlowerPrince", "BOSS_FlowerPrince", "WingGolem_Fire", "BOSS_WingGolem_Fire", "WhiteMoth_Neutral",
+  "BOSS_WhiteMoth_Neutral", "IceSeal_Ground", "BOSS_IceSeal_Ground", "Mothman", "BOSS_SmallYeti", "BOSS_Mothman",
+  "BOSS_ThunderFluffyBird", "GhostBlackCat", "BOSS_GhostBlackCat", "DandelionGirl", "BOSS_DandelionGirl", "RedFlowerBird",
+  "BOSS_RedFlowerBird", "BOSS_DarkFlameFox", "BOSS_KingWhale_otomo", "BOSS_LanternButler",
+}
+
+-- Membership set + on-demand cache for get(), plus the alias table the naming rule produces.
+-- The set's VALUE is the DataTable the row came from, which costs nothing over the `true` it
+-- used to hold and is what makes get(id)'s `kind` honest. Both tables are indexed into the same
+-- accumulators, in CATALOG order, so rule (3) is decided the same way on every load.
+local set, aliases, unnamed = catalog.index(M.PASSIVE, M.TABLES.passive)
+catalog.index(M.PARTNER, M.TABLES.partner, { set = set, aliases = aliases, unnamed = unnamed })
 local cache = {}
+
+-- CATALOG (DATA): both source tables merged, passive rows first — the shape this file has
+-- always published, so nothing downstream has to know about the split. Built here rather than
+-- written out a third time, which is also what keeps it from drifting from its two halves.
+M.CATALOG = {}
+for _, id in ipairs(M.PASSIVE) do M.CATALOG[#M.CATALOG + 1] = id end
+for _, id in ipairs(M.PARTNER) do M.CATALOG[#M.CATALOG + 1] = id end
+
+---Names that are NOT ids. Two of them here: CraftSpeed_3 -> "CraftSpeed*3" and
+---CraftSpeed_5 -> "CraftSpeed*5". See native/_catalog.lua rule (2).
+M.ALIASES = aliases
+---Rows with no named field, and why. Empty for this catalog; see rules (3) and (4).
+M.UNNAMED = unnamed
+
+---Which DataTable a row came from, or nil for anything that is not a catalog row. The curated
+---definition below answers nil too, because "FlameThrower" is not a row in either table — see
+---the note on it.
+---@param id string
+---@return string?
+function M.tableOf(id)
+    local t = id and set[id]
+    return (type(t) == "string") and t or nil
+end
 
 -- get(id): a Skill wrapper for ANY real catalog id, built on first use + cached; nil if
 -- id is not a known skill row. defining sets .id and registers into object_manager.
+-- Reading a named field comes through here, so it is just as lazy.
+--
+-- `kind` is passed rather than left to Skill.Spec's default, which is the whole reason the two
+-- source tables are kept apart: the default is "active", and answering "active" for a
+-- DT_PassiveSkill_Main_Common row would be the handle claiming something the id does not have.
+-- Nothing else is declared — element, power and cooldown are row VALUES this build cannot read,
+-- and inventing them would be worse than nil.
+--
+-- MEMBERSHIP IS `set[id] ~= nil`, NOT `set[id]`. The value carries the source table, and the
+-- curated definition is pre-seeded with `false` because it came from no table at all — a truthy
+-- test would drop it back out of the catalog it was just added to.
 function M.get(id)
-    if not id or not set[id] then return nil end
+    if id == nil or set[id] == nil then return nil end
     if cache[id] then return cache[id] end
-    local h = Skill{ id = id }
+    local h = Skill{ id = id, kind = KIND_OF_TABLE[set[id]] }
     cache[id] = h
     return h
 end
@@ -489,8 +596,17 @@ M.Fireball = Skill{
     },
 }
 
--- Pre-seed curated so get("FlameThrower") returns the curated handle (hooks intact).
-set[M.Fireball.id] = true
+-- Pre-seed curated so get("FlameThrower") returns the curated handle (hooks intact), and so
+-- `skills.FlameThrower` names it — M.Fireball is a NICKNAME, since "Fireball" is not an id of
+-- anything. The membership value is `false` rather than a table name on purpose: it is a real
+-- member (get and the named field both find it) but it came from NO DataTable, so tableOf()
+-- answers nil for it rather than naming a table that does not have the row.
+set[M.Fireball.id] = false
 cache[M.Fireball.id] = M.Fireball
+
+-- LAST: hang the lazy named fields off the module. After the curated definition, so the
+-- rule-(4) shadow check sees the module's complete own surface. See native/_catalog.lua.
+catalog.expose(M, { set = set, aliases = aliases, unnamed = unnamed,
+                    get = M.get, label = "native.skills" })
 
 return M

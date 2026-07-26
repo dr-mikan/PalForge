@@ -2,23 +2,32 @@
 -- unifying the old native/audio/bgm/ and native/audio/se/ subdirectories.
 --
 --   (a) M.CATALOG  — the COMPLETE AkAudioEvent (Wwise event) set: name -> asset path.
---   (b) M.bgm(name)/M.se(name)/M.get(name) — lazy, cached handles for any catalog name.
---   (c) CURATED    — the sound ids already chosen, as named helpers.
+--   (b) M.<Name>   — an Audio handle per event, built on first read. native/_catalog.lua owns
+--                    the naming rule; for this set it is the identity, because every one of the
+--                    1957 AkAudioEvent names is already a Lua identifier. A named field is the
+--                    SOUND-EFFECT spelling (M.se), which is what M.get has always been.
+--   (c) M.bgm(name)/M.se(name)/M.get(name) — lazy, cached handles for any catalog name.
+--   (d) CURATED    — the sound ids already chosen, as named helpers.
 --
 -- bgm/se lower a catalog entry into an api/audio definition (registered under the "audio"
 -- type in object_manager) carrying BOTH the event name and its asset path. `kind` is purely
 -- descriptive here — the native route is the same call for music and effects — so calling
--- both bgm(name) and se(name) for one name simply keeps whichever was defined last.
+-- both bgm(name) and se(name) for one name simply keeps whichever was defined last. That is
+-- also true of a named field: reading `audio.AKE_BGM_Title` defines it as an SE, and calling
+-- `audio.bgm("AKE_BGM_Title")` afterwards re-defines the same id as a BGM. Both play the same
+-- sound through the same call; only the descriptive `kind` moves.
 --
 --   local audio = require("palforge.native.audio")
 --   audio.MainTheme:play()                        -- curated bgm helper
---   audio.se("AKE_General_Explosion"):play()
+--   audio.AKE_General_Explosion:play()            -- a NAMED handle for every event
+--   audio.se("AKE_General_Explosion"):play()      -- the same handle, by name string
 --
 -- PLAY API (CONFIRMED in-game): each name is a Wwise AkAudioEvent with an asset path;
 -- utils/sound/native.lua plays it via LoadAsset(path) -> PlayAkEventSoundByActor(actor,
 -- asset). (PlaySoundByActor({Key=FName(name)}) is SILENT for these — a different namespace.)
 
-local Audio = require("palforge.api.audio")
+local Audio   = require("palforge.api.audio")
+local catalog = require("palforge.native._catalog")
 
 local M = {}
 
@@ -2014,17 +2023,42 @@ function M.se(name)
     return seCache[name]
 end
 
--- get(name): a sound-effect handle by default (nil if not in the catalog).
+-- get(name): the handle for a catalog name — WHICHEVER KIND IT WAS ALREADY BUILT AS, and a
+-- sound-effect one when it has not been built yet. nil if name is not in the catalog.
+--
+-- The bgm-first check is not cosmetic. Defining an id re-registers it in object_manager under
+-- that id (api/audio), so an unconditional M.se(name) would silently convert an already-defined
+-- BGM into an SE — and since M.get is also what the NAMED FIELDS resolve through, merely
+-- READING `audio.AKE_BGM_Title` would have downgraded the curated M.MainTheme. A read must not
+-- redefine anything. Calling M.bgm/M.se explicitly still does what it always did: the last
+-- explicit call wins, which is the documented behaviour at the top of this file.
 function M.get(name)
+    if name and bgmCache[name] then return bgmCache[name] end
     return M.se(name)
 end
 
 -- ---- CURATED helpers (the sound ids already chosen; all dump-confirmed) ----
+-- All six are NICKNAMES rather than event names: "MainTheme" is not an AkAudioEvent, so it names
+-- nothing but this line, while `audio.AKE_BGM_Title` is the event's own name and resolves to
+-- this very handle through the bgm cache.
 M.MainTheme    = M.bgm("AKE_BGM_Title")                       -- title-screen BGM
 M.BattleTheme  = M.bgm("AKE_LegendDeer_State_Strong_Strong")  -- boss-battle BGM
 M.VictoryTheme = M.bgm("AKE_Arena_Victory_01")                -- arena victory jingle
 M.Explosion    = M.se("AKE_General_Explosion")                -- generic explosion SE
 M.Laser        = M.se("AKE_Weapon_ChargeLaserRifle_Fire")     -- laser-rifle fire SE
 M.Footstep     = M.se("AKE_Pal_Footstep")                     -- Pal footstep SE
+
+-- LAST: hang the lazy named fields off the module. THIS CATALOG IS A MAP, not a list, so its own
+-- CATALOG table IS the membership set — nothing is copied and index() only walks it to look for
+-- names that need an alias, of which there are none. See native/_catalog.lua.
+local set, aliases, unnamed = catalog.index(M.CATALOG)
+
+---Names that are NOT event names. Empty for this catalog; see native/_catalog.lua rule (2).
+M.ALIASES = aliases
+---Events with no named field, and why. Empty for this catalog; see rules (3) and (4).
+M.UNNAMED = unnamed
+
+catalog.expose(M, { set = set, aliases = aliases, unnamed = unnamed,
+                    get = M.get, label = "native.audio" })
 
 return M
