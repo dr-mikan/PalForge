@@ -69,9 +69,8 @@ PalForge : 1
 ```
 
 `CheatManagerEnablerMod` は、ゲーム本体の管理オブジェクト `UPalCheatManager` を PalForge に
-使わせるための Mod です。有効なままにしてください。`Item.Handle:give`、`Item.Handle:take`、
-`Pal.Handle:spawn` はいずれもこのオブジェクトを通るので、無いとどれもゲームに届く前に断られて
-`false` になります。スポーンの経路は次の行を出して諦めます。
+使わせるための Mod です。有効なままにしてください。パルをワールドに出す処理はこのオブジェクトを
+通るので、無いと `Pal.Handle:spawn` はゲームに届く前に断られ、次の行を出して諦めます。
 
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
@@ -310,15 +309,14 @@ api.Building{
 `PalBoxV2`、`native/items` は `Wood` / `Berries` / `Arrow`、`native/pals` は `ChickenPal` と `SheepBall`
 を同梱しています。置き換えたい場合を除いて、別の ID を選んでください。
 
-パルの例では、ハンドラではなくアクションを見てみます。`:spawn` はこのバージョンでは何も配置しない
-ので（下の行はどちらも `false` を返します）、確認できるのは定義そのものです。ゲーム自身のチキンが、
-あなたのメッシュとハンドラを持つようになります。
+パルの例では、ハンドラではなくアクションを見てみます。スポーンには数秒の猶予をあげてください。
+クリーチャーが現れるのは呼び出しから 4〜8 秒後で、宣言したメッシュとハンドラを持って出てきます。
 
 ```lua
 local api = require("palforge.api")
 
 -- Pal.get works for any game CharacterID, defined or not.
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- false: no creature appears
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- the pal arrives a few seconds later
 
 -- Defining the same id attaches your own mesh and handlers to it. This replaces
 -- native/pals' curated ChickenPal demo definition.
@@ -338,7 +336,7 @@ local chicken = api.Pal{
     },
 }
 
-chicken:spawn(api.Player.coordinateOffset(300, 0, 0))     -- false: no creature appears
+chicken:spawn(api.Player.coordinateOffset(300, 0, 0))     -- 3 m away, a few seconds later
 ```
 
 ## ゲーム内で確認する
@@ -438,7 +436,7 @@ end
 local api = require("palforge.api")
 
 api.Item.get("Wood"):give(10)
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- :spawn places nothing in this version
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- the pal arrives a few seconds later
 ```
 
 </Tab>
@@ -666,16 +664,16 @@ events = {
 
 ### スポーンしても何も起きない
 
-このバージョンでは、何を渡しても `:spawn` からクリーチャーは現れません。[Pal](/docs/api/pal) を
-参照してください。パルの定義が今も何をしてくれるかもそこに書いてあります。次の警告はそれより手前の
-別の問題で、こちらは直す価値があります。
+まずはもう数秒待ってください。パルが現れるのは `:spawn` が返ってから 4〜8 秒後で、いつ現れたかは
+ログに出ます（[Pal](/docs/api/pal) を参照）。それだけ待っても何も出てこない場合は、次の行を探して
+ください。
 
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
 ```
 
-これは、呼び出しがゲームに届く前に拒否されたという意味です。`:spawn` には `UPalCheatManager` が
-必要なので、`mods.txt` で `CheatManagerEnablerMod` を有効にしてください。
+これは、呼び出しがゲームに届く前に拒否されたという意味です。ワールドへのスポーンには
+`UPalCheatManager` が必要なので、`mods.txt` で `CheatManagerEnablerMod` を有効にしてください。
 
 ## 次に読むもの
 

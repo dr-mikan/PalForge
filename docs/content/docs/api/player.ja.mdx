@@ -231,7 +231,7 @@ local function spawnHere(charId, level)
         log.warn("no world yet - nothing spawned")
         return false
     end
-    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- false in this version
+    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- issued; arrives seconds later
 end
 
 event.on("world.ready", function()
@@ -240,15 +240,13 @@ end)
 ```
 
 <Callout type="warn">
-このバージョンでは `Pal.Handle:spawn` はワールドにクリーチャーを配置しないので、ここで求めた座標が
-何かをどこかに出すことはありません。[Pal](/docs/api/pal) を参照してください。座標そのものは本物で、
-このページの他の内容はすべて動きます。自前の距離計算、建築物の位置、自分で配置するものなどに
-使ってください。
+座標指定のスポーンは即座ではなく、スポーンのあとに移動が続く形です。ゲーム自身の呼び出しはプレイヤーの
+すぐそばにパルを出し、PalForge はそれが現れるのを待ってから指定座標へ移動させます。着地はぴったりです。
+ここまで全体で 4〜8 秒かかるので、見た目には「自分の隣に現れてから移動していく」形になります。
 
-経路としては、スポーンのあとに移動が続く形です。ゲーム自身の呼び出しはプレイヤーのすぐそばにパルを
-出し、PalForge はそのアクターだけを 400 ms 間隔で最大 6 回まで再試行しながら指定座標へ移動させます
-（クリーチャーが現れるまで数フレームかかるためです）。また `CheatManagerEnabler` mod が必要です。
-無い場合は管理用オブジェクトがそもそも存在せず、`:spawn` はゲームに届く前に `false` を返します。
+`:spawn` はそのどれも起きないうちに返るので、戻り値は「呼び出しが発行された」だけを意味します。
+[Pal](/docs/api/pal) を参照してください。また `CheatManagerEnabler` mod が必要です。無い場合は管理用
+オブジェクトがそもそも存在せず、ワールドへのスポーンはゲームに届く前に `false` を返します。
 </Callout>
 
 ### プレイヤーの正面にスポーンさせる
@@ -275,7 +273,7 @@ end
 
 local at = inFront(600)   -- 6 m ahead
 if at then
-    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- false in this version
+    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- lands exactly here, seconds later
 end
 ```
 

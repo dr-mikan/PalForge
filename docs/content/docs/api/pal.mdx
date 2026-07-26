@@ -8,13 +8,13 @@ description: Add a creature that reacts when it spawns, takes damage or is caugh
 - Make a creature react the moment you catch it, hit it or kill it
 - Play a sound, or start a timed effect, when a pal dies
 - Give a pal a different body, a different colour and a different size
+- Drop a pal into the world where you are standing, at the level you pick
 - Run your own code on every one of your pals, over and over, while the game is playing
-- Know what `:spawn` can and cannot do in this version
 
 ## Make a pal
 
 A pal is one of the game's creatures. Write `Pal{ ... }` with the game's own name for it, and
-you get back an object you can look up later, hang behaviour on and act through.
+you get back an object you can spawn, look up later and hang behaviour on.
 
 ```lua title="content/pals.lua"
 local pal = Pal{
@@ -28,7 +28,7 @@ local pal = Pal{
     },
 }
 
-pal:spawn(Player.coordinate())   -- no creature appears in this version; see :spawn below
+pal:spawn(Player.coordinate())   -- the pal turns up a few seconds later
 ```
 
 Catch a Chicken Pal in your game and the victory jingle plays. That is the whole loop:
@@ -42,8 +42,8 @@ Pal.get("SheepBall")        -- a handle for an existing id; never nil
 Pal.get_all()               -- every PalForge-registered pal, as handles
 ```
 
-`Pal.get` never returns nil. An id nobody defined gets a thin definition — enough to call the
-actions on, but with no handlers on it. Only `Pal{ ... }` registers a pal, and only a
+`Pal.get` never returns nil. An id nobody defined gets a thin definition — enough to
+`:spawn` it, but with no handlers on it. Only `Pal{ ... }` registers a pal, and only a
 registered pal ever gets its handlers called.
 
 Palworld's own creature list lives in `native/pals`:
@@ -443,26 +443,9 @@ actions, five event forwarders and five queries.
 
 ### spawn
 
-<Callout type="error" title="Putting a pal in the world is not available in this version">
-`:spawn` does not make a creature appear. The game's own spawn call runs without complaining
-and nothing arrives — not in that instant, and not a second later either — so `:spawn` reports
-what it saw rather than what it asked for, and answers `false`.
-
-What does work is everything about a pal that is **already** in the world.  `onCaptured`,
-`onDamaged`, `onDeath`, `onSpawned` and `onTick` all fire for the game's own creatures, and
-`:renderOn` still changes what one looks like. Build on the pals the game puts there for you —
-the wild ones, the one the player just caught — rather than on creatures you place yourself.
-
-The `toPlayer` route hands the creature to the player's party or box, and nothing in Lua can
-look inside either, so it answers `true` for "the call was issued" and cannot promise more than
-that. Do not read it as a pal in the box.
-
-The shape below does not change, so code written against it stays correct.
-</Callout>
-
 ```lua
 ---@param arg Coord|table|nil
----@return boolean appeared
+---@return boolean issued
 pal:spawn(arg)
 ```
 
@@ -492,40 +475,72 @@ flowchart TD
   B -->|"at"| C["core.spawn.palAt"]
   B -->|"toPlayer"| D["core.spawn.palForPlayer"]
   B -->|"neither"| E["core.spawn.pal"]
-  C --> F["PalCheatManager SpawnMonster"]
+  C --> F["SpawnMonster"]
   E --> F
-  D --> G["PalCheatManager SpawnMonsterForPlayer"]
-  F --> H["teleport the new actor - palAt only"]
+  D --> G["RequestSpawnMonsterForPlayer"]
+  F --> H["teleport the new pal - palAt only"]
 ```
 
-Every route goes through `UPalCheatManager`, the game's server-checked admin API. For the two
-world routes the result is checked instead of assumed: PalForge counts the creatures in the
-world immediately before the call and immediately after it, and answers `true` only when one
-that was not there a moment ago is there now. That check is why `:spawn` answers `false` — the
-call runs, and no creature is ever there afterwards. A `false` also covers the plain refusals:
-an empty id, a coordinate that is not a number, or no cheat manager to reach.
+<Callout type="warn" title="A spawn is not instant">
+The pal turns up roughly **four to eight seconds** after you call `:spawn`. That is the game's
+own pace, not a delay PalForge adds, and nothing can make it immediate.
 
-A coordinate is a spawn followed by a move, because the game's own call drops the pal near the
-player and ignores the position you asked for. PalForge looks for a creature that was not in
-the world before, and teleports that one — retrying every 400 ms, up to six times, since a
-creature would take a few frames to appear. With nothing appearing, the pass finds nothing to
-move and says so in the log.
+So the boolean says the call was **issued**, and it cannot say more than that — your code has
+long since moved on by the time the creature exists. Do not look for the pawn on the next line,
+and do not treat a `true` as a pal standing somewhere.
 
-#### The cheat manager
+To react to the pal, use the `onSpawned` handler, which runs when the creature actually arrives.
+If you must look yourself, look repeatedly over ten seconds or more.
+</Callout>
 
-`SpawnMonster` and `SpawnMonsterForPlayer` live on `UPalCheatManager`. On a client, the
-CheatManagerEnabler mod creates that object from `PlayerController:ClientRestart`; on a
-dedicated server that hook never fires, so nothing else creates one. `core/spawn` builds it
-itself when the session has none: it constructs the `PalPlayerController`'s own `CheatClass`
-with `StaticConstructObject` — falling back to `/Script/Pal.PalCheatManager` and then
-`/Script/Engine.CheatManager` when that class is null — and attaches the result to the
-controller. The object stays there, so this happens once per session rather than once per
-spawn, and the log records the one time it runs. That is what gives a dedicated server the same
-route as a client.
+`false` is the honest failure: the call was refused or never attempted at all — an empty id, a
+coordinate that is not a number, or no admin object to reach.
+
+The arrival is reported in the log a few seconds later, with the elapsed time, so you can see
+what happened without instrumenting your own code:
+
+```text
+[PalForge.spawn][info] spawn.pal ChickenPal: 1 new PalCharacter in the world 5.9 s after the call (look 15 of 20)
+```
+
+#### Spawning on a coordinate
+
+A coordinate spawn is a spawn followed by a move. The game's own call ignores the position you
+ask for and drops the pal beside the player, so PalForge waits for the creature to arrive, picks
+out the one that was not there before, and teleports it onto your point.
+
+It lands **exactly** there. The deferred pass reads the position back off the pal it moved and
+reports both that and the distance from what you asked for:
+
+```text
+[PalForge.spawn][info] spawn.palAt: placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0
+```
+
+What you see in game is the pal appearing next to you and then moving to the spot, a few seconds
+after the call. That is the shape of it, and there is no way to have the creature simply start
+at the coordinate.
+
+#### Sending one to the player
+
+`:spawn{ toPlayer = true }` hands the creature to the player's party or box instead of the
+world, and takes no admin object at all. Its `true` means the call was issued and stops there:
+nothing in Lua can look inside a party or a box, so there is no arrival to report and no log
+line follows.
+
+#### The admin object
+
+The world routes go through `UPalCheatManager`. On a client, the CheatManagerEnabler mod creates
+that object from `PlayerController:ClientRestart`; on a dedicated server that hook never fires,
+so nothing else creates one. `core/spawn` builds it itself when the session has none: it
+constructs the `PalPlayerController`'s own `CheatClass` with `StaticConstructObject` — falling
+back to `/Script/Pal.PalCheatManager` and then `/Script/Engine.CheatManager` when that class is
+null — and attaches the result to the controller. The object stays there, so this happens once
+per session rather than once per spawn, and the log records the one time it runs. That is what
+gives a dedicated server the same route as a client.
 
 The earliest failure is having no player controller at all: no world loaded, or not connected
-yet. Every route then returns `false` without reaching the game, and warns that no cheat
-manager was found and none could be built. Calling from `world.ready` avoids that window:
+yet. Every route then returns `false` without reaching the game, and warns that no admin object
+was found and none could be built. Calling from `world.ready` avoids that window:
 
 ```lua
 local event = require("palforge.core.event")
@@ -533,7 +548,7 @@ local log   = require("palforge.utils.log").scope("example")
 
 event.on("world.ready", function()
     if not Pal.get("ChickenPal"):spawn{ level = 10 } then
-        log.warn("no pal appeared")
+        log.warn("the spawn call was not issued")
     end
 end)
 ```
@@ -796,7 +811,6 @@ local function summonSquad(n, level)
         return false
     end
     for i = 1, n do
-        -- false in this version: no member appears
         Squad:spawn{ at = { x = at.x + i * 250, y = at.y + 250, z = at.z }, level = level }
     end
     return true
@@ -808,20 +822,21 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-Each member takes its own `SpawnMonster` call, and each one's `onSpawned` would attach the mesh
-to its own creature. No member appears in this version, so nothing is placed and no `onSpawned`
-follows — the same code is what summons the squad once the world route works.
+Each member takes its own spawn call, and each one's `onSpawned` attaches the mesh to its own
+creature as it arrives. The squad does not appear all at once or immediately: every member is a
+few seconds behind its own call, so they turn up over the following handful of seconds.
 
 ## Limits
 
 <Callout type="warn">
 
-- **Putting a pal in the world does not work.** `:spawn` returns `false` on every route that
-  places a creature in the world, and none appears. Everything else on this page is about pals
-  the game itself put there, and all of that works.
+- **A spawn is not instant, and `:spawn` cannot tell you it worked.** The pal arrives four to
+  eight seconds later, so the boolean is about the call being issued. Arrival is in the log, and
+  `onSpawned` is where a handler belongs.
 - **Lua cannot add a brand-new creature.** `Pal{ id = ... }` gives behaviour, visuals and
   metadata to a creature the game already has; creating the data row itself is PalSchema's
-  job. An id with no matching `BP_<Id>_C` in the game never gets its handlers called.
+  job. An id with no matching `BP_<Id>_C` in the game never gets its handlers called, and
+  `:spawn` has nothing to spawn.
 - **`onTick` is a sweep, not a game event.** `core/event` walks the live pals every
   `core.event.PAL_SCAN_MS` — 3000 ms by default — and calls `onTick` once per live creature.
   Set `require("palforge.core.event").PAL_SCAN_MS = 5000` to slow it down, or `0` to switch it
@@ -847,16 +862,16 @@ follows — the same code is what summons the squad once the world route works.
 - **A handler error ends that handler.** PalForge calls your hook inside `pcall` and logs the
   failure with its channel and hook name, so the bug is visible in the log — but the rest of
   the handler does not run, and neither the channel nor the game notices.
-- **`:spawn` needs a player controller before it can even try.** It needs `PalCheatManager`
-  too, but nothing else has to create that first: when the session has none, `core/spawn`
-  builds one from the controller's `CheatClass` and attaches it, so a dedicated server takes
-  the same route as a client even though CheatManagerEnabler's `ClientRestart` hook never runs
-  there. With no `PalPlayerController` to build it on, every route returns `false` without
-  reaching the game.
+- **A world spawn needs a player controller before it can even try.** It needs
+  `PalCheatManager` too, but nothing else has to create that first: when the session has none,
+  `core/spawn` builds one from the controller's `CheatClass` and attaches it, so a dedicated
+  server takes the same route as a client even though CheatManagerEnabler's `ClientRestart` hook
+  never runs there. With no `PalPlayerController` to build it on, every world route returns
+  `false` without reaching the game. The `toPlayer` route needs none of this.
 - **A coordinate is a move after the spawn, not a spawn location.** The game's own call ignores
-  the position you asked for, so PalForge looks for the creature that just appeared and
-  teleports it, retrying every 400 ms up to six times. That pass only ever reports to the log,
-  and what it reports today is that there was no new creature to move.
+  the position you asked for, so PalForge waits for the creature, picks out the new one and
+  teleports it onto your point — where it lands exactly. That pass reports only to the log, and
+  the line it writes carries the position read back off the pal.
 - **A mesh is never attached for you.** Call `:renderOn(actor)` from a handler.
   `core.mesh.ENABLED` is a global kill switch that turns every attach into a no-op, and the
   material fields reach a backend that paints only when `kind` is `procedural` or `obj`.
@@ -872,8 +887,9 @@ follows — the same code is what summons the squad once the world route works.
   the only field you have to fill in.
 - What happens to a pal goes under `events`: `onSpawned`, `onDamaged`, `onDeath`,
   `onCaptured` and `onTick`. Every one of them is live.
-- `pal:spawn()` is how a pal would be placed, but it cannot place one in this version: it
-  answers `false` and nothing appears. Work with the creatures the game spawns itself.
+- `pal:spawn()` puts a pal in the world, and the pal arrives four to eight seconds later. Pass a
+  coordinate to place it exactly, or `{ toPlayer = true, num = 3 }` to send them to the player.
+  The boolean is about the call, so react in `onSpawned`.
 - A `mesh` changes what a pal looks like, but you attach it yourself with
   `pal:renderOn(ctx.actor)` from `onSpawned`.
 - Only ids you defined with `Pal{ ... }` get their handlers called; `Pal.get` gives you the

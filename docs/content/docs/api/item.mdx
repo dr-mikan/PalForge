@@ -437,7 +437,7 @@ vanilla item can be given, taken and queried without being described first.
 | `.id` | string | The item's game item id. A plain field. |
 | `:count()` | number \| nil | How many of this item the local player is carrying right now. `nil` means the count could not be read, never that the player has none. |
 | `:give(count)` | boolean | Adds `count` (default 1) to the local player's inventory. `true` only when the inventory count was seen to rise. |
-| `:take(count)` | boolean | Removes `count` (default 1) by dropping it on the ground at the player's feet. `count` is treated as a magnitude. `true` only when the count was seen to fall. |
+| `:take(count)` | boolean | Consumes `count` (default 1) out of the local player's inventory. `count` is treated as a magnitude. `true` only when the count was seen to fall. |
 | `:recipeOf()` | table \| nil | The declared recipe, or `nil` when the item has none. |
 | `:iconOf()` | any \| nil | Texture ref from the item icon DataTable, else the declared `icon`. |
 | `:name()` | string | The declared name, else the id. |
@@ -451,14 +451,14 @@ vanilla item can be given, taken and queried without being described first.
 
 ### give
 
-`:give` puts items in the player's inventory through the game's own admin object, and then
-checks that they arrived. The inventory count is read before the call and again after it, and
-`true` means the count was seen to **rise**.
+`:give` puts items in the player's inventory through the inventory's own write, and then checks
+that they arrived. The count is read before the call and again after it, and `true` means it was
+seen to **rise**.
 
 ```mermaid
 flowchart LR
   A["Item.Handle:give"] --> B["read the count"]
-  B --> C["the game's GetItem cheat"]
+  B --> C["the inventory's own add"]
   C --> D["read the count again"]
   D --> E["true only when it rose"]
 ```
@@ -472,22 +472,15 @@ if not Item.get("Berries"):give(5) then
 end
 ```
 
-<Callout type="warn">
-`:give` and `:take` go through the game's admin object, which the companion mod
-`CheatManagerEnablerMod` switches on. Without it there is no admin object to call, so both are
-refused before they reach the game and answer `false`.
-[Getting started](/docs/getting-started) has the `mods.txt` line that turns it on.
-</Callout>
-
 The boolean is the measurement, never the call. A `false` means nothing was seen to arrive, and
-that has several causes — no admin object, an item id the game does not know, or an inventory
-with no room for it. Every outcome is logged with the item, the count and what the inventory
-did, so the log separates the cases the boolean cannot:
+that has several causes — the inventory refusing outright, an inventory with no room, or a count
+that could not be read afterwards. The inventory answers with a reason of its own, and the log
+carries it, so the log separates the cases the boolean cannot:
 
 ```text
 [PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
-[PalForge.items][warn] give Wood x10: GetItem executed [evidence declared] and the count did not rise (135 -> 135) — unknown item id, or the inventory had no room
-[PalForge.items][err] give Wood x10 failed: no PalCheatManager on this session (needs CheatManagerEnabler)
+[PalForge.items][warn] give Wood x10: AddItem_ServerInternal answered Success but the count did not rise (135 -> 135). Weight is now 300.0 of 300.0
+[PalForge.items][err] give Wood x10 failed: the player's inventory could not be reached
 ```
 
 The `[evidence ...]` tag at the end records how PalForge checked the call against the running
@@ -496,41 +489,39 @@ readable.
 
 A namespaced id is resolved first, so `Item.get("example:Potion"):give(1)` hands the name
 `example_Potion` to the game. PalForge does not check that a matching data row exists — an id
-the game does not know is accepted, adds nothing, and comes back as a `false`.
+the game does not know moves nothing, and comes back as a `false`.
 
 <Callout type="info">
-Do not count on your own `:give` reaching your own `onObtain`. `onObtain` follows the game's own
-pickup reporting, and inside an `onObtain` handler a guard stops a handler from setting itself
-off again. Log what you hand out at the point you hand it out.
+A `:give` goes through the same write the game uses for a pickup, so it normally reaches
+`onObtain` as well. Inside an `onObtain` handler a guard stops that, so a handler cannot set
+itself off; anywhere else, expect your own give to come back around.
 </Callout>
 
 ### take
 
 `:take` is the same measurement in the other direction: the count is read before and after, and
-`true` means it was seen to **fall**.
+`true` means it was seen to **fall**. The items are consumed — nothing lands at the player's
+feet to be picked back up — so a pack can charge a real price for something.
 
-<Callout type="warn" title="Taking items drops them at the player's feet">
-Nothing in this version makes an item vanish, so `:take` uses the call that takes it out of the
-inventory: the items land on the ground where the player is standing. The inventory really has
-lost them — that is what `:take` means, and the count check proves it — but a pile appears next
-to the player, and anyone can walk over it and pick it back up.
-
-Plan for the pile. `:take` fits "hand this over" well and "this is consumed" badly, so charge a
-price with it only where the player picking it straight back up does not break your design.
+<Callout type="warn" title="Taking needs the player to have something equipped">
+The consume runs through a weapon the player is carrying. A player with nothing equipped at all
+has nothing to route it through, so `:take` answers `false` and says exactly that in the log. It
+is the one thing to design around: if your building charges a price, a player standing there
+bare-handed cannot pay it.
 </Callout>
 
 ```mermaid
 flowchart LR
   A["Item.Handle:take"] --> B["read the count"]
   B --> C["clamp to what is held"]
-  C --> D["the game's DropItem cheat"]
+  C --> D["the game's consume call"]
   D --> E["read the count again"]
   E --> F["true only when it fell"]
 ```
 
 ```lua
 if Item.get("Wood"):take(3) then
-    -- three Wood left the inventory, and are lying at the player's feet
+    -- three Wood are gone from the inventory
 else
     -- nothing was measured to leave
 end
@@ -541,13 +532,13 @@ inventory holds. Asking when they hold none skips the call altogether. Both outc
 so the log separates the cases the boolean cannot:
 
 ```text
-[PalForge.items][info] take Wood x3: 12 -> 9, dropped on the ground at the player's feet [evidence declared]
-[PalForge.items][warn] take Wood x5: the inventory holds only 2, dropping that many
-[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is dropped
+[PalForge.items][info] take Wood x3: 164 -> 161 [evidence declared]
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, taking that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is taken
 ```
 
 <Callout type="warn">
-A clamped removal still returns `true` — the second line above drops 2 of the 5 asked for and
+A clamped removal still returns `true` — the second line above takes 2 of the 5 asked for and
 answers `true`. `true` means "the count was seen to fall", not "exactly `count` left". When the
 amount has to be exact, read `:count()` yourself before and after.
 </Callout>
@@ -573,8 +564,9 @@ all — no world loaded, no player found — and never that the player has none,
 before you compare.
 
 `iconOf` looks the id up in `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` and reads the
-texture off the row. Every step is fail-soft: a missing table, row or column gives you the
-`icon` you declared instead, which is `nil` unless you set one.
+texture off the row, so a vanilla id hands you the game's own artwork for that item. Every step
+is fail-soft: a missing table, row or column gives you the `icon` you declared instead, which is
+`nil` unless you set one. A namespaced id of your own has no row, so it always falls back.
 
 ### Enumerating
 
@@ -726,7 +718,7 @@ Building{
     events = {
         onRightClick = function(self, ctx)
             -- ctx.actor = the build object, ctx.player = who interacted, ctx.buildId
-            local ok = Item.get("Wood"):take(5)   -- the 5 Wood land on the ground, not in a bin
+            local ok = Item.get("Wood"):take(5)   -- the 5 Wood are consumed
             if not ok then
                 log.warn("could not take the wood")
                 return
@@ -751,12 +743,12 @@ description wins, so the mesh block is repeated here to keep the vanilla look. U
 namespaced id for content of your own.
 </Callout>
 
-Take first and hand over only when the take succeeded: that order is what stops the bench
-paying out for free, because `:take` returns `false` when nothing was seen to leave. Two things
-it does not promise. The wood does not disappear — it is on the floor next to the player, who
-can pick it straight back up, so this bench is a trade of convenience rather than a real price.
-And `true` does not mean all 5 left, because a request is clamped to what the player is
-carrying, so an exact trade still needs its own `:count()` check.
+Take first and hand over only when the take succeeded: that order is what stops the bench paying
+out for free, because `:take` returns `false` when nothing was seen to leave. The wood is
+consumed rather than dropped, so this really is a price the player paid. One thing `true` does
+not promise is that all 5 left — a request is clamped to what the player is carrying — so an
+exact trade still needs its own `:count()` check. And a player with nothing equipped cannot pay
+at all, which the `false` branch already covers.
 
 ## What to watch out for
 
@@ -775,9 +767,9 @@ search over your registered ids is what finds it. The search reads a snapshot in
 particular order and returns the first id that matches, so two pack ids resolving to the same
 row name are ambiguous.
 
-**Taking an item drops it at the player's feet.** `:take` moves items out of the inventory and
-into the world, because nothing in this version destroys one. The removal is real and measured,
-and so is the pile on the floor.
+**Taking an item needs something equipped.** The consume runs through a weapon the player is
+carrying, so a player holding nothing at all has no route for it and `:take` answers `false`.
+The items themselves are consumed, not dropped.
 
 **`onUse` does not name the target directly.** `ctx.actor` is the local player pawn, the one
 who used the item. The character it was used on is in `ctx.targetId` as a raw instance id,
@@ -800,12 +792,12 @@ cannot stop the event.
 and act on that inventory, so on a shared server they answer for whichever player pawn is found
 first. `count` answering `nil` means the read failed, not that the bag is empty.
 
-**`give` and `take` need the admin object.** Both go through the one
-`CheatManagerEnablerMod` switches on. Without that companion mod they are refused before they
-reach the game and answer `false`. `count` does not need it.
+**`give` goes through the inventory's own write.** It reports what the inventory answered as
+well as what the count did, so the log names the reason behind a `false`.
 
-**Do not count on a `:give` reaching your `onObtain`.** Log what your own code hands out at the
-point you call it, rather than waiting for the event to come back around.
+**A `:give` normally fires `onObtain` too.** It goes through the same write the game uses for a
+pickup. Inside an `onObtain` handler a guard prevents that, so a handler cannot set itself off;
+anywhere else, expect your own give to come back around.
 
 **Repeat pickups inside half a second are dropped.** Two of the game's calls report one
 pickup, and PalForge drops a repeat of the same item id within that window so your handler
@@ -816,8 +808,8 @@ runs once. A genuine second pickup of the same item that fast is lost.
 - Write `Item{ ... }` to describe an item. Only `id` is required, and the id must be one the
   game already has.
 - `Item.get("Wood")` gives you a handle for any item. `:count()` reads how many the player is
-  carrying, `:give` adds and `:take` removes — and each of the three tells you what it measured,
-  not what it attempted. `:take` drops what it removes on the ground.
+  carrying, `:give` adds and `:take` consumes — and each of the three tells you what it measured,
+  not what it attempted. `:take` needs the player to have something equipped.
 - Put your code in `events`. `onObtain` runs on pickup, `onUse` runs when the item is used.
   `onCraft` and `onDiscard` do not run yet.
 - In `onUse`, `ctx.actor` is the player who used the item — the right target for food and

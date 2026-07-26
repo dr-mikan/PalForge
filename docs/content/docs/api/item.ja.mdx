@@ -384,7 +384,7 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 | `.id` | string | このアイテムのゲーム内アイテム ID。ただのフィールドです。 |
 | `:count()` | number \| nil | ローカルプレイヤーが今このアイテムをいくつ持っているか。`nil` は「読めなかった」であって「0 個」ではありません。 |
 | `:give(count)` | boolean | ローカルプレイヤーの所持品に `count` 個（既定 1）追加します。所持数が増えたのを観測できたときだけ `true` です。 |
-| `:take(count)` | boolean | `count` 個（既定 1）をプレイヤーの足元に落として所持品から取り除きます。`count` は絶対値として扱われます。所持数が減ったのを観測できたときだけ `true` です。 |
+| `:take(count)` | boolean | ローカルプレイヤーの所持品から `count` 個（既定 1）を消費します。`count` は絶対値として扱われます。所持数が減ったのを観測できたときだけ `true` です。 |
 | `:recipeOf()` | table \| nil | 宣言されたレシピ。無ければ `nil`。 |
 | `:iconOf()` | any \| nil | アイコン DataTable のテクスチャ参照。外れたら宣言済みの `icon`。 |
 | `:name()` | string | 宣言された名前。無ければ id。 |
@@ -398,12 +398,12 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 
 ### give
 
-`:give` はゲーム自身の管理用オブジェクトを通してプレイヤーの所持品にアイテムを入れ、そのうえで本当に届いたかを確かめます。呼び出しの前と後に所持数を読み、`true` は所持数が**増えたのを観測できた**という意味です。
+`:give` は所持品自身の書き込みを通してプレイヤーの所持品にアイテムを入れ、そのうえで本当に届いたかを確かめます。呼び出しの前と後に所持数を読み、`true` は所持数が**増えたのを観測できた**という意味です。
 
 ```mermaid
 flowchart LR
   A["Item.Handle:give"] --> B["read the count"]
-  B --> C["the game's GetItem cheat"]
+  B --> C["the inventory's own add"]
   C --> D["read the count again"]
   D --> E["true only when it rose"]
 ```
@@ -417,48 +417,42 @@ if not Item.get("Berries"):give(5) then
 end
 ```
 
-<Callout type="warn">
-`:give` と `:take` はゲームの管理用オブジェクトを通ります。これを有効にするのはコンパニオン Mod の `CheatManagerEnablerMod` です。入っていないと呼ぶ相手が存在しないので、どちらもゲームに届く前に断られ、`false` を返します。`mods.txt` に書く行は [はじめかた](/docs/getting-started) にあります。
-</Callout>
-
-戻り値は呼び出しの成否ではなく実測の結果です。`false` は「届いたものが観測できなかった」という意味で、原因はいくつかあります。管理用オブジェクトが無い、ゲームが知らないアイテム ID だった、所持品に空きが無かった、などです。結果はアイテム名・個数・所持数の変化とともに毎回ログに残るので、真偽値では区別できないケースもログで切り分けられます。
+戻り値は呼び出しの成否ではなく実測の結果です。`false` は「届いたものが観測できなかった」という意味で、原因はいくつかあります。所持品がその場で拒否した、空きが無かった、あとから所持数を読めなかった、などです。所持品自身が理由を答え、ログがそれを運ぶので、真偽値では区別できないケースもログで切り分けられます。
 
 ```text
 [PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
-[PalForge.items][warn] give Wood x10: GetItem executed [evidence declared] and the count did not rise (135 -> 135) — unknown item id, or the inventory had no room
-[PalForge.items][err] give Wood x10 failed: no PalCheatManager on this session (needs CheatManagerEnabler)
+[PalForge.items][warn] give Wood x10: AddItem_ServerInternal answered Success but the count did not rise (135 -> 135). Weight is now 300.0 of 300.0
+[PalForge.items][err] give Wood x10 failed: the player's inventory could not be reached
 ```
 
 行末の `[evidence ...]` は、呼び出す前に PalForge が実行中のゲームと突き合わせて確認した方法の記録です。これに合わせて何かをする必要はありません。予想外の `false` を読み解くためのものです。
 
-名前空間付きの ID は先に解決されるため、`Item.get("example:Potion"):give(1)` はゲームに `example_Potion` を渡します。対応するデータ行が存在するかどうかを PalForge は確認しません。ゲームが知らない ID もそのまま受け付けられ、何も増えず、`false` として返ってきます。
+名前空間付きの ID は先に解決されるため、`Item.get("example:Potion"):give(1)` はゲームに `example_Potion` を渡します。対応するデータ行が存在するかどうかを PalForge は確認しません。ゲームが知らない ID では何も増えず、`false` として返ってきます。
 
 <Callout type="info">
-自分で呼んだ `:give` が自分の `onObtain` に届くことを当てにしないでください。`onObtain` が追っているのはゲーム自身の入手報告で、`onObtain` ハンドラの中では自分自身を呼び直さないようガードも入ります。何を配ったかは、配ったその場でログに書いてください。
+`:give` はゲームが入手に使うのと同じ書き込みを通るので、普通は `onObtain` にも届きます。`onObtain` ハンドラの中ではガードが働くのでハンドラが自分を呼び直すことはありませんが、それ以外の場所では自分の give が戻ってくると考えてください。
 </Callout>
 
 ### take
 
-`:take` は同じ実測を逆向きに行います。前後で所持数を読み、`true` は所持数が**減ったのを観測できた**という意味です。
+`:take` は同じ実測を逆向きに行います。前後で所持数を読み、`true` は所持数が**減ったのを観測できた**という意味です。アイテムは消費されます。プレイヤーの足元に落ちて拾い直されることはないので、パックが本当の対価を取れます。
 
-<Callout type="warn" title="take はアイテムをプレイヤーの足元に落とします">
-このバージョンにはアイテムを消滅させる呼び出しがありません。そこで `:take` は所持品から取り出す呼び出しを使います。アイテムはプレイヤーが立っている場所の地面に落ちます。所持品が本当に失ったこと自体は `:take` の意味どおりで、所持数の確認がそれを裏づけますが、プレイヤーのすぐ横に山ができ、誰でもその上を歩いて拾い直せます。
-
-この山を前提に設計してください。`:take` は「渡してもらう」には向き、「消費させる」には向きません。対価として使うのは、拾い直されても設計が壊れない場面だけにしてください。
+<Callout type="warn" title="take にはプレイヤーが何かを装備している必要があります">
+消費はプレイヤーが持っている武器を経由して行われます。何も装備していないプレイヤーには経由するものが無いので、`:take` は `false` を返し、その旨をログに書きます。設計時に考慮すべきはこの一点です。建築物が対価を取る場合、素手で立っているプレイヤーは支払えません。
 </Callout>
 
 ```mermaid
 flowchart LR
   A["Item.Handle:take"] --> B["read the count"]
   B --> C["clamp to what is held"]
-  C --> D["the game's DropItem cheat"]
+  C --> D["the game's consume call"]
   D --> E["read the count again"]
   E --> F["true only when it fell"]
 ```
 
 ```lua
 if Item.get("Wood"):take(3) then
-    -- three Wood left the inventory, and are lying at the player's feet
+    -- three Wood are gone from the inventory
 else
     -- nothing was measured to leave
 end
@@ -467,13 +461,13 @@ end
 プレイヤーの所持数より多く要求してもエラーにはなりません。要求は所持している分に丸められます。1 つも持っていないときは呼び出し自体を行いません。どちらもログに残るので、真偽値では区別できないケースもログで切り分けられます。
 
 ```text
-[PalForge.items][info] take Wood x3: 12 -> 9, dropped on the ground at the player's feet [evidence declared]
-[PalForge.items][warn] take Wood x5: the inventory holds only 2, dropping that many
-[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is dropped
+[PalForge.items][info] take Wood x3: 164 -> 161 [evidence declared]
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, taking that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is taken
 ```
 
 <Callout type="warn">
-丸められた除去でも `true` になります。上の 2 行目は 5 個の要求のうち 2 個を落として `true` を返します。`true` の意味は「所持数が減ったのを観測できた」であって「ちょうど `count` 個減った」ではありません。個数を正確に扱いたいときは、自分で前後に `:count()` を読んでください。
+丸められた除去でも `true` になります。上の 2 行目は 5 個の要求のうち 2 個を取って `true` を返します。`true` の意味は「所持数が減ったのを観測できた」であって「ちょうど `count` 個減った」ではありません。個数を正確に扱いたいときは、自分で前後に `:count()` を読んでください。
 </Callout>
 
 ### クエリ
@@ -493,7 +487,7 @@ local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 
 `count` は所持品まわりで唯一動く操作です。その ID をローカルプレイヤーがいくつ持っているかをゲームに尋ね、ただの数値を返します。`nil` は「まったく読めなかった」（ワールド未読み込み、プレイヤーが見つからない）という意味で、「0 個」ではありません。比較する前に `nil` かどうかを確かめてください。
 
-`iconOf` は `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` から ID を引き、行のテクスチャを読みます。各段階は fail-soft で、テーブル・行・カラムのいずれが欠けても宣言済みの `icon` を返します。`icon` を設定していなければ `nil` です。
+`iconOf` は `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` から ID を引き、行のテクスチャを読みます。バニラの ID なら、ゲーム本体がそのアイテムに使っている絵がそのまま返ります。各段階は fail-soft で、テーブル・行・カラムのいずれが欠けても宣言済みの `icon` を返します（設定していなければ `nil`）。自作の名前空間付き ID には行が無いので、常にフォールバックします。
 
 ### 列挙
 
@@ -631,7 +625,7 @@ Building{
     events = {
         onRightClick = function(self, ctx)
             -- ctx.actor = the build object, ctx.player = who interacted, ctx.buildId
-            local ok = Item.get("Wood"):take(5)   -- the 5 Wood land on the ground, not in a bin
+            local ok = Item.get("Wood"):take(5)   -- the 5 Wood are consumed
             if not ok then
                 log.warn("could not take the wood")
                 return
@@ -654,7 +648,7 @@ Building{
 この例は PalForge が既に記述している ID `"WorkBench"` を占有します。後から記述した方が勝つので、バニラの見た目を保つようにメッシュのブロックをここでも書いています。自作のコンテンツには名前空間付きの ID を使ってください。
 </Callout>
 
-先に取り、成功したときだけ渡す。この順序が、台がただ働きで払い出すのを防ぎます。`:take` は何も出ていったのを観測できなければ `false` を返すからです。ただし約束しないことが 2 つあります。木材は消えません。プレイヤーのすぐ横の地面にあり、そのまま拾い直せるので、この台は本当の対価ではなく手間の交換です。そして `true` は 5 個すべてが出ていったことを意味しません。要求は所持している分に丸められるので、正確な取引には自分で `:count()` を確かめる処理が必要です。
+先に取り、成功したときだけ渡す。この順序が、台がただ働きで払い出すのを防ぎます。`:take` は何も出ていったのを観測できなければ `false` を返すからです。木材は落ちるのではなく消費されるので、これは本当にプレイヤーが支払った対価です。`true` が意味しないのは「5 個すべてが出ていったこと」だけです。要求は所持している分に丸められるので、正確な取引には自分で `:count()` を確かめる処理が必要です。また何も装備していないプレイヤーはそもそも支払えず、それは `false` の分岐がすでに拾っています。
 
 ## 注意すること
 
@@ -666,7 +660,7 @@ Building{
 
 **名前空間付きの ID は予備の検索で照合されます。** イベントが運ぶのはゲームのデータ行名なので、`"example:Potion"` として登録したアイテムは厳密な検索では見つからず、登録済み ID の走査が拾います。走査はスナップショットを順不同でたどり、最初に一致した ID を返すため、解決後の行名が同じになるパック ID が 2 つあるとどちらになるかは決まりません。
 
-**取り出したアイテムはプレイヤーの足元に落ちます。** このバージョンにはアイテムを消滅させる手段が無いため、`:take` は所持品から世界へ移します。除去そのものは本物で実測されますが、床に落ちた山も本物です。
+**取り出しにはプレイヤーが何かを装備している必要があります。** 消費はプレイヤーが持っている武器を経由するので、何も持っていないプレイヤーには経路が無く、`:take` は `false` を返します。アイテム自体は落ちるのではなく消費されます。
 
 **`onUse` は対象を直接は教えてくれません。** `ctx.actor` はアイテムを使ったローカルプレイヤーのポーンです。使われた対象は `ctx.targetId` に生のインスタンス ID として入っており、それをアクターに変換する処理はありません。食べ物やポーションなら両者は同じですが、パルに与えた場合は違います。
 
@@ -678,16 +672,16 @@ Building{
 
 **`give`・`take`・`count` はローカルプレイヤー専用です。** `PalPlayerCharacter` を探してその所持品に作用するので、共有サーバーでは最初に見つかったプレイヤーポーンについて答えます。`count` の `nil` は読み取りに失敗したという意味で、鞄が空という意味ではありません。
 
-**`give` と `take` には管理用オブジェクトが必要です。** どちらも `CheatManagerEnablerMod` が有効にするオブジェクトを通ります。このコンパニオン Mod が無いと、ゲームに届く前に断られて `false` になります。`count` には不要です。
+**`give` は所持品自身の書き込みを通ります。** 所持数の変化だけでなく、所持品が何と答えたかも報告するので、`false` の理由がログから分かります。
 
-**`:give` が自分の `onObtain` に返ってくることを当てにしないでください。** 自分のコードが何を配ったかは、イベントが回ってくるのを待たずに、呼んだその場でログに書いてください。
+**`:give` は普通 `onObtain` も動かします。** ゲームが入手に使うのと同じ書き込みを通るからです。`onObtain` ハンドラの中ではガードが働きますが、それ以外の場所では自分の give が戻ってくると考えてください。
 
 **0.5 秒以内の重複入手は捨てられます。** 1 回の入手をゲームの 2 つの呼び出しが知らせるため、PalForge は同じアイテム ID の重複をその時間内で捨て、ハンドラが 1 回だけ動くようにしています。同じアイテムをそれより速く本当にもう一度拾った場合、その回は失われます。
 
 ## まとめ
 
 - アイテムは `Item{ ... }` で記述します。必須は `id` だけで、ID はゲームに既にあるものを使います。
-- `Item.get("Wood")` はどのアイテムでもハンドルを返します。`:count()` は今いくつ持っているかを読み、`:give` は追加し、`:take` は取り除きます。3 つとも「試みたこと」ではなく「実測できたこと」を返します。`:take` が取り除いた分は地面に落ちます。
+- `Item.get("Wood")` はどのアイテムでもハンドルを返します。`:count()` は今いくつ持っているかを読み、`:give` は追加し、`:take` は消費します。3 つとも「試みたこと」ではなく「実測できたこと」を返します。`:take` にはプレイヤーが何かを装備している必要があります。
 - 自分のコードは `events` に書きます。`onObtain` は拾ったとき、`onUse` は使ったときに動きます。`onCraft` と `onDiscard` はまだ動きません。
 - `onUse` の `ctx.actor` はアイテムを使ったプレイヤーです。食べ物やポーションの対象はこれで合っています。
 - `category`、`maxStack`、`icon`、`recipe` は自分のコード向けのメモです。ゲームは読みません。

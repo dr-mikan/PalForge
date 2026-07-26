@@ -378,7 +378,7 @@ Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall
 ```lua
 skill:teach(actor)      --> boolean, true only when the skill is on the character afterwards
 skill:forget(actor)     --> boolean, true only when it is gone afterwards
-skill:skillsOn(actor)   --> { active = { ... }, passive = { ... } } | nil
+skill:skillsOn(actor)   --> { active, passive, equipable, mastered } | nil
 ```
 
 `actor` は実在するキャラクターでなければなりません。ワールドに立っている Pal か、
@@ -389,7 +389,7 @@ local pawn = Player.character()
 
 Skill.get("FireBlast"):teach(pawn)    -- one of the game's own moves
 Skill.get("Legend"):teach(pawn)       -- not a move: added as a passive trait
-Skill.get("FireBlast"):skillsOn(pawn) --> { active = { "FireBlast" }, passive = { "Legend" } }
+Skill.get("FireBlast"):skillsOn(pawn) -- what that character carries right now
 Skill.get("FireBlast"):forget(pawn)
 ```
 
@@ -413,23 +413,47 @@ Palworld はアクティブな技とパッシブな特性を別々の場所に�
 大文字・小文字は区別されないので、`"fireblast"` でも同じ技になります。id を書く前に確かめたいときは、
 `require("palforge.core.character").wazaNames()` がこのビルドのアクティブ技名をすべてソートして返します。
 
-### 戻り値の意味
+### キャラクターの手持ちを読む
 
-書き込みは必ずキャラクターを読み戻して確認するので、`true` は「そのスキルがキャラクター上に
-**見えた**」という意味です。呼び出しが例外を出さなかった、ではありません。`false` は載らなかったと
-いう意味で、対象がキャラクターでない、ゲームがその id を受け付けない、書き込みが断られた、の
-いずれかです。
+`:skillsOn(actor)` は読み取りで、こちらは動きます。返るのは 4 つのリストです。パルは装備している
+数本より多くの技を知っているからです。
 
-`:skillsOn(actor)` は `{ active = {...}, passive = {...} }` を返します。空のリストは「読めたうえで
-何も持っていない」です。テーブルごと `nil` の場合は、そのキャラクターをまったく読めなかったという
-意味で、「持っていない」ではありません。添字を引く前に `nil` を確かめてください。
+| キー | 中身 |
+| --- | --- |
+| `active` | いま装備している技（最大 4 つ） |
+| `passive` | パッシブ特性の名前 |
+| `equipable` | 装備*できる*技 |
+| `mastered` | 習得済みの技 |
+
+空のリストは「読めたうえで 1 つも無い」で、これは本物の答えです。`active` が空のパルは、単に何も
+装備していないだけかもしれません。テーブルごと `nil` の場合は、そのキャラクターをまったく読めな
+かったという意味で、「持っていない」ではありません。添字を引く前に `nil` を確かめてください。
 
 ```lua
 local carried = Skill.get("FireBlast"):skillsOn(pawn)
 if carried then
-    print(#carried.active .. " moves, " .. #carried.passive .. " traits")
+    print(#carried.active .. " equipped, " .. #carried.equipable .. " available")
 end
 ```
+
+<Callout type="info">
+尋ねる相手は**パル**にしてください。村人や商人もキャラクターであり、ゲームのキャラクター一覧にも
+入っていますが、技を持っていません。そのため尋ねると、読み取りに失敗したときとまったく同じ形の
+空のリストが返ってきます。
+</Callout>
+
+### 書き込みが報告すること
+
+`:teach` と `:forget` は必ずキャラクターを読み戻して自分を検算するので、`true` は「そのスキルが
+キャラクター上に**見えた**」という意味であり、呼び出しが例外を出さなかった、ではありません。
+`false` は載らなかったという意味で、対象がキャラクターでない、ゲームがその id を受け付けない、
+書き込みが断られた、のいずれかです。
+
+<Callout type="warn">
+決めつけずに、その真偽値を確かめてください。手持ちを読むほうは決着していますが、書き込むほうは
+まだパックの土台にするような段階ではありません。`:teach` の `false` は、あなたのコードのバグでは
+なくフレームワークからの報告です。頼りにする前に、作り直してもよいセーブで一度試してください。
+</Callout>
 
 <Callout type="info">
 `:teach` と `:equip` は意図的に別物で、どちらにも使い道があります。`:equip` は好きな値に対して自分の

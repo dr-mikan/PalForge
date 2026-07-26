@@ -222,7 +222,7 @@ local function spawnHere(charId, level)
         log.warn("no world yet - nothing spawned")
         return false
     end
-    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- false in this version
+    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- issued; arrives seconds later
 end
 
 event.on("world.ready", function()
@@ -231,13 +231,13 @@ end)
 ```
 
 <Callout type="warn">
-这个版本里 `Pal.Handle:spawn` 不会在世界里放下生物，所以你在这里算出来的坐标并不会把什么东西放到
-哪里 —— 见 [Pal](/docs/api/pal)。坐标本身是真的，本页其余内容也都能用：拿它做自己的距离计算、当作
-建筑物的位置，或者用在任何你自己放置的东西上。
+按坐标生成不是立刻的，而且它是“先生成、再搬过去”。游戏自己的调用会把帕鲁放在玩家旁边，PalForge 等它
+出现之后再把它挪到你给的点上 —— 落点分毫不差。整个过程要 4 到 8 秒，所以你看到的是帕鲁先出现在你身边，
+然后再移动过去。
 
-它走的路是“先生成、再搬过去”。游戏自己的调用会把帕鲁放在玩家旁边，随后 PalForge 再把那一个 actor
-挪到你给的坐标上，每 400 ms 重试一次、最多六次，因为生物本该过几帧才出现。它还需要
-`CheatManagerEnabler` 模组：没有它就根本没有管理对象，`:spawn` 在够到游戏之前就返回 `false`。
+`:spawn` 在这一切发生之前就返回了，所以那个布尔值只表示调用发出去了，没有别的含义。见
+[Pal](/docs/api/pal)。它还需要 `CheatManagerEnabler` 模组：没有它就根本没有管理对象，放进世界的生成
+在够到游戏之前就返回 `false`。
 </Callout>
 
 ### 在玩家正前方生成
@@ -264,7 +264,7 @@ end
 
 local at = inFront(600)   -- 6 m ahead
 if at then
-    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- false in this version
+    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- lands exactly here, seconds later
 end
 ```
 

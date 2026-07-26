@@ -84,7 +84,7 @@ setmetatable(Pal, { __call = function(_, spec) return define(spec) end })
 ```lua
 local boss = Pal{ id = "ChickenPal", name = "Scorched Chicken" }
 
-boss:spawn(Player.coordinate())   -- the action for putting one in the world; see Pal
+boss:spawn(Player.coordinate())   -- put one in the world
 boss:name()                       -- "Scorched Chicken"
 boss.id                           -- "ChickenPal"
 ```

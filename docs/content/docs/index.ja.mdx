@@ -104,7 +104,7 @@ Item{
 ```lua
 require("palforge.api")
 
-Pal.get("ChickenPal"):spawn(Player.coordinate())   -- :spawn places nothing in this version
+Pal.get("ChickenPal"):spawn(Player.coordinate())   -- the pal arrives a few seconds later
 Item.get("Wood"):give(10)
 ```
 
@@ -283,16 +283,13 @@ flowchart LR
   身に着けさせ、UI 要素はマウント・更新・アンマウントを自分で行います。`Audio.Handle:stop(actor)` は
   サウンド単位ではなく、そのアクターで鳴っているものをすべて止めます。
 
-<Callout type="error" title="このバージョンでできない 2 つのこと">
-パックを設計する前に、この 2 つを前提にしてください。どちらも書くこと自体はできます。途中で
-失敗するのではなく、`false` を返して何も変えません。
+<Callout type="error" title="このバージョンでできない 1 つのこと">
+**自分で用意したサウンドは再生できません。** `Audio` の定義に自作の音声ファイルを指定しても、
+受け付けられたうえで何も起きません。再生できるのはゲームに最初から入っているサウンドだけで、
+その数は数千あります。カタログは [Audio](/docs/api/audio) にあります。
 
-- **パルをワールドに置けません。** `Pal.Handle:spawn` はどこにもクリーチャーを出しません。動くのは、
-  ゲーム自身が出したクリーチャーへの反応です。捕獲・ダメージ・死亡と定期巡回はすべて走ります。
-- **サウンドごとの音量はありません。** `Audio.Handle:setVolume` は何も変えず、ゲーム側にも
-  サウンド単位の音量が存在しません。カタログから静かなサウンドを選んでください。
-
-このページの残りは今日から動きます。
+このページの残りは今日から動きます。ひとつだけ身に付けたい習慣があります。ゲームに触れる呼び出しは
+「実測した結果」を返すので、決めつけずに戻り値を確かめてください。
 </Callout>
 
 <Callout type="warn">
@@ -354,7 +351,7 @@ local Whistle = Skill{
     cooldown = 30.0,
     events = {
         onActivate = function(skill, owner, ctx)
-            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))   -- no pal appears
+            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))
         end,
     },
 }
@@ -414,7 +411,7 @@ Building{
 - `Audio.Handle:stop(actor)` はサウンド単位ではありません。そのアクターで鳴っているものを
   すべて止めます。
 - `Item.Handle:give` はインベントリが実測でどう動いたかを返すので、`false` は「何も届かなかった」
-  という意味です。`:spawn` の行はこのバージョンでは何も配置しません。それ以外はすべて動きます。
+  という意味です。`:spawn` の行は、実行の数秒後にパルをワールドへ出します。即座ではありません。
 
 <Callout type="info">
 `CampFire`、`Wood`、`Berries`、`ChickenPal` は `Scripts/palforge/native/*.lua` にある実在の id で、

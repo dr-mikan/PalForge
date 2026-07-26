@@ -264,23 +264,24 @@ A test can also skip on its own terms, at any depth, once it learns the precondi
 there:
 
 ```lua
-s:test("a coordinate spawn reports what it observed", function(t)
+s:test("a coordinate spawn is issued and the world can be enumerated", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
 
     local ok = Pal.get("ChickenPal"):spawn(coord)
-    t:type(ok, "boolean", ":spawn reports a boolean verdict")
-    t:eq(ok, false, "a coordinate spawn reports false while nothing appears; a true here "
-        .. "means a pal was observed to arrive, and this test is what needs updating")
+    t:eq(ok, true, "the spawn call was issued")
+
+    -- The pal is seconds away, so there is nothing to assert about arrival here.
+    local near = support.nearestPal(coord)
+    if not near then t:skip("the world could not be enumerated") end
+    t:type(near.dist, "number", "and the world can be measured around the point asked for")
 end)
 ```
 
-That last line is worth copying as a habit. `:spawn` places no creature in this version, so the
-check asserts exactly that — and if a pal ever does arrive, this test goes red and the failure
-is how you find out. A `t:type(ok, "boolean")` on its own would pass either way and tell you
-nothing. Assert what the game does today, including the parts that fall short, and let a change
-break the test on purpose.
+That shape is worth copying. A spawn is asynchronous, so a test cannot assert that the creature
+arrived — the check ends where the evidence ends, and the arrival goes to the log. Assert what
+the call can actually answer for, and leave what it cannot to the thing that can see it.
 
 Skips run in both directions. Several checks cover the *no-world* path — the shut ready
 gate, a widget's `:screen()` with no owner — and those call `t:skip("a world is loaded")`
@@ -498,9 +499,9 @@ coordinate with its distance and the total count. A spawn check uses it to confi
 can still list its characters around the point it asked for.
 
 <Callout type="info">
-`:spawn` places no creature in this version, so the pal suite checks the `false` and then checks
-the measurement that verdict is built on: `nearestPal` proves the world can still be enumerated
-around the point that was asked for, which is what a working spawn would be detected by.
+`:spawn` returns before the pal exists, so the pal suite does not try to assert an arrival. It
+checks that the call was issued, and then that `nearestPal` can enumerate the world around the
+point asked for — which is what the deferred pass uses to find the creature and report it.
 </Callout>
 
 Real game ids the suites lean on, so a live check exercises content the game actually has:
@@ -522,13 +523,11 @@ support.GAME = {
 The sweep un-registers definitions. It cannot un-do what a live test did to your save, and
 the world tests are written with that in mind — but not all of it is reversible.
 
-- **No pal is spawned.** `pal` asks `UPalCheatManager` for a `ChickenPal` in three of its live
-  tests, and no creature appears in this version, so those three leave nothing behind. Should
-  one ever arrive, it stays: nothing in the tree can despawn a pal.
-- **Given Wood is handed straight back, onto the floor.** `item` gives three `Wood` and takes
-  the same three back. Taking drops them on the ground where you are standing rather than
-  destroying them, so what a run leaves behind is a small pile at your feet — and if the give
-  landed and the take did not, the Wood is in your inventory instead.
+- **Spawned pals stay.** `pal` asks for a `ChickenPal` in three of its live tests, and each one
+  turns up a few seconds after the run has finished. Nothing in the tree can despawn them.
+- **Given Wood is handed straight back.** `item` gives three `Wood` and consumes the same three,
+  so a clean run leaves your inventory where it found it. If the give landed and the take did
+  not — a player with nothing equipped cannot take — the three Wood stay in your bag.
 - **Nothing is placed, worn or built.** The mesh and pal render tests point at a model path
   that deliberately will not load, so the backend bails before it touches the player's mesh
   component. The building suite is read-only over what you have already built, and never
@@ -539,20 +538,19 @@ the world tests are written with that in mind — but not all of it is reversibl
   is switched on — an effect that named one would take it off again on the way out.
 
 <Callout type="warn">
-Run the world-touching suites in a throwaway save, not the one you care about. Three Wood on the
-floor is a small mess, but it is a mess, and the framework makes no promise to clean it up.
+Run the world-touching suites in a throwaway save, not the one you care about. Three chickens is
+a small mess, but it is a mess, and the framework makes no promise to clean it up — and they
+turn up seconds after the run says it is done.
 </Callout>
 
-A green run does not mean every call in the api does the whole job its name suggests. Three
-of them fall short today, and the suites pin that down on purpose:
+A green run does not mean every call in the api does the whole job its name suggests. Three of
+them reach further, or later, than the name suggests, and the suites pin that down on purpose:
 
-- `Pal.Handle:spawn` places no creature in the world. The three live pal checks assert the
-  `false` rather than skipping past it, so the day one appears the suite says so.
-- `Audio.Handle:setVolume` returns `false` for every value, including the edges. It changes
-  nothing, and this build has no per-sound volume for it to change. Pick a quieter sound event,
-  or leave the loudness to the game's own audio options, and treat the `false` as the honest
-  answer.
-- `Audio.Handle:stop` is actor-wide. It issues `StopSoundByActor`, so it silences
+- `Pal.Handle:spawn` answers about the call, not the creature. The pal is four to eight seconds
+  behind it, so no assertion here can be about arrival — the log is where that lands.
+- `Audio.Handle:setVolume` is actor-wide. It scales everything one actor is emitting rather than
+  the sound you called it on, so the tests treat it as a property of the actor.
+- `Audio.Handle:stop` is actor-wide too. It issues `StopSoundByActor`, so it silences
   everything on that actor rather than the one sound you called it on — a handle for an id
   that was never defined stops the actor just the same. Play sounds you need to stop
   separately on separate actors.
@@ -564,8 +562,8 @@ of them fall short today, and the suites pin that down on purpose:
 - `test.run("pal")` runs one suite, and `test.bind("F5", fn)` puts anything you like on a key.
 - Checks that need a world start with `support.needWorld(t)`, so they skip instead of failing.
 - Give every id you make up in a test `support.id(...)`, and the sweep removes it afterwards.
-- Run the world-touching suites in a throwaway save: what a live check gives you stays, and
-  what it takes back lands on the floor.
+- Run the world-touching suites in a throwaway save: the pals a live check spawns stay in the
+  world, and they arrive after the run has finished.
 
 Next, read [Building a content pack](/docs/guides/first-content-pack) to write the content
 these checks are there to protect.

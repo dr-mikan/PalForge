@@ -30,16 +30,17 @@
 --     named EPalItemOperationResult, which the log carries). Observed in a real save:
 --     "give Wood x3: 140 -> 143", with the game's own pickup event firing beside it
 --     ("Wood onObtain: count=3").
---   * :take is WIRED BUT UNWATCHED, and it is measured the same way — true only when the count
---     was seen to FALL. It does NOT drop the items on the ground any more; the route is the
---     game's own consume, APalWeaponBase:RequestConsumeItem (dumps/cxx/Pal.hpp:11776), reached
---     through the player's own loadout component, so nothing is left lying at the player's feet
---     for them to walk back over. Two things to know before planning around it: the player must
---     have a spawned weapon actor (the consume is a method ON one — equip anything and the route
---     exists), and no run has watched it succeed yet. The inventory itself has no removal at all:
---     its whole class chain declares nothing that subtracts, and a NEGATIVE Count through the add
---     was measured accepted and inert (161 -> 161). The route that DOES work is a weapon's
---     RequestConsumeItem — see utils/items.take.
+--   * :take WORKS and is measured the same way — true only when the count was seen to FALL.
+--     Observed in the same press that proved :give: "take Wood x3: 164 -> 161". The items are
+--     CONSUMED, not dropped, so nothing is left at the player's feet to walk back over — which
+--     is what makes charging a cost possible at all. The route is the game's own consume,
+--     APalWeaponBase:RequestConsumeItem, reached through the player's loadout component.
+--     ONE CONSTRAINT: the consume is a method ON a weapon actor, so a player carrying nothing
+--     has no route and this reports false saying so. Equipping anything is enough — the weapon
+--     need only be spawned, not in hand, and it spends the id it is HANDED rather than its own
+--     ammunition. The inventory itself has no removal at all: its whole class chain declares
+--     nothing that subtracts, and a NEGATIVE Count through the add was measured accepted and
+--     inert (161 -> 161).
 --
 -- WHAT THAT COST, since it shaped this file for a long time. The add was blocked on ONE
 -- argument. The live declaration is five parameters and a return —
@@ -294,13 +295,15 @@ function Handle:give(count) return items.give(self.id, count or 1) end
 ---The items are CONSUMED, not dropped: nothing lands at the player's feet for them to walk back
 ---over, which is what makes charging a cost possible at all. The request is clamped to what the
 ---inventory actually holds, and skipped when it holds none.
----⚠️ TWO CAVEATS. The consume is a method on a WEAPON ACTOR (it is the path a throw weapon takes
----when it spends what it threw), reached through the player's own loadout component — so a player
----with nothing equipped has no route and this reports false saying exactly that. And ⚠️ NO RUN HAS
----WATCHED IT SUCCEED yet: the declaration is checked against the live class by core.signature
----before anything is marshalled, but whether it spends the id it is HANDED is the open half of
----The inventory itself cannot subtract — see utils.items.take for the
----whole eliminated list, including the negative-Count hypothesis that was finally measured dead.
+---⚠️ ONE CONSTRAINT. The consume is a method on a WEAPON ACTOR (it is the path a throw weapon
+---takes when it spends what it threw), reached through the player's own loadout component — so a
+---player carrying nothing has no route and this reports false saying exactly that. Equipping
+---anything is enough: the weapon need only be spawned, not in hand.
+---
+---Observed working, in the same press that proved :give — "take Wood x3: 164 -> 161" — which
+---also settles that it spends the id it is HANDED rather than the weapon's own ammunition.
+---The inventory itself cannot subtract: see utils.items.take for the whole eliminated list,
+---including the negative-Count hypothesis that was finally measured dead.
 ---@param count integer?
 ---@return boolean ok  # true only when the inventory count was measured to fall
 function Handle:take(count) return items.take(self.id, count or 1) end

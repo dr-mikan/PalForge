@@ -231,7 +231,7 @@ local function spawnHere(charId, level)
         log.warn("no world yet - nothing spawned")
         return false
     end
-    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- false in this version
+    return Pal.get(charId):spawn{ at = at, level = level or 5 }   -- issued; arrives seconds later
 end
 
 event.on("world.ready", function()
@@ -240,16 +240,14 @@ end)
 ```
 
 <Callout type="warn">
-`Pal.Handle:spawn` places no creature in the world in this version, so a coordinate you work out
-here does not put anything anywhere — see [Pal](/docs/api/pal). The coordinate itself is real,
-and everything else on this page works: use it for your own distance maths, for a structure's
-position, or for anything you place yourself.
+A coordinate spawn is not instant, and it is a spawn followed by a move. The game's own call
+drops the pal beside the player, and PalForge waits for it to appear and then relocates it onto
+your point — where it lands exactly. All of that takes four to eight seconds, so what you see is
+the pal turning up next to you and then moving.
 
-The route it takes is a spawn followed by a move. The game's own call drops a pal beside the
-player, and PalForge relocates that one actor to your coordinate, retrying every 400 ms up to
-six times because a creature takes a few frames to appear. It also needs the
-`CheatManagerEnabler` mod: without it there is no admin object at all, and `:spawn` answers
-`false` before it reaches the game.
+`:spawn` returns before any of it has happened, so the boolean says the call was issued and
+nothing more. See [Pal](/docs/api/pal). It also needs the `CheatManagerEnabler` mod: without it
+there is no admin object at all, and a world spawn answers `false` before it reaches the game.
 </Callout>
 
 ### Spawn in front of the player
@@ -276,7 +274,7 @@ end
 
 local at = inFront(600)   -- 6 m ahead
 if at then
-    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- false in this version
+    Pal.get("ChickenPal"):spawn{ at = at, level = 10 }   -- lands exactly here, seconds later
 end
 ```
 

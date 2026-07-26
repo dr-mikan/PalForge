@@ -386,7 +386,7 @@ itself carries it, and read back what that character has.
 ```lua
 skill:teach(actor)      --> boolean, true only when the skill is on the character afterwards
 skill:forget(actor)     --> boolean, true only when it is gone afterwards
-skill:skillsOn(actor)   --> { active = { ... }, passive = { ... } } | nil
+skill:skillsOn(actor)   --> { active, passive, equipable, mastered } | nil
 ```
 
 `actor` has to be a real character — a pal standing in the world, or the player's own pawn from
@@ -397,7 +397,7 @@ local pawn = Player.character()
 
 Skill.get("FireBlast"):teach(pawn)    -- one of the game's own moves
 Skill.get("Legend"):teach(pawn)       -- not a move: added as a passive trait
-Skill.get("FireBlast"):skillsOn(pawn) --> { active = { "FireBlast" }, passive = { "Legend" } }
+Skill.get("FireBlast"):skillsOn(pawn) -- what that character carries right now
 Skill.get("FireBlast"):forget(pawn)
 ```
 
@@ -421,22 +421,48 @@ Case does not matter, so `"fireblast"` finds the same move.
 `require("palforge.core.character").wazaNames()` returns every active-move name this build has,
 sorted, if you want to check an id before you write it.
 
-### What the boolean means
+### Reading a character's loadout
 
-Every write is checked by reading the character back afterwards, so `true` means the skill was
-**seen on the character** — never that a call ran without complaining. `false` means it did not
-land: the target is not a character, the game will not take the id, or the write was refused.
+`:skillsOn(actor)` is the read, and it works. It answers four lists, because a pal knows more
+moves than the handful it has equipped:
 
-`:skillsOn(actor)` answers `{ active = {...}, passive = {...} }`. Empty lists mean the read
-worked and the character carries none. `nil` for the whole table means the character could not
-be read at all — unknown, never "has none" — so check for `nil` before you index it.
+| key | what is in it |
+| --- | --- |
+| `active` | the moves it has equipped right now — up to four |
+| `passive` | its passive traits, by name |
+| `equipable` | the moves it *could* equip |
+| `mastered` | the moves it has mastered |
+
+Empty lists mean the read worked and found none, which is a real answer: a pal with nothing in
+`active` may simply have nothing equipped. `nil` for the whole table means the character could
+not be read at all — unknown, never "has none" — so check for `nil` before you index it.
 
 ```lua
 local carried = Skill.get("FireBlast"):skillsOn(pawn)
 if carried then
-    print(#carried.active .. " moves, " .. #carried.passive .. " traits")
+    print(#carried.active .. " equipped, " .. #carried.equipable .. " available")
 end
 ```
+
+<Callout type="info">
+Ask a **pal**, not a villager or a merchant. Those are characters too, and the game's own list
+of characters includes them, but they carry no moves — so asking one reports empty lists that
+look exactly like a read that failed.
+</Callout>
+
+### What the write reports
+
+`:teach` and `:forget` check themselves by reading the character back afterwards, so a `true`
+means the skill was **seen on the character** and never that a call ran without complaining.
+`false` means it did not land: the target is not a character, the game will not take the id, or
+the write was refused.
+
+<Callout type="warn">
+Check that boolean rather than assuming. Reading a loadout is settled; writing to one is not
+something to build a pack around yet, and a `false` from `:teach` is the framework telling you
+so rather than a bug in your code. Try one in a save you do not mind reloading before you rely
+on it.
+</Callout>
 
 <Callout type="info">
 `:teach` and `:equip` are different on purpose, and both are worth having. `:equip` runs your

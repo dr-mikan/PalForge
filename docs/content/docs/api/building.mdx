@@ -880,7 +880,7 @@ return Building{
                 return
             end
             local at = { x = self.pos.x, y = self.pos.y + 300, z = self.pos.z + 100 }
-            if Pal.get("ChickenPal"):spawn(at) then   -- false in this version: no pal appears
+            if Pal.get("ChickenPal"):spawn(at) then   -- issued; the pal arrives seconds later
                 self.state.summons  = self.state.summons + 1
                 self.state.cooldown = COOLDOWN_TICKS
                 self:save()
@@ -891,10 +891,10 @@ return Building{
 }
 ```
 
-`:spawn` places no creature in this version, so the `if` never runs its body and the post keeps
-its charge — the structure, the cooldown and the saved counter all work, and the summon is the
-one step waiting on [Pal](/docs/api/pal). Defining `PalBoxV2` again replaces the ready-made
-definition from `native/buildings.lua`, so the mesh is restated here. The vanilla pal box UI still opens — the interact hook watches the
+The `if` runs its body as soon as the spawn call is issued, which is several seconds before the
+pal turns up — so the counter and the cooldown move first and the creature follows. That is the
+right order here: the post has committed to the summon. Defining `PalBoxV2` again replaces the
+ready-made definition from `native/buildings.lua`, so the mesh is restated here. The vanilla pal box UI still opens — the interact hook watches the
 call, it does not swallow it.
 
 ## Summary

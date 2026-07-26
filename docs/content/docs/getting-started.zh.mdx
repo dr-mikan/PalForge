@@ -67,8 +67,8 @@ PalForge : 1
 ```
 
 `CheatManagerEnablerMod` 的作用，是把游戏自己的管理对象 `UPalCheatManager` 交给 PalForge。请让它
-保持开启：`Item.Handle:give`、`Item.Handle:take` 和 `Pal.Handle:spawn` 都要走这个对象，没有它时，
-它们都会在够到游戏之前被拒绝并返回 `false` —— 生成那条路会写下这一行然后放弃：
+保持开启：把帕鲁放进世界要走这个对象，没有它时，`Pal.Handle:spawn` 会在够到游戏之前被拒绝，写下
+这一行然后放弃：
 
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
@@ -302,14 +302,14 @@ api.Building{
 `Wood`、`Berries` 和 `Arrow`，`native/pals` 带了 `ChickenPal` 和 `SheepBall`。除非你就是想替换，
 否则请换一个 id。
 
-再来一个帕鲁的例子，看的是一个动作而不是处理函数。`:spawn` 在这个版本里什么都不会放下 —— 下面两行
-都返回 `false` —— 所以你能看到的是定义本身：游戏自己的鸡现在带上了你的网格和你的处理函数。
+再来一个帕鲁的例子，看的是一个动作而不是处理函数。给生成留几秒钟：生物会在调用之后 4 到 8 秒出现，
+身上带着你声明的网格和处理函数。
 
 ```lua
 local api = require("palforge.api")
 
 -- Pal.get works for any game CharacterID, defined or not.
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- false: no creature appears
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- the pal arrives a few seconds later
 
 -- Defining the same id attaches your own mesh and handlers to it. This replaces
 -- native/pals' curated ChickenPal demo definition.
@@ -329,7 +329,7 @@ local chicken = api.Pal{
     },
 }
 
-chicken:spawn(api.Player.coordinateOffset(300, 0, 0))     -- false: no creature appears
+chicken:spawn(api.Player.coordinateOffset(300, 0, 0))     -- 3 m away, a few seconds later
 ```
 
 ## 在游戏里确认
@@ -427,7 +427,7 @@ end
 local api = require("palforge.api")
 
 api.Item.get("Wood"):give(10)
-api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- :spawn places nothing in this version
+api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- the pal arrives a few seconds later
 ```
 
 </Tab>
@@ -648,15 +648,15 @@ events = {
 
 ### 生成帕鲁没有反应
 
-这个版本里，不管你传什么，`:spawn` 都不会有生物出现 —— 见 [Pal](/docs/api/pal)，那里也写了帕鲁定义
-今天还能为你做什么。下面这条警告是更早一步的另一个问题，无论如何都值得修好：
+先再等几秒。帕鲁会在 `:spawn` 返回之后 4 到 8 秒才到，日志里会写它是什么时候到的 —— 见
+[Pal](/docs/api/pal)。等过这段时间还是什么都没出现，就去找这一行：
 
 ```text
 [PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
 ```
 
-它表示这个调用在够到游戏之前就被拒绝了。`:spawn` 需要 `UPalCheatManager`，所以请在 `mods.txt` 里
-打开 `CheatManagerEnablerMod`。
+它表示这个调用在够到游戏之前就被拒绝了。放进世界的生成需要 `UPalCheatManager`，所以请在 `mods.txt`
+里打开 `CheatManagerEnablerMod`。
 
 ## 接下来读什么
 

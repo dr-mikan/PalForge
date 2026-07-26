@@ -741,7 +741,7 @@ return Building{
                 return
             end
             local at = { x = self.pos.x, y = self.pos.y + 300, z = self.pos.z + 100 }
-            if Pal.get("ChickenPal"):spawn(at) then   -- false in this version: no pal appears
+            if Pal.get("ChickenPal"):spawn(at) then   -- issued; the pal arrives seconds later
                 self.state.summons  = self.state.summons + 1
                 self.state.cooldown = COOLDOWN_TICKS
                 self:save()
@@ -752,8 +752,8 @@ return Building{
 }
 ```
 
-`:spawn` 在这个版本里什么都不会放下，所以那个 `if` 的内容不会执行，这个台子的充能也就保住了：建筑物、
-冷却和存档计数都能用，只有召唤这一步在等 [Pal](/docs/api/pal)。再定义一次 `PalBoxV2`，会替换掉
+那个 `if` 在生成调用发出去的当下就会执行它的内容，而帕鲁要好几秒之后才到 —— 所以计数和冷却先动，
+生物随后才来。在这里这个顺序是对的：这个台子已经把这次召唤定下来了。再定义一次 `PalBoxV2`，会替换掉
 `native/buildings.lua` 里现成的定义，所以这里把 mesh 重新写了一遍。原版的帕鲁盒子界面照常打开 —— 交互钩子只是看着这次调用，并不会把它吞掉。
 
 ## 小结

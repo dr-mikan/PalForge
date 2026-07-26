@@ -255,22 +255,23 @@ support.needGlobal(t, "FindAllOf")   -- skip unless that engine global is a func
 测试也可以自己决定跳过，在任意深度上，只要它发现前提条件不在：
 
 ```lua
-s:test("a coordinate spawn reports what it observed", function(t)
+s:test("a coordinate spawn is issued and the world can be enumerated", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
     if not coord then t:skip("no player location to spawn in front of") end
 
     local ok = Pal.get("ChickenPal"):spawn(coord)
-    t:type(ok, "boolean", ":spawn reports a boolean verdict")
-    t:eq(ok, false, "a coordinate spawn reports false while nothing appears; a true here "
-        .. "means a pal was observed to arrive, and this test is what needs updating")
+    t:eq(ok, true, "the spawn call was issued")
+
+    -- The pal is seconds away, so there is nothing to assert about arrival here.
+    local near = support.nearestPal(coord)
+    if not near then t:skip("the world could not be enumerated") end
+    t:type(near.dist, "number", "and the world can be measured around the point asked for")
 end)
 ```
 
-最后那一行值得当成习惯抄下来。这个版本里 `:spawn` 什么都不会放下，所以这项检查就主张这件事 ——
-将来真有帕鲁出现时，这个测试会变红，而那次失败就是通知。只写 `t:type(ok, "boolean")` 的话，两种
-情况都会通过，什么也告诉不了你。把游戏今天做到的事如实写进断言，连不足的部分一起，让变化去
-故意打破测试。
+这个形状值得抄下来。生成是异步的，所以测试没法断言生物已经到了 —— 检查在证据到头的地方结束，到达
+则写进日志。只断言这个调用真正能负责的部分，负责不了的交给能看见它的那一方。
 
 跳过是双向的。有几项检查覆盖的是*没有世界*的那条路径 —— 关着的 ready 闸门、没有归属者的控件的
 `:screen()` —— 它们在发现世界存在时会调用 `t:skip("a world is loaded")`。
@@ -473,8 +474,8 @@ support.nearestPal(coord)    -- { actor, pos, dist, count }, or nil
 和总数。生成检查用它来确认游戏仍然能在它请求的那个点周围列出自己的角色。
 
 <Callout type="info">
-这个版本里 `:spawn` 什么都不会放下，所以 pal 套件先核对那个 `false`，再核对这个判定所依赖的测量本身：
-`nearestPal` 证明世界在它请求的那个点周围仍然可以被枚举，而那正是一次能用的生成会被检测到的方式。
+`:spawn` 在帕鲁存在之前就返回了，所以 pal 套件不会去断言到达。它核对调用发出去了，再核对 `nearestPal`
+能在请求的那个点周围枚举世界 —— 而那正是延后处理用来找到并报告这只生物的手段。
 </Callout>
 
 套件依赖的真实游戏 id，这样一次实时检查用到的是游戏里真的有的内容：
@@ -496,12 +497,11 @@ support.GAME = {
 清扫注销的是定义。它没法撤销一次实时测试对你存档做过的事，世界测试也是照着这一点写的 —— 但
 并不是所有事都可逆。
 
-- **不会生成出帕鲁。** `pal` 在它的三个实时测试里向 `UPalCheatManager` 要一只 `ChickenPal`，而这个
-  版本里什么都不会出现，所以这三项什么也不会留下。将来真有一只出现的话，它会留下：整棵树里没有
-  东西能把帕鲁收回去。
-- **发出去的 Wood 会被原样交回来，掉在地上。** `item` 发三个 `Wood`，再把同样的三个拿回来。拿走
-  不是销毁，而是掉在你站着的地面上，所以一次运行留下的是你脚边的一小堆；如果 give 成了而 take
-  没成，那它们就留在你的背包里。
+- **生成出来的帕鲁会留下。** `pal` 在它的三个实时测试里各要一只 `ChickenPal`，每一只都会在这次运行
+  结束之后几秒才出现。整棵树里没有东西能把帕鲁收回去。
+- **发出去的 Wood 会被原样交回来。** `item` 发三个 `Wood`，再把同样的三个消耗掉，所以顺利跑完一遍
+  之后，你的背包和开始时一样。如果 give 成了而 take 没成 —— 什么都没装备的玩家拿不走 —— 那三个
+  Wood 就留在你包里。
 - **不会放置、穿戴或建造任何东西。** mesh 和 pal 的渲染测试指向一个故意加载不了的模型路径，
   所以后端在碰到玩家的 mesh 组件之前就退出了。building 套件对你已经建好的东西只读，也从不
   调用 `inst:save()`。存在 `PalPlayerController` 时，UI 套件会在构造控件之前停下。
@@ -509,19 +509,18 @@ support.GAME = {
   声明 `nativeStatus`，所以不会点亮游戏自己的状态异常；写了的效果，也会在退出时把它熄灭。
 
 <Callout type="warn">
-碰世界的套件请在一个可以丢掉的存档里跑，别在你在意的那个存档里跑。地上三个木头是很小的一点
-乱，但它确实是乱，而框架并没有承诺会去收拾。
+碰世界的套件请在一个可以丢掉的存档里跑，别在你在意的那个存档里跑。三只鸡是很小的一点乱，但它确实
+是乱，而框架并没有承诺会去收拾 —— 而且它们会在运行显示结束之后几秒才出现。
 </Callout>
 
-一次全绿的运行，并不代表 api 里每个调用都把它名字暗示的活干完了。今天有三个只做了一半，套件
-特意把这一点钉住：
+一次全绿的运行，并不代表 api 里每个调用都把它名字暗示的活干完了。今天有三个管到的范围比名字更大，
+或者比名字更晚，套件特意把这一点钉住：
 
-- `Pal.Handle:spawn` 不会在世界里放下生物。三项实时 pal 检查主张的就是那个 `false`，而不是绕过去，
-  所以等到真有帕鲁出现的那天，套件会告诉你。
-- `Audio.Handle:setVolume` 对每个值都返回 `false`，边界值也一样。它什么都不改，而这个版本上根本
-  没有按声音调节的音量可改。请挑一个更安静的声音事件，或者把音量交给游戏自己的音频选项，并把那个
-  `false` 当作诚实的回答。
-- `Audio.Handle:stop` 是按 actor 生效的。它发出 `StopSoundByActor`，所以它让那个 actor 上的所有
+- `Pal.Handle:spawn` 回答的是调用，不是生物。帕鲁在它之后 4 到 8 秒才到，所以这里的任何断言都不会
+  是关于到达的 —— 到达落在日志里。
+- `Audio.Handle:setVolume` 是按 actor 生效的。它调整的是那个 actor 正在发出的一切，而不是你调用它的
+  那一个声音，所以测试也把它当成 actor 的性质来对待。
+- `Audio.Handle:stop` 同样是按 actor 生效的。它发出 `StopSoundByActor`，所以它让那个 actor 上的所有
   声音都安静下来，而不只是你调用它的那一个声音 —— 就算是一个从未定义过的 id 的句柄，也照样让
   actor 安静。需要单独停止的声音，请放在不同的 actor 上播放。
 
@@ -532,7 +531,8 @@ support.GAME = {
 - `test.run("pal")` 只跑一个套件，`test.bind("F5", fn)` 能把你想要的任何处理放到一个键上。
 - 需要世界的检查以 `support.needWorld(t)` 开头，所以它们会跳过，而不是失败。
 - 测试里自己编出来的 id 都用 `support.id(...)` 取，之后清扫会把它们移除。
-- 碰世界的套件请在可以丢掉的存档里跑：实时检查发给你的东西会留下，它拿回去的东西会掉在地上。
+- 碰世界的套件请在可以丢掉的存档里跑：实时检查生成出来的帕鲁会留在世界里，而且是在运行结束之后
+  才到。
 
 接下来读[制作内容包](/docs/guides/first-content-pack)，写出这些检查要保护的那些内容。
 

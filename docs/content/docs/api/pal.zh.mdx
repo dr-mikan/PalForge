@@ -8,13 +8,13 @@ description: 添加一只在生成、受到伤害或被捕捉时会做出反应�
 - 让帕鲁在被捕捉、被打中、被击杀的那一刻做出反应
 - 帕鲁死亡时播放一段音效，或者开始一个有时限的效果
 - 给帕鲁换一副身体、换一种颜色、换一个大小
+- 在你站着的位置放出一只帕鲁，等级由你决定
 - 游戏运行期间，对你的每一只帕鲁反复运行你自己的代码
-- 弄清这个版本的 `:spawn` 能做什么、不能做什么
 
 ## 创建帕鲁
 
 帕鲁就是游戏里的生物。用游戏里那只生物本来的名字写一句 `Pal{ ... }`，你就会拿到一个对象，
-之后可以再取回它、给它挂上行为、通过它做各种操作。
+可以用它生成帕鲁、之后再取回它、给它挂上行为。
 
 ```lua title="content/pals.lua"
 local pal = Pal{
@@ -28,7 +28,7 @@ local pal = Pal{
     },
 }
 
-pal:spawn(Player.coordinate())   -- no creature appears in this version; see :spawn below
+pal:spawn(Player.coordinate())   -- the pal turns up a few seconds later
 ```
 
 在游戏里捕捉一只 Chicken Pal，胜利音效就会响起。整个流程就这么多：说清楚你指的是哪只生物，
@@ -42,7 +42,7 @@ Pal.get("SheepBall")        -- a handle for an existing id; never nil
 Pal.get_all()               -- every PalForge-registered pal, as handles
 ```
 
-`Pal.get` 永远不会返回 nil。没有人定义过的 id 会拿到一份很薄的定义，够用来调用那些动作，但上面
+`Pal.get` 永远不会返回 nil。没有人定义过的 id 会拿到一份很薄的定义，够用来 `:spawn`，但上面
 没有任何处理函数。只有 `Pal{ ... }` 会注册帕鲁，也只有注册过的帕鲁才会被调用处理函数。
 
 Palworld 自带的生物列表在 `native/pals` 里：
@@ -422,23 +422,9 @@ sub:unsubscribe()
 
 ### spawn
 
-<Callout type="error" title="这个版本没法把帕鲁放进世界">
-`:spawn` 不会让生物出现。游戏自己那个生成调用一声不吭地跑完了，可什么都没来 —— 当下没有，一秒
-之后也没有 —— 所以 `:spawn` 报告的是它真正看见的东西，而不是它请求的东西，返回 `false`。
-
-能用的是围绕**已经**在世界里的帕鲁的一切。`onCaptured`、`onDamaged`、`onDeath`、`onSpawned` 和
-`onTick` 都会对游戏自己的生物触发，`:renderOn` 也照样能改变它的外观。请围绕游戏替你放进世界的
-帕鲁来做内容 —— 野生的那些、玩家刚捕到的那只 —— 而不是围绕你自己放置的生物。
-
-`toPlayer` 那条路是把生物交给玩家的队伍或仓库，而这两个地方 Lua 都看不进去，所以它返回的 `true`
-只表示“调用发出去了”，不能保证更多。别把它当成仓库里真的多了一只帕鲁。
-
-下面这个写法不会变，照着它写的代码以后依然正确。
-</Callout>
-
 ```lua
 ---@param arg Coord|table|nil
----@return boolean appeared
+---@return boolean issued
 pal:spawn(arg)
 ```
 
@@ -466,34 +452,64 @@ flowchart TD
   B -->|"at"| C["core.spawn.palAt"]
   B -->|"toPlayer"| D["core.spawn.palForPlayer"]
   B -->|"neither"| E["core.spawn.pal"]
-  C --> F["PalCheatManager SpawnMonster"]
+  C --> F["SpawnMonster"]
   E --> F
-  D --> G["PalCheatManager SpawnMonsterForPlayer"]
-  F --> H["teleport the new actor - palAt only"]
+  D --> G["RequestSpawnMonsterForPlayer"]
+  F --> H["teleport the new pal - palAt only"]
 ```
 
-每条路都走 `UPalCheatManager`，也就是游戏那套由服务器校验的管理 API。对于放进世界的那两条路，
-结果是被核对过的，不是假定的：PalForge 在调用之前和调用之后各数一次世界里的生物，只有当一只刚才
-还不在的生物现在在了，才返回 `true`。`:spawn` 之所以返回 `false`，正是因为这道核对 —— 调用跑完了，
-而之后从来没有生物在那儿。`false` 也涵盖那些直白的拒绝：id 是空的、坐标不是数字，或者根本够不到
-作弊管理器。
+<Callout type="warn" title="生成不是立刻发生的">
+帕鲁会在你调用 `:spawn` 之后大约 **4 到 8 秒**才出现。这是游戏自己的节奏，不是 PalForge 加的延迟，
+也没有办法让它变成立刻。
 
-坐标是“先生成、再搬过去”。游戏自己那个调用会把帕鲁扔在玩家附近，忽略你要求的位置，所以 PalForge
-会去找刚才还不在世界里的那只生物，把它传送过去 —— 每 400 毫秒重试一次，最多六次，因为生物本该过
-几帧才出现。今天什么都不会出现，所以这一轮找不到可搬的对象，并把这件事写进日志。
+所以那个布尔值的意思是调用**发出去了**，它也不可能表示更多：等生物真正存在的时候，你的代码早就
+往下走了。别在下一行去找那个 pawn，也别把 `true` 当成“已经有一只帕鲁站在那里”。
 
-#### 作弊管理器
+想对这只帕鲁做出反应，就用 `onSpawned` 处理函数，它会在生物真正到达时运行。非要自己找的话，请在
+十秒以上的时间里反复找。
+</Callout>
 
-`SpawnMonster` 和 `SpawnMonsterForPlayer` 是 `UPalCheatManager` 上的方法。在客户端上，
-CheatManagerEnabler 模组会在 `PlayerController:ClientRestart` 里创建这个对象；在专用服务器上那个
-钩子从不触发，也没有别的东西会去创建它。会话里一个都没有时，`core/spawn` 会自己造一个：它用
-`StaticConstructObject` 构造 `PalPlayerController` 自己的 `CheatClass`——那个类为空时依次回退到
-`/Script/Pal.PalCheatManager` 和 `/Script/Engine.CheatManager`——再把结果挂到控制器上。这个对象会
-一直留着，所以这件事每个会话只发生一次，而不是每次生成都发生一次，唯一的那次会记进日志。这就是
-专用服务器能和客户端走同一条路的原因。
+`false` 是老老实实的失败：调用被拒绝，或者根本没去尝试 —— id 是空的、坐标不是数字，或者够不到
+管理对象。
 
-最早的失败，是根本没有玩家控制器：世界还没加载，或者还没连上。这时每条路都在够到游戏之前就返回
-`false`，并警告说找不到作弊管理器，也造不出来。从 `world.ready` 里调用可以避开这段时间：
+到达会在几秒之后写进日志，还带着经过的时间，所以你不用在自己代码里加计时也能看清楚发生了什么：
+
+```text
+[PalForge.spawn][info] spawn.pal ChickenPal: 1 new PalCharacter in the world 5.9 s after the call (look 15 of 20)
+```
+
+#### 按坐标生成
+
+按坐标生成是“先生成、再搬过去”。游戏自己的调用会忽略你要的位置，把帕鲁扔在玩家旁边，所以 PalForge
+会等生物到达，挑出刚才还不在的那一只，再把它传送到你给的点上。
+
+它落得**分毫不差**。这一轮延后处理会从被移动的那只帕鲁身上把位置读回来，并同时报告这个位置和它与
+你所要求的点之间的偏差：
+
+```text
+[PalForge.spawn][info] spawn.palAt: placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0
+```
+
+你在游戏里看到的，是调用之后几秒帕鲁先出现在你身边，然后再移动到那个点上。它就是这个形状，没有办法
+让生物一开始就出现在坐标处。
+
+#### 直接送给玩家
+
+`:spawn{ toPlayer = true }` 把生物交给玩家的队伍或仓库，而不是放进世界，而且完全不需要管理对象。
+它的 `true` 只表示调用发出去了，到此为止：Lua 看不进队伍，也看不进仓库，所以没有可以报告的到达，
+后面也不会跟一行日志。
+
+#### 管理对象
+
+放进世界的那几条路要走 `UPalCheatManager`。在客户端上，CheatManagerEnabler 模组会在
+`PlayerController:ClientRestart` 里创建这个对象；在专用服务器上那个钩子从不触发，也没有别的东西会去
+创建它。会话里一个都没有时，`core/spawn` 会自己造一个：它用 `StaticConstructObject` 构造
+`PalPlayerController` 自己的 `CheatClass`——那个类为空时依次回退到 `/Script/Pal.PalCheatManager` 和
+`/Script/Engine.CheatManager`——再把结果挂到控制器上。这个对象会一直留着，所以这件事每个会话只发生
+一次，而不是每次生成都发生一次，唯一的那次会记进日志。这就是专用服务器能和客户端走同一条路的原因。
+
+最早的失败，是根本没有玩家控制器：世界还没加载，或者还没连上。这时每条放进世界的路都在够到游戏之前
+就返回 `false`，并警告说找不到管理对象，也造不出来。从 `world.ready` 里调用可以避开这段时间：
 
 ```lua
 local event = require("palforge.core.event")
@@ -501,7 +517,7 @@ local log   = require("palforge.utils.log").scope("example")
 
 event.on("world.ready", function()
     if not Pal.get("ChickenPal"):spawn{ level = 10 } then
-        log.warn("no pal appeared")
+        log.warn("the spawn call was not issued")
     end
 end)
 ```
@@ -755,7 +771,6 @@ local function summonSquad(n, level)
         return false
     end
     for i = 1, n do
-        -- false in this version: no member appears
         Squad:spawn{ at = { x = at.x + i * 250, y = at.y + 250, z = at.z }, level = level }
     end
     return true
@@ -767,19 +782,18 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-每个成员各用一次自己的 `SpawnMonster` 调用，各自的 `onSpawned` 再把网格装到各自的生物上 —— 这是它
-应有的形状。这个版本里一个成员都不会出现，所以什么都没被放置，`onSpawned` 也不会跟上。等放进世界
-那条路能用了，同样这段代码就会把分队召出来。
+每个成员各用一次自己的生成调用，各自的 `onSpawned` 会在自己的生物到达时把网格装上去。这支小队不会
+一起出现，也不会立刻出现：每一只都比自己那次调用晚几秒，所以它们会在接下来的几秒里陆续到位。
 
 ## 限制
 
 <Callout type="warn">
 
-- **没法把帕鲁放进世界。** 凡是把生物放进世界的那几条路，`:spawn` 都返回 `false`，而且什么都不会
-  出现。本页其余内容讲的都是游戏自己放进世界的帕鲁，那些全都能用。
+- **生成不是立刻的，`:spawn` 也没法告诉你它成功了。** 帕鲁要 4 到 8 秒后才到，所以那个布尔值说的是
+  “调用发出去了”。到达写在日志里，处理逻辑该放在 `onSpawned`。
 - **Lua 没法凭空造出一只全新的生物。** `Pal{ id = ... }` 是给游戏里已有的生物加上行为、外观和
   元数据；创建数据行本身是 PalSchema 的活。游戏里没有对应 `BP_<Id>_C` 的 id，处理函数永远不会
-  被调用。
+  被调用，`:spawn` 也没有东西可生成。
 - **`onTick` 是巡检，不是游戏事件。** `core/event` 每隔 `core.event.PAL_SCAN_MS`（默认 3000 毫秒）
   遍历一次活着的帕鲁，每只生物调用一次 `onTick`。用
   `require("palforge.core.event").PAL_SCAN_MS = 5000` 可以放慢它，用 `0` 可以关掉它。它比 500 毫秒
@@ -799,13 +813,14 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 - **处理函数出错，这个处理函数就到此为止。** PalForge 在 `pcall` 里调用你的钩子，并把失败连同
   频道名和钩子名一起写进日志，所以 bug 在日志里看得见——但处理函数余下的部分不会运行，频道和
   游戏都不会察觉。
-- **`:spawn` 连尝试都需要先有一个玩家控制器。** 它也需要 `PalCheatManager`，但不必先由别的东西
-  创建：会话里一个都没有时，`core/spawn` 会用控制器的 `CheatClass` 造一个并挂上去，所以专用服务器
-  能和客户端走同一条路——那里 CheatManagerEnabler 的 `ClientRestart` 钩子从不运行。如果连
-  `PalPlayerController` 都没有，没有东西可以拿来造，每条路都在够到游戏之前就返回 `false`。
-- **坐标是生成之后的移动，不是生成位置。** 游戏自己的调用会忽略你要求的位置，所以 PalForge 会去找
-  刚出现的那只生物并把它传送过去，每 400 毫秒重试一次，最多六次。这一轮的结果只会写进日志，而今天
-  写进去的内容是：没有新生物可搬。
+- **放进世界的生成，连尝试都需要先有一个玩家控制器。** 它也需要 `PalCheatManager`，但不必先由别的
+  东西创建：会话里一个都没有时，`core/spawn` 会用控制器的 `CheatClass` 造一个并挂上去，所以专用
+  服务器能和客户端走同一条路——那里 CheatManagerEnabler 的 `ClientRestart` 钩子从不运行。如果连
+  `PalPlayerController` 都没有，没有东西可以拿来造，每条放进世界的路都在够到游戏之前就返回 `false`。
+  `toPlayer` 那条路这些都不需要。
+- **坐标是生成之后的移动，不是生成位置。** 游戏自己的调用会忽略你要求的位置，所以 PalForge 会等生物
+  到达，挑出新的那一只，再把它传送到你给的点上 —— 落点分毫不差。这一轮的结果只会写进日志，那一行里
+  带着从帕鲁身上读回来的位置。
 - **网格永远不会自动装上。** 请在处理函数里调用 `:renderOn(actor)`。`core.mesh.ENABLED` 是一个
   全局开关，关掉它以后所有装载都变成空操作；而材质相关的字段送到的后端，只有在 `kind` 是
   `procedural` 或 `obj` 时才上色。
@@ -819,8 +834,8 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 - `Pal{ id = "ChickenPal", ... }` 给游戏里的一只生物加上新的行为。必填的字段只有 `id`。
 - 帕鲁身上发生的事写在 `events` 下面：`onSpawned`、`onDamaged`、`onDeath`、`onCaptured` 和
   `onTick`。这五个都是可用的。
-- `pal:spawn()` 本来是放置帕鲁的调用，但这个版本放不进去：它返回 `false`，什么都不会出现。请围绕
-  游戏自己放出来的生物来做内容。
+- `pal:spawn()` 把帕鲁放进世界，帕鲁会在 4 到 8 秒后到。传坐标就能精确放到那个点，传
+  `{ toPlayer = true, num = 3 }` 就直接送给玩家。那个布尔值说的是调用本身，所以反应写在 `onSpawned` 里。
 - `mesh` 改变帕鲁的样子，但要你自己在 `onSpawned` 里调用 `pal:renderOn(ctx.actor)` 装上去。
 - 只有你用 `Pal{ ... }` 定义过的 id 才会被调用处理函数；`Pal.get` 给你动作，但不给你事件。
 - `onTick` 对每只活着的帕鲁大约每三秒运行一次，自己不记东西——要按生物记的内容，用 `ctx.actor`

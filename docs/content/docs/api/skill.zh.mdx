@@ -368,7 +368,7 @@ Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall
 ```lua
 skill:teach(actor)      --> boolean, true only when the skill is on the character afterwards
 skill:forget(actor)     --> boolean, true only when it is gone afterwards
-skill:skillsOn(actor)   --> { active = { ... }, passive = { ... } } | nil
+skill:skillsOn(actor)   --> { active, passive, equipable, mastered } | nil
 ```
 
 `actor` 必须是一个真正的角色：站在世界里的帕鲁，或者 `Player.character()` 返回的玩家自己的 pawn。
@@ -379,7 +379,7 @@ local pawn = Player.character()
 
 Skill.get("FireBlast"):teach(pawn)    -- one of the game's own moves
 Skill.get("Legend"):teach(pawn)       -- not a move: added as a passive trait
-Skill.get("FireBlast"):skillsOn(pawn) --> { active = { "FireBlast" }, passive = { "Legend" } }
+Skill.get("FireBlast"):skillsOn(pawn) -- what that character carries right now
 Skill.get("FireBlast"):forget(pawn)
 ```
 
@@ -402,21 +402,43 @@ Palworld 把主动技能和被动技能分开存放，所以 `:teach` 必须二�
 大小写不影响结果，`"fireblast"` 找到的是同一个技能。想在写下 id 之前先确认，
 `require("palforge.core.character").wazaNames()` 会返回这个版本里全部主动技能的名字，已排好序。
 
-### 那个布尔值是什么意思
+### 读出一个角色的技能配置
 
-每一次写入之后都会把角色读回来核对，所以 `true` 表示这个技能**在角色身上被看到了** —— 绝不是“调用
-没报错”。`false` 表示它没有装上：目标不是角色、游戏不接受这个 id，或者写入被拒绝了。
+`:skillsOn(actor)` 是读取，而读取是能用的。它返回四个列表，因为一只帕鲁知道的技能比它装上的那几个
+要多：
 
-`:skillsOn(actor)` 返回 `{ active = {...}, passive = {...} }`。空列表表示读成功了、这个角色一个都
-没有。整张表是 `nil` 则表示这个角色根本读不出来 —— 是“未知”，不是“没有” —— 所以取下标之前先判断
-`nil`。
+| 键 | 里面是什么 |
+| --- | --- |
+| `active` | 它现在装备着的技能 —— 最多四个 |
+| `passive` | 它的被动特性，按名字 |
+| `equipable` | 它*可以*装备的技能 |
+| `mastered` | 它已经掌握的技能 |
+
+空列表表示读成功了、一个都没有，这是一个真实的答案：`active` 为空的帕鲁，也可能只是什么都没装备。
+整张表是 `nil` 则表示这个角色根本读不出来 —— 是“未知”，不是“没有” —— 所以取下标之前先判断 `nil`。
 
 ```lua
 local carried = Skill.get("FireBlast"):skillsOn(pawn)
 if carried then
-    print(#carried.active .. " moves, " .. #carried.passive .. " traits")
+    print(#carried.active .. " equipped, " .. #carried.equipable .. " available")
 end
 ```
+
+<Callout type="info">
+要问就问**帕鲁**，别问村民或商人。它们也是角色，游戏自己的角色列表里也有它们，但它们身上没有技能 ——
+所以问它们得到的是空列表，和一次失败的读取长得一模一样。
+</Callout>
+
+### 写入会告诉你什么
+
+`:teach` 和 `:forget` 每次写完都会把角色读回来核对，所以 `true` 表示这个技能**在角色身上被看到了**，
+绝不是“调用没报错”。`false` 表示它没有装上：目标不是角色、游戏不接受这个 id，或者写入被拒绝了。
+
+<Callout type="warn">
+别假定，去看那个布尔值。读配置这件事已经定下来了，写配置还没有到可以拿来搭整合包的程度；`:teach`
+返回 `false` 是框架在如实告诉你，而不是你的代码有 bug。在真正依赖它之前，先在一个可以重来的存档里
+试一次。
+</Callout>
 
 <Callout type="info">
 `:teach` 和 `:equip` 是有意分开的两件事，而且两个都有用。`:equip` 对任何值都能跑你自己的 `onEquip`

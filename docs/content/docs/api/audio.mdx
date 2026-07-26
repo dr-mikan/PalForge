@@ -281,7 +281,7 @@ just keeps whichever call ran last. The same applies to the `bgm(name)` / `se(na
 ```lua
 Handle:play(actor)        --> boolean
 Handle:stop(actor)        --> boolean
-Handle:setVolume(volume)  --> false, always -- see the note below
+Handle:setVolume(volume, actor)  --> boolean
 ```
 
 `actor` is optional. When you leave it out, both `play` and `stop` use the character the player
@@ -322,15 +322,20 @@ player character stops that character's footsteps and voice lines with it. Stopp
 and leaving the others running would need a Wwise `PlayingID` that the sound does not keep.
 </Callout>
 
-<Callout type="error" title="Setting a sound's volume is not available in this version">
-`:setVolume` changes nothing and always returns `false`. There is no per-sound volume dial for
-it to turn: Wwise, the sound system Palworld uses, lets a mod set named parameters, and this
-build of the game declares exactly three of them — none of which is a volume — and no mixing
-buses at all.
+<Callout type="warn">
+`:setVolume` is **actor-wide**, exactly like `:stop`. It scales everything one actor is
+emitting — your sounds and the game's alike — rather than the one sound you called it on, so
+which handle you use makes no difference. `actor` is optional and defaults to the player's own
+character, the same as `:play` and `:stop`.
 
-**Choosing the event is the volume control.** The catalog holds loud sounds and quiet ones for
-the same kind of moment, so pick the one that already sits at the level you want, and leave the
-overall loudness to the player's own audio settings.
+`volume` is a plain multiplier: `1.0` leaves things as they are, `0.5` is half, `0.0` is
+silence. It returns `true` when the call was issued, which is as far as the game lets Lua see —
+nobody has yet confirmed by ear what a given number sounds like, so treat the number as
+something to tune rather than a promise.
+
+To make **one** sound quieter than another on the same actor, pick a quieter event from the
+catalog. Playing them on separate actors is the other way round: then a volume applies to one
+of them.
 </Callout>
 
 ### Queries
@@ -455,7 +460,7 @@ end
 
 ## What does not work yet
 
-Three things here do less than you would expect: two are unfinished, and one stops more than
+Three things here do less than you would expect: one is unfinished, and two reach further than
 you asked for. All three stay quiet instead of raising an error, so read this before you spend
 an evening on a silent sound.
 
@@ -474,9 +479,9 @@ sound to keep going, play it on a different actor — music on a placed building
 and effects on the player.
 </Callout>
 
-`:setVolume` is the third gap, covered above: it returns `false` and changes nothing, and there
-is no volume to set on this build, so a volume slider has nothing to move. Pick a quieter event
-instead.
+`:setVolume` shares `:stop`'s actor-wide scope, covered above: it scales everything that actor
+is emitting rather than the one sound you called it on. A per-sound volume slider still has to
+be separate actors, or separate events.
 
 ## Recipes
 
@@ -638,8 +643,8 @@ Filing the sound away is best-effort: if that step fails, you still get a workin
 - Play it with `handle:play(actor)`. Leave `actor` out and it plays on the player's character.
 - `true` from `:play()` means the call went out, not that you heard it. Check `:source().path`
   when a sound is silent.
-- `:stop(actor)` silences everything on that actor, and `:setVolume` does nothing — choose a
-  quieter event instead.
+- `:stop(actor)` silences everything on that actor, and `:setVolume(volume, actor)` scales
+  everything on it. Both are actor-wide, never per sound.
 - Define your sounds once when the pack loads, and only call `:play()` inside handlers.
 
 Next, read [Item](/docs/api/item) to hook a sound onto something the player picks up or uses.

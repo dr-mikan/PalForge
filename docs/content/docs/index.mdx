@@ -106,7 +106,7 @@ on it. Both spellings work:
 ```lua
 require("palforge.api")
 
-Pal.get("ChickenPal"):spawn(Player.coordinate())   -- :spawn places nothing in this version
+Pal.get("ChickenPal"):spawn(Player.coordinate())   -- the pal arrives a few seconds later
 Item.get("Wood"):give(10)
 ```
 
@@ -285,17 +285,13 @@ How much of that happens by itself depends on the domain:
   a UI element is mounted, refreshed and unmounted by you. `Audio.Handle:stop(actor)` is not
   per-sound: it silences everything playing on that actor.
 
-<Callout type="error" title="Two things this version cannot do">
-Plan around these before you design a pack. Both are calls you can still write — they answer
-`false` and change nothing, rather than failing halfway.
+<Callout type="error" title="One thing this version cannot do">
+**A sound of your own cannot be played.** Pointing an `Audio` definition at an audio file you
+made is accepted and then does nothing. Only sounds the game already ships can be played, and
+there are thousands of them — [Audio](/docs/api/audio) has the catalog.
 
-- **Pals cannot be placed in the world.** `Pal.Handle:spawn` puts no creature anywhere. What
-  does work is reacting to the creatures the game itself spawns — capture, damage, death and
-  the periodic sweep all run.
-- **A sound has no volume of its own.** `Audio.Handle:setVolume` changes nothing, and the game
-  offers no per-sound volume to change. Pick a quieter sound from the catalog instead.
-
-Everything else on this page runs today.
+Everything else on this page runs today, with one habit worth forming: a call that touches the
+game answers what it measured, so check the boolean rather than assuming.
 </Callout>
 
 <Callout type="warn">
@@ -356,7 +352,7 @@ local Whistle = Skill{
     cooldown = 30.0,
     events = {
         onActivate = function(skill, owner, ctx)
-            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))   -- no pal appears
+            Pal.get("ChickenPal"):spawn(Player.coordinateOffset(200, 0, 0))
         end,
     },
 }
@@ -416,7 +412,8 @@ What each piece does:
   building actor.
 - `Audio.Handle:stop(actor)` is not per-sound. It stops everything playing on that actor.
 - `Item.Handle:give` reports what the inventory was measured to do, so a `false` from it means
-  nothing arrived. The `:spawn` line places nothing in this version; everything else here runs.
+  nothing arrived. The `:spawn` line puts a pal in the world a few seconds after it runs, not
+  straight away.
 
 <Callout type="info">
 `CampFire`, `Wood`, `Berries` and `ChickenPal` are real ids from

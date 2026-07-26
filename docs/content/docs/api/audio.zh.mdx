@@ -273,7 +273,7 @@ end
 ```lua
 Handle:play(actor)        --> boolean
 Handle:stop(actor)        --> boolean
-Handle:setVolume(volume)  --> false, always -- see the note below
+Handle:setVolume(volume, actor)  --> boolean
 ```
 
 `actor` 可以省略。省略时，`play` 和 `stop` 都会用 `FindFirstOf("PalPlayerCharacter")` 找到
@@ -311,13 +311,17 @@ end
 和语音一起停掉。想停一个、让其他继续响，需要 Wwise 的 `PlayingID`，而声音本身没有保存它。
 </Callout>
 
-<Callout type="error" title="这个版本没法调节单个声音的音量">
-`:setVolume` 什么都不会改变，永远返回 `false`。因为根本没有“单个声音的音量旋钮”可以拧：Palworld
-用的声音系统 Wwise 允许模组设置具名参数，而这个版本的游戏总共只声明了三个，没有一个是音量，
-也完全没有混音总线。
+<Callout type="warn">
+`:setVolume` 和 `:stop` 一样是**按 actor 生效**的。它调整的是那个 actor 正在发出的一切 —— 你的声音和
+游戏的声音都算 —— 而不是你调用它的那一个声音，所以用哪个句柄调用都没有区别。`actor` 可以省略，
+省略时和 `:play`、`:stop` 一样用玩家自己的角色。
 
-**挑事件就是你的音量控制。** 同一类场合，目录里既有响的声音也有轻的声音，直接挑一个音量本来就
-合适的；整体音量交给玩家自己的音频设置。
+`volume` 就是一个倍数：`1.0` 保持原样，`0.5` 是一半，`0.0` 是静音。调用发出去了它就返回 `true`，
+游戏让 Lua 看到的也就到此为止 —— 还没有人用耳朵确认过某个数值听起来是什么样，所以把这个数字当成
+可以调的旋钮，而不是一个承诺。
+
+想让同一个 actor 上的**某一个**声音更轻，就从目录里挑一个更轻的事件。把它们放到不同的 actor 上播
+则是另一条路：那样音量就只作用于其中一个。
 </Callout>
 
 ### 查询
@@ -440,7 +444,7 @@ end
 
 ## 还不能用的功能
 
-这里有三样东西做的事比你预期的少：两样没做完，一样停掉的东西比你要求的多。三样都不会报错，
+这里有三样东西做的事比你预期的少：一样没做完，两样管到的范围比你要求的大。三样都不会报错，
 只是安静地过去，所以在为一个不出声的声音耗掉一晚上之前，先读这一节。
 
 <Callout type="warn">
@@ -456,8 +460,8 @@ PalForge 播放：请从目录里挑一个最接近的声音。
 响，就把它放到另一个 actor 上播——比如音乐放在放置好的建筑物上，音效放在玩家身上。
 </Callout>
 
-第三处欠缺是上面说过的 `:setVolume`：它返回 `false`，什么都不改，而这个版本上根本没有可设置的
-音量，所以音量滑块没有能拖动的东西。改成挑一个更安静的事件。
+第三样是上面说过的 `:setVolume`，它和 `:stop` 的作用范围一样：调整的是那个 actor 正在发出的一切，
+而不是你调用它的那一个声音。真要做按声音的音量滑块，还是得靠分开的 actor 或分开的事件。
 
 ## 实用示例
 
@@ -615,7 +619,8 @@ Audio.get: id (string) is required
 - 除了 `soundId`，也要传 `soundPath`。听得到的是路径；只有名称是无声的。
 - 用 `handle:play(actor)` 播放。省略 `actor` 就在玩家角色上播放。
 - `:play()` 返回 `true` 表示调用发出去了，不表示你听到了。声音不响时检查 `:source().path`。
-- `:stop(actor)` 会停掉那个 actor 上的一切；`:setVolume` 什么都不做，改成挑一个更安静的事件。
+- `:stop(actor)` 会停掉那个 actor 上的一切，`:setVolume(volume, actor)` 会调整那个 actor 上的一切。
+  两者都是按 actor 生效，从来不是按单个声音。
 - 声音在内容包加载时定义一次，处理函数里只调用 `:play()`。
 
 接下来读 [Item](/docs/api/item)，给玩家捡起或使用的东西加上声音。

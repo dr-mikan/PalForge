@@ -19,12 +19,12 @@ description: 从一个空的模组文件夹开始，做出一个能放下、能�
 - 与信标交互会发动一个冷却 30 秒的技能，
 - 技能在交互的那个角色身上播放音效，
 - 给他一个 12 秒、最多叠 3 层的增益，
-- 并试着在信标的位置召唤一只守护帕鲁，
+- 并在信标的位置召唤一只守护帕鲁，
 - 信标本身发放一件道具、数一次使用次数、消耗一次充能，并把这个次数写进世界存档，
 - 一个反复运行的处理函数，会在你不在它旁边时把充能补回来。
 
-音效、增益、发放、冷却、计数和存档状态，都会在游戏里真的发生。这个版本做不到的只有守护帕鲁
-这一步，到了那个位置会再说一次。
+这些都会在游戏里真的发生。唯一需要事先知道、免得吓一跳的是那只帕鲁：它不会立刻出现，而是在交互
+之后几秒才到。到了那个位置会再说一次。
 
 这样 Building、Skill、Audio、Effect、Pal 和 Item 就都在一个包里了。这个包自己就是一个模组
 文件夹，复用同一次会话里已经加载好的 PalForge。
@@ -35,11 +35,10 @@ description: 从一个空的模组文件夹开始，做出一个能放下、能�
   能看到 `[PalForge.main][info] ready`。
 - 召唤帕鲁要经过 `UPalCheatManager`，也就是游戏自己的管理对象。PalForge 会去找一个，找不到
   就在玩家控制器上自己造一个，所以你只要在世界里就够了。
-- 发放道具走的是同一个管理对象，并且返回它实测到的结果：`Item.Handle:give` 在前后各读一次
-  背包，只有数量真的上升了才返回 `true`。
-- 这个包里有一步在这个版本做不到，而且它是软失败的。`Pal.Handle:spawn` 不会在世界里放出生物：
-  它返回 `false`，往日志里写一行，处理函数剩下的部分照常往下走。它仍然写在包里，因为形状是对
-  的，也因为“每个调用都检查结果”的包才是不会坏的包。见 [Pal](/docs/api/pal)。
+- 发放道具走的是背包自己的写入，并且返回它实测到的结果：`Item.Handle:give` 在前后各读一次背包，
+  只有数量真的上升了才返回 `true`。
+- 生成不是立刻的。`Pal.Handle:spawn` 在调用发出去的当下就返回，而生物要 4 到 8 秒后才到，所以这个
+  包里没有任何地方等它，也没有任何地方去核对它到了没有。见 [Pal](/docs/api/pal)。
 
 <Callout type="info">
 下面这个信标接管的是游戏里已经有的建筑物、道具和生物。Lua 可以给一个已有的 id 加上行为和
@@ -234,10 +233,10 @@ return M
 同一个播放调用。
 
 <Callout type="warn">
-这里有两样东西不能用，请绕开它们。`Handle:setVolume` 返回 `false`，什么也不改，而游戏也没有提供
-按声音调节的音量——请直接挑一个本身响度就合适的音效事件。`soundFile`（你自己的音频文件）能被接受，然后什么也不做，所以请改用
-目录里游戏自带的 `AkAudioEvent`。`Handle:stop` 也不是按单个声音停的：它会停掉那个 actor 上
-正在播放的一切。
+这里有两样东西和名字给人的印象不一样，请绕开它们。`soundFile`（你自己的音频文件）能被接受，然后
+什么也不做，所以请改用目录里游戏自带的 `AkAudioEvent`。另外 `Handle:stop` 和 `Handle:setVolume`
+都不是按单个声音来的：两者作用的都是那个 actor 上正在播放的一切，所以想让某一个声音更轻，就挑一个
+更轻的事件。
 </Callout>
 
 </Step>
@@ -432,7 +431,7 @@ M.Flare = Skill{
         onActivate = function(skill, owner, ctx)
             audio.Signal:play(owner)                                -- on the interacting character
             effects.Blessing:apply(owner, { source = ctx.beacon })  -- 12s, stacks to 3
-            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- false: no pal appears
+            pals.Guardian:spawn{ at = ctx.at, level = 5 }           -- arrives seconds later
             log.info("flare fired from " .. tostring(ctx.beacon))
         end,
     },
@@ -551,18 +550,18 @@ return M
 [PalForge.beacon.buildings][info] beacon placed at 12345/-6789/420
 [PalForge.beacon.buildings][info] beacon tracked fresh: 0 use(s), 3 charge(s)
 [PalForge.beacon.effects][info] blessing applied by Altar@123,-68,4
-[PalForge.spawn][warn] spawn.palAt: SpawnMonster(Kitsunebi, lv 5) ran and NOTHING spawned, so there is nothing to move to (12345,-6789,420)
 [PalForge.beacon.skills][info] flare fired from Altar@123,-68,4
 [PalForge.items][info] give Ruby x3: 0 -> 3 [evidence declared]
 [PalForge.beacon.effects][info] blessing tick at 3.0s
+[PalForge.spawn][info] spawn.palAt: placed new pal at (12345,-6789,420); it reads back (12345,-6789,420), off by 0
 ```
 
-注册类的数量和实例键取决于你这次会话，行的顺序则不会变。`onActivate` 先跑音效、效果和生成尝试，
-再打印自己那一行，所以增益和生成先被报出来——而 `give` 那一行只会在 `:activate` 返回之后出现。
+注册类的数量和实例键取决于你这次会话，行的顺序则不会变。`onActivate` 先跑音效、效果和生成，再打印
+自己那一行，所以增益先被报出来，而 `give` 那一行会在 `:activate` 返回之后出现。
 
-其中一行就是这个版本做不到的那一步，它是被如实报告出来的：没有生物被放下。其余每一行都是包在
-正常工作，而 `give` 那一行写出了背包前后的数量，因为它的 `true` 就是从那里实测出来的。正因为
-处理函数在拿到 `false` 之后还会往下走，你才能这样读日志：哪一步没成，一眼就看得见。
+生成那一行晚好几秒才出现在最后，这不是问题，而是“生成”这件事本来的形状：调用是在交互过程中发出去
+的，帕鲁随后才到，放置也是那时候才被报告。每一行写的都是实测到的东西 —— `give` 那一行带着背包前后
+的数量，生成那一行带着从帕鲁身上读回来的位置 —— 所以跑一次就能确切知道哪一步成了、哪一步没成。
 
 </Step>
 
@@ -633,8 +632,8 @@ flowchart LR
 | 领域 | 游戏调用 | 你调用 |
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
-| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`（这个版本什么都放不下）、`:renderOn(actor)`、`:skillsOf()`、`:teachAll(actor)` |
-| Item | `onObtain`, `onUse` | `:count()`、`:give(n)`、`:take(n)`（拿走的东西会掉在玩家脚边）、`:iconOf()`、`:recipeOf()` |
+| Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`（帕鲁几秒后才到）、`:renderOn(actor)`、`:skillsOf()`、`:teachAll(actor)` |
+| Item | `onObtain`, `onUse` | `:count()`、`:give(n)`、`:take(n)`（消耗掉；需要玩家装备着东西）、`:iconOf()`、`:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`（按 PalForge 自己的时间表） | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
 | Skill | 没有 | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | 没有 | `:play()`, `:stop()` |
@@ -798,14 +797,13 @@ print(schema.help("Building.Spec.Events"))
 然后确认建筑物有没有被跟踪：`#Building.get("Altar"):instances()`。空列表说明扫描没能把 actor
 和你的定义对上，通常是因为 `Building{ id = ... }` 里的 id 不是游戏给那个建筑物用的 id。
 
-**帕鲁没有出现。** 这个版本里 `:spawn` 不会有帕鲁出现，所以这是预料之中的结果，不是你哪里配错了
-—— 细节见 [Pal](/docs/api/pal)。另外还有更早的一种失败值得排除：按坐标生成需要会话里有玩家控制器。
-没有的话它连游戏都够不到，并记下
+**帕鲁没有出现。** 先等够八秒 —— 生成不是立刻的，日志会写它是什么时候到的。如果一直不出现，要排除
+的更早一步的失败是没有玩家控制器：没有它时调用根本够不到游戏，并记下
 `spawn.palAt: no PalCheatManager and none could be constructed (no player controller yet?)`
 。不带 `at` 的 `:spawn()` 报的是同一件事，前缀是 `spawn.pal:`。
 
 **奖励没有到手。** `:give` 在没有观察到背包数量上升时返回 `false`，它的日志行会说明是哪一步停下的：
-根本没有管理对象（打开 `CheatManagerEnablerMod`）、游戏不认识这个道具 ID，或者背包已经放不下。
+背包当场拒绝、游戏不认识这个道具 ID，或者背包已经放不下。
 
 **技能永远只发动一次。** 那是 `cooldown` 在干活。冷却期间 `:activate` 返回 `false`。`kind`
 是 `"passive"` 的技能也返回 `false`，你自己的处理函数报错时同样返回 `false`。

@@ -384,7 +384,7 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 | `.id` | string | 这个道具的游戏道具 ID。就是一个普通字段。 |
 | `:count()` | number \| nil | 本地玩家现在身上带着多少个。`nil` 的意思是读不出来，绝不是“一个都没有”。 |
 | `:give(count)` | boolean | 往本地玩家的背包里加 `count` 个（默认 1）。只有观察到背包数量确实上升时才是 `true`。 |
-| `:take(count)` | boolean | 把 `count` 个（默认 1）丢在玩家脚边，从背包里移除；`count` 按绝对值处理。只有观察到数量确实下降时才是 `true`。 |
+| `:take(count)` | boolean | 从本地玩家的背包里消耗 `count` 个（默认 1）；`count` 按绝对值处理。只有观察到数量确实下降时才是 `true`。 |
 | `:recipeOf()` | table \| nil | 声明过的配方；没有配方时为 `nil`。 |
 | `:iconOf()` | any \| nil | 道具图标 DataTable 里的贴图引用，查不到就用声明的 `icon`。 |
 | `:name()` | string | 声明的名字，没有就用 ID。 |
@@ -398,12 +398,12 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 
 ### give
 
-`:give` 通过游戏自己的管理对象把道具放进玩家背包，然后核对它们是不是真的到了：调用之前读一次背包数量，调用之后再读一次，`true` 表示看到数量**上升**了。
+`:give` 通过背包自己的写入把道具放进玩家背包，然后核对它们是不是真的到了：调用之前读一次数量，调用之后再读一次，`true` 表示看到数量**上升**了。
 
 ```mermaid
 flowchart LR
   A["Item.Handle:give"] --> B["read the count"]
-  B --> C["the game's GetItem cheat"]
+  B --> C["the inventory's own add"]
   C --> D["read the count again"]
   D --> E["true only when it rose"]
 ```
@@ -417,48 +417,42 @@ if not Item.get("Berries"):give(5) then
 end
 ```
 
-<Callout type="warn">
-`:give` 和 `:take` 都要走游戏的管理对象，而打开它的是配套模组 `CheatManagerEnablerMod`。没有它就没有可调用的对象，两者都会在够到游戏之前被拒绝并返回 `false`。要写进 `mods.txt` 的那一行见 [快速开始](/docs/getting-started)。
-</Callout>
-
-这个布尔值是实测结果，不是“调用成功了没有”。`false` 表示没有观察到东西到位，原因可能有好几个：没有管理对象、游戏不认识这个道具 ID、背包已经放不下。每一种结果都会连同道具名、数量和背包的变化写进日志，所以布尔值分不出来的情况，日志能分出来：
+这个布尔值是实测结果，不是“调用成功了没有”。`false` 表示没有观察到东西到位，原因可能有好几个：背包当场拒绝、背包放不下、事后读不出数量。背包自己会给出一个理由，日志会把它带上，所以布尔值分不出来的情况，日志能分出来：
 
 ```text
 [PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
-[PalForge.items][warn] give Wood x10: GetItem executed [evidence declared] and the count did not rise (135 -> 135) — unknown item id, or the inventory had no room
-[PalForge.items][err] give Wood x10 failed: no PalCheatManager on this session (needs CheatManagerEnabler)
+[PalForge.items][warn] give Wood x10: AddItem_ServerInternal answered Success but the count did not rise (135 -> 135). Weight is now 300.0 of 300.0
+[PalForge.items][err] give Wood x10 failed: the player's inventory could not be reached
 ```
 
 行尾的 `[evidence ...]` 记的是 PalForge 在发出调用之前，是怎么拿正在运行的游戏核对过的。你不需要为它做什么；它只是让一个出乎意料的 `false` 变得看得懂。
 
-带命名空间的 ID 会先被解析，所以 `Item.get("example:Potion"):give(1)` 交给游戏的名字是 `example_Potion`。PalForge 不会检查对应的数据行是否存在 —— 游戏不认识的 ID 也照样被接受、什么都没加，然后以 `false` 的形式回来。
+带命名空间的 ID 会先被解析，所以 `Item.get("example:Potion"):give(1)` 交给游戏的名字是 `example_Potion`。PalForge 不会检查对应的数据行是否存在 —— 游戏不认识的 ID 什么都不会加，然后以 `false` 的形式回来。
 
 <Callout type="info">
-别指望自己调用的 `:give` 会回到自己的 `onObtain`。`onObtain` 跟的是游戏自己的拾取汇报，而且在 `onObtain` 处理函数里面还有一道保护，不让处理函数把自己再触发一遍。你自己发出了什么，就在发出的那个位置写进日志。
+`:give` 走的是游戏拾取时用的同一个写入，所以它通常也会走到 `onObtain`。在 `onObtain` 处理函数里面有一道保护拦着，处理函数不会把自己再触发一遍；在别的地方，就要预料到自己的 give 会绕回来。
 </Callout>
 
 ### take
 
-`:take` 是同一套实测，方向相反：前后各读一次数量，`true` 表示看到数量**下降**了。
+`:take` 是同一套实测，方向相反：前后各读一次数量，`true` 表示看到数量**下降**了。道具是被消耗掉的 —— 不会掉在玩家脚边让人捡回去 —— 所以整合包可以真正收取一份代价。
 
-<Callout type="warn" title="take 会把道具丢在玩家脚边">
-这个版本上没有任何调用能让道具凭空消失，所以 `:take` 用的是把它从背包里取出来的那个调用：道具会掉在玩家站着的地面上。背包确实少了它们 —— 这正是 `:take` 的含义，数量核对也证实了 —— 但玩家旁边会出现一堆东西，谁都能走过去把它捡回来。
-
-请按“会留下一堆”来设计。`:take` 适合“把东西交出来”，不适合“把东西消耗掉”，所以只有在玩家原地捡回去也不会破坏设计时，才用它来收取代价。
+<Callout type="warn" title="take 需要玩家身上装备着东西">
+这次消耗是通过玩家带着的武器完成的。身上什么都没装备的玩家没有可走的通道，所以 `:take` 返回 `false`，并在日志里把这件事说清楚。这是设计时要绕开的唯一一点：如果你的建筑物要收代价，一个空着手站在那里的玩家是付不了的。
 </Callout>
 
 ```mermaid
 flowchart LR
   A["Item.Handle:take"] --> B["read the count"]
   B --> C["clamp to what is held"]
-  C --> D["the game's DropItem cheat"]
+  C --> D["the game's consume call"]
   D --> E["read the count again"]
   E --> F["true only when it fell"]
 ```
 
 ```lua
 if Item.get("Wood"):take(3) then
-    -- three Wood left the inventory, and are lying at the player's feet
+    -- three Wood are gone from the inventory
 else
     -- nothing was measured to leave
 end
@@ -467,13 +461,13 @@ end
 要的比玩家带着的多，不算错误：请求会被夹到背包实际持有的数量。一个都没有时，这个调用干脆就不发出去。两种情况都会写进日志，所以布尔值分不出来的情况，日志能分出来：
 
 ```text
-[PalForge.items][info] take Wood x3: 12 -> 9, dropped on the ground at the player's feet [evidence declared]
-[PalForge.items][warn] take Wood x5: the inventory holds only 2, dropping that many
-[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is dropped
+[PalForge.items][info] take Wood x3: 164 -> 161 [evidence declared]
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, taking that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is taken
 ```
 
 <Callout type="warn">
-被夹过的移除照样返回 `true` —— 上面第二行要 5 个、只丢了 2 个，返回的仍是 `true`。`true` 的意思是“看到数量下降了”，不是“正好走了 `count` 个”。数量必须精确时，自己在前后各读一次 `:count()`。
+被夹过的移除照样返回 `true` —— 上面第二行要 5 个、只拿走了 2 个，返回的仍是 `true`。`true` 的意思是“看到数量下降了”，不是“正好走了 `count` 个”。数量必须精确时，自己在前后各读一次 `:count()`。
 </Callout>
 
 ### 查询
@@ -493,7 +487,7 @@ local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 
 `count` 是背包这边唯一能用的操作。它问游戏本地玩家带着多少个这个 ID，返回一个普通数字。`nil` 表示根本读不出来（世界还没加载、找不到玩家），而不是“一个都没有”，所以比较之前先判断 `nil`。
 
-`iconOf` 会去 `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` 里查这个 ID，读出那一行上的贴图。每一步都是容错的：表、行或列缺了任何一个，返回的就是你声明的 `icon`，而你没设过的话它是 `nil`。
+`iconOf` 会去 `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` 里查这个 ID，读出那一行上的贴图，所以原版 ID 拿到的就是游戏本身给这个道具用的美术资源。每一步都是容错的：表、行或列缺了任何一个，返回的就是你声明的 `icon`（没设过就是 `nil`）。你自己带命名空间的 ID 没有对应的行，所以总是走回退。
 
 ### 枚举
 
@@ -631,7 +625,7 @@ Building{
     events = {
         onRightClick = function(self, ctx)
             -- ctx.actor = the build object, ctx.player = who interacted, ctx.buildId
-            local ok = Item.get("Wood"):take(5)   -- the 5 Wood land on the ground, not in a bin
+            local ok = Item.get("Wood"):take(5)   -- the 5 Wood are consumed
             if not ok then
                 log.warn("could not take the wood")
                 return
@@ -654,7 +648,7 @@ Building{
 这个例子接管了 ID `"WorkBench"`，而 PalForge 已经描述过它。最新的描述胜出，所以这里把 mesh 那一块又写了一遍，好保住原版的外观。你自己的内容请用带命名空间的 ID。
 </Callout>
 
-先扣、扣成功了才给：这个顺序才能让补给台不至于白发东西，因为没看到东西离开时 `:take` 会返回 `false`。但有两点它不保证。木头不会消失 —— 它就在玩家旁边的地上，可以直接捡回去，所以这个台子是图省事的交换，而不是真正的代价。另外 `true` 也不表示 5 个全走了：请求会被夹到玩家实际带着的数量，所以必须精确的交易还是得自己查一次 `:count()`。
+先扣、扣成功了才给：这个顺序才能让补给台不至于白发东西，因为没看到东西离开时 `:take` 会返回 `false`。木头是被消耗掉的，不是掉在地上，所以这确实是玩家付出的代价。`true` 唯一不保证的是“5 个全走了”：请求会被夹到玩家实际带着的数量，所以必须精确的交易还是得自己查一次 `:count()`。另外，什么都没装备的玩家根本付不了，这一点 `false` 分支已经接住了。
 
 ## 注意事项
 
@@ -666,7 +660,7 @@ Building{
 
 **带命名空间的 ID 是靠兜底搜索匹配到的。** 事件带的是游戏的数据行名，所以注册成 `"example:Potion"` 的道具精确查找找不到，是在你注册过的 ID 上做的搜索找到它的。这个搜索读的是一份快照，顺序不定，返回第一个匹配的 ID，所以两个解析后行名相同的内容包 ID 是有歧义的。
 
-**拿走的道具会掉在玩家脚边。** 这个版本上没有销毁道具的手段，所以 `:take` 是把它们从背包移到世界里。移除本身是真的，也是实测过的；地上那一堆同样是真的。
+**拿走道具需要玩家装备着东西。** 这次消耗是通过玩家带着的武器完成的，所以什么都没拿的玩家没有通道，`:take` 返回 `false`。道具本身是被消耗掉的，不是掉在地上。
 
 **`onUse` 不会直接告诉你目标是谁。** `ctx.actor` 是本地玩家的 pawn，也就是使用道具的那个。被用上的角色在 `ctx.targetId` 里，是一个原始实例 ID，这里没有东西会把它变成 actor。食物和药水两者相同，喂帕鲁时就不同。
 
@@ -678,16 +672,16 @@ Building{
 
 **`give`、`take` 和 `count` 只作用于本地玩家。** 它们找到 `PalPlayerCharacter` 并作用在那个背包上，所以在共享服务器上，它们回答的是第一个被找到的玩家 pawn。`count` 返回 `nil` 表示读取失败，不是背包空了。
 
-**`give` 和 `take` 需要管理对象。** 两者都要走 `CheatManagerEnablerMod` 打开的那个对象。没有这个配套模组，它们在够到游戏之前就被拒绝，返回 `false`。`count` 不需要它。
+**`give` 走的是背包自己的写入。** 它既报告数量的变化，也报告背包本身答了什么，所以 `false` 的原因在日志里看得见。
 
-**别指望一次 `:give` 会回到你的 `onObtain`。** 你自己的代码发出了什么，就在调用的那个位置写进日志，别等事件绕回来。
+**一次 `:give` 通常也会触发 `onObtain`。** 它走的是游戏拾取时用的同一个写入。在 `onObtain` 处理函数里面有保护拦着；在别的地方，就要预料到自己的 give 会绕回来。
 
 **半秒内的重复拾取会被丢掉。** 游戏的两个调用报告的是同一次拾取，PalForge 会在这个时间窗内丢掉同一个道具 ID 的重复，好让你的处理函数只运行一次。同一个道具真的在这么短时间内被第二次拾取，那一次就丢了。
 
 ## 小结
 
 - 写 `Item{ ... }` 描述一个道具。只有 `id` 是必须的，而且这个 ID 必须是游戏里已经有的。
-- `Item.get("Wood")` 会给你任意道具的句柄。`:count()` 读出玩家现在带着多少，`:give` 往里加，`:take` 往外拿 —— 三者返回的都是“实测到了什么”，而不是“试着做了什么”。`:take` 拿走的东西会掉在地上。
+- `Item.get("Wood")` 会给你任意道具的句柄。`:count()` 读出玩家现在带着多少，`:give` 往里加，`:take` 消耗掉 —— 三者返回的都是“实测到了什么”，而不是“试着做了什么”。`:take` 需要玩家身上装备着东西。
 - 把你的代码放进 `events`。`onObtain` 在拾取时运行，`onUse` 在道具被使用时运行。`onCraft` 和 `onDiscard` 还不会运行。
 - 在 `onUse` 里，`ctx.actor` 是使用道具的玩家 —— 食物和药水要作用的正是他。
 - `category`、`maxStack`、`icon` 和 `recipe` 是给你自己代码用的记录。游戏不会读它们。
