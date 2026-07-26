@@ -269,6 +269,17 @@ local function installCommands()
         log.warn("console commands unavailable this session; the keys above are the only way in")
         return
     end
+    -- REGISTERING A COMMAND IS NOT THE SAME AS BEING ABLE TO TYPE ONE. UE4SS ships with its
+    -- console switched off, and this handler registers perfectly well into a window that does
+    -- not exist — which is exactly the failure the console was added to escape from, one layer
+    -- further down. The log said "console commands: pf_spawn pf_teach ..." while there was
+    -- nowhere to put them.
+    --
+    -- Turn it on in ue4ss/UE4SS-settings.ini and restart the game:
+    --     ConsoleEnabled = 1
+    --     GuiConsoleEnabled = 1
+    --     GuiConsoleVisible = 1
+    -- The setting cannot be read from here, so this is a note rather than a check.
     -- The body is queued onto the game thread, because everything it touches is a live UObject.
     -- It is also wrapped: a console command that raises takes UE4SS's handler down with it, and
     -- a typo in a dev command is not worth a broken console.
@@ -328,6 +339,8 @@ local function installCommands()
     local names = { "pf_tests", "pf_spawn", "pf_teach" }
     for _, p in ipairs(M.PROBES) do names[#names + 1] = "pf_" .. p.name end
     log.info("console commands: " .. table.concat(names, "  "))
+    log.info("if you cannot type those, UE4SS's console is off: set ConsoleEnabled, "
+        .. "GuiConsoleEnabled and GuiConsoleVisible to 1 in ue4ss/UE4SS-settings.ini and restart")
 end
 installCommands()
 

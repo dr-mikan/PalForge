@@ -74,6 +74,16 @@ pf_tests   pf_watch   pf_reflect   pf_pal   pf_title
 pf_spawn   pf_teach
 ```
 
+**UE4SS ships with its console OFF**, and a command registers perfectly well into a window that
+does not exist — which is the same failure the console was meant to escape, one layer down. Turn
+it on in `ue4ss/UE4SS-settings.ini` and restart:
+
+```ini
+ConsoleEnabled = 1
+GuiConsoleEnabled = 1
+GuiConsoleVisible = 1
+```
+
 The last two exist because two channels are only observable while something specific is
 happening, and "go and play until it does" is a poor instruction when the something is
 "catch a pal strong enough to fight". `pf_spawn` puts one in front of you; `pf_teach` gives the
