@@ -394,6 +394,7 @@ end
 -- build is reusable. A FAILED build is not cached, so a call made before the table finished
 -- loading is simply retried on the next one.
 local iconMaps = setmetatable({}, { __mode = "k" })
+local sampled  = {}   -- one raw-shape sample per table, so a busy log stays readable
 
 -- TODO(icons-row-read): unknown whether GetDataTableColumnAsString is reflected on this build.
 -- That is the whole of what is left. The table is found, the row keys read, the column measured,
@@ -418,6 +419,32 @@ local function iconMap(tbl, tableName)
             local ok, values, level = signature.call(library(), "GetDataTableColumnAsString",
                 { "ObjectProperty", "NameProperty" }, tbl, key)
             if ok then
+                -- SAMPLE THE RAW ARRAY, once per table. The first run of this route answered
+                -- with the right LENGTH and every value empty — 0 of 1207 rows — which can mean
+                -- two completely different things: the engine rendered a soft pointer as an
+                -- empty string, or toList could not read the elements it was handed and filled
+                -- in blanks to keep the indexes aligned. Those need opposite fixes, and nothing
+                -- printed so far distinguishes them. So look at element 1 directly.
+                if not sampled[tableName] then
+                    sampled[tableName] = true
+                    local bits = {}
+                    bits[#bits + 1] = "container=" .. type(values)
+                    local n; pcall(function() n = #values end)
+                    bits[#bits + 1] = "#=" .. tostring(n)
+                    for _, probe in ipairs({
+                        { "[1]",      function() return values[1] end },
+                        { "[0]",      function() return values[0] end },
+                        { "Get(0)",   function() return values:Get(0) end },
+                    }) do
+                        local okp, v = pcall(probe[2])
+                        if okp and v ~= nil then
+                            local str; pcall(function() str = tostring(v) end)
+                            bits[#bits + 1] = string.format("%s=%s(%s)", probe[1], type(v), tostring(str))
+                        end
+                    end
+                    log.info(string.format("icons: %s column %s raw sample -> %s",
+                        tableName, col, table.concat(bits, "  ")))
+                end
                 local vals = toList(values)
                 -- Only zippable if the two really are the same walk of the same RowMap. A length
                 -- mismatch means they are not, and pairing them anyway would hand out
