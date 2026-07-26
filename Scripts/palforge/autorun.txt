@@ -3,11 +3,32 @@
 #   <name>            run as soon as the world is ready
 #   <seconds> <name>  run that many seconds after the world is ready
 #
-# The names are the pf_* actions: pf_tests pf_spawn pf_teach pf_reflect pf_pal pf_watch pf_title
+# The names are the pf_* actions:
+#   pf_tests pf_spawn pf_teach pf_reflect pf_pal pf_watch pf_title pf_uislot pf_uievents
 # Lines starting with # are ignored. Delete a line to stop it running.
 #
 # THIS SESSION'S GOAL: settle skill.hit and skill.equip without catching a pal.
 # pf_spawn puts a ChickenPal in front of you — hit it with a melee weapon.
 # pf_teach gives the nearest pal a passive skill 20 s later, by which time the spawn has landed.
-pf_spawn
-20 pf_teach
+# skill.equip is CLOSED and skill.hit is measured silent from both sides, so pf_spawn/pf_teach
+# have done their job. Commented out rather than deleted — put them back if you want a pal.
+# pf_spawn
+# 20 pf_teach
+
+# NOW: the last UI slot question. Read-only, one shot, no in-game action needed. The 10 s delay
+# lets the game's own UI widgets come up, because the probe cross-checks against them.
+10 pf_uislot
+
+# ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----
+#
+# ui-menubutton-inner-slot — one shot, ~2 s of log, nothing to do in game afterwards.
+# Reads WBP_Title_MenuButton_C's own designer tree from inside a save; the delay is so the
+# in-game UI it cross-checks against (inventory / build menu widgets) is up.
+#10 pf_uislot
+#
+# ui-update-event — arms four counting hooks, then WANTS TWO THINGS FROM YOU:
+#   1. play for a minute, opening and closing the inventory / build menu / pause menu
+#   2. quit to the TITLE SCREEN and load your save again
+# The hooks stay armed across that (UE4SS has no unregister), so the second load's storm is
+# counted in full and the verdict prints itself. Leave the mod running; do not restart.
+#pf_uievents

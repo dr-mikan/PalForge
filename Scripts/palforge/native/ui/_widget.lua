@@ -424,14 +424,23 @@ end
 -- answer to the question below, from an ordinary session instead of a probe.
 --
 -- TODO(ui-menubutton-inner-slot): still unknown — whether a widget named `HorizontalBox_0` is
--- in a created WBP_Title_MenuButton's tree AT ALL, and if so which slot class it occupies.
+-- in a WBP_Title_MenuButton's tree AT ALL, and if so which slot class it occupies.
 -- dumps/cxx/WBP_Title_MenuButton.hpp:11-15 lists the button's five declared widget members —
 -- Image_161, Image_Icon_Appeal, SizeBox_Icon, Test_Content, WBP_PalInvisibleButton — and
 -- HorizontalBox_0 is not among them, while the two names this file DOES match by string are.
 -- That is not proof of absence (a widget with "Is Variable" unchecked gets no member and still
--- exists in the WidgetTree), so what is owed is one line off a live button: findByName returning
--- nil means the name is stale and the whole function should go; a slot whose class this now logs
--- means it is real and the alignment is settled.
+-- exists in the WidgetTree), so what is owed is one line off a real button: no HorizontalBox_0
+-- means the name is stale and the whole function should go; a slot whose class gets logged means
+-- it is real and the alignment is settled.
+--
+-- NARROWED, 2026-07-26: this no longer needs the title screen. A UWidgetBlueprintGeneratedClass
+-- carries the designer hierarchy on the class itself (dumps/cxx/UMG.hpp:1977 `UWidgetTree*
+-- WidgetTree`), with every widget's Slot already assigned — so the answer is a PROPERTY READ on
+-- the class, with nothing created. test/probes/uislot.lua does exactly that from a loaded save
+-- (autorun: `pf_uislot`). The ONE thing that can still leave this open is LoadAsset: in-world the
+-- title class is not resident (dumps/reflection/03_widgets.txt lists WBP_Title_MenuBG_C and
+-- WBP_Title_WorldSelectButton_C but no WBP_Title_MenuButton_C), so if neither LoadAsset form
+-- pulls it in, the fallback is still probes/title.lua at the main menu.
 local function leftAlignButtonContent(btn)
     local inner = M.findByName(btn, M.PATHS.menuButtonInner)
     if not alive(inner) then return false end

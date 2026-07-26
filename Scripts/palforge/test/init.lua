@@ -16,7 +16,12 @@
 --   F5  reflection dump          needs a loaded save
 --   F6  the pal's mesh           needs a pal standing near you
 --   F8  watch native hooks       needs you to craft / drop / spawn while it runs
---   F8  the title menu button    needs the title screen
+--   F2  the title menu button    needs the title screen
+--   F3  the same button, in-world  loads the title class into a save and reads its tree
+--   F10 count the UI hooks       arms four counters, then wants a quit-to-title and a reload
+--
+-- The last two exist because there is no way to make anyone press a key: they are reachable
+-- from core/autorun as pf_uislot and pf_uievents, and both work from a LOADED WORLD.
 --
 -- Results land in UE4SS.log under [PalForge.test] and [PalForge.unittests]:
 --
@@ -112,6 +117,13 @@ M.PROBES = {
       desc = "arms native hooks and logs what fires while you act" },
     { name = "title",   key = "F2", needs = "the title screen",
       desc = "the game's own title menu button, so ours can match it" },
+    -- The two below are the in-world halves of the last two UI items, and they exist BECAUSE
+    -- of the note above: no key can be relied on, so both are written to be run from
+    -- core/autorun (pf_uislot, pf_uievents) in a loaded save. The keys are a convenience only.
+    { name = "uislot",  key = "F3", needs = "a loaded save",
+      desc = "the title menu button's inner slot, read from a world instead of the title" },
+    { name = "uievents", key = "F10", needs = "a loaded save, then a quit to title and a reload",
+      desc = "counts the four UI-rebuild hooks, including across a whole world load" },
 }
 
 -- WHAT A COMMAND DOES, kept apart from HOW IT IS INVOKED. Three input routes have now failed in

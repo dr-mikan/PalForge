@@ -299,6 +299,16 @@ function Handle:autoRefresh(ms)
     --     exactly then. Nothing is hooked from this module until one probe run says which of the
     --     four fires, how often, and at what moment. Until then polling is the driver, and it is
     --     a deliberate choice rather than the only option left.
+    --
+    -- NARROWED, 2026-07-26: (a) and (b) are both COUNTING questions now, and test/probes/
+    -- uievents.lua takes the count — four hooks whose entire body is one integer increment, plus
+    -- a report on core/poll's heartbeat. (a) falls out of the totals: a candidate that stays at
+    -- zero while menus open and close is one whose base UFunction nothing calls. (b) needs the
+    -- storm, and a hook armed at world.ready misses ITS OWN world's storm by definition — so the
+    -- measurement is taken across a SECOND load: core/event.lua:779-782 records that UE4SS has no
+    -- unregister and a hook stays armed into the next world load, which turns that warning into
+    -- the instrument. Autorun `pf_uievents`, then quit to the title and load a save again; the
+    -- window between world.left and world.ready IS the storm.
     return poll(self._st, tonumber(ms) or 500, false, nil)
 end
 
