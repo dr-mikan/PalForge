@@ -18,6 +18,16 @@
 -- section that prints no HOOK line is now a real finding about the shipping build, and each one
 -- says in its own MISS note which candidate is next.
 --
+-- AND FOUR OF THEM HAVE NOW ANSWERED, in the negative, which is why several sections carry two
+-- or three hooks instead of one. A play session on 2026-07-26 measured PlayActionByWazaID,
+-- MakeDamageInfoByWazaType, AddPassiveSkill/RemovePassiveSkill and
+-- BroadcastOnCompleteInitializeParameter all REGISTERING and never firing, while ten other
+-- channels announced in the same session. Those four are still armed here, but as CONTROLS —
+-- a run where one of them fires would contradict a measurement and needs saying loudly. The
+-- lines that matter now are the CANDIDATE sections beside each control: they arm the paths
+-- dumps/cxx names for the same moment, chosen for a shape that has never failed in this tree
+-- (a delegate target, an RPC) rather than for a promising name.
+--
 -- THIS IS THE ONE PROBE THAT IS NOT PURELY PASSIVE. It registers native hooks, and UE4SS has
 -- no way to unregister one — everything it arms stays armed until you quit the game. It also
 -- spawns ONE ChickenPal in front of you, because pal-spawn-placement is about OUR spawn path
@@ -359,10 +369,13 @@ end
 
 local function pal_spawned_hook()
     probe.begin("pal-spawned-hook")
-    probe.note("BroadcastOnCompleteInitializeParameter has been armed once before, at MOD LOAD, "
-        .. "and counted 0 calls. This run arms it in a FULLY LOADED world, which is the case "
-        .. "that was never tested. core/event.lua arms the same path after world.ready; a second "
-        .. "registration is additive.")
+    probe.note("MEASURED SILENT, 2026-07-26. BroadcastOnCompleteInitializeParameter has now been "
+        .. "armed twice — once at MOD LOAD and once AFTER world.ready in a real save, which was "
+        .. "the case that had never been tested — and counted 0 both times while pals were "
+        .. "caught and released and ten other channels announced. That is an answer, not a gap: "
+        .. "the BROADCASTER is not reachable through ProcessEvent. It is armed again here only "
+        .. "as a control, so a session where it DOES fire is not mistaken for one where nothing "
+        .. "was tried. The candidates that replace it are in the next section.")
 
     -- The baseline matters: "0 fires" only means something if pals actually exist to fire.
     local pals = probe.allOf("PalCharacter")
@@ -380,12 +393,11 @@ local function pal_spawned_hook()
     probe.note("A HIT only after the release/spawn, naming the new pal's BP class, confirms "
         .. "Pal.Spec.Events.onSpawned as LIVE and the doc string in api/pal.lua drops "
         .. "'(UNCONFIRMED candidate)'.")
-    probe.note("A MISS (0 lines across the whole window) no longer means the game does not run "
-        .. "it — dumps/cxx settled that it does, because UPalCharacterManager's spawn entry "
-        .. "point subscribes to the very delegate map this function broadcasts (Pal.hpp:15538 "
-        .. "vs :9016). It means the BROADCASTER is not reachable through ProcessEvent, and the "
-        .. "replacement is a delegate TARGET: see the pal-spawned-fresh section, which arms "
-        .. "APalPlayerCharacter:OnCompleteInitializeParameter for exactly that reason.")
+    probe.note("A MISS (0 lines across the whole window) is the EXPECTED result and repeats a "
+        .. "measurement already made — the game does run this function (UPalCharacterManager's "
+        .. "spawn entry point subscribes to the very delegate map it broadcasts, Pal.hpp:15538 "
+        .. "vs :9016), but the broadcaster is not reachable through ProcessEvent. The answer "
+        .. "lives in the next section, which arms two delegate TARGETS of that same map.")
     probe.finish()
 end
 
@@ -401,19 +413,39 @@ local function pal_spawned_fresh()
         .. "above — read its 'HOOK pal.init' lines for this item too. This section arms only the "
         .. "FALLBACKS the TODO names, so nothing is hooked twice.")
 
-    probe.section("fallback 1: a delegate TARGET rather than the broadcaster")
+    probe.section("candidate 1: the PLAYER's delegate target")
     -- THE point of this run. BroadcastOnCompleteInitializeParameter is the thing that CALLS the
     -- delegates; APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter* InCharacter)
     -- (dumps/cxx/Pal.hpp:10637) is one of the things it calls, and a dynamic-delegate target is
-    -- always invoked through ProcessEvent — which is the path RegisterHook can see. If the
-    -- broadcaster is silent and this one is not, that difference IS the answer.
+    -- always invoked through ProcessEvent — which is the path RegisterHook can see. The
+    -- broadcaster IS silent (measured twice); if this one is not, that difference IS the answer.
+    -- core/event.lua now arms this same path after world.ready; a second registration is additive.
     probe.params(probe.class("/Script/Pal.PalPlayerCharacter"), "OnCompleteInitializeParameter")
-    probe.watch("/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter", "pal.initTarget", 16)
+    armDetailed("/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter", "pal.initTarget", 16,
+        function(n, self, a1)
+            probe.line("HOOK pal.initTarget #%d t=+%.1fs  self(player)=%s  a1(character)=%s",
+                n, since(), render(pget(self)), render(pget(a1)))
+        end)
 
-    probe.section("fallback 2: PalCharacter:BeginPlay")
+    probe.section("candidate 2: the PAL's OWN delegate target")
+    -- The one the player-side hook cannot cover. Same delegate signature
+    -- (OnCompleteInitializeParameter__DelegateSignature(APalCharacter*), Pal.hpp:9052), but
+    -- APalNPC::OnCompletedInitParam (:10203) is bound on the NPC's own side, so it does not
+    -- depend on the player having subscribed to that particular character — and
+    -- APalMonsterCharacter (:10167) inherits it without redeclaring, so this base UFunction is
+    -- the one ProcessEvent runs for every pal. If exactly one of these two sections prints
+    -- lines, that tells you which pals the channel can see.
+    probe.params(probe.class("/Script/Pal.PalNPC"), "OnCompletedInitParam")
+    armDetailed("/Script/Pal.PalNPC:OnCompletedInitParam", "pal.initNPC", 24,
+        function(n, self, a1)
+            probe.line("HOOK pal.initNPC #%d t=+%.1fs  self=%s  a1(character)=%s",
+                n, since(), render(pget(self)), render(pget(a1)))
+        end)
+
+    probe.section("fallback 3: PalCharacter:BeginPlay")
     probe.watch("/Script/Pal.PalCharacter:BeginPlay", "pal.beginplay", 16)
 
-    probe.section("fallback 3: the spawner classes")
+    probe.section("fallback 4: the spawner classes")
     -- CLASS NAMES CORRECTED against dumps/cxx/Pal.hpp: there is no PalMonsterSpawner,
     -- PalMonsterSpawnerBase or PalMonsterSpawnerManager anywhere in the binary, so the three
     -- names this list used to carry could only ever print "absent". The real ones are
@@ -435,15 +467,21 @@ local function pal_spawned_fresh()
     probe.allOf("PalEnemySpawner")
     probe.line("NOTE %d spawner hook(s) armed", armed)
 
-    probe.note("ACTION 6 — release a pal from the palbox, then travel far enough for a wild pal to "
-        .. "stream in, then let the probe's own ChickenPal spawn (next section) land.")
-    probe.note("A HIT on 'HOOK pal.init' whose self= is a pal BP class you just created makes "
-        .. "pal.spawned a real spawn signal and closes both pal-spawned items.")
-    probe.note("A MISS on pal.init but a HIT on 'HOOK pal.initTarget', 'HOOK pal.beginplay' or "
-        .. "'HOOK pal.spawner' names the replacement source: core/event.lua's "
-        .. "tryHookAfterWorldReady switches path and the channel, dispatch and Pal onSpawned "
-        .. "keep working as they are. pal.initTarget is the one to hope for — it carries the new "
-        .. "character as a PARAMETER rather than as self, so the emit reads ctx.actor off a1.")
+    probe.note("ACTION 6 — STAND STILL for ~20 s first (a fire during that window means these "
+        .. "are RE-INIT signals, not spawn signals — write that down), THEN release a pal from "
+        .. "the palbox, THEN travel far enough for a wild pal to stream in, then let the "
+        .. "probe's own ChickenPal spawn (next section) land. Wait ten seconds after each: the "
+        .. "pal arrives ~6 s after the call and an empty log at 1.2 s says nothing.")
+    probe.note("A HIT on 'HOOK pal.initNPC' or 'HOOK pal.initTarget' naming a pal BP class you "
+        .. "just created is the result this whole section exists for: core/event.lua already "
+        .. "arms both, so the channel starts working the moment one of them fires and nothing "
+        .. "has to change. Note WHICH of the two, and whether it fired for the wild pal as well "
+        .. "as the released one — initTarget only sees characters the PLAYER subscribed to.")
+    probe.note("A HIT on 'HOOK pal.init' (the broadcaster) would contradict two measurements; "
+        .. "say so loudly, it would mean the earlier silences had another cause.")
+    probe.note("A MISS on both targets but a HIT on 'HOOK pal.beginplay' or 'HOOK pal.spawner' "
+        .. "names the next source to wire; core/event's tryHookAfterWorldReady takes one more "
+        .. "path and the channel, dispatch and Pal onSpawned keep working as they are.")
     probe.note("A MISS on ALL of them means no pal-birth signal is reachable from Lua on this "
         .. "build, and pal.spawned has to fall back to the existing 3 s PAL_SCAN sweep "
         .. "(first-seen actor = spawned). That is a real answer too — say so.")
@@ -471,34 +509,92 @@ local function renderWaza(v)
     return string.format("%s(%d)", tostring(wazaName(n) or "<no EPalWazaID name>"), n)
 end
 
+---An EPalWazaID read off a LIVE OBJECT's property rather than a hook parameter. A property
+---read can come back inside UE4SS's wrapper, which tonumber cannot see through; the two new
+---activate sources and the new hit source all read properties, so both shapes are tried.
+---(core/event.lua's wazaNum is the same ladder — this is its probe-side twin.)
+local function wazaOf(obj, field)
+    if obj == nil then return nil end
+    local raw; pcall(function() raw = obj[field] end)
+    if raw == nil then return nil end
+    local n = tonumber(raw)
+    if n then return n end
+    local inner; pcall(function() inner = raw:get() end)
+    return tonumber(inner)
+end
+
 local function skill_activate_source()
     probe.begin("skill-activate-source")
-    probe.note("core/event.lua now sources skill.activate from "
-        .. "UPalUtility::PlayActionByWazaID(AActor* actionActor, AActor* TargetActor, "
-        .. "EPalWazaID WazaID) — dumps/cxx/Pal.hpp:32037, and the name is in the live build's "
-        .. "own PalUtility listing (02_reflection.txt:2049). Three scalar parameters, one of "
-        .. "which is the move's identity. It has never been armed, so this section exists to "
-        .. "find out whether the game calls it or whether it is a Blueprint-facing helper the "
-        .. "C++ combat path walks past.")
+    probe.note("MEASURED SILENT, 2026-07-26: UPalUtility::PlayActionByWazaID (Pal.hpp:32037, "
+        .. "reflected at 02_reflection.txt:2049) was armed by core/event.lua, registered "
+        .. "successfully, and carried NOTHING while a pal fought and killed another pal in a "
+        .. "real save — in a session where pal.damaged, pal.death and eight other channels all "
+        .. "announced. It is a Blueprint-facing helper the shipping combat path walks past. It "
+        .. "is armed here as a CONTROL only.")
+    probe.note("WHAT THE DUMP SAYS THE PATH REALLY IS: a pal's move is an ACTION OBJECT. "
+        .. "UPalActionWazaBase (Pal.hpp:13270) carries `EPalWazaID WazaID` on the object itself "
+        .. "(:13272); the per-pal table EPalWazaID -> action class is "
+        .. "UPalStaticCharacterParameterComponent::WazaActionInstancedMap (:29469); the action "
+        .. "component instantiates and plays it (:13171-13173) and the played object gets "
+        .. "OnBeginAction (:13122). So `self.WazaID` on a live action IS the move, with no "
+        .. "lookup. core/event.lua now arms two more sources on that basis; this section arms "
+        .. "the same two so you can see them separately from the channel.")
 
+    probe.section("control: the measured-silent helper")
     probe.params(probe.class("/Script/Pal.PalUtility"), "PlayActionByWazaID")
-
     armDetailed("/Script/Pal.PalUtility:PlayActionByWazaID", "skill.activate", 16,
         function(n, self, a1, a2, a3)
             probe.line("HOOK skill.activate #%d t=+%.1fs  actor=%s  target=%s  waza=%s",
                 n, since(), render(pget(a1)), render(pget(a2)), renderWaza(pget(a3)))
         end)
 
+    probe.section("candidate 2: the action object announcing its own start")
+    -- `self` IS the move. The ONE way this fails is that OnBeginAction reads like a Blueprint
+    -- event and Palworld's waza actions are BP classes: if a BP subclass implements it, that
+    -- subclass owns the UFunction ProcessEvent runs and a hook on the base sits behind it.
+    -- That is exactly what this line is here to find out.
+    probe.params(probe.class("/Script/Pal.PalActionBase"), "OnBeginAction")
+    armDetailed("/Script/Pal.PalActionBase:OnBeginAction", "skill.actionBegin", 20,
+        function(n, self)
+            local a = pget(self)
+            local w = wazaOf(a, "WazaID")
+            local owner; pcall(function() owner = a:GetActionCharacter() end)
+            probe.line("HOOK skill.actionBegin #%d t=+%.1fs  action=%s  waza=%s  owner=%s",
+                n, since(), render(a), w and renderWaza(w) or "nil (not a waza action)",
+                render(owner))
+        end)
+
+    probe.section("candidate 3: the PLAYER's action component telling its listener")
+    -- A delegate TARGET of UPalActionComponent::OnActionBeginDelegate (Pal.hpp:13158-13159),
+    -- and REFLECTED in the live build's PalPlayerCharacter listing. Player-only by
+    -- construction: it is bound to the player's own action component, not a pal's.
+    probe.params(probe.class("/Script/Pal.PalPlayerCharacter"), "OnBeginAction")
+    armDetailed("/Script/Pal.PalPlayerCharacter:OnBeginAction", "skill.playerAction", 20,
+        function(n, self, a1)
+            local a = pget(a1)
+            local w = wazaOf(a, "WazaID")
+            probe.line("HOOK skill.playerAction #%d t=+%.1fs  action=%s  waza=%s",
+                n, since(), render(a), w and renderWaza(w) or "nil (not a waza action)")
+        end)
+
     probe.note("ACTION 7 — have YOUR pal use a move (send it at something), then use a partner "
         .. "skill yourself, then swing a melee weapon. All three within ~15 s.")
-    probe.note("A HIT with a real waza name confirms skill.activate end to end: Skill "
-        .. "onActivate is live for any pack that DEFINED a skill under that id.")
+    probe.note("A HIT on 'HOOK skill.actionBegin' with a real waza name is the result that "
+        .. "closes this item: core/event.lua already emits from that exact path, so Skill "
+        .. "onActivate goes live for any pack that DEFINED a skill under that id, for pals AND "
+        .. "the player. Note how many actionBegin lines print `waza=nil` — those are jumps and "
+        .. "rolls and are correctly dropped by the channel.")
+    probe.note("A HIT only on 'HOOK skill.playerAction' means the channel works for the PLAYER "
+        .. "and not for pals, which is a partial answer worth recording as one.")
     probe.note("A HIT whose waza prints '<no EPalWazaID name>' means core.character.WAZA is out "
         .. "of date against this build — paste the integer.")
-    probe.note("A MISS (0 lines after a pal visibly used a move) closes this candidate: the next "
-        .. "one is a UPalActionWazaBase subclass's OnBeginAction, because Pal.hpp:13270 puts "
-        .. "`EPalWazaID WazaID` on that class itself, so `self` would carry the identity. Say so "
-        .. "and core/event's installSkillSource changes one path.")
+    probe.note("A MISS on BOTH new candidates, after a pal visibly used a move, means the "
+        .. "action layer is not reachable through ProcessEvent on this build. The last lead in "
+        .. "the dump is UPalActionComponent:PlayAction_ToALL (:13171) — a NetMulticast RPC, the "
+        .. "shape that has never failed here — but it hands over TSubclassOf<UPalActionBase> "
+        .. "rather than an id, so it would need the class->waza direction of "
+        .. "WazaActionInstancedMap (:29469) read first, and nothing in this tree has read a "
+        .. "TMap keyed by an enum yet. Say so rather than guessing.")
     probe.finish()
 end
 
@@ -514,6 +610,7 @@ local function skill_hit_source()
         .. "UPalUtility::MakeDamageInfoByWazaType(Attacker, Defencer, ..., EPalWazaID WazaType, "
         .. "...) at Pal.hpp:32046, whose 7th parameter is the move and whose 2nd is the victim.")
 
+    probe.section("control: the measured-silent damage builder, plus the victim hook")
     probe.params(probe.class("/Script/Pal.PalUtility"), "MakeDamageInfoByWazaType")
 
     -- Eight parameters deep. armDetailed only forwards four, so this one is armed inline: the
@@ -549,28 +646,75 @@ local function skill_hit_source()
                 n, since(), render(pget(self)), render(pget(a1)))
         end)
 
+    probe.section("candidate 2: the attack-collision anim notify")
+    -- MEASURED: source 1 above stayed silent while pal.damaged fired in the same fight, so the
+    -- damage is not built through that helper. This is the melee attack window itself.
+    -- UPalAnimNotifyState_AttackCollision::OnHit (Pal.hpp:13576) is a DELEGATE TARGET — its
+    -- parameter list matches UPalHitFilter::OnHitDelegate's signature (:20614) field for field
+    -- — which means ProcessEvent AND means the filter already accepted the overlap, so this is
+    -- a landed hit rather than a raw touch. The identity is not in any parameter: it is on the
+    -- notify's `AttackFilter` (:13571), which for an attack is a UPalAttackFilter carrying
+    -- `EPalWazaID Waza` (:14069) and `AActor* Attacker` (:14077).
+    probe.params(probe.class("/Script/Pal.PalAnimNotifyState_AttackCollision"), "OnHit")
+    M.counts["skill.hitCollision"] = 0
+    local okColl = pcall(function()
+        RegisterHook("/Script/Pal.PalAnimNotifyState_AttackCollision:OnHit",
+            function(self, _a1, a2, _a3, _a4, a5)
+                M.counts["skill.hitCollision"] = (M.counts["skill.hitCollision"] or 0) + 1
+                local n = M.counts["skill.hitCollision"]
+                if n > 16 then return end
+                pcall(function()
+                    local notify = pget(self)
+                    local filter; pcall(function() filter = notify.AttackFilter end)
+                    local w = wazaOf(filter, "Waza")
+                    local attacker; pcall(function() attacker = filter.Attacker end)
+                    probe.line("HOOK skill.hitCollision #%d t=+%.1fs  waza=%s  attacker=%s",
+                        n, since(), w and renderWaza(w) or "nil (filter carries no .Waza)",
+                        render(attacker))
+                    probe.line("HOOK skill.hitCollision #%d   victim=%s  hitLocation=%s  filter=%s",
+                        n, render(pget(a2)), render(pget(a5)), render(filter))
+                end)
+            end)
+    end)
+    probe.line("NOTE armed /Script/Pal.PalAnimNotifyState_AttackCollision:OnHit -> %s",
+        okColl and "ok" or "FAILED (function not found on this build)")
+
     probe.note("ACTION 8 — hit a pal with a NAMED move (a fire attack from your own pal, say), "
-        .. "wait ~5 s, then hit one with a plain melee swing.")
-    probe.note("A HIT on 'HOOK skill.hit' with a real waza name on the MOVE and nothing on the "
-        .. "melee swing is the ideal answer: it confirms both that the hook fires and that it is "
-        .. "waza-specific rather than every-damage. Count the lines per move — this function "
-        .. "BUILDS the damage, and a multi-collision move may build one per collision.")
-    probe.note("A MISS on skill.hit while 'HOOK pal.damage' fires means damage is built somewhere "
-        .. "this helper is not, and Skill onHit stays Handle:hit-only. Do NOT go back to walking "
-        .. "the damage struct — that route is closed by the field lists above.")
+        .. "wait ~5 s, then hit one with a plain melee swing, then shoot one with a RANGED pal "
+        .. "move if you have one. The ranged case is the part no hook here is expected to cover.")
+    probe.note("A HIT on 'HOOK skill.hitCollision' with a real waza name is the result that "
+        .. "closes the melee half: core/event.lua already emits skill.hit from that exact path. "
+        .. "Count the lines per move — a multi-collision move lands more than once, so onHit "
+        .. "must be idempotent.")
+    probe.note("A HIT whose waza prints 'nil (filter carries no .Waza)' means the notify's "
+        .. "AttackFilter is a plain UPalHitFilter on this animation rather than a "
+        .. "UPalAttackFilter; the channel correctly stays silent for those. Note how often.")
+    probe.note("A MISS on the RANGED move while melee works is the EXPECTED result and should be "
+        .. "recorded as one: a projectile lands through APalBullet (Pal.hpp:8849), which carries "
+        .. "OwnerStaticItemId and no EPalWazaID at all, so the id can only reach it by being "
+        .. "carried forward from the ACTION that spawned the bullet.")
+    probe.note("A MISS on skill.hit AND skill.hitCollision while 'HOOK pal.damage' fires means "
+        .. "no attacker-side identity is reachable and Skill onHit stays Handle:hit-only. Do NOT "
+        .. "go back to walking the damage struct — that route is closed by the field lists above.")
     probe.finish()
 end
 
 local function skill_passive_source()
     probe.begin("skill-passive-source")
-    probe.note("the old open question is answered by dumps/cxx/Pal.hpp: "
-        .. "UPalIndividualCharacterParameter::AddPassiveSkill(FName AddSkill, FName "
-        .. "OverrideSkill) at :21155 and ::RemovePassiveSkill(FName SkillId) at :21003 — FNames, "
-        .. "not an index into a fixed-size array, and no struct anywhere. Both names are in the "
-        .. "live build's full listing of that class (02_reflection.txt:1107). The owner is the "
-        .. "same object's `APalCharacter* IndividualActor` property (:20910). core/event.lua "
-        .. "sources skill.equip / skill.unequip from them, armed after world.ready. What is left "
-        .. "is which player ACTIONS route through them.")
+    probe.note("MEASURED SILENT, 2026-07-26: UPalIndividualCharacterParameter::AddPassiveSkill "
+        .. "(Pal.hpp:21155) and ::RemovePassiveSkill (:21003) were armed by core/event.lua after "
+        .. "world.ready, registered successfully, and carried NOTHING while pals were caught and "
+        .. "released. Both are in the live build's full listing of that class "
+        .. "(02_reflection.txt:1107) and both take FNames rather than an index — the SHAPE was "
+        .. "never the problem. They are armed here as a CONTROL only.")
+    probe.note("WHAT THE DUMP OFFERS INSTEAD: passives are attached WHOLESALE, as a list, by the "
+        .. "component that actually applies them. UPalPassiveSkillComponent (Pal.hpp:26565) "
+        .. "holds the effect infos (:26573), broadcasts OnStartSkillEffect / OnEndSkillEffect "
+        .. "(:26567-26572) and rewrites damage through OverrideDamageInfoBySkill (:26584) — and "
+        .. "SetupSkillFromSelf(UObject* OwnerObject, const TArray<FName>& skillList) (:26582) is "
+        .. "how the names get in. core/event.lua now DIFFS that list per component: a new name "
+        .. "is an equip, a vanished one an unequip. The cost is that the first call for a "
+        .. "component reports its whole list.")
 
     local cls = probe.class("/Script/Pal.PalIndividualCharacterParameter")
     probe.params(cls, "AddPassiveSkill")
@@ -591,20 +735,52 @@ local function skill_passive_source()
                 n, since(), render(pget(a1)), render(owner))
         end)
 
+    probe.section("candidate 2: the whole list, handed to the component that applies it")
+    probe.params(probe.class("/Script/Pal.PalPassiveSkillComponent"), "SetupSkillFromSelf")
+    armDetailed("/Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf", "skill.passiveSetup", 24,
+        function(n, self, a1, a2)
+            local comp = pget(self)
+            local owner; pcall(function() owner = comp:GetOwner() end)
+            -- Print the LIST, because the whole question is whether it arrives readable: a
+            -- TArray<FName> that answers a length but no strings is the failure this file has
+            -- seen twice before (core/icons.lua, core/character.lua readList).
+            local names, count = {}, 0
+            pcall(function()
+                local arr = pget(a2)
+                local len; pcall(function() len = #arr end)
+                for i = 1, (tonumber(len) or 0) do
+                    local v; pcall(function() v = arr[i] end)
+                    count = count + 1
+                    if #names < 8 then names[#names + 1] = render(v) end
+                end
+            end)
+            probe.line("HOOK skill.passiveSetup #%d t=+%.1fs  comp=%s  owner=%s  ownerObject=%s",
+                n, since(), render(comp), render(owner), render(pget(a1)))
+            probe.line("HOOK skill.passiveSetup #%d   %d name(s): %s",
+                n, count, (#names > 0) and table.concat(names, ", ") or "<none readable>")
+        end)
+
     probe.note("ACTION 9 — capture ONE wild pal (capture-time random passives are the most "
         .. "likely route), and if you have a Statue of Power / passive-skill bench in reach, "
         .. "change one passive there too. Pulling a pal in and out of the party is the case "
         .. "expected NOT to fire — do it anyway, so a fire there is recorded as a surprise.")
-    probe.note("A HIT with a readable passive FName and a non-nil owner confirms skill.equip / "
-        .. "skill.unequip: Skill onEquip / onUnequip are live for any DEFINED skill under that "
-        .. "id. Note WHICH action produced it — that is the part no dump can answer.")
-    probe.note("A STORM of skill.equip lines at world load would mean the world-ready gate is "
-        .. "not enough and passives are re-added rather than restored wholesale; say so, and the "
-        .. "source needs a first-N-seconds suppressor.")
-    probe.note("A MISS on both after a capture means these are C++-internal call sites that "
-        .. "RegisterHook cannot see — the next candidate is "
+    probe.note("A HIT on 'HOOK skill.passiveSetup' with READABLE names is the result that closes "
+        .. "this item: core/event.lua diffs that list and emits skill.equip / skill.unequip from "
+        .. "it. Record WHICH action produced each one — that is the part no dump can answer.")
+    probe.note("A HIT that prints a count but '<none readable>' means the TArray<FName> arrives "
+        .. "wrapped and the diff will see an empty list every time; paste the line, because the "
+        .. "fix is in core/event's nameOf ladder, not in the choice of hook.")
+    probe.note("A HIT on 'HOOK skill.equip' / 'HOOK skill.unequip' (the measured-silent control) "
+        .. "would contradict an earlier measurement; say so loudly.")
+    probe.note("A STORM of passiveSetup lines as pals stream in is EXPECTED, not a bug — that is "
+        .. "the documented cost of the only route the dump offers, and the channel really is "
+        .. "reporting 'these passives are now attached to this character'. Worth counting how "
+        .. "many, so someone can judge whether a load-storm suppressor is needed.")
+    probe.note("A MISS on ALL of them after a capture means the passive list is maintained "
+        .. "somewhere RegisterHook cannot see — the last candidate is "
         .. "UPalMapObjectOperatingTableModel:RequestChangePassiveSkill (Pal.hpp:24094), which is "
-        .. "the bench's own request and takes the passive FName as its third parameter.")
+        .. "the bench's own request and takes the passive FName as its third parameter. That is "
+        .. "narrower (the bench only) but it is a server request rather than a broadcast.")
     probe.finish()
 end
 

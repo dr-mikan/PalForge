@@ -58,7 +58,7 @@ means — most of this api is fail-soft, so a `false` is information, not an exc
 
 | domain | define | look up | handle | hooks (live/total) | what it is |
 |---|---|---|---|---|---|
-| [Pal](#pal) | `Pal{ … }` | `.get(id)` `.get_all()` | 8 methods | 5/5 | A pal is a spawnable creature. |
+| [Pal](#pal) | `Pal{ … }` | `.get(id)` `.get_all()` | 8 methods | 4/5 | A pal is a spawnable creature. |
 | [Item](#item) | `Item{ … }` | `.get(id)` `.get_all()` | 9 methods | 2/4 | An item is a piece of inventory content: materials, consumables, equipment, ammo. |
 | [Building](#building) | `Building{ … }` | `.get(id)` `.get_all()` | 9 methods | 8/10 | A building is a placeable structure: workbenches, storage, machines, decorations —… |
 | [Skill](#skill) | `Skill{ … }` | `.get(id)` `.get_all()` | 14 methods | 0/4 | A skill is what a Pal can do: an active attack or a passive trait. |
@@ -129,7 +129,7 @@ Declared as `events = { onX = function(self, …) end }` inside `Pal{ … }`.
 
 | hook | fires | signature | ctx | meaning |
 |---|---|---|---|---|
-| `onSpawned` | LIVE? | `fun(self: Pal.Handle, ctx: table)` | ctx.actor = the pawn | LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world |
+| `onSpawned` | manual | `fun(self: Pal.Handle, ctx: table)` | ctx.actor = the pawn | three candidate sources armed after world load, none seen firing - finished spawning into the world |
 | `onDamaged` | LIVE | `fun(self: Pal.Handle, ctx: table)` | ctx.actor | LIVE - took damage |
 | `onDeath` | LIVE | `fun(self: Pal.Handle, ctx: table)` | ctx.actor | LIVE - HP reached zero |
 | `onCaptured` | LIVE | `fun(self: Pal.Handle, ctx: table)` | ctx.actor, ctx.comp = the pal's parameter component | LIVE - caught in a sphere |
@@ -360,10 +360,10 @@ Declared as `events = { onX = function(self, …) end }` inside `Skill{ … }`.
 
 | hook | fires | signature | ctx | meaning |
 |---|---|---|---|---|
-| `onActivate` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | an active skill fired (self, owner, ctx) - source wired, not yet seen firing |
-| `onHit` | manual | `fun(self: Skill.Handle, target: any, ctx: table)` | — | one of its hits landed (self, target, ctx) - source wired, may repeat per collision |
-| `onEquip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was attached (self, owner, ctx) - source wired, not yet seen firing |
-| `onUnequip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was removed (self, owner, ctx) - source wired, not yet seen firing |
+| `onActivate` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | an active skill fired (self, owner, ctx) - three sources armed, none seen firing |
+| `onHit` | manual | `fun(self: Skill.Handle, target: any, ctx: table)` | — | one of its hits landed (self, target, ctx) - two sources armed, melee only, may repeat |
+| `onEquip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was attached (self, owner, ctx) - two sources armed, none seen firing |
+| `onUnequip` | manual | `fun(self: Skill.Handle, owner: any, ctx: table)` | — | a passive was removed (self, owner, ctx) - two sources armed, none seen firing |
 
 ### Skill.Handle
 

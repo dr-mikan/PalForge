@@ -58,53 +58,87 @@ local character = require("palforge.core.character")
 ---handle as its first argument, then the subject (the owner, or the TARGET for onHit), then
 ---ctx. A handler this list does not name is a hard error, not a silent no-op.
 local Events = schema.define("Skill.Spec.Events", {
-    -- SOURCE: /Script/Pal.PalUtility:PlayActionByWazaID(AActor* actionActor,
-    -- AActor* TargetActor, EPalWazaID WazaID) — dumps/cxx/Pal.hpp:32037, and the name is in
-    -- the LIVE build's own listing (dumps/reflection/02_reflection.txt:2049 PalUtility). Three
-    -- scalar parameters, one of which is the move's identity, which is what every earlier
-    -- candidate lacked: PalPlayerController:PlaySkill stays ruled out (armed twice, 0 firings)
-    -- and the action-component routes (PlayAction / PlayActionByType) carry a UClass, not a
-    -- waza id. ctx = { skillId, wazaId, owner, actor, target }.
-    -- TODO(skill-activate-source): unverified IN GAME — reflected and declared, never armed,
-    -- so it is unknown whether the C++ combat path goes through this helper or builds its
-    -- action directly. Press F8, have a pal use a move, and look for `HOOK skill.activate`.
-    -- If it is 0, the next candidate is a UPalActionWazaBase subclass's OnBeginAction:
-    -- Pal.hpp:13270 puts `EPalWazaID WazaID` on that class itself, so `self` would carry it.
+    -- THREE SOURCES, and the first of them is a MEASUREMENT rather than a candidate.
+    --   1. /Script/Pal.PalUtility:PlayActionByWazaID(AActor*, AActor*, EPalWazaID)
+    --      (dumps/cxx/Pal.hpp:32037, reflected at 02_reflection.txt:2049). ARMED AND MEASURED
+    --      SILENT, 2026-07-26: a pal fought and killed another pal in a real save, pal.damaged
+    --      and pal.death both carried events, this carried nothing. It is a Blueprint-facing
+    --      helper the shipping combat path walks past. Still armed (UE4SS cannot unregister,
+    --      and a silent hook costs nothing) but it is not what will fire.
+    --   2. /Script/Pal.PalActionBase:OnBeginAction (Pal.hpp:13122). `self` IS the move: a pal's
+    --      attack is a UPalActionWazaBase, which carries `EPalWazaID WazaID` on the object
+    --      itself (:13272), plus GetActionCharacter (:13141) and GetActionTarget (:13138).
+    --      DECLARED ONLY. Its one failure mode: if Palworld's BP waza-action classes implement
+    --      this event, the subclass owns the UFunction that ProcessEvent runs and a hook on the
+    --      base sits behind it.
+    --   3. /Script/Pal.PalPlayerCharacter:OnBeginAction(const UPalActionBase* action)
+    --      (Pal.hpp:10651) — a delegate TARGET of UPalActionComponent::OnActionBeginDelegate,
+    --      REFLECTED in the live build's PalPlayerCharacter listing. Bound to the PLAYER's
+    --      action component, so it covers the player's own waza actions and NOT a pal's.
+    -- ctx = { skillId, wazaId, owner, actor, target, via } (+ ctx.action for sources 2 and 3).
+    -- `via` names which source carried it; the log announces the first one per session.
+    -- TODO(skill-activate-source): NARROWED. Source 1 is ruled out by measurement. What is
+    -- unmeasured is whether 2 is reachable (base UFunction vs BP override) and 3 covers
+    -- anything the player does. If both stay silent while a pal visibly attacks, the last lead
+    -- is UPalActionComponent:PlayAction_ToALL (:13171, a NetMulticast RPC — the shape that has
+    -- never failed here), which hands over a TSubclassOf rather than an id and would need the
+    -- class->waza direction of WazaActionInstancedMap (:29469) read first.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "an active skill fired (self, owner, ctx) - source wired, not yet seen firing" },
-    -- SOURCE: /Script/Pal.PalUtility:MakeDamageInfoByWazaType(Attacker, Defencer, ...,
-    -- EPalWazaID WazaType, ...) — Pal.hpp:32046, 7th parameter, also in the live listing.
-    -- ctx = { skillId, wazaId, target, owner, attacker, location }.
+                    doc = "an active skill fired (self, owner, ctx) - three sources armed, none seen firing" },
+    -- TWO SOURCES, same shape: the first is measured silent, the second replaces it.
+    --   1. /Script/Pal.PalUtility:MakeDamageInfoByWazaType(..., EPalWazaID WazaType, ...)
+    --      (Pal.hpp:32046, 7th parameter). ARMED AND MEASURED SILENT in the same fight in which
+    --      pal.damaged fired, so damage is not built through this helper. Kept armed.
+    --   2. /Script/Pal.PalAnimNotifyState_AttackCollision:OnHit(MyHitComponent, HitActor,
+    --      HitComponent, FoliageIndex, HitLocation, HitCount) (Pal.hpp:13576) — the melee
+    --      attack window itself, and a delegate TARGET whose parameter list matches
+    --      UPalHitFilter::OnHitDelegate field for field (:20614), so it runs through
+    --      ProcessEvent AND only after the filter accepted the overlap. The identity is on the
+    --      notify's `AttackFilter`: UPalAttackFilter.Waza (:14069) and .Attacker (:14077).
+    --      DECLARED ONLY. Its limit: this is the COLLISION path. A projectile move lands
+    --      through APalBullet (:8849), which carries OwnerStaticItemId and no waza at all.
+    -- ctx = { skillId, wazaId, target, owner, attacker, location, via } (+ ctx.filter for 2).
     -- WHAT IS CLOSED: the victim side, permanently. OnDamageReaction's one parameter is
     -- FPalDamageRactionInfo, whose COMPLETE field list is IsBlow / BlowVelocity /
     -- IsLeanBackAnime / IsStan / IsLargeDown / HitLocation (Pal.hpp:1885) — no skill, no waza,
-    -- no attacker. FPalDamageInfo (:1834) has 40 fields and still no EPalWazaID, only an
-    -- EPalWazaCategory bucket and the weapon's AttackStaticItemID. So no amount of struct
-    -- walking on the damage hook could ever have named the skill, and the attacker side is
-    -- the only side that can. Do not re-probe that struct.
-    -- TODO(skill-hit-source): unverified IN GAME, and imperfect by construction even if it
-    -- fires — this function BUILDS the damage rather than reporting that it landed, and its
-    -- `DamageRatePerCollision` parameter says a multi-collision move may build one per
-    -- collision. KEEP onHit IDEMPOTENT. What is left to measure is only the firing.
+    -- no attacker. FPalDamageInfo (:1834) has 40 fields and FPalDamageResult (:1896) has 12,
+    -- and neither has an EPalWazaID. So no amount of struct walking on the damage hook could
+    -- ever have named the skill, and the attacker side is the only side that can. Do not
+    -- re-probe those structs.
+    -- TODO(skill-hit-source): NARROWED. Source 1 is ruled out by measurement; source 2 covers
+    -- melee only. The PROJECTILE half is what is left, and no class in dumps/cxx carries both a
+    -- bullet and an EPalWazaID — so a ranged move's hit can only be identified by carrying the
+    -- id forward from the ACTION that spawned the bullet, which needs onActivate working first.
+    -- KEEP onHit IDEMPOTENT either way: a multi-collision move can land more than once.
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
-                    doc = "one of its hits landed (self, target, ctx) - source wired, may repeat per collision" },
-    -- SOURCE: /Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill(FName AddSkill,
-    -- FName OverrideSkill) — Pal.hpp:21155 — and :RemovePassiveSkill(FName SkillId) — :21003.
-    -- Both names are in the live build's full listing of that class (02_reflection.txt:1107).
-    -- The old open question is ANSWERED: the parameters are FNames, not an index into a
-    -- fixed-size array, and no struct is involved. The owner comes off the same object's
-    -- `APalCharacter* IndividualActor` property (:20910), so ctx.owner is a real character.
-    -- ctx = { skillId, owner, actor, params, overrides }. `overrides` is AddPassiveSkill's
-    -- second argument passed straight through; it is NOT read as an unequip, because the name
-    -- does not say which of the two ids is being displaced.
-    -- TODO(skill-passive-source): unverified IN GAME. Which player actions route through these
-    -- two is still unmeasured — capture-time random assignment and the Statue of Power are the
-    -- expectation, party in/out is not. Both are armed only after world.ready, so a passive
-    -- restored during the load storm should not surface as an equip; that too is unobserved.
+                    doc = "one of its hits landed (self, target, ctx) - two sources armed, melee only, may repeat" },
+    -- TWO SOURCES for the pair, and again the first is measured rather than assumed.
+    --   1. /Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill(FName AddSkill, FName
+    --      OverrideSkill) — Pal.hpp:21155 — and :RemovePassiveSkill(FName SkillId) — :21003.
+    --      Both are in the live build's listing of that class (02_reflection.txt:1107) and both
+    --      take FNames, not an index; the owner is the same object's `APalCharacter*
+    --      IndividualActor` (:20910). ARMED AND MEASURED SILENT, 2026-07-26, across a session
+    --      of catching and releasing pals. Kept armed. ctx = { skillId, owner, actor, params,
+    --      overrides, via }. `overrides` is AddPassiveSkill's second argument passed straight
+    --      through; it is NOT read as an unequip, because the name does not say which of the
+    --      two ids is being displaced.
+    --   2. /Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf(UObject* OwnerObject,
+    --      const TArray<FName>& skillList) — Pal.hpp:26582. The component that actually applies
+    --      passive effects, handed the WHOLE list. Because it is a list and not an event, the
+    --      source DIFFS it against what it last saw for that component: a new name is an equip,
+    --      a vanished one an unequip. DECLARED ONLY. THE COST, stated rather than hidden: the
+    --      first call for a component emits equip for every passive that character already has,
+    --      so a pal streaming into the world announces its four passives once. Keep onEquip
+    --      idempotent. ctx = { skillId, owner, actor, component, source, via }.
+    -- TODO(skill-passive-source): NARROWED. Source 1 is ruled out by measurement. What is
+    -- unmeasured is whether source 2 fires and WHICH moments it covers — character init,
+    -- capture-time assignment and the Statue of Power are the expectation. If it too is silent,
+    -- the last lead is UPalMapObjectOperatingTableModel:RequestChangePassiveSkill (:24094), the
+    -- bench's own request, which takes the passive FName as its third parameter.
     { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "a passive was attached (self, owner, ctx) - source wired, not yet seen firing" },
+                    doc = "a passive was attached (self, owner, ctx) - two sources armed, none seen firing" },
     { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "a passive was removed (self, owner, ctx) - source wired, not yet seen firing" },
+                    doc = "a passive was removed (self, owner, ctx) - two sources armed, none seen firing" },
 })
 
 ---What you pass to Skill{ ... }. `id` is the only required field.

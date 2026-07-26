@@ -40,7 +40,7 @@
 ---@field material? string # base material asset path to instance from
 
 ---@class Pal.Spec.Events
----@field onSpawned? fun(self: Pal.Handle, ctx: table) # LIVE (UNCONFIRMED candidate, armed only after the world loads) - finished spawning into the world
+---@field onSpawned? fun(self: Pal.Handle, ctx: table) # three candidate sources armed after world load, none seen firing - finished spawning into the world
 ---@field onDamaged? fun(self: Pal.Handle, ctx: table) # LIVE - took damage
 ---@field onDeath? fun(self: Pal.Handle, ctx: table) # LIVE - HP reached zero
 ---@field onCaptured? fun(self: Pal.Handle, ctx: table) # LIVE - caught in a sphere
@@ -143,10 +143,10 @@
 --=============================================================================
 
 ---@class Skill.Spec.Events
----@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # an active skill fired (self, owner, ctx) - source wired, not yet seen firing
----@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # one of its hits landed (self, target, ctx) - source wired, may repeat per collision
----@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was attached (self, owner, ctx) - source wired, not yet seen firing
----@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was removed (self, owner, ctx) - source wired, not yet seen firing
+---@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # an active skill fired (self, owner, ctx) - three sources armed, none seen firing
+---@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # one of its hits landed (self, target, ctx) - two sources armed, melee only, may repeat
+---@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was attached (self, owner, ctx) - two sources armed, none seen firing
+---@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was removed (self, owner, ctx) - two sources armed, none seen firing
 
 ---@alias Skill.Spec.Kind "active"|"passive"
 ---@class Skill.Spec

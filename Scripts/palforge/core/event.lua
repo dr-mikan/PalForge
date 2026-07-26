@@ -15,20 +15,30 @@
 -- watch — plus the OnCompleteBuild hook that runtime refused (see building.build).
 -- The runtime no longer calls hooks directly — the scan/hooks EMIT channels and
 -- DISPATCH resolves the live instance and calls the hook (place fires exactly once).
--- The PAL source arms four native hooks plus a slow onTick sweep, the ITEM source six,
--- and the SKILL source four. Seven of those fourteen were found on 2026-07-26 in
--- dumps/cxx/Pal.hpp — UE4SS's own CXXHeaderDump of the installed binary — which is the
--- first source in this tree that could answer "what does the game call when X happens"
--- without the game running. Each carries, at its hook, the EVIDENCE CLASS it was wired on:
+-- The PAL source arms six native hooks plus a slow onTick sweep, the ITEM source six, and
+-- the SKILL source eight. Most were found in dumps/cxx/Pal.hpp — UE4SS's own CXXHeaderDump
+-- of the installed binary — which is the first source in this tree that could answer "what
+-- does the game call when X happens" without the game running. Each carries, at its hook,
+-- the EVIDENCE CLASS it was wired on:
 --   recorded firing  > reflected in the live build > declared in the header dump only.
 -- Nothing below is wired on less than a real declaration, and the two channels that STILL
 -- have no source (building.leftclick, building.break) say so with the reason.
 --
--- ARMED LATE, ON PURPOSE. Two of those hooks — building.build's
--- OnCompleteBuild_ServerInternal and pal.spawned's BroadcastOnCompleteInitializeParameter
+-- SOME CHANNELS CARRY SEVERAL SOURCES AT ONCE, and that is deliberate rather than untidy.
+-- A play session on 2026-07-26 measured four hooks REGISTERING and never firing —
+-- PlayActionByWazaID, MakeDamageInfoByWazaType, AddPassiveSkill/RemovePassiveSkill and
+-- BroadcastOnCompleteInitializeParameter — while ten other channels announced in the same
+-- session. UE4SS cannot unregister a hook, so those four stay armed (a silent hook costs
+-- nothing) and the candidates the dump named to replace them are armed BESIDE them. Whichever
+-- one the shipping build actually reaches wins, and announceVia logs which that was, once.
+-- Every one of them is guarded on the identity it needs (a named EPalWazaID, a live actor),
+-- so an extra source can only add silence, never a wrong event.
+--
+-- ARMED LATE, ON PURPOSE. Some of those hooks — building.build's
+-- OnCompleteBuild_ServerInternal, the three pal.spawned candidates, the three passive ones
 -- — also fire for every PRE-EXISTING object during the world-load storm, where the
 -- reference library records one native access violation and one wedged UE4SS callback
--- layer. Neither is registered at start(): both go through tryHookAfterWorldReady, a
+-- layer. None is registered at start(): they go through tryHookAfterWorldReady, a
 -- one-shot world.ready subscriber. See each hook for what that does and does not buy.
 --
 -- Not every channel dispatches to a live instance: building.build fires BEFORE the actor
@@ -679,6 +689,32 @@ local function fstr(v, field)
     return s
 end
 
+---Is `o` a live UObject? Every hook below that reaches THROUGH one object to reach another
+---(a component to its owner, a notify state to its filter) asks this first, because an
+---engine object handed to a hook can be mid-teardown and a property read on one of those is
+---the shape that faults natively — which pcall cannot catch.
+local function alive(o)
+    if o == nil then return false end
+    local ok, v = pcall(function() return o.IsValid and o:IsValid() end)
+    return ok and v == true
+end
+
+---A STABLE table key for a UObject, as a string.
+---
+---Not the userdata. UE4SS builds a fresh Lua wrapper on every `:get()` / FindAllOf element, so
+---`t[obj]` written in one hook call is not `t[obj]` read in the next even for the identical
+---engine object — a table keyed on the wrapper silently never matches and every dedupe or
+---diff built on it degrades to "always new". GetFullName() is the object's unique path
+---(`PalPassiveSkillComponent /Game/.../BP_ChickenPal_C_2147460233.PassiveSkillComponent`) and
+---is the same string every time. nil when it cannot be read, and every caller treats that as
+---"do not remember this one" rather than as a key.
+local function objKey(o)
+    if o == nil then return nil end
+    local s; pcall(function() s = o:GetFullName() end)
+    if type(s) ~= "string" or s == "" then return nil end
+    return s
+end
+
 ---Read a hook param that IS the value (a bare FName / number), not a struct field.
 local function pstr(p)
     local v = getv(p)
@@ -711,6 +747,24 @@ end
 local function tryHook(path, fn)
     local ok, e = pcall(RegisterHook, path, fn)
     if not ok then log.warn("hook unavailable (feature disabled): " .. path .. " -> " .. tostring(e)) end
+end
+
+-- Which SOURCE first carried a given channel, announced once per (channel, source) pair.
+--
+-- srcEmit already says "this channel is live", and that was enough while every channel had one
+-- source. Three of them do not any more: pal.spawned, skill.activate and skill.hit each carry
+-- several candidate hooks, armed side by side precisely because nobody knows which one the
+-- shipping build reaches — and "skill.activate works" is not an actionable sentence when the
+-- next step differs completely depending on whether the action OBJECT or the player's action
+-- COMPONENT is what fired. One extra line, once, is the difference between a measurement and
+-- a rumour. It is the same reasoning as srcEmit's own proof-of-life line, one level finer.
+local viaSeen = {}
+local function announceVia(channel, via)
+    local k = channel .. "\0" .. tostring(via)
+    if viaSeen[k] then return end
+    viaSeen[k] = true
+    log.info(string.format("%s carried its first event from source %q — that is the path that "
+        .. "works on this build", channel, tostring(via)))
 end
 
 -- Register a native hook only ONCE THE WORLD IS READY, never at mod load. For a hook that
@@ -992,10 +1046,39 @@ end
 -- Native hooks CONFIRMED by the in-game event probe (dump/06_events.txt):
 --   capture -> PalCharacterParameterComponent:SetIsCapturedProcessing(bool started=true)
 --   damage  -> PalCharacter:OnDamageReaction    death -> PalCharacter:OnDeadCharacter
--- (spawn candidate BroadcastOnCompleteInitializeParameter is UNCONFIRMED and is armed LATE
---  — see the hook itself. onTick has no native source at all; it is driven by the sweep
---  above, which is why that sweep exists.)
+-- (the spawn candidates are armed LATE and there are now THREE of them — the broadcaster,
+--  measured silent, plus the two delegate TARGETS the dump named to replace it. See the hooks
+--  themselves. onTick has no native source at all; it is driven by the sweep above, which is
+--  why that sweep exists.)
 local function installPalSource()
+    -- THREE sources can describe one pal finishing its parameter init, so a spawn is deduped
+    -- PER ACTOR rather than per id: the same character reaching two of them is one spawn, and
+    -- two different pals born in the same frame are two. The key is objKey's stable string,
+    -- NOT the actor wrapper — see objKey for why a wrapper cannot be a table key here. An
+    -- actor whose name will not read is emitted without being remembered, because a duplicate
+    -- event is a smaller wrong than a dropped one.
+    --
+    -- Bounded on purpose: pals stream in and out for a whole session and the keys are strings,
+    -- so nothing would ever release them. At the cap the table is dropped whole — the only
+    -- cost of that is that a pal which initialises twice across the boundary is reported
+    -- twice, which is what handlers are already told to tolerate.
+    local SPAWN_DEDUPE_SEC = 1.0
+    local SPAWN_KEYS_MAX   = 2048
+    local lastSpawn, lastSpawnN = {}, 0
+    local function emitSpawned(actor, via)
+        if not alive(actor) then return end
+        local now = os.clock()
+        local key = objKey(actor)
+        if key then
+            if lastSpawn[key] and (now - lastSpawn[key]) < SPAWN_DEDUPE_SEC then return end
+            if lastSpawnN >= SPAWN_KEYS_MAX then lastSpawn, lastSpawnN = {}, 0 end
+            if lastSpawn[key] == nil then lastSpawnN = lastSpawnN + 1 end
+            lastSpawn[key] = now
+        end
+        announceVia("pal.spawned", via)
+        srcEmit("pal.spawned", { actor = actor, via = via })
+    end
+
     -- capture: SetIsCapturedProcessing(true) on the pal's param component; the pal actor
     -- is the component's owner. (probe: a1=true, self=BP_ChickenPal_C.CharacterParameterComponent)
     tryHook("/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing", function(self, started)
@@ -1040,20 +1123,59 @@ local function installPalSource()
     -- alongside its InitializeParameterCallback — the game's own way of saying "call me when
     -- this NEW character finishes initialising" is a subscription to this broadcast. A pal
     -- created after world load therefore does broadcast; that is no longer a hope.
-    -- TODO(pal-spawned-fresh): what the header dump cannot settle is whether the broadcast
-    -- REACHES US. BroadcastOnCompleteInitializeParameter is the broadcaster, not a delegate
-    -- target — a plain C++ call site would bypass reflection entirely and RegisterHook would
-    -- sit behind it silently, which is a complete explanation for the one recorded arming
-    -- counting 0. Every hook in this file that is proven to fire is an RPC, a BlueprintCallable
-    -- static or a dynamic-delegate target; this one is none of the three. One post-load arming
-    -- that logs a single firing closes it (F8, then release a pal and WAIT >10 s for the
-    -- spawn); if it stays at 0, the replacement is a delegate TARGET rather than the
-    -- broadcaster — APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter*)
-    -- (Pal.hpp:10637) is one such bound handler and is the next path to arm.
+    -- MEASURED SILENT, 2026-07-26. Armed after world.ready in a real save (UE4SS logged the
+    -- registration as hooks 39, 40), pals were caught and released, and pal.spawned carried
+    -- nothing while ten other channels announced. So the suspicion below is now the finding:
+    -- the BROADCASTER is not reachable through ProcessEvent. It stays armed — UE4SS cannot
+    -- unregister — and the two delegate TARGETS it names are armed beside it.
     tryHookAfterWorldReady("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter",
         function(self)
             if not worldReady then return end
-            pcall(function() srcEmit("pal.spawned", { actor = get(self) }) end)
+            pcall(function() emitSpawned(get(self), "BroadcastOnCompleteInitializeParameter") end)
+        end)
+
+    -- THE REPLACEMENT, and the dump names TWO of them rather than one. Everything bound to
+    -- APalCharacter's OnCompleteInitializeParameterDelegateMap has the signature
+    -- `OnCompleteInitializeParameter__DelegateSignature(APalCharacter* InCharacter)`
+    -- (Pal.hpp:9052), so any function in the binary with that exact parameter list is a bound
+    -- handler — and a dynamic-delegate target is always invoked through ProcessEvent, which is
+    -- the path RegisterHook can see. Reading the classes whole turned up three; two are wired:
+    --
+    --   APalPlayerCharacter::OnCompleteInitializeParameter(APalCharacter*)   (Pal.hpp:10637)
+    --     EVIDENCE CLASS: REFLECTED + DECLARED. The name is in the live build's own
+    --     PalPlayerCharacter listing (dumps/reflection/02_reflection.txt, the block at :738),
+    --     which is the strongest any pal.spawned candidate has ever had. `self` is the PLAYER
+    --     and a1 is the character that finished initialising — so the emit reads ctx.actor off
+    --     a1, never off self. Its limit: it only fires for characters the PLAYER subscribed
+    --     to, which is the otomo/party path rather than every wild pal that streams in.
+    --
+    --   APalNPC::OnCompletedInitParam(APalCharacter*)                        (Pal.hpp:10203)
+    --     EVIDENCE CLASS: DECLARED ONLY. But it is the one bound on the PAL's own side, so it
+    --     does not depend on anyone else having subscribed — and APalMonsterCharacter (:10167)
+    --     inherits it without redeclaring, so the base UFunction is the one ProcessEvent runs
+    --     and this hook sees every pal. `self` and a1 should be the same character here; a1 is
+    --     preferred and self is the fallback.
+    --
+    -- The third, APalNPC::MasterWazaSetup(APalCharacter*) (:10205), is deliberately NOT armed:
+    -- it has the same signature and is therefore the same broadcast, but its name says it
+    -- exists to set up mastered moves, and a third hook on one moment buys nothing that the
+    -- second does not.
+    tryHookAfterWorldReady("/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter",
+        function(self, inCharacter)
+            if not worldReady then return end
+            pcall(function()
+                emitSpawned(getv(inCharacter), "PalPlayerCharacter:OnCompleteInitializeParameter")
+            end)
+        end)
+
+    tryHookAfterWorldReady("/Script/Pal.PalNPC:OnCompletedInitParam",
+        function(self, inCharacter)
+            if not worldReady then return end
+            pcall(function()
+                local who = getv(inCharacter)
+                if not alive(who) then who = get(self) end
+                emitSpawned(who, "PalNPC:OnCompletedInitParam")
+            end)
         end)
 
     installPalTickSource()   -- the onTick sweep (no native hook exists; see above)
@@ -1471,19 +1593,92 @@ end
 -- is the only side that can. That is a settled negative, not an untried idea.
 --
 -- EVIDENCE CLASS: REFLECTED (the live build declares both names) + DECLARED (the header dump
--- gives both signatures). Not recorded firing: neither has ever been armed, so it is still
--- unknown whether the GAME calls them or whether they are Blueprint-facing helpers the C++
--- combat path bypasses. Wiring them cannot misfire — PlayActionByWazaID with a waza id is a
+-- gives both signatures). Wiring them cannot misfire — PlayActionByWazaID with a waza id is a
 -- move being played by definition — so silence is the only failure mode.
--- TODO(skill-activate-source): unverified IN GAME. Arm F8, have a pal use a move, and look
--- for a `skill.activate` dispatch; 0 firings means the C++ combat path builds its action
--- without this helper and the next candidate is a UPalActionWazaBase subclass's OnBeginAction
--- (Pal.hpp:13270 declares `EPalWazaID WazaID` right on that class, so `self` would carry it).
--- TODO(skill-hit-source): unverified IN GAME, and one thing is known to be imperfect even if
--- it fires: MakeDamageInfoByWazaType is called to BUILD the damage, not to report that it
--- landed, and `float DamageRatePerCollision` in its parameter list says a multi-collision move
--- may build one per collision. Handlers must be idempotent. What is NOT in doubt any more is
--- the identity — see the FPalDamageRactionInfo paragraph above; that half is closed.
+--
+-- AND SILENCE IS WHAT THEY PRODUCED. MEASURED 2026-07-26, in a real save: both registered
+-- (UE4SS logged `Registered native hook (29, 30)` and `(31, 32)`), a pal fought and killed
+-- another pal, pal.damaged and pal.death both carried events and announced themselves, and
+-- NEITHER skill channel carried anything. Ten other channels announced in the same session.
+-- So these two are Blueprint-facing helpers that the shipping C++ combat path walks past.
+-- They stay armed — UE4SS cannot unregister a hook, and a helper that is silent costs
+-- nothing — but they are no longer the only source on either channel.
+--
+-- WHAT THE DUMP SAYS THE COMBAT PATH ACTUALLY IS, read 2026-07-26 out of dumps/cxx/Pal.hpp
+-- by reading the classes whole rather than grepping for guessed names:
+--
+--   A pal's move is an ACTION OBJECT, and the waza id is a field ON that object.
+--   UPalActionWazaBase (Pal.hpp:13270) is `public UPalActionBase` and adds exactly one thing
+--   that matters here: `EPalWazaID WazaID` at 0x0158 (:13272), with `GetWazaID()` beside it
+--   (:13279). Which action class belongs to which move is a per-pal table:
+--   UPalStaticCharacterParameterComponent::WazaActionInstancedMap is
+--   `TMap<EPalWazaID, TSubclassOf<UPalActionBase>>` (:29469). The AI picks the slot
+--   (UPalAIActionCombatBase::NextIsWaza / NextWazaSlotIndex, :12637-12638), the action
+--   component instantiates and plays the class (UPalActionComponent::PlayAction_Internal /
+--   PlayAction_ToALL, :13171-13173), and the played object gets OnBeginAction() (:13122).
+--   So `self.WazaID` on a live action IS the move's identity, with no lookup and no struct
+--   walk — and UPalActionBase carries GetActionCharacter() (:13141) and GetActionTarget()
+--   (:13138) for the other two things this channel needs.
+--
+-- SO TWO MORE ACTIVATE SOURCES ARE ARMED ALONGSIDE PlayActionByWazaID. Both are guarded on a
+-- readable, named EPalWazaID, so a non-waza action (jump, roll, eat, build) emits nothing:
+-- the failure mode of each is silence, never a wrong event.
+--
+--   activate (2) -> /Script/Pal.PalActionBase:OnBeginAction  (Pal.hpp:13122)
+--        `self` is the action object itself, so this is the shortest possible route to the
+--        identity. EVIDENCE CLASS: DECLARED ONLY — UPalActionBase is not among the 21 classes
+--        in 02_reflection.txt and has never been armed. THE ONE WAY IT FAILS, stated plainly:
+--        OnBeginAction reads like a Blueprint event, and Palworld's waza actions are BP
+--        classes. If a BP subclass implements it, that subclass owns its own UFunction, and
+--        ProcessEvent runs THAT one — a hook on the base would sit behind it forever. This is
+--        the same "is the call site reachable" doubt as pal.spawned, and it resolves the same
+--        way: by arming it and looking.
+--
+--   activate (3) -> /Script/Pal.PalPlayerCharacter:OnBeginAction(const UPalActionBase* action)
+--        (Pal.hpp:10651). A DELEGATE TARGET of UPalActionComponent::OnActionBeginDelegate
+--        (:13158-13159, signature ActionStartDelegate__DelegateSignature at :13194) — the one
+--        evidence class in this file that has never yet failed, because a dynamic delegate is
+--        always broadcast through ProcessEvent. EVIDENCE CLASS: REFLECTED + DECLARED — the
+--        name `.OnBeginAction` is in the live build's own PalPlayerCharacter listing
+--        (02_reflection.txt, the block at :738). ITS LIMIT, and it is a real one: `self` is
+--        the PLAYER, so it is bound to the PLAYER's action component. It covers the player's
+--        own waza actions (a partner skill, a summoned-weapon move) and NOT a pal's, which
+--        run on the pal's own component with a different set of listeners. It is armed
+--        because a narrow source that fires beats a broad one that does not.
+--
+--   hit (2) -> /Script/Pal.PalAnimNotifyState_AttackCollision:OnHit(UPrimitiveComponent*
+--        MyHitComponent, AActor* HitActor, UPrimitiveComponent* HitComponent,
+--        const TArray<int32>& FoliageIndex, FVector HitLocation, int32 HitCount)
+--        (Pal.hpp:13576). This is the melee/collision attack window itself: the notify state
+--        holds `UPalHitFilter* AttackFilter` (:13571), the filter for an attack is a
+--        UPalAttackFilter which carries `EPalWazaID Waza` (:14069) and `AActor* Attacker`
+--        (:14077), and this OnHit is a DELEGATE TARGET — its parameter list matches
+--        UPalHitFilter::OnHitDelegate's signature (:20614) field for field. That matters
+--        twice over: it means ProcessEvent, and it means the hit already PASSED the filter
+--        (MaxHitNum, HitInterval, the intersection test), so this is a landed hit rather than
+--        a raw overlap. EVIDENCE CLASS: DECLARED ONLY. Its limit: it is the COLLISION path.
+--        A projectile move lands through APalBullet instead (:8849), whose fields carry
+--        OwnerStaticItemId and no waza at all — so a ranged pal move is still uncovered by
+--        this hook, and by every other one in the dump.
+--
+-- TODO(skill-activate-source): NARROWED, not closed. PlayActionByWazaID is MEASURED SILENT in
+-- combat, so it is no longer a candidate — it is a ruled-out one kept armed for free. What is
+-- unmeasured is whether either replacement is reachable: PalActionBase:OnBeginAction (does the
+-- base UFunction run, or does a BP override take the ProcessEvent) and
+-- PalPlayerCharacter:OnBeginAction (fires, but only for the player). If BOTH stay silent while
+-- a pal visibly attacks, the remaining lead in the dump is UPalActionComponent's
+-- PlayAction_ToALL (:13171) — a NetMulticast RPC, the shape that has never failed here — but
+-- it hands over `TSubclassOf<UPalActionBase>` rather than an id, so it would need the class ->
+-- waza direction of WazaActionInstancedMap (:29469) resolved first, and nothing in this tree
+-- has read a TMap keyed by an enum yet.
+-- TODO(skill-hit-source): NARROWED. MakeDamageInfoByWazaType is MEASURED SILENT while
+-- pal.damaged fired in the same fight, so damage is not built through that helper. The
+-- collision-notify route above replaces it for melee. What stays open is the PROJECTILE half:
+-- no class in dumps/cxx carries both a bullet and an EPalWazaID, so if a ranged move must
+-- report hits, the id has to come from the ACTION that spawned the bullet
+-- (UPalActionWazaBase.WazaID) and be carried forward — which needs skill.activate to work
+-- first. Do NOT go back to the damage structs: FPalDamageInfo (:1834, 40 fields) and
+-- FPalDamageResult (:1896, 12 fields) both have no EPalWazaID, and that is settled.
 --
 -- The passive pair writes to a character rather than to the world:
 --   equip   -> UPalIndividualCharacterParameter::AddPassiveSkill(FName AddSkill,
@@ -1499,62 +1694,204 @@ end
 -- `OverrideSkill` is handed through as ctx.overrides and is NOT read as an unequip. The name
 -- does not say which of the two ids is being displaced, and inventing an unequip out of an
 -- ambiguous parameter is the kind of wiring this file refuses on principle.
--- TODO(skill-passive-source): unverified IN GAME. What is left is which player actions route
--- through these two — capture-time random assignment and the Statue of Power are the
--- expectation, party in/out is not, and none has been observed. Note also that these are
--- ordinary BlueprintCallable functions rather than RPCs or delegate targets, so the same
--- "does a C++ call site bypass the hook" doubt applies here as to pal.spawned.
+--
+-- AND THAT PAIR IS ALSO MEASURED SILENT. Same session, 2026-07-26: both registered (UE4SS
+-- logged hooks 35-38), pals were caught and released, and neither channel carried anything.
+-- So the passive list is not maintained one name at a time through those two — or at least
+-- not through a call site RegisterHook can see.
+--
+--   equip/unequip (2) -> /Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf(
+--        UObject* OwnerObject, const TArray<FName>& skillList)              (Pal.hpp:26582)
+--        The dump's answer to "then how DOES a passive get attached": wholesale, as a LIST,
+--        by the component that owns passive effects. UPalPassiveSkillComponent (:26565) is
+--        the thing that actually applies them — it holds `TArray<FPalPassiveSkillEffectInfos>
+--        SkillInfos` (:26573), broadcasts OnStartSkillEffect / OnEndSkillEffect (:26567-26572)
+--        and rewrites damage through OverrideDamageInfoBySkill (:26584). SetupSkillFromSelf is
+--        how the names get in.
+--        BECAUSE IT IS A LIST AND NOT AN EVENT, this source DIFFS: the names it has last seen
+--        for that component are remembered in a weak table, a name that is new emits
+--        skill.equip and a name that has gone emits skill.unequip. Stated plainly, because it
+--        is the cost of the only route the dump offers: the FIRST call for a component emits
+--        equip for every passive that character already has. A pal streaming into the world
+--        will therefore announce its four passives once. That is honest — at that moment those
+--        passives really are being attached to that character — but it is not the same thing
+--        as "the player just added one", and a handler must be idempotent for it.
+--        EVIDENCE CLASS: DECLARED ONLY. Armed after world.ready like the pair above.
+--
+-- TODO(skill-passive-source): NARROWED. AddPassiveSkill / RemovePassiveSkill are MEASURED
+-- SILENT across a session of catching and releasing pals, so they are ruled out as the route
+-- (kept armed, since they cost nothing and cannot misfire). What is unmeasured is whether
+-- SetupSkillFromSelf fires, and if it does, WHICH moments it covers — the expectation is
+-- character init, capture-time assignment, and the Statue of Power, and none of the three is
+-- observed. If it too is silent, the remaining lead is
+-- UPalMapObjectOperatingTableModel:RequestChangePassiveSkill (Pal.hpp:24094), the bench's own
+-- request, which takes the passive FName as its third parameter and is an ordinary server
+-- request rather than a broadcast — narrower (the bench only), but reachable.
 -- =====================================================================================
 local function installSkillSource()
     -- EPalWazaID arrives as a bare integer (core/character.lua:449 documents that enum
     -- elements come through as numbers), and every public surface in this tree speaks skill
     -- NAMES, so the one shared table is inverted once, lazily.
     local nameOfWaza
-    local function wazaName(v)
+    ---An EPalWazaID as a number, whether it arrived as one or inside a wrapper. A hook PARAM
+    ---is an int; a PROPERTY read off a live object (UPalActionWazaBase.WazaID,
+    ---UPalAttackFilter.Waza) may come back wrapped, and the two new activate sources read
+    ---properties rather than params.
+    local function wazaNum(v)
+        if v == nil then return nil end
         local n = tonumber(v)
+        if n then return n end
+        local inner; pcall(function() inner = v:get() end)
+        return tonumber(inner)
+    end
+    local function wazaName(v)
+        local n = wazaNum(v)
         if not n then return nil end
         if not nameOfWaza then
             nameOfWaza = {}
             for k, id in pairs(character.WAZA) do nameOfWaza[id] = k end
         end
-        return nameOfWaza[n]
+        return nameOfWaza[n]     -- EPalWazaID::None is 0 and is absent from the table, so a
+                                 -- non-waza action drops out here rather than being emitted
+    end
+
+    -- THREE sources feed skill.activate, TWO feed skill.hit and TWO feed each of the passive
+    -- pair, and several of them can legitimately describe the SAME moment: an action begins on
+    -- the player's component AND on the action object; a passive is added by name AND appears
+    -- in the next whole-list setup. A repeat of the same skill id inside this window is
+    -- dropped, exactly as the two item.obtain sources are deduped and for the same reason.
+    --
+    -- Keyed on (channel, id) ONLY, never on the owner. The cost is stated rather than hidden:
+    -- two pals using the same move, or two pals streaming in with the same passive, within a
+    -- quarter second are reported once. That is shorter than any attack animation and cheaper
+    -- than letting a duplicate run every pack's handler twice. The table is bounded by the
+    -- number of distinct skill ids the session has seen, so it cannot grow without limit the
+    -- way an owner-keyed one would.
+    local SKILL_DEDUPE_SEC = 0.25
+    local lastSkill = {}
+    local function emitSkill(channel, id, ctx, via)
+        local now = os.clock()
+        local k = channel .. "\0" .. id
+        if lastSkill[k] and (now - lastSkill[k]) < SKILL_DEDUPE_SEC then return end
+        lastSkill[k] = now
+        ctx.via = via
+        announceVia(channel, via)
+        srcEmit(channel, ctx)
     end
 
     -- activate. ctx.owner is the actor that played the move (what onActivate is handed as its
     -- second argument); ctx.target is what it was aimed at, which may be nil for a move with
     -- no target.
+    --
+    -- SOURCE 1 — MEASURED SILENT in real combat (see the header). Kept armed because UE4SS
+    -- cannot unregister and a silent helper costs nothing; if it ever does fire, the via line
+    -- says so and this comment is wrong rather than the wiring.
     tryHook("/Script/Pal.PalUtility:PlayActionByWazaID", function(self, actionActor, targetActor, wazaID)
         if not worldReady then return end
         pcall(function()
             local id = wazaName(getv(wazaID))
             if not id then return end
-            srcEmit("skill.activate", {
+            emitSkill("skill.activate", id, {
                 skillId = id,
-                wazaId  = tonumber(getv(wazaID)),
+                wazaId  = wazaNum(getv(wazaID)),
                 owner   = getv(actionActor),
                 actor   = getv(actionActor),   -- same value under the name the pal channels use
                 target  = getv(targetActor),
-            })
+            }, "PlayActionByWazaID")
         end)
+    end)
+
+    ---SOURCES 2 and 3 share this: given a live UPalActionBase, emit skill.activate IF it is a
+    ---waza action. `WazaID` exists only on UPalActionWazaBase (Pal.hpp:13272), so reading it
+    ---off a jump or an eat action answers nil and nothing is emitted — which is what makes
+    ---arming a hook this broad safe. GetActionCharacter / GetActionTarget (Pal.hpp:13141,
+    ---:13138) are declared on the BASE, so they are available whatever the subclass is.
+    local function emitFromAction(action, via)
+        if not alive(action) then return end
+        local raw; pcall(function() raw = action.WazaID end)
+        local n = wazaNum(raw)
+        if not n then return end
+        local id = wazaName(n)
+        if not id then return end
+        local owner;  pcall(function() owner = action:GetActionCharacter() end)
+        local target; pcall(function() target = action:GetActionTarget() end)
+        if not alive(owner) then owner = nil end
+        if not alive(target) then target = nil end
+        emitSkill("skill.activate", id, {
+            skillId = id,
+            wazaId  = n,
+            owner   = owner,
+            actor   = owner,
+            target  = target,
+            action  = action,      -- the UPalActionWazaBase itself, for a pack that wants more
+        }, via)
+    end
+
+    -- SOURCE 2 — the action object announcing its own start. `self` IS the move.
+    tryHook("/Script/Pal.PalActionBase:OnBeginAction", function(self)
+        if not worldReady then return end
+        pcall(function() emitFromAction(getv(self), "PalActionBase:OnBeginAction") end)
+    end)
+
+    -- SOURCE 3 — the PLAYER's action component announcing a start to its listener. a1 is the
+    -- action; `self` is the player and is deliberately NOT used as the owner, because the
+    -- action's own GetActionCharacter is the authority (a summoned weapon's action is played
+    -- on the weapon, not on the player).
+    tryHook("/Script/Pal.PalPlayerCharacter:OnBeginAction", function(self, action)
+        if not worldReady then return end
+        pcall(function() emitFromAction(getv(action), "PalPlayerCharacter:OnBeginAction") end)
     end)
 
     -- hit. The waza is the SEVENTH parameter, so this is the one hook in the file that reads
     -- past a4; UE4SS hands every declared parameter to the callback, and a build that hands
     -- over fewer simply leaves wazaType nil and the guard below drops the event.
+    -- SOURCE 1 — MEASURED SILENT while pal.damaged fired in the same fight. Kept armed.
     tryHook("/Script/Pal.PalUtility:MakeDamageInfoByWazaType",
         function(self, attacker, defender, _aHit, _dHit, hitLocation, _foliage, wazaType)
             if not worldReady then return end
             pcall(function()
                 local id = wazaName(getv(wazaType))
                 if not id then return end
-                srcEmit("skill.hit", {
+                emitSkill("skill.hit", id, {
                     skillId  = id,
-                    wazaId   = tonumber(getv(wazaType)),
+                    wazaId   = wazaNum(getv(wazaType)),
                     target   = getv(defender),     -- onHit's second argument
                     owner    = getv(attacker),
                     attacker = getv(attacker),
                     location = getv(hitLocation),
-                })
+                }, "MakeDamageInfoByWazaType")
+            end)
+        end)
+
+    -- SOURCE 2 — the attack-collision anim notify, after its hit filter accepted the overlap.
+    -- The identity is on the FILTER, not on any parameter: UPalAttackFilter.Waza (Pal.hpp:14069)
+    -- and .Attacker (:14077). a2 is the victim and a5 the hit location. The `AttackFilter`
+    -- property is typed UPalHitFilter, so a notify whose filter is a plain hit filter has no
+    -- .Waza and drops out — same guard, same silence-not-noise failure mode as the activate pair.
+    tryHook("/Script/Pal.PalAnimNotifyState_AttackCollision:OnHit",
+        function(self, _myComp, hitActor, _hitComp, _foliage, hitLocation)
+            if not worldReady then return end
+            pcall(function()
+                local notify = getv(self)
+                if not alive(notify) then return end
+                local filter; pcall(function() filter = notify.AttackFilter end)
+                if not alive(filter) then return end
+                local raw; pcall(function() raw = filter.Waza end)
+                local id = wazaName(raw)
+                if not id then return end
+                local attacker; pcall(function() attacker = filter.Attacker end)
+                if not alive(attacker) then attacker = nil end
+                local target = getv(hitActor)
+                if not alive(target) then target = nil end
+                emitSkill("skill.hit", id, {
+                    skillId  = id,
+                    wazaId   = wazaNum(raw),
+                    target   = target,             -- onHit's second argument
+                    owner    = attacker,
+                    attacker = attacker,
+                    location = getv(hitLocation),
+                    filter   = filter,
+                }, "PalAnimNotifyState_AttackCollision:OnHit")
             end)
         end)
 
@@ -1571,6 +1908,7 @@ local function installSkillSource()
         return actor, p
     end
 
+    -- SOURCE 1 — MEASURED SILENT across a session of catching and releasing pals. Kept armed.
     tryHookAfterWorldReady("/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill",
         function(self, addSkill, overrideSkill)
             if not worldReady then return end
@@ -1578,13 +1916,13 @@ local function installSkillSource()
                 local id = pstr(addSkill)
                 if not id then return end
                 local actor, params = ownerOf(self)
-                srcEmit("skill.equip", {
+                emitSkill("skill.equip", id, {
                     skillId   = id,
                     owner     = actor,
                     actor     = actor,
                     params    = params,
                     overrides = pstr(overrideSkill),   -- see the note above: NOT an unequip
-                })
+                }, "AddPassiveSkill")
             end)
         end)
 
@@ -1595,7 +1933,96 @@ local function installSkillSource()
                 local id = pstr(skillId)
                 if not id then return end
                 local actor, params = ownerOf(self)
-                srcEmit("skill.unequip", { skillId = id, owner = actor, actor = actor, params = params })
+                emitSkill("skill.unequip", id,
+                    { skillId = id, owner = actor, actor = actor, params = params },
+                    "RemovePassiveSkill")
+            end)
+        end)
+
+    -- SOURCE 2 — the passive-effect component being handed the whole list. See the header for
+    -- why this is a DIFF and what that costs.
+    --
+    -- The remembered set is keyed by objKey's stable string for the COMPONENT, never by the
+    -- component wrapper — a wrapper is rebuilt on every hook call and a table keyed on one
+    -- would see every setup as a first setup and report the whole list as equips every time.
+    -- A component genuinely seen for the first time DOES have an empty previous set, and that
+    -- is exactly why its whole list surfaces as equips once; see the header.
+    --
+    -- Bounded for the same reason as the spawn table: string keys are never released by the
+    -- garbage collector on their own. At the cap the whole table is dropped, which costs one
+    -- repeat of the first-call behaviour for the components seen after it.
+    local PASSIVE_KEYS_MAX = 2048
+    local passiveSeen, passiveSeenN = {}, 0
+
+    ---One TArray<FName> element as a plain string. The array reader hands elements over
+    ---UNWRAPPED-BY-DESIGN (see eachArray), so both shapes are tried: a bare FName with
+    ---ToString, and UE4SS's wrapper with the FName behind :get(). core/character.lua's
+    ---readList found the same two shapes on GetEquipWaza and is the reason this is not
+    ---assumed away.
+    local function nameOf(v)
+        if v == nil then return nil end
+        local s
+        if type(v) == "userdata" and v.ToString then pcall(function() s = v:ToString() end) end
+        if s == nil then
+            local inner; pcall(function() inner = v:get() end)
+            if inner ~= nil then
+                if type(inner) == "userdata" and inner.ToString then
+                    pcall(function() s = inner:ToString() end)
+                else
+                    s = tostring(inner)
+                end
+            end
+        end
+        if s == nil or s == "" or s == "None" then return nil end
+        return s
+    end
+
+    tryHookAfterWorldReady("/Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf",
+        function(self, ownerObject, skillList)
+            if not worldReady then return end
+            pcall(function()
+                local comp = getv(self)
+                if not alive(comp) then return end
+                local key = objKey(comp)
+                if not key then return end   -- no stable identity => no honest diff => no event
+
+                local now = {}
+                eachArray(getv(skillList), function(v)
+                    local n = nameOf(v)
+                    if n then now[n] = true end
+                end)
+
+                local prev = passiveSeen[key] or {}
+                if passiveSeenN >= PASSIVE_KEYS_MAX then passiveSeen, passiveSeenN = {}, 0 end
+                if passiveSeen[key] == nil then passiveSeenN = passiveSeenN + 1 end
+                passiveSeen[key] = now
+
+                -- The OWNER. The component's actor is what a handler wants (a character), and
+                -- OwnerObject is what the game passed — which need not be an actor at all,
+                -- since equipment carries passives too. Prefer the actor, fall back to the
+                -- argument, and hand BOTH over so a pack can tell an equipment passive from a
+                -- character one.
+                local actor; pcall(function() actor = comp:GetOwner() end)
+                if not alive(actor) then actor = nil end
+                local src = getv(ownerObject)
+                local who = actor or (alive(src) and src or nil)
+
+                for name in pairs(now) do
+                    if not prev[name] then
+                        emitSkill("skill.equip", name, {
+                            skillId = name, owner = who, actor = who,
+                            component = comp, source = src,
+                        }, "SetupSkillFromSelf")
+                    end
+                end
+                for name in pairs(prev) do
+                    if not now[name] then
+                        emitSkill("skill.unequip", name, {
+                            skillId = name, owner = who, actor = who,
+                            component = comp, source = src,
+                        }, "SetupSkillFromSelf")
+                    end
+                end
             end)
         end)
 end
@@ -1851,9 +2278,11 @@ function M.start()
     -- dispatch (channel -> object hook)
     installDispatch()
     reload.markArmed()
-    log.info("event wired: bus + sources (tick/world/building/pal/item/skill; onBuild, "
-        .. "onSpawned and the passive pair arm at world.ready; building.leftclick and "
-        .. "building.break have no native source and never will) + dispatch")
+    log.info("event wired: bus + sources (tick/world/building/pal/item/skill; onBuild, the "
+        .. "three onSpawned candidates and the three passive ones arm at world.ready; "
+        .. "skill.activate has three sources and skill.hit two, and the log says which one "
+        .. "carried it; building.leftclick and building.break have no native source and never "
+        .. "will) + dispatch")
 end
 
 return M
