@@ -33,6 +33,11 @@
 local M = {}
 M.widget    = require("palforge.native.ui._widget")
 M.tree      = require("palforge.native.ui.tree")
+-- The keyboard seam behind UI.Spec's `keys` / `buttons`. Re-exported for the same reason `tree`
+-- is — so `keys.report()` is reachable from a probe or an autorun action without requiring an
+-- underscore module — and for the same caveat: a pack should not need it. What a pack writes is
+-- `keys = { "INS" }, onKeyPressed = function(self, ctx) ... end` on its own declaration.
+M.keys      = require("palforge.native.ui.keys")
 M.Button    = require("palforge.native.ui.button")
 M.TitleMenu = require("palforge.native.ui.title_menu")
 return M

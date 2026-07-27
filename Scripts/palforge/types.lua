@@ -347,6 +347,11 @@
 ---@field update? fun(self: UI.Handle) # refresh the already-built widgets (self); runs on each :refresh()
 ---@field destroy? fun(self: UI.Handle) # remove the widgets render() built (self); runs on :unmount()
 ---@field input? UI.Spec.Input # how much of the player's mouse this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor. "clicks" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. "exclusive" is a modal and stops game input — see the warning on it (default none)
+---@field z? number # stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down (default 0)
+---@field keys? string[] # the key names onKeyPressed wants, spelled as UE4SS's Key table spells them ("INS", "END", "F4", "NUM_ZERO"). Required alongside onKeyPressed: a press is read through RegisterKeyBind, which binds ONE named key. "ESCAPE" is refused by name
+---@field onKeyPressed? fun(self: UI.Handle, ctx: table) # one of `keys` went down: (self = the element INSTANCE, ctx.key / ctx.z / ctx.id). Reaches ONLY the topmost mounted element — a panel gets no key while anything is above it
+---@field buttons? string[] # which mouse buttons onMousePressed wants: "left", "right", "middle". Required alongside onMousePressed
+---@field onMousePressed? fun(self: UI.Handle, ctx: table) # one of `buttons` went down: (self, ctx.button / ctx.z / ctx.id). Goes to the TOPMOST element that declared it and stops there. ⚠️ a global press, not a hit test — nothing says what was under the cursor and the game still receives it; for a click ON a widget use Button{ onClick = }
 ---@field data? table # default fields shared by every instance of this element
 
 --=============================================================================

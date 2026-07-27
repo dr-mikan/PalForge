@@ -789,6 +789,243 @@ s:test("a render that reports failure gives the mouse back on the way out", func
     t:eq(el:isMounted(), false, "and the element stays unmounted, so mount() retries")
 end)
 
+--=============================================================================
+-- `z` and the EVENT ROUTING RULE — two overlapping panels, with no game and no keyboard
+--
+-- The whole point of putting the stack in api/ui rather than in the engine seam is that the
+-- rule is decidable without either: a list of tables, a number each, and two walks over it.
+-- So every case below asserts the rule ITSELF — who gets the press — by routing through the
+-- same entry point an arriving key uses (UI.routeKey / UI.routeMouse), rather than by pressing
+-- anything. Whether a key can arrive at all is a different question and is not answerable here;
+-- native/ui/keys.lua owns it and says so in words.
+--
+-- The elements mount onto FAKE roots at absurd z values (9000+), so they are the top of any
+-- stack they find themselves in — and the cases that need to own the whole stack say so and
+-- skip rather than assert against somebody else's mounted panel.
+--=============================================================================
+
+-- The routing rule is about WHO IS TOP, so a case that asserts it needs the stack to itself.
+-- In a headless run this is always true; in a live session with a panel already up it is not,
+-- and a skip is the honest answer rather than a failure about somebody else's element.
+local function ownStack(t)
+    if #UI.stack() > 0 then
+        t:skip("another UI element is already mounted, and this asserts against a stack it owns")
+    end
+end
+
+-- Mount `n` declared-nothing elements with the given z values and handlers, and hand back the
+-- instances plus a teardown. Every case unmounts, because a leaked mounted element would sit at
+-- the top of the stack for every case after it.
+local function mountAt(spec)
+    local El = UI{ id = support.id(spec.what or "z"), z = spec.z,
+                   keys = spec.keys, onKeyPressed = spec.onKey,
+                   buttons = spec.buttons, onMousePressed = spec.onMouse,
+                   render = function() end }
+    local el = El:new{ hits = 0 }
+    el:mount(fakeRoot())
+    return el
+end
+
+s:test("`z` defaults to 0, is carried on the class, and is refused when it is not a number",
+function(t)
+    local El = UI{ id = support.id("ui_z_default") }
+    t:eq(El:state().zOrder, 0, "an element that did not ask sits at 0")
+    local Up = UI{ id = support.id("ui_z_up"), z = 40 }
+    t:eq(Up:state().zOrder, 40, "and one that did carries what it declared")
+    t:errors(function() UI{ id = support.id("ui_z_bad"), z = "top" } end,
+        "expects number, got string")
+end)
+
+s:test("a handler and the names it listens to are ONE declaration: half of one is refused",
+function(t)
+    local f = function() end
+    t:errors(function() UI{ id = support.id("ui_k1"), onKeyPressed = f } end,
+        "declares onKeyPressed but no `keys`")
+    t:errors(function() UI{ id = support.id("ui_k2"), keys = { "INS" } } end,
+        "declares `keys` but no onKeyPressed")
+    t:errors(function() UI{ id = support.id("ui_k3"), onMousePressed = f } end,
+        "declares onMousePressed but no `buttons`")
+    t:errors(function() UI{ id = support.id("ui_k4"), buttons = { "left" } } end,
+        "declares `buttons` but no onMousePressed")
+end)
+
+s:test("a key list and a button list are checked where they are written", function(t)
+    local f = function() end
+    t:errors(function() UI{ id = support.id("ui_k5"), keys = {}, onKeyPressed = f } end,
+        "is empty")
+    t:errors(function() UI{ id = support.id("ui_k6"), keys = { 4 }, onKeyPressed = f } end,
+        "entry 1 is a number")
+    t:errors(function()
+        UI{ id = support.id("ui_k7"), buttons = { "scroll" }, onMousePressed = f }
+    end, "the buttons are \"left\", \"right\" and \"middle\"")
+    -- Names are normalised once, at define time, so neither router does string work per press.
+    local El = UI{ id = support.id("ui_k8"), keys = { "ins" }, onKeyPressed = f,
+                   buttons = { "MIDDLE" }, onMousePressed = f }
+    t:eq(El:state().keySet.INS, true, "a key name is upper-cased the way UE4SS spells one")
+    t:eq(El:state().buttonSet.middle, true, "and a button name is lower-cased the way a pack writes one")
+end)
+
+s:test("the stack is ordered by z, and by mount order among equals", function(t)
+    ownStack(t)
+    local low  = mountAt{ what = "z_low",  z = 9001 }
+    local high = mountAt{ what = "z_high", z = 9003 }
+    local mid  = mountAt{ what = "z_mid",  z = 9002 }
+    local tie  = mountAt{ what = "z_tie",  z = 9003 }   -- same z as `high`, mounted later
+
+    local rows = UI.stack()
+    t:eq(#rows, 4, "every mounted element is in the stack")
+    t:eq(rows[1].id, tie:state().id, "equal z: the most recently mounted is on top, as a canvas draws it")
+    t:eq(rows[2].id, high:state().id, "then the earlier one at that same z")
+    t:eq(rows[3].id, mid:state().id, "then the next z down")
+    t:eq(rows[4].id, low:state().id, "and the lowest z last")
+
+    tie:unmount(); high:unmount(); mid:unmount(); low:unmount()
+    t:eq(#UI.stack(), 0, "unmounting takes an element out of the stack")
+end)
+
+s:test("a KEY reaches only the topmost element — a covered panel does not get it", function(t)
+    ownStack(t)
+    local bottomHits, topHits = 0, 0
+    local bottom = mountAt{ what = "z_kb", z = 9010, keys = { "INS" },
+                            onKey = function() bottomHits = bottomHits + 1 end }
+    local top    = mountAt{ what = "z_kt", z = 9020, keys = { "INS" },
+                            onKey = function() topHits = topHits + 1 end }
+
+    local who, why = UI.routeKey("INS")
+    t:eq(who, top:state().id, "the top element took it")
+    t:eq(topHits, 1, "its handler ran once")
+    t:eq(bottomHits, 0, "and the one underneath never saw the key")
+    t:truthy(why:find("->", 1, true), "the reason says where it went: " .. tostring(why))
+
+    top:unmount()
+    who = UI.routeKey("INS")
+    t:eq(who, bottom:state().id, "with the top one gone the key falls to what is now topmost")
+    t:eq(bottomHits, 1, "and its handler runs")
+    bottom:unmount()
+end)
+
+s:test("a key is BLOCKED by a higher panel that does not want it, rather than falling through",
+function(t)
+    ownStack(t)
+    local hits = 0
+    local wants = mountAt{ what = "z_kw", z = 9010, keys = { "INS" },
+                           onKey = function() hits = hits + 1 end }
+    -- Declares no keys at all: it is not listening, and it still covers what is underneath.
+    local cover = mountAt{ what = "z_kc", z = 9020 }
+
+    local who, why = UI.routeKey("INS")
+    t:eq(who, nil, "nothing took the key")
+    t:eq(hits, 0, "the element that wanted it is covered, so it did not run")
+    t:truthy(why:find("blocked by", 1, true), "and the reason names the blocker: " .. tostring(why))
+    t:truthy(why:find(tostring(cover:state().id), 1, true), "by id, so it is actionable")
+
+    cover:unmount()
+    t:eq(UI.routeKey("INS"), wants:state().id, "uncovered, the same key now arrives")
+    t:eq(hits, 1, "and the handler runs")
+    wants:unmount()
+end)
+
+s:test("a MOUSE press goes to the topmost element that WANTS it, and stops there", function(t)
+    ownStack(t)
+    local bottomHits, midHits = 0, 0
+    local bottom = mountAt{ what = "z_mb", z = 9010, buttons = { "middle" },
+                            onMouse = function() bottomHits = bottomHits + 1 end }
+    local mid    = mountAt{ what = "z_mm", z = 9020, buttons = { "middle" },
+                            onMouse = function() midHits = midHits + 1 end }
+    -- The difference from the key rule, in one element: this one is on top and declares no
+    -- interest in the mouse, so it is TRANSPARENT to a press where it would BLOCK a key.
+    local top    = mountAt{ what = "z_mt", z = 9030, keys = { "INS" }, onKey = function() end }
+
+    local who, why = UI.routeMouse("middle")
+    t:eq(who, mid:state().id, "the topmost element that declared the button took it")
+    t:eq(midHits, 1, "its handler ran")
+    t:eq(bottomHits, 0, "and the press stopped there rather than carrying on down")
+
+    -- ...while a key at the same moment is blocked by the very element the press ignored.
+    local keyWho = UI.routeKey("INS")
+    t:eq(keyWho, top:state().id, "the same stack routes a key to the top element instead")
+    t:truthy(why:find("->", 1, true), "the mouse reason says where it went: " .. tostring(why))
+
+    top:unmount(); mid:unmount(); bottom:unmount()
+end)
+
+s:test("a press that nobody declared is reported, not swallowed", function(t)
+    ownStack(t)
+    local who, why = UI.routeMouse("left")
+    t:eq(who, nil, "with nothing mounted, nothing takes it")
+    t:truthy(why:find("no PalForge element is mounted", 1, true), tostring(why))
+
+    local el = mountAt{ what = "z_none", z = 9040, keys = { "INS" }, onKey = function() end }
+    who, why = UI.routeMouse("right")
+    t:eq(who, nil, "and an element that wants a key does not thereby want a button")
+    t:truthy(why:find("none of them declared onMousePressed", 1, true), tostring(why))
+    el:unmount()
+end)
+
+s:test("the handler is called (self, ctx) with the instance and what was pressed", function(t)
+    ownStack(t)
+    local seenSelf, seenCtx
+    local el = mountAt{ what = "z_ctx", z = 9050, keys = { "END" },
+                        onKey = function(self, ctx) seenSelf, seenCtx = self, ctx end }
+    UI.routeKey("end")   -- routed in whatever case it arrives; the router normalises
+    t:eq(seenSelf, el:state(), "`self` is the element INSTANCE, as everywhere else in this tree")
+    t:eq(seenCtx.key, "END", "ctx names the key")
+    t:eq(seenCtx.z, 9050, "and the z it was routed at")
+    t:eq(seenCtx.id, el:state().id, "and which element is being told")
+    el:unmount()
+end)
+
+s:test("a handler that raises is reported and does not break the next press", function(t)
+    ownStack(t)
+    local after = 0
+    local bad = mountAt{ what = "z_bad", z = 9060, keys = { "INS" },
+                         onKey = function() error("handler is broken", 0) end }
+    local who, why = UI.routeKey("INS")
+    t:eq(who, nil, "a raising handler did not take the press")
+    t:truthy(why:find("raised", 1, true), "and the reason says so: " .. tostring(why))
+    bad:unmount()
+
+    local good = mountAt{ what = "z_good", z = 9060, keys = { "INS" },
+                          onKey = function() after = after + 1 end }
+    t:eq(UI.routeKey("INS"), good:state().id, "the router is still working afterwards")
+    t:eq(after, 1, "and the next element's handler ran")
+    good:unmount()
+end)
+
+s:test("UI.report prints the stack and what the key binds are doing", function(t)
+    ownStack(t)
+    local el = mountAt{ what = "z_report", z = 9070, keys = { "INS" }, onKey = function() end }
+    local lines = table.concat(UI.report(), "\n")
+    t:truthy(lines:find(tostring(el:state().id), 1, true), "the mounted element is listed")
+    t:truthy(lines:find("z=9070", 1, true), "with its z")
+    t:truthy(lines:find("keys=INS", 1, true), "and the keys it asked for")
+    el:unmount()
+    t:truthy(table.concat(UI.report(), "\n"):find("no element is mounted", 1, true),
+        "and an empty stack says so rather than printing nothing")
+end)
+
+s:test("Esc is refused by name: nothing here goes between the player and the game's menu",
+function(t)
+    -- The one hard rule the whole input design exists for. A UI element may ask for Esc; the
+    -- engine seam refuses it, and the refusal carries the reason rather than a silent no-bind.
+    t:type(native.keys.FORBIDDEN.ESCAPE, "string", "the refusal is declared with its reason")
+    local recs = native.keys.arm({ keys = { "ESCAPE" }, onKey = function() end })
+    t:eq(#recs, 1, "one record came back for the one name")
+    t:eq(recs[1].state, "refused", "and it was refused rather than armed")
+    t:truthy(recs[1].why:find("close", 1, true) or recs[1].why:find("Esc", 1, true),
+        "with the mandate as the reason: " .. tostring(recs[1].why))
+    t:truthy(table.concat(native.keys.report(), "\n"):find("ESCAPE", 1, true),
+        "and it is visible in the report rather than only in this test")
+end)
+
+s:test("setZ says which hosts have a z and which do not, without touching a game", function(t)
+    local ok, why = native.tree.setZ(nil, 10)
+    t:eq(ok, false, "there is nothing to order when the host handed back no slot")
+    t:type(why, "string", "and the reason is a sentence: " .. tostring(why))
+    t:eq(native.tree.SCREEN_BASE_Z, 1000,
+        "a screen host still sits where every shipped PalForge screen sat, with z added to it")
+end)
+
 s:test("slot padding is expanded to the four sides UMG names", function(t)
     local m = native.tree.margin(6)
     t:eq(m.Left, 6, "one number pads every side")

@@ -65,7 +65,7 @@ means — most of this api is fail-soft, so a `false` is information, not an exc
 | [Effect](#effect) | `Effect{ … }` | `.get(id)` `.get_all()` `.activeOn(target)` | 10 methods | 4/4 | An effect is a status applied to a character (a player or a Pal): buffs, debuffs,… |
 | [Audio](#audio) | `Audio{ … }` | `.get(id)` `.get_all()` `.bgm(spec)` `.se(spec)` | 7 methods | — | Audio is one playable sound: background music or a one-shot effect. |
 | [Mesh](#mesh) | `Mesh{ … }` | `.get(id)` `.get_all()` | 6 methods | — | A mesh is the VISUAL a definition wears: a model asset plus how to paint it. |
-| [UI](#ui) | `UI{ … }` | `.get(id)` `.get_all()` | 12 methods | — | A UI element is something drawn on screen out of Palworld's own native UMG kit. |
+| [UI](#ui) | `UI{ … }` | `.get(id)` `.get_all()` `.report()` `.routeKey(keyName)` `.routeMouse(button)` `.stack()` | 12 methods | — | A UI element is something drawn on screen out of Palworld's own native UMG kit. |
 | [Player](#player) | — | `.character()` `.coordinate()` `.coordinateOffset(dx, dy, dz)` | — | — | PUBLIC player API. Thin facade over utils/player. |
 
 ## Validation — exactly what is rejected, and the message you get
@@ -538,6 +538,10 @@ A UI element is something drawn on screen out of Palworld's own native UMG kit.
 | `UI{ … }` | `UI.Handle` | Define a UI element and register it. |
 | `UI.get(id)` | `UI.Handle` | Get an EXISTING element by id: a previously-defined one, else a thin (inert) element. Never nil. |
 | `UI.get_all()` | `UI.Handle[]` | Every PalForge-registered UI element, as a list of handles. |
+| `UI.report()` | `string[]` | What the stack and the key binds are doing, as printable lines — the stack from here, the binds from the engine seam. |
+| `UI.routeKey(keyName)` | `string?` | Route one key press by name, exactly as an arriving key does. |
+| `UI.routeMouse(button)` | `string?` | The same for a mouse button ("left" / "right" / "middle"). |
+| `UI.stack()` | `table[]` | Every MOUNTED element, in routing order: highest z first, most recently mounted first among equals. |
 
 ### UI.Spec
 
@@ -552,6 +556,11 @@ A UI element is something drawn on screen out of Palworld's own native UMG kit.
 | `update` | `fun(self: UI.Handle)` | — | refresh the already-built widgets (self); runs on each :refresh() |
 | `destroy` | `fun(self: UI.Handle)` | — | remove the widgets render() built (self); runs on :unmount() |
 | `input` | `string` | = `none`, one of `none` `cursor` `clicks` `exclusive` | how much of the player's mouse this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor. "clicks" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. "exclusive" is a modal and stops game input — see the warning on it |
+| `z` | `number` | = `0` | stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down |
+| `keys` | `string[]` | checked | the key names onKeyPressed wants, spelled as UE4SS's Key table spells them ("INS", "END", "F4", "NUM_ZERO"). Required alongside onKeyPressed: a press is read through RegisterKeyBind, which binds ONE named key. "ESCAPE" is refused by name |
+| `onKeyPressed` | `fun(self: UI.Handle, ctx: table)` | — | one of `keys` went down: (self = the element INSTANCE, ctx.key / ctx.z / ctx.id). Reaches ONLY the topmost mounted element — a panel gets no key while anything is above it |
+| `buttons` | `string[]` | checked | which mouse buttons onMousePressed wants: "left", "right", "middle". Required alongside onMousePressed |
+| `onMousePressed` | `fun(self: UI.Handle, ctx: table)` | — | one of `buttons` went down: (self, ctx.button / ctx.z / ctx.id). Goes to the TOPMOST element that declared it and stops there. ⚠️ a global press, not a hit test — nothing says what was under the cursor and the game still receives it; for a click ON a widget use Button{ onClick = } |
 | `data` | `table` | — | default fields shared by every instance of this element |
 
 ### UI.Node.VBox
@@ -692,7 +701,7 @@ Same fields as [`UI.Node.Border`](#uinodeborder), with 1 difference:
 | `:unmount()` | — | Take the element down: runs destroy() so it removes its own widgets, then forgets the rendered state so a later mount() renders afresh. Also cancels autoRefresh/autoMount. |
 
 `UI.Class` methods (what `self` resolves inside a handler that gets a
-definition or an instance): `:destroy()` `:destroyTree()` `:find(name)` `:grabInput()` `:isMounted()` `:mount(root)` `:refresh()` `:releaseHost()` `:releaseInput()` `:render(root)` `:renderTree(root)` `:unmount()` `:update()` `:updateTree()`.
+definition or an instance): `:applyZ()` `:armInput()` `:destroy()` `:destroyTree()` `:find(name)` `:grabInput()` `:isMounted()` `:mount(root)` `:refresh()` `:releaseHost()` `:releaseInput()` `:render(root)` `:renderTree(root)` `:unmount()` `:update()` `:updateTree()`.
 
 ### palforge.ui
 

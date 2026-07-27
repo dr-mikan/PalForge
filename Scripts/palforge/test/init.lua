@@ -471,6 +471,196 @@ pf_uidecl = function()
         return true
     end)
 end,
+
+-- pf_uiz — TWO OVERLAPPING PANELS. The z-order and the event-routing rule, put on screen where
+-- they can be watched instead of asserted, and the ESC REGRESSION in the same run.
+--
+-- WHAT THIS ANSWERS, and each answer is separable from the others:
+--
+--   1. ⚠️ DOES ESC STILL CLOSE THE GAME'S OWN MENU. This is the one that matters. The BOTTOM
+--      panel is deliberately the exact configuration that broke it — a UI.Frame (the game's own
+--      WBP_PalCommonWindow chrome, a CommonUI activatable) plus input = "clicks" (which calls
+--      SetInputMode_GameAndUIEx and therefore hands our widget the keyboard focus). Both halves
+--      of the fix are on that path: the focus is handed straight back to the game viewport
+--      (SetFocusToGameViewport, dumps/cxx/UMG.hpp:2007) and the frame's CommonUI back-handler /
+--      modal / activation-focus flags are forced off before it is activated. Press Esc twice.
+--      If the menu opens and closes, the fix holds. If it opens and will not close, it does not,
+--      and the two log lines named below say which half failed.
+--
+--   2. WHICH PANEL IS DRAWN ON TOP. They overlap on purpose and the top one is smaller, so the
+--      bottom one shows around its edges. TOP declares z = 20, BOTTOM z = 10.
+--
+--   3. WHO GETS A KEY. Both panels want the same keys. Only the TOP one may have them — a key
+--      does not reach a panel while anything is above it. At 45 s the top panel takes itself
+--      down and the same key starts reaching the bottom one, which is the rule changing its
+--      answer while you watch.
+--
+--   4. WHO GETS A MOUSE PRESS. Only the BOTTOM panel declares one, and it gets middle-click even
+--      though it is covered — because a press goes to the topmost panel that WANTS it, where a
+--      key is blocked by the topmost panel full stop. That difference is the whole design, and
+--      this is the one run in which both halves are visible at once.
+--
+-- ⚠️ WHETHER THE KEYS ARRIVE AT ALL IS NOT SOMETHING THIS CAN PROMISE. Palworld claims keys
+-- without telling anyone — F7 was its volume control, the bind succeeded, the key never came —
+-- and there is no call that asks whether a key is free. So two keys are declared (INS and END),
+-- and the keys report prints, in words, that an arrival count of zero cannot tell "the game took
+-- it" from "nobody pressed it". If neither key arrives, THAT is the finding, and the panels still
+-- prove the z-order and the mouse half.
+--
+-- SAFE BY CONSTRUCTION: the top panel unmounts itself at 45 s and the bottom at 100 s, on ELAPSED
+-- SECONDS through core/poll — no key is needed to get rid of either, precisely because no key can
+-- be relied on. Unmounting is also what gives the cursor back.
+pf_uiz = function()
+    local UI   = require("palforge.api.ui")
+    local tree = require("palforge.native.ui").tree
+    local poll = require("palforge.core.poll")
+    local VBox, Label, Border, SizeBox, Frame = UI.VBox, UI.Label, UI.Border, UI.SizeBox, UI.Frame
+
+    -- Two keys rather than one, for the reason in the header: neither is known to be free, and
+    -- two independent chances cost nothing. Middle-click for the mouse half — the least likely of
+    -- the three to be in the middle of something the player is doing.
+    local KEYS, BUTTON = { "INS", "END" }, "middle"
+
+    -- THE BOTTOM PANEL. The game's own window chrome, and the input mode that broke Esc — this
+    -- one is the regression test as much as it is the lower half of the stack.
+    local Bottom = UI{
+        id    = "palforge_test:ZBottom",
+        name  = "z = 10, the panel underneath",
+        host  = "game",
+        z     = 10,
+        input = "clicks",
+        keys  = KEYS,
+        onKeyPressed   = function(self, ctx)
+            self.keyHits = (self.keyHits or 0) + 1
+            log.info(string.format("pf_uiz: BOTTOM took key %s (z=%d) — so nothing is above it "
+                .. "any more", tostring(ctx.key), ctx.z))
+        end,
+        buttons = { BUTTON },
+        onMousePressed = function(self, ctx)
+            self.mouseHits = (self.mouseHits or 0) + 1
+            log.info(string.format("pf_uiz: BOTTOM took mouse %q (z=%d) THROUGH the panel above "
+                .. "it — a press goes to the topmost panel that WANTS it", tostring(ctx.button), ctx.z))
+        end,
+        root = Frame{ color = { 0.05, 0.07, 0.12, 0.95 },
+            SizeBox{ width = 470, height = 250,
+                VBox{ padding = 12,
+                    Label{ text = "PalForge  BOTTOM  z = 10", size = 20, native = true },
+                    Label{ text = "input = \"clicks\"  +  the game's own window chrome" },
+                    Label{ name = "counts", text = function(self)
+                        return string.format("keys taken %d   |   middle-click taken %d",
+                            self.keyHits or 0, self.mouseHits or 0)
+                    end },
+                    Label{ text = "a key reaches me only once the RED panel is gone" },
+                    Label{ text = "I go away by myself at 100 s" },
+                },
+            },
+        },
+    }
+
+    -- THE TOP PANEL. Takes nothing at all (input = "none" is the default and is the right default),
+    -- declares no mouse interest, and is smaller so the panel underneath shows around it.
+    local Top = UI{
+        id    = "palforge_test:ZTop",
+        name  = "z = 20, the panel on top",
+        host  = "game",
+        z     = 20,
+        keys  = KEYS,
+        onKeyPressed = function(self, ctx)
+            self.keyHits = (self.keyHits or 0) + 1
+            log.info(string.format("pf_uiz: TOP took key %s (z=%d) — and the panel underneath did "
+                .. "NOT, which is the rule", tostring(ctx.key), ctx.z))
+        end,
+        root = Border{ color = { 0.32, 0.08, 0.06, 0.97 },
+            SizeBox{ width = 340, height = 130,
+                VBox{ padding = 10,
+                    Label{ text = "PalForge  TOP  z = 20", size = 20, native = true },
+                    Label{ name = "counts", text = function(self)
+                        return string.format("keys taken %d   |   no mouse declared",
+                            self.keyHits or 0)
+                    end },
+                    Label{ text = "I unmount myself at 45 s" },
+                },
+            },
+        },
+    }
+
+    local bottom = Bottom:new{ keyHits = 0, mouseHits = 0 }
+    local top    = Top:new{ keyHits = 0 }
+    -- autoMount for both: the in-game layout may not be up yet, and the same subscription that
+    -- retries the mount is the one that re-evaluates the counters once it is in.
+    bottom:autoMount(nil, 1000)
+    top:autoMount(nil, 1000)
+    log.info("pf_uiz: two panels are trying to mount into the game's own UI root (z = 10 and 20)")
+
+    local function report(when)
+        for _, line in ipairs(UI.report()) do log.info("pf_uiz " .. when .. ": " .. line) end
+        for _, line in ipairs(tree.clickReport()) do log.info("pf_uiz " .. when .. ": " .. line) end
+    end
+
+    -- What a panel actually got, read off its built tree rather than inferred: which slot class
+    -- the host handed back (a CanvasPanelSlot is the one that has a ZOrder at all) and what the
+    -- input grab really applied — "SetFocusToGameViewport" in that list is the Esc fix having run.
+    local function evidence(tag, h)
+        local st = h:state()
+        if not h:isMounted() then
+            log.warn(string.format("pf_uiz: %s is NOT mounted — %s", tag, tostring(h:lastError())))
+            return
+        end
+        local slotCls, rootCls = "?", "?"
+        pcall(function() slotCls = st._tree.slot:GetClass():GetFName():ToString() end)
+        pcall(function() rootCls = st._tree.root:GetClass():GetFName():ToString() end)
+        log.info(string.format("pf_uiz: %s mounted | z=%s | slot=%s | rootClass=%s | input -> %s",
+            tag, tostring(st.zOrder), slotCls, rootCls,
+            st._input and table.concat(st._input.applied or {}, " + ") or "nothing taken"))
+    end
+
+    local phase = 0
+    poll.every("pf_uiz", function(elapsed)
+        if elapsed >= 12 and phase < 1 then
+            phase = 1
+            evidence("TOP   ", top)
+            evidence("BOTTOM", bottom)
+            report("at 12 s")
+            log.info("pf_uiz: NOW — (a) press Esc TWICE: the game's menu must open AND close. "
+                .. "(b) press INS, then END: only the RED panel's counter may move. "
+                .. "(c) press the MIDDLE mouse button: only the BLUE panel's counter may move.")
+            support.announce("pf_uiz: press Esc twice, then INS / END, then middle-click")
+        elseif elapsed >= 45 and phase < 2 then
+            phase = 2
+            top:unmount()
+            log.info("pf_uiz: the TOP panel has unmounted itself. Press INS or END again — the "
+                .. "same key must now reach the BOTTOM panel, because nothing is above it.")
+            support.announce("pf_uiz: top panel gone — press INS / END again")
+        elseif elapsed >= 55 and phase < 3 then
+            phase = 3
+            report("at 55 s")
+        elseif elapsed >= 100 and phase < 4 then
+            phase = 4
+            bottom:unmount()
+            log.info("pf_uiz: the BOTTOM panel has unmounted itself; the cursor flag is restored "
+                .. "exactly as it was found (it is the one half that is readable).")
+        elseif elapsed >= 105 then
+            report("final")
+            log.info("pf_uiz: HOW TO READ IT — "
+                .. "(a) Esc opened AND closed the game's menu -> the Esc fix holds; look for "
+                .. "`SetFocusToGameViewport` in BOTTOM's input line and for the `[PalForge.ui] "
+                .. "frame: ... CommonUI activation flags were ...` line, which is the measurement "
+                .. "of which half was the cause. "
+                .. "(b) Esc opened it and would not close it -> the fix does NOT hold; those two "
+                .. "lines say which half did not run. "
+                .. "(c) the red panel's key counter moved and the blue one's did not -> the key "
+                .. "rule holds; after 45 s the blue one's moving instead is the same rule. "
+                .. "(d) the blue panel's mouse counter moved while the red panel was still up -> "
+                .. "the mouse rule holds, and it is genuinely different from the key rule. "
+                .. "(e) `arrived=0` on both keys -> Palworld has claimed INS and END, or nobody "
+                .. "pressed them, and the keys line above says in words that this count cannot "
+                .. "tell those two apart. The z-order and the mouse half are unaffected by it.")
+            support.announce("pf_uiz: done — both panels are down")
+            return true
+        end
+        return false
+    end)
+end,
 }
 for _, p in ipairs(M.PROBES) do
     M.ACTIONS["pf_" .. p.name] = function() M.probe(p.name) end

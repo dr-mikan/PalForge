@@ -133,6 +133,61 @@
 -- "exclusive" (it is NOT readable — UE has no GetInputMode — and forcing GameOnly would rip the
 -- mouse out of the game's own menu if one were open). native/ui/_widget.lua's INPUT block states
 -- that asymmetry in full.
+--
+-- ⚠️ AND THE ONE PROMISE THAT OUTRANKS EVERY OTHER LINE IN THIS FILE: THE PLAYER CAN ALWAYS
+-- CLOSE THE GAME'S OWN MENU. A live run found that a mounted panel with input = "clicks" stopped
+-- Esc from closing Palworld's menu — the failure this whole design was supposed to prevent, and
+-- one that is worse than a button that does nothing. Both halves of the fix are in
+-- native/ui/_widget.lua (keyboard focus is handed straight back to the game viewport; a Frame's
+-- CommonUI back-handler and modal flags are forced off before it is activated) and its ⚠️⚠️ block
+-- is the one to read. What belongs HERE is the rule those halves serve: no element of this tree
+-- may sit between the player and the game's own menu, whatever it declares.
+--
+-- WHICH PANEL IS ON TOP, AND WHICH ONE GETS THE KEY: `z`.
+--
+-- Two panels up at once is the ordinary case (a HUD readout and a dialog over it), and until
+-- there was a declared order it was decided by mount order — i.e. by whichever pack's file the
+-- loader happened to reach first. `z` is that order, declared, default 0, higher on top:
+--
+--   UI{ id = "pack:Hud",    host = "game", z = 0,   root = ... }
+--   UI{ id = "pack:Dialog", host = "game", z = 100, root = ... }
+--
+-- It decides TWO different things, and it is worth being exact about which is which:
+--
+--   DRAWING is the engine's, and only where the engine has a z at all. A tree hosted in the
+--   game's canvas gets it (UCanvasPanelSlot::SetZOrder, UMG.hpp:356); one hosted in the title
+--   screen's VerticalBox cannot, because a box stacks by child order and has no z — that is
+--   reported once, not swallowed. A "screen" host stacks by AddToViewport's z instead.
+--
+--   ROUTING is this file's, and it is exact everywhere, host or no host: the mounted elements
+--   are kept in (z, then mount order) and events walk that order.
+--
+-- EVENTS: `onKeyPressed` AND `onMousePressed`, ROUTED BY THAT ORDER.
+--
+--   onKeyPressed  reaches ONLY the topmost mounted element. A panel does not get a key while
+--                 anything above it is still up — even if the thing above it wants no keys at
+--                 all. That is the modal reading, and it is deliberate: the top panel is what
+--                 the player is looking at.
+--   onMousePressed goes to the topmost element that WANTS it, and stops there. An element that
+--                 declares no onMousePressed is transparent to a press rather than blocking it.
+--
+--   UI{ id = "pack:Dialog", z = 100,
+--       keys = { "INS" },          onKeyPressed   = function(self, ctx) self:unmount() end,
+--       buttons = { "middle" },    onMousePressed = function(self, ctx) ... end }
+--
+-- WHICH keys and WHICH buttons have to be declared, and that is not bureaucracy. A press is read
+-- through UE4SS's RegisterKeyBind, which binds one named key — there is no "give me every key",
+-- and there is no way to ask whether a key is free. Palworld claims keys without telling anyone:
+-- F7 was its volume control, the bind succeeded, and the key never arrived (core/autorun.lua:19-22).
+-- So the names are the author's to choose, `native/ui/keys.lua` counts what actually ARRIVES, and
+-- UI.report() prints — in words — that an arrival count of zero cannot distinguish "the game took
+-- this key" from "nobody pressed it". Esc is refused by name.
+--
+-- ⚠️ AND A MOUSE PRESS IS NOT A CLICK ON A WIDGET. onMousePressed is a global press notification
+-- routed by z; UE4SS cannot tell us what was under the cursor, and nothing here consumes the
+-- press — the game still gets it. Clicking a thing on screen is Button{ onClick = ... }, which
+-- goes through the game's own CommonButtonBase and really does know which widget was hit. The
+-- two are different events and neither substitutes for the other.
 
 local om     = require("palforge.core.object_manager")
 local schema = require("palforge.core.schema")
@@ -396,6 +451,49 @@ local Host = schema.define("UI.Spec.Host", {
       doc = "the panel inside it that takes our children: a declared member (read as a property), else a widget of that name in its tree. Omitted: the widget itself is the panel" },
 })
 
+--=============================================================================
+-- KEYS AND BUTTONS — what an element may ask to hear
+--=============================================================================
+
+---The three mouse buttons a press can be routed for, as a pack spells them. The engine's own
+---names for them live in native/ui/keys.lua and are not this file's business — api/ui makes no
+---engine call, and "left" is what an author writes.
+local BUTTONS = { left = true, right = true, middle = true }
+
+-- A non-empty array of non-empty strings. Both `keys` and `buttons` are lists rather than single
+-- values because wanting two of either is ordinary (a panel closed by Insert OR Delete), and a
+-- list of one costs a pair of braces.
+local function nameListCheck(what)
+    return function(v)
+        if #v == 0 then
+            return false, "is empty — name at least one " .. what .. ", or drop the field"
+        end
+        local n = 0
+        for _ in pairs(v) do n = n + 1 end
+        if n ~= #v then return false, "must be a plain array of " .. what .. " names" end
+        for i, item in ipairs(v) do
+            if type(item) ~= "string" or #item == 0 then
+                return false, string.format("entry %d is a %s, not a %s name", i, type(item), what)
+            end
+        end
+        return true
+    end
+end
+
+local keysCheck = nameListCheck("key")
+
+local function buttonsCheck(v)
+    local ok, why = nameListCheck("mouse button")(v)
+    if not ok then return false, why end
+    for i, b in ipairs(v) do
+        if not BUTTONS[tostring(b):lower()] then
+            return false, string.format("entry %d is %q — the buttons are \"left\", \"right\" "
+                .. "and \"middle\"", i, tostring(b))
+        end
+    end
+    return true
+end
+
 local HOST_NAMES = { screen = true, game = true }
 
 local function hostCheck(v)
@@ -438,6 +536,124 @@ local function refuse(st, why)
 end
 
 --=============================================================================
+-- THE STACK — every mounted element, in declared z order, and the two routers that walk it
+--
+-- WHY IT IS IN THIS FILE. Routing is a decision about WHO, and "who" is a list of Lua tables
+-- sorted by a number: no engine call, no widget, nothing that needs a game. That is what lets
+-- the whole rule be proved headlessly (test/cases/ui.lua does exactly that), and it is the same
+-- reason the node vocabulary lives here and the widget construction does not. What DOES need a
+-- game — whether a key press can be heard at all — is native/ui/keys.lua's, reached through the
+-- one seam this file already uses for everything engine-shaped, native/ui/tree.
+--
+-- THE ORDER. Highest z first; among equal z, the most recently mounted first. That tie-break is
+-- not arbitrary — it is what UMG itself does with a canvas, where children of equal ZOrder draw
+-- in the order they were added — so "what is on top" reads the same whether you ask the screen
+-- or ask this list.
+--
+-- THE TWO RULES, and they are different on purpose:
+--
+--   a KEY reaches only the TOPMOST mounted element. If the top element does not want that key,
+--   the key goes nowhere: it does NOT fall through to the panel underneath. A panel that is
+--   covered is not the panel the player is typing at.
+--
+--   a MOUSE PRESS goes to the topmost element that WANTS it, and stops there. An element with no
+--   onMousePressed is transparent rather than blocking, because a press has a position and a
+--   panel that declared no interest in one has said it is not what was pressed.
+--
+-- NEITHER CONSUMES ANYTHING. UE4SS's keybinds observe; they do not swallow. The game receives
+-- every one of these presses regardless of what this list decides. "Stops there" means it stops
+-- travelling down THIS list — no PalForge element below sees it — and nothing more than that.
+-- Saying so here is the difference between a documented mechanism and a mystery.
+--=============================================================================
+
+local STACK = { list = {}, seq = 0 }
+
+local function zOf(st) return tonumber(st.zOrder) or 0 end
+
+-- Mounted, in routing order. Rebuilt per event rather than kept sorted: a panel stack is a
+-- handful of entries and a press is a human action, so the sort is free and there is no
+-- invalidation to get wrong when an element's z or mount state changes.
+local function ordered()
+    local out = {}
+    for _, st in ipairs(STACK.list) do out[#out + 1] = st end
+    table.sort(out, function(a, b)
+        local az, bz = zOf(a), zOf(b)
+        if az ~= bz then return az > bz end
+        return (a._stackSeq or 0) > (b._stackSeq or 0)
+    end)
+    return out
+end
+
+local function stackPush(st)
+    if st._stackSeq then return end
+    STACK.seq = STACK.seq + 1
+    st._stackSeq = STACK.seq
+    STACK.list[#STACK.list + 1] = st
+end
+
+local function stackPop(st)
+    if not st._stackSeq then return end
+    st._stackSeq = nil
+    for i, e in ipairs(STACK.list) do
+        if e == st then table.remove(STACK.list, i); return end
+    end
+end
+
+local function label(st)
+    return string.format("%s (z=%d)", tostring(st.id or "ui element"), zOf(st))
+end
+
+-- Call one handler with the house event shape: (self, ctx), self being the element INSTANCE.
+-- A raising handler is reported and does not take the press down — the next press must still
+-- route, and a broken handler is one element's bug rather than the router's.
+local function deliver(st, fn, ctx, what)
+    local ok, e = pcall(fn, st, ctx)
+    if not ok then
+        log.err(string.format("%s: %s handler raised: %s", label(st), what, tostring(e)))
+        return nil, string.format("%s reached %s and the handler raised", what, label(st))
+    end
+    return st.id, string.format("%s -> %s", what, label(st))
+end
+
+---Route one key press. Returns the id of the element that took it, or nil — and, either way, the
+---sentence that says why, because "the key arrived and nothing happened" has four causes and a
+---log that does not name which one is a log that costs a whole run.
+---@param keyName string
+---@return string? delivered, string why
+local function routeKey(keyName)
+    local what = string.format("key %q", tostring(keyName))
+    local top = ordered()[1]
+    if not top then
+        return nil, what .. " arrived and no PalForge element is mounted"
+    end
+    if type(top.onKeyPressed) ~= "function" or not (top.keySet and top.keySet[keyName]) then
+        return nil, string.format("%s was blocked by %s, the topmost mounted element — a key "
+            .. "does not reach anything underneath, and this one did not want it", what, label(top))
+    end
+    return deliver(top, top.onKeyPressed,
+        { key = keyName, z = zOf(top), id = top.id, kind = "key" }, what)
+end
+
+---Route one mouse press ("left" / "right" / "middle") to the topmost element that wants it.
+---@param button string
+---@return string? delivered, string why
+local function routeMouse(button)
+    local what = string.format("mouse %q", tostring(button))
+    local order = ordered()
+    if #order == 0 then
+        return nil, what .. " arrived and no PalForge element is mounted"
+    end
+    for _, st in ipairs(order) do
+        if type(st.onMousePressed) == "function" and st.buttonSet and st.buttonSet[button] then
+            return deliver(st, st.onMousePressed,
+                { button = button, z = zOf(st), id = st.id, kind = "mouse" }, what)
+        end
+    end
+    return nil, string.format("%s reached none of the %d mounted element(s) — none of them "
+        .. "declared onMousePressed for it", what, #order)
+end
+
+--=============================================================================
 -- SPEC — the shape of UI{ ... }, declared as data so it is enforced on every call and so
 -- the editor type definitions can be generated from it. It stays a LOCAL; read it at
 -- runtime through the registry:
@@ -472,6 +688,16 @@ local Spec = schema.define("UI.Spec", {
     { "input",       type = "string", default = "none",
                      values = { "none", "cursor", "clicks", "exclusive" },
                      doc = "how much of the player's mouse this element takes while it is mounted. \"none\" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). \"cursor\" shows the cursor. \"clicks\" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. \"exclusive\" is a modal and stops game input — see the warning on it" },
+    { "z",           type = "number", default = 0,
+                     doc = "stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down" },
+    { "keys",        type = "table", sig = "string[]", check = keysCheck,
+                     doc = "the key names onKeyPressed wants, spelled as UE4SS's Key table spells them (\"INS\", \"END\", \"F4\", \"NUM_ZERO\"). Required alongside onKeyPressed: a press is read through RegisterKeyBind, which binds ONE named key. \"ESCAPE\" is refused by name" },
+    { "onKeyPressed", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
+                     doc = "one of `keys` went down: (self = the element INSTANCE, ctx.key / ctx.z / ctx.id). Reaches ONLY the topmost mounted element — a panel gets no key while anything is above it" },
+    { "buttons",     type = "table", sig = "string[]", check = buttonsCheck,
+                     doc = "which mouse buttons onMousePressed wants: \"left\", \"right\", \"middle\". Required alongside onMousePressed" },
+    { "onMousePressed", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
+                     doc = "one of `buttons` went down: (self, ctx.button / ctx.z / ctx.id). Goes to the TOPMOST element that declared it and stops there. ⚠️ a global press, not a hit test — nothing says what was under the cursor and the game still receives it; for a click ON a widget use Button{ onClick = }" },
     { "data",        type = "table",    doc = "default fields shared by every instance of this element" },
 })
 
@@ -585,7 +811,10 @@ function Class:mount(root)
         local tree, why = uiTree()
         if not tree then return refuse(self, why) end
         local host, reason
-        local ok, err = pcall(function() host, reason = tree.host(self.hostSpec) end)
+        -- The z goes in HERE for a "screen" host, because a viewport layer's stacking is decided
+        -- by AddToViewport at the moment it is shown and there is no slot to restyle afterwards.
+        -- A panel host takes its z from applyZ below instead. One declared number, two mechanisms.
+        local ok, err = pcall(function() host, reason = tree.host(self.hostSpec, { z = self.zOrder }) end)
         if not ok then return refuse(self, err) end
         if not host then return refuse(self, reason) end
         self._host, root = host, host.panel
@@ -599,7 +828,73 @@ function Class:mount(root)
     end
     self._mounted = true
     self._mountError, self._loggedError = nil, nil
+    -- IN THE STACK BEFORE ANYTHING ELSE IS TAKEN. Routing order is this file's own bookkeeping
+    -- and cannot fail; the three calls after it all can, and none of them may leave an element
+    -- that is on screen absent from the list that decides who gets a key.
+    stackPush(self)
+    self:applyZ()
+    self:armInput()
     self:grabInput()
+    return true
+end
+
+-- Echo the declared z into the host's slot, where the host has a z at all. Not a failure when it
+-- does not: a VerticalBox stacks by child order and has no ZOrder, so the declaration still
+-- decides routing and simply does not decide drawing there. Logged ONCE per instance, because a
+-- reason that repeats every remount buries the log the way the mount errors used to.
+function Class:applyZ()
+    local tree = uiTree()
+    if not tree then return false end
+    local slot = self._tree and self._tree.slot
+    -- A host we created already applied it (a screen layer stacks by AddToViewport, and
+    -- tree.host was given the z); there is nothing left to say about it.
+    if self._host and self._host.zApplied then return true end
+    local ok, why = false, nil
+    pcall(function() ok, why = tree.setZ(slot, self.zOrder) end)
+    -- An element that declared nothing is not owed an explanation: z = 0 is the default, an
+    -- imperative render has no slot to style, and a line per mount saying so would read like a
+    -- defect. The report is for the author who asked for a stacking order and did not get one.
+    if (tonumber(self.zOrder) or 0) == 0 then return ok end
+    if not ok and why and self._loggedZ ~= why then
+        self._loggedZ = why
+        log.info(string.format("%s: z = %s is routing-only here — %s",
+            tostring(self.id or "ui element"), tostring(self.zOrder), tostring(why)))
+    end
+    return ok
+end
+
+-- Ask the engine seam to arm the keys and buttons this element declared, and point them at the
+-- routers above. Arming is GLOBAL and PERMANENT — UE4SS has no unregister for a keybind, the same
+-- fact core/event.lua records for hooks — so a key is bound at most once per session and an
+-- element that unmounts stops receiving because the ROUTER stops choosing it, not because the
+-- bind went away. Every refusal is logged once per distinct message, never once per mount.
+function Class:armInput()
+    local wantsKeys = self.keyList and #self.keyList > 0
+    local wantsMouse = self.buttonList and #self.buttonList > 0
+    if not (wantsKeys or wantsMouse) then return false end
+    local tree = uiTree()
+    if not tree then return false end
+    local records
+    pcall(function()
+        records = tree.armInput({ keys = self.keyList, buttons = self.buttonList,
+                                  onKey = routeKey, onMouse = routeMouse })
+    end)
+    if type(records) ~= "table" then return false end
+    self._loggedKeys = self._loggedKeys or {}
+    for _, r in ipairs(records) do
+        local line = string.format("%s: %s", tostring(r.state), tostring(r.why or "bound"))
+        if self._loggedKeys[r.key] ~= line then
+            self._loggedKeys[r.key] = line
+            if r.state == "armed" then
+                log.info(string.format("%s: key %s armed — a press is ROUTED, never consumed, so "
+                    .. "the game still gets it. Whether it arrives at all is not knowable until "
+                    .. "one does; UI.report() says so too", tostring(self.id), r.key))
+            else
+                log.warn(string.format("%s: key %s %s — %s", tostring(self.id), r.key,
+                    tostring(r.state), tostring(r.why)))
+            end
+        end
+    end
     return true
 end
 
@@ -674,6 +969,10 @@ function Class:isMounted() return self._mounted == true end
 -- the rendered state, so a later mount() renders afresh instead of stacking a second
 -- copy. A throwing destroy() cannot leave the element stuck mounted.
 function Class:unmount()
+    -- OUT OF THE STACK FIRST, before anything that can fail. An element that is coming down must
+    -- stop being the reason a key does not reach the panel underneath it, and that has to be true
+    -- even if its destroy() raises — the same argument as releaseInput's, one layer up.
+    stackPop(self)
     if self._mounted then pcall(function() self:destroy() end) end
     self._mounted = false
     self._root = nil
@@ -741,6 +1040,55 @@ local function define(spec)
     end
     cls.hostSpec  = spec.host   -- read by mount() when it is given no root
     cls.inputMode = spec.input  -- read by mount() once the render has succeeded
+    cls.zOrder    = spec.z or 0 -- read by mount() (drawing) and by the routers (order)
+
+    -- A HANDLER AND ITS NAMES ARE ONE DECLARATION, and half of one is refused rather than
+    -- half-honoured. `onKeyPressed` with no `keys` cannot be wired to anything — a press is read
+    -- through RegisterKeyBind, which binds one NAMED key, and there is no "every key" form. And
+    -- `keys` with no handler binds a key of the player's, permanently (UE4SS has no unregister),
+    -- to route it to nothing. Both read as working code and neither is, so both are errors here
+    -- rather than a surprise in a log nobody is watching.
+    if spec.onKeyPressed and not spec.keys then
+        fail(string.format("UI %q declares onKeyPressed but no `keys`. A press is read through "
+            .. "UE4SS's RegisterKeyBind, which binds ONE named key — there is no way to ask for "
+            .. "all of them — so name the ones you want: keys = { \"INS\" }.", spec.id))
+    end
+    if spec.keys and not spec.onKeyPressed then
+        fail(string.format("UI %q declares `keys` but no onKeyPressed, so the keys would be "
+            .. "bound for the whole session (UE4SS has no unregister) and routed to nothing.",
+            spec.id))
+    end
+    if spec.onMousePressed and not spec.buttons then
+        fail(string.format("UI %q declares onMousePressed but no `buttons`. Name them: "
+            .. "buttons = { \"left\" }. ⚠️ and if what you want is a click ON something, that is "
+            .. "Button{ onClick = ... } — onMousePressed is a global press with no hit test.",
+            spec.id))
+    end
+    if spec.buttons and not spec.onMousePressed then
+        fail(string.format("UI %q declares `buttons` but no onMousePressed, so the buttons would "
+            .. "be bound for the whole session and routed to nothing.", spec.id))
+    end
+
+    -- Normalised ONCE, at define time, so neither router does string work per press: the LIST is
+    -- what the engine seam arms, the SET is what a route test reads.
+    if spec.keys then
+        cls.keyList, cls.keySet = {}, {}
+        for _, k in ipairs(spec.keys) do
+            local name = tostring(k):upper()
+            cls.keyList[#cls.keyList + 1] = name
+            cls.keySet[name] = true
+        end
+        cls.onKeyPressed = spec.onKeyPressed
+    end
+    if spec.buttons then
+        cls.buttonList, cls.buttonSet = {}, {}
+        for _, b in ipairs(spec.buttons) do
+            local name = tostring(b):lower()
+            cls.buttonList[#cls.buttonList + 1] = name
+            cls.buttonSet[name] = true
+        end
+        cls.onMousePressed = spec.onMousePressed
+    end
 
     -- A DECLARED tree fills the three seams itself. render is replaced outright (declaring
     -- both is refused above the assignment, not silently resolved); update and destroy are
@@ -799,6 +1147,73 @@ end
 function UI.get_all()
     local out = {}
     for _, cls in pairs(om.all("ui")) do out[#out + 1] = wrap(cls) end
+    return out
+end
+
+--=============================================================================
+-- the routing surface — published because a rule nobody can inspect is a rumour
+--=============================================================================
+
+---Every MOUNTED element, in routing order: highest z first, most recently mounted first among
+---equals. One row per element: { id, z, seq, keys, buttons }.
+---
+---This is the list both routers walk, handed back rather than described, so a probe or a test can
+---assert the order instead of inferring it from which handler ran.
+---@return table[]
+function UI.stack()
+    local out = {}
+    for i, st in ipairs(ordered()) do
+        out[i] = { id = st.id, z = zOf(st), seq = st._stackSeq,
+                   keys = st.keyList, buttons = st.buttonList }
+    end
+    return out
+end
+
+---Route one key press by name, exactly as an arriving key does. Returns the id of the element
+---that took it (nil if none) plus the sentence that says why.
+---
+---Published for two reasons: it is how the headless suite proves the rule with no keyboard, and
+---it is how a probe can ask "if INS arrived right now, who would get it" without pressing
+---anything. It does NOT synthesize a key press to the game — nothing here touches input.
+---@param keyName string
+---@return string? delivered, string why
+function UI.routeKey(keyName) return routeKey(tostring(keyName):upper()) end
+
+---The same for a mouse button ("left" / "right" / "middle").
+---@param button string
+---@return string? delivered, string why
+function UI.routeMouse(button) return routeMouse(tostring(button):lower()) end
+
+---What the stack and the key binds are doing, as printable lines — the stack from here, the
+---binds from the engine seam. Both halves matter and neither answers the other's question: the
+---stack says WHO would get a press, the binds say whether a press can arrive at all.
+---@return string[]
+function UI.report()
+    local out = {}
+    local list = UI.stack()
+    if #list == 0 then
+        out[#out + 1] = "ui: no element is mounted, so every key and mouse press routes nowhere"
+    else
+        out[#out + 1] = string.format("ui: %d mounted element(s), topmost first — a KEY reaches "
+            .. "only the first row; a MOUSE press reaches the first row that declared buttons",
+            #list)
+        for i, row in ipairs(list) do
+            out[#out + 1] = string.format("ui:   %d. %-34s z=%-5d keys=%s buttons=%s", i,
+                tostring(row.id), row.z,
+                (row.keys and #row.keys > 0) and table.concat(row.keys, ",") or "-",
+                (row.buttons and #row.buttons > 0) and table.concat(row.buttons, ",") or "-")
+        end
+    end
+    local tree = uiTree()
+    if not tree then
+        out[#out + 1] = "ui: the engine seam is unavailable, so nothing can be said about whether "
+            .. "any key is bound"
+        return out
+    end
+    local ok, lines = pcall(tree.keyReport)
+    if ok and type(lines) == "table" then
+        for _, line in ipairs(lines) do out[#out + 1] = line end
+    end
     return out
 end
 

@@ -60,7 +60,8 @@
 #   `rootClass=WBP_PalCommonWindow_C`       the panel is wearing the game's own chrome.
 #   `rootClass=Border`                      it is not; a [ui] warning above names what was missing.
 # Nothing is written to your save and the panel comes off with a reload (F9) or on leaving.
-20 pf_uidecl
+# 20 pf_uidecl   (superseded by pf_uiz, which stacks two panels)
+20 pf_uiz
 
 # ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----
 #

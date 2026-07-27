@@ -59,6 +59,7 @@
 -- dumps/reflection/03_widgets.txt:54), and nothing has yet been seen to appear in it.
 
 local widget = require("palforge.native.ui._widget")
+local keys   = require("palforge.native.ui.keys")
 local sig    = require("palforge.core.signature")
 
 local M = {}
@@ -501,6 +502,10 @@ function M.destroy(built)
         pcall(function() widget.releaseClicks(built.clicks) end)
     end
     local w = built.root
+    -- A UI.Frame root is a CommonUI activatable that mount() activated, and an activated widget
+    -- is registered with the game's action router. Deactivate it before it leaves the tree; the
+    -- call is a no-op for every other kind of root (widget.deactivate gates on the class).
+    pcall(function() widget.deactivate(w) end)
     built.root, built.slot = nil, nil
     built.byName, built.binds, built.clicks, built.notes = {}, {}, {}, {}
     if not alive(w) then return false end
@@ -524,12 +529,21 @@ end
 ---fullscreen dim plus an inset panel, and a frame the author did not declare is not
 ---composition. A declared tree that wants one writes it — UI.Border{ UI.SizeBox{ ... } } —
 ---and gets exactly the frame it can see in its own source.
+---`opts.z` is the element's declared stacking order. Where it lands depends on the host, because
+---the two hosts stack by different mechanisms and neither is a choice this file gets to make:
+---a "screen" host is a widget on the VIEWPORT and stacks by AddToViewport's z (UMG.hpp:1781); a
+---panel host stacks by its SLOT, which is M.setZ's job and only works on a canvas.
+---
+---SCREEN_BASE_Z is added rather than substituted so that the default (z = 0) is the 1000 every
+---shipped PalForge screen has used, and a declared z reads as "relative to where PalForge sits",
+---not as an absolute the author has to know the game's layers to choose.
 ---@return table? host, string? reason
-function M.host(spec)
+function M.host(spec, opts)
+    local z = tonumber(opts and opts.z) or 0
     if spec == "screen" then
-        local screen, why = widget.screen(nil, { dim = false })
+        local screen, why = widget.screen(nil, { dim = false, zOrder = M.SCREEN_BASE_Z + z })
         if not screen then return nil, tostring(why) end
-        return { panel = screen.root, outer = screen.tree, screen = screen,
+        return { panel = screen.root, outer = screen.tree, screen = screen, zApplied = "AddToViewport",
                  what = "a viewport layer of our own" }
     end
     if spec == "game" then
@@ -565,6 +579,78 @@ function M.grabInput(mode, focus) return widget.grabInput(mode, focus) end
 ---cannot: the cursor flag is readable and is restored precisely, the input MODE is not readable
 ---at all and is only forced back for the one mode that would otherwise strand the player.
 function M.releaseInput(grab) return widget.releaseInput(grab) end
+
+---The base viewport z-order a "screen" host sits at, before the element's declared `z` is added.
+---1000 is what every shipped PalForge screen used (_widget.show's own default), so a declared
+---z of 0 changes nothing about where a screen has always been drawn.
+M.SCREEN_BASE_Z = 1000
+
+--=============================================================================
+-- Z — the declared stacking order, echoed into the engine where the engine has one
+--
+-- THE DECLARED z IS THE SOURCE OF TRUTH FOR ROUTING, and this call is only the DRAWING half.
+-- api/ui keeps the mounted elements in declared-z order and routes keys and mouse presses down
+-- that order; nothing here is consulted for that. What this does is make what is DRAWN on top
+-- agree with what is ROUTED to first, so a panel that receives the key is also the panel the
+-- player can see. When it cannot (below), routing is still exactly right and only the drawing
+-- order is the host's business — which is worth saying rather than leaving as a surprise.
+--
+-- IT ONLY WORKS ON A CANVAS, and that is a fact about UMG rather than a limitation here:
+--   dumps/cxx/UMG.hpp:354   int32 ZOrder;                 } UCanvasPanelSlot, and ONLY that slot
+--                     :356   void SetZOrder(int32 InZOrder); } class
+-- A UVerticalBoxSlot / UOverlaySlot / UBorderSlot has no z at all — a box stacks by ORDER, not by
+-- number. So a tree hosted in the game's CanvasPanel_Root (host = "game", which is what
+-- _widget.gameUIRoot hands back — UMG.hpp:347) takes the z, and a tree injected into the title
+-- screen's VerticalBox cannot, and says so once rather than logging a refusal per mount.
+--
+-- SetZOrder takes a plain int32, so it is one of the calls core/signature can verify outright.
+-- The property is written as well as the setter, the way every slot write in this file is: UE4SS
+-- setters sometimes no-op where the property write lands, and vice versa.
+--=============================================================================
+
+---Give a built tree's host slot the element's declared z. Returns false plus the reason when the
+---slot has no such concept, which is normal and not a failure.
+---@return boolean applied, string? why
+function M.setZ(slot, z)
+    z = tonumber(z) or 0
+    if type(slot) ~= "userdata" then
+        return false, "the host handed back no slot to order (the tree is placed, and drawn in "
+            .. "the order its host stacks children)"
+    end
+    local cls
+    pcall(function() cls = slot:GetClass():GetFName():ToString() end)
+    if cls ~= "CanvasPanelSlot" then
+        return false, string.format("a %s has no ZOrder — only a UCanvasPanelSlot does "
+            .. "(UMG.hpp:354). This host stacks by child order, so the declared z still decides "
+            .. "event routing and does not decide drawing here", tostring(cls or "?"))
+    end
+    local ok = sig.call(slot, "SetZOrder", { "IntProperty" }, math.floor(z))
+    pcall(function() slot.ZOrder = math.floor(z) end)
+    if not ok then
+        return false, "SetZOrder was refused or raised (core/signature logged which); the "
+            .. "ZOrder property was still written"
+    end
+    return true
+end
+
+--=============================================================================
+-- keys — the seam api/ui reaches UE4SS's keyboard through
+--
+-- Re-exported here for one reason: api/ui talks to native/ui/tree and to nothing else. That is
+-- what lets api/ui hold the routing RULE (pure, provable with no game) while every question about
+-- whether a press can be heard at all lives on this side of the line. native/ui/keys.lua is where
+-- the answers are, and its header is the one to read about keys the game has already claimed.
+--=============================================================================
+
+---Arm the keys and mouse buttons an element declared, pointing them at api/ui's router.
+---Returns one record per name; never raises, and never blocks a mount.
+---@return table[] records
+function M.armInput(spec) return keys.arm(spec) end
+
+---What the UI key binds are doing, as printable lines — including the sentence that says what an
+---arrival count of zero cannot tell you.
+---@return string[]
+function M.keyReport() return keys.report() end
 
 ---What the shared click router is doing, as printable lines — armed routes, their ids, and how
 ---many clicks each has SEEN across the whole game. Re-exported so a probe or an autorun action

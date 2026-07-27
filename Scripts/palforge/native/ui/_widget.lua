@@ -1016,12 +1016,57 @@ function M.gameFrame(pc)
     -- straight into the canvas — so it has to be activated by hand or it can sit there collapsed,
     -- which would read as "the Frame node does nothing" with nothing in the log.
     -- ActivateWidget takes no arguments (CommonUI.hpp:177), so it goes through signature cleanly.
+    --
+    -- ⚠️ BUT NOT BEFORE THE THREE FLAGS BELOW ARE OFF, and this is the SECOND candidate cause of
+    -- "Esc could not close the game's menu" — the first being the focus argument, in the INPUT
+    -- block above. Activating a UCommonActivatableWidget registers it with the game's action
+    -- router (UPalCommonUIActionRouter, dumps/cxx/Pal.hpp:16698), and three of its declared
+    -- properties decide what that registration COSTS everybody else:
+    --
+    --   bIsBackHandler            CommonUI.hpp:149  this widget claims the BACK action — which is
+    --                                               what Esc is under CommonUI. Ours is not on any
+    --                                               layer and has no menu to close, so claiming it
+    --                                               can only swallow it.
+    --   bIsModal                  CommonUI.hpp:153  input does not reach anything underneath.
+    --   bSupportsActivationFocus  CommonUI.hpp:152  activating it moves focus onto it, which is
+    --                                               the same trap the focus argument sets.
+    --
+    -- Their values on WBP_PalCommonWindow_C's CDO are not in the dump (a header lists declarations,
+    -- not defaults), so they are READ and LOGGED before being forced false: that log line is the
+    -- measurement of which of the two candidates was really doing it, and it costs one line per
+    -- frame built. All three are plain BoolProperties, so this is a property write and not a call.
+    local were = {}
+    for _, flag in ipairs({ "bIsBackHandler", "bIsModal", "bSupportsActivationFocus" }) do
+        local was
+        pcall(function() was = frame[flag] end)
+        were[#were + 1] = flag .. "=" .. tostring(was)
+        pcall(function() frame[flag] = false end)
+    end
+    log("frame: " .. name .. " CommonUI activation flags were " .. table.concat(were, " ")
+        .. " — all three forced false before ActivateWidget, so an unparented window of ours can "
+        .. "never become the action router's back handler (that is Esc) or its modal")
     sig.call(frame, "ActivateWidget", {})
     -- SelfHitTestInvisible (ESlateVisibility 4, UMG_enums.hpp:48-55): the chrome must not eat the
     -- clicks meant for the button inside it, and Visible on a container is exactly how that
     -- happens. Children stay hit-testable.
     pcall(function() frame:SetVisibility(4) end)
     return frame, slot, name
+end
+
+---Deactivate a widget that IS a CommonUI activatable, and say nothing at all about one that is
+---not. The counterpart to the ActivateWidget above: an activated widget is registered with the
+---action router, and RemoveFromParent is not documented to unregister it — so a frame that is
+---taken down without this could keep a stale node in the router for the rest of the session.
+---
+---Gated on the class rather than tried blind: DeactivateWidget (CommonUI.hpp:170) is absent from
+---every plain UMG primitive this tree builds, and core/signature would correctly log a refusal
+---for each of them, which reads like a defect and is not one.
+---@return boolean deactivated
+function M.deactivate(w)
+    if not alive(w) then return false end
+    if not M.isA(w, "CommonActivatableWidget") then return false end
+    local ok = sig.call(w, "DeactivateWidget", {})
+    return ok == true
 end
 
 -- The game's own text block. A UWidget (UTextBlock -> UCommonTextBlock -> UPalTextBlockBase ->
@@ -1098,9 +1143,75 @@ end
 --     there is worse than one whose button does nothing. It is still the dangerous mode: a
 --     hot-reload (F9) drops this Lua state without ever calling release, and nobody would be
 --     able to move. Do not use it for anything a player leaves running.
+--
+-- ⚠️⚠️ THE FOCUS ARGUMENT, AND WHY ESC STOPPED CLOSING THE GAME'S MENU (2026-07-27)
+--
+-- OBSERVED, in a live save: with a declared panel up under `input = "clicks"`, pressing Esc no
+-- longer closed Palworld's own menu. That is the worst failure this file can have — a mod that
+-- traps a player in a menu is worse than a mod whose button does nothing — so the second
+-- argument to the two Ex calls is now the most load-bearing line in the module.
+--
+-- WHAT `InWidgetToFocus` DOES. It is not a hint. UWidgetBlueprintLibrary's implementation takes
+-- the widget's underlying SWidget and hands it to FInputMode*::SetWidgetToFocus, and
+-- APlayerController::SetInputMode applies that through the controller's own FReply
+-- (SlateOperations) as a SetUserFocus. So the moment a grab succeeds, KEYBOARD FOCUS SITS ON
+-- OUR PANEL and stays there — it is not scoped to the call, and nothing takes it back.
+--
+-- ⚠️ WHAT IS EVIDENCE HERE AND WHAT IS NOT, because the difference decides how much to believe.
+-- FROM THE DUMP, i.e. from this game install: the parameter exists, it is a UWidget*, and it is
+-- named InWidgetToFocus (UMG.hpp:2005); there is no non-Ex form (only :2003-2005 exist);
+-- SetFocusToGameViewport exists and takes nothing (:2007); Palworld ships a CommonUI action
+-- router (Pal.hpp:16698) and CommonUI resolves Esc as a BACK action against an activatable
+-- widget rather than as a key (CommonUI.hpp:149, :172). FROM UE'S OWN ENGINE SOURCE, which this
+-- repo cannot check: that SetWidgetToFocus becomes a SetUserFocus, and the FReply that carries
+-- it is deferred. NOT MEASURED AT ALL: that the focus is what broke Esc. It is the leading
+-- hypothesis and there is a SECOND one of equal standing — the UI.Frame's CommonUI activation
+-- flags, see the ⚠️ block in M.gameFrame — and this file now closes both, because closing one
+-- and guessing is how a session gets spent. THE MEASUREMENT IS THE RUN: `pf_uiz` prints the
+-- frame's three flags as it found them and lists what the grab applied, and Esc either closes
+-- the game's menu or it does not. Read those two log lines before believing either paragraph.
+--
+-- WHY THAT BREAKS ESC SPECIFICALLY, rather than all keys. Palworld's UI is CommonUI, and the
+-- game ships its own action router: `UPalCommonUIActionRouter : UCommonUIActionRouterBase`
+-- (dumps/cxx/Pal.hpp:16698, base at dumps/cxx/CommonUI.hpp:794). CommonUI does not read Esc as
+-- a key at all — it resolves a BACK action against the activatable widget that owns the focused
+-- widget (`bIsBackHandler`, CommonUI.hpp:149; `BP_OnHandleBackAction`, :172). A focus path that
+-- ends inside a widget of ours, parented into CanvasPanel_Root and belonging to no activatable
+-- tree the router knows, is a focus path with no back handler in it. The menu stays open.
+--
+-- IS THERE A NON-FOCUSING FORM. No — and that was worth checking rather than assuming. This
+-- build's UWidgetBlueprintLibrary declares exactly three input-mode entries, UMG.hpp:2003-2005,
+-- and both of the ones that set a mode with a cursor take the UWidget* focus parameter. There is
+-- no SetInputMode_GameAndUI without the Ex, and passing nil into an ObjectProperty is the one
+-- marshalling shape nobody here has measured (a wrong TYPE faults where pcall cannot see it).
+--
+-- SO THE FOCUS IS GIVEN STRAIGHT BACK. UMG.hpp:2007 declares
+--   void SetFocusToGameViewport();
+-- on the same library — no arguments at all, so it is the safest call in this file to make.
+-- Called after the mode call, it puts keyboard focus back on the game viewport, which is where
+-- the game's own input and CommonUI's router expect to find it. The MODE stays as asked, so
+-- clicks still reach widgets: mouse routing in Slate is by what is under the cursor, not by what
+-- has focus.
+--
+-- IT IS DONE TWICE, AND THAT IS NOT BELT-AND-BRACES. The focus the input mode asks for is
+-- DEFERRED — it rides the player controller's FReply and is processed when Slate next handles
+-- input, i.e. AFTER our immediate call returns. So the second pass, one heartbeat later on
+-- core/poll (elapsed seconds, never a tick count), is the one that actually wins; the immediate
+-- one covers the case where the reply was already flushed.
+--
+-- "exclusive" DOES NOT GET THE HAND-BACK, and the reason is that it would be theatre: UIOnly
+-- makes the viewport ignore game input outright, so Esc cannot reach the game whether we hold
+-- focus or not. What that mode gets instead is a DEAD-MAN RELEASE (M.EXCLUSIVE_MAX_SECONDS): an
+-- exclusive grab that is still held after that many seconds is released and the mode forced back
+-- to GameOnly, loudly. It is not a substitute for unmounting; it is the floor under the promise
+-- that the player always gets out.
 --=============================================================================
 
 M.MOUSE_LOCK = { DO_NOT_LOCK = 0, ON_CAPTURE = 1, ALWAYS = 2, IN_FULLSCREEN = 3 }
+
+---How long an "exclusive" (UIOnly) grab may be held before it is released without being asked.
+---Bounded on ELAPSED SECONDS through core/poll, never on a tick count (core/poll.lua:51-56).
+M.EXCLUSIVE_MAX_SECONDS = 120
 
 ---The modes M.grabInput accepts, as a set, so api/ui can declare the same list without
 ---duplicating it and without loading this module.
@@ -1110,6 +1221,44 @@ local function inputLibrary()
     local lib
     pcall(function() lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary") end)
     return alive(lib) and lib or nil
+end
+
+---Put keyboard focus back on the GAME VIEWPORT — the counter-move to the `InWidgetToFocus`
+---argument the two Ex input-mode calls insist on. See the ⚠️⚠️ block above for why this is the
+---line that decides whether Esc closes the game's own menu.
+---
+---`void SetFocusToGameViewport()` (dumps/cxx/UMG.hpp:2007) takes NO arguments, which makes it the
+---one call in this file with nothing to marshal and nothing to get wrong. It still goes through
+---core/signature, so a build that does not declare it logs a named refusal rather than raising.
+---@return boolean ok, string? why
+function M.releaseFocusToGame()
+    local lib = inputLibrary()
+    if not lib then
+        return false, "UWidgetBlueprintLibrary's CDO did not resolve, so focus could not be "
+            .. "handed back to the game viewport"
+    end
+    local ok = sig.call(lib, "SetFocusToGameViewport", {})
+    if ok then return true end
+    return false, "SetFocusToGameViewport was refused or raised (core/signature logged which)"
+end
+
+-- Ride the ONE heartbeat for the deferred second pass. Required lazily and inside a pcall so
+-- this module still loads in a session where core/poll is unavailable — the immediate call above
+-- has already run by then, and losing the second pass is a degraded fix, not a broken load.
+local function laterOnHeartbeat(name, seconds, fn)
+    local registered = false
+    pcall(function()
+        local poll = require("palforge.core.poll")
+        -- poll.every's own answer, not the pcall's: it REFUSES past its bound (core/poll.lua:63-67)
+        -- and reporting a pass that never registered is the silent failure this tree keeps paying
+        -- for. What is reported is what was really installed.
+        registered = poll.every(name, function(elapsed)
+            if elapsed < seconds then return false end
+            pcall(fn)
+            return true
+        end) == true
+    end)
+    return registered
 end
 
 ---Give the mouse to a widget. Returns a grab token to hand back to M.releaseInput, or nil plus
@@ -1175,7 +1324,40 @@ function M.grabInput(mode, focus)
         grab.mode = "cursor"
         grab.note = "the input-mode call did not go through (core/signature logged the reason); "
             .. "only the cursor was shown"
+        return grab
     end
+
+    if mode == "exclusive" then
+        -- No hand-back (it would be theatre in UIOnly — the viewport ignores game input either
+        -- way). A dead-man release instead, so this mode cannot outlive the player's patience.
+        grab.deadman = true
+        laterOnHeartbeat("ui exclusive dead-man", M.EXCLUSIVE_MAX_SECONDS, function()
+            if grab.released then return end
+            err(string.format("input = \"exclusive\" was still held after %d s and is being "
+                .. "released without being asked: UIOnly stops game input, and nothing unattended "
+                .. "may leave a player unable to move. Unmount the element that took it.",
+                M.EXCLUSIVE_MAX_SECONDS))
+            M.releaseInput(grab)
+        end)
+        return grab
+    end
+
+    -- THE LINE THAT KEEPS ESC WORKING. Immediately, and again one heartbeat later, because the
+    -- focus the mode call asks for is applied through the controller's deferred FReply and would
+    -- otherwise land AFTER this. Read the ⚠️⚠️ block above before changing either half.
+    local okFocus, whyFocus = M.releaseFocusToGame()
+    if okFocus then
+        grab.applied[#grab.applied + 1] = "SetFocusToGameViewport"
+    else
+        grab.note = (grab.note and (grab.note .. "; ") or "")
+            .. "keyboard focus could NOT be handed back to the game viewport (" .. tostring(whyFocus)
+            .. ") — Esc may not reach the game's own menu while this element is mounted"
+    end
+    local again = laterOnHeartbeat("ui focus hand-back", 0.4, function()
+        if grab.released then return end
+        M.releaseFocusToGame()
+    end)
+    if again then grab.applied[#grab.applied + 1] = "SetFocusToGameViewport (again next heartbeat)" end
     return grab
 end
 
@@ -1184,6 +1366,10 @@ end
 ---@return boolean released
 function M.releaseInput(grab)
     if type(grab) ~= "table" or not alive(grab.pc) then return false end
+    -- Latched so the deferred passes armed by grabInput (the focus hand-back, the exclusive
+    -- dead-man) become no-ops rather than acting on an element that is already down.
+    if grab.released then return false end
+    grab.released = true
     local pc = grab.pc
     if grab.mode == "exclusive" then
         local lib = inputLibrary()
