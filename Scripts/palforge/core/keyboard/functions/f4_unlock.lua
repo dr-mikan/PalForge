@@ -5,6 +5,10 @@
 local reg   = require("palforge.core.keyboard.base.registory")
 local items = require("palforge.utils.items")
 
+-- register(), not claim(): this is a documented, intentional bind of a specific key in a dev-only
+-- session, and being refused because Palworld happens to use F4 would leave the dev with no way
+-- in at all. The desc is what reg.report() prints next to whatever the game has on the same key,
+-- which is how "F4 does nothing" stops being a mystery — see core/keyboard/base/keymap.lua.
 reg.register("F4", function()
     items.unlockAllTech()
-end)
+end, { desc = "dev: unlock all technology" })

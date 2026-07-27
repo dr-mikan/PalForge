@@ -643,14 +643,26 @@ end
 --=============================================================================
 
 ---Arm the keys and mouse buttons an element declared, pointing them at api/ui's router.
----Returns one record per name; never raises, and never blocks a mount.
+---`spec.keys` are refused if Palworld's live key config already uses them; `spec.overrideKeys`
+---are taken anyway, deliberately. Returns one record per name; never raises, and never blocks a
+---mount.
 ---@return table[] records
 function M.armInput(spec) return keys.arm(spec) end
 
----What the UI key binds are doing, as printable lines — including the sentence that says what an
----arrival count of zero cannot tell you.
+---What the UI key binds are doing, as printable lines — including, for every armed key that has
+---never been pressed, which of the possible reasons applies.
 ---@return string[]
 function M.keyReport() return keys.report() end
+
+---The whole live keymap plus the per-name lookup table: what Palworld has an action on, and what
+---every UE4SS-bindable name's status is. Re-exported for the same reason keyReport is — a probe
+---or an autorun action should not have to reach past this seam to ask.
+---@return string[]
+function M.keymapReport()
+    local out = {}
+    for _, line in ipairs(keys.keymap.lines()) do out[#out + 1] = line end
+    return out
+end
 
 ---What the shared click router is doing, as printable lines — armed routes, their ids, and how
 ---many clicks each has SEEN across the whole game. Re-exported so a probe or an autorun action

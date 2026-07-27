@@ -1026,6 +1026,337 @@ s:test("setZ says which hosts have a z and which do not, without touching a game
         "a screen host still sits where every shipped PalForge screen sat, with z added to it")
 end)
 
+--=============================================================================
+-- IS THIS KEY FREE — the keymap, the three cases, and the deliberate override
+--
+-- WHY THESE CASES ARE IN THE UI FILE. The keyboard is reached from exactly one declarative
+-- surface (UI.Spec's `keys` / `overrideKeys`), it is the surface that pays for a wrong answer,
+-- and this file is where the rest of that surface is already proved. The modules under test are
+-- core/keyboard/base/{keymap,registory}.lua.
+--
+-- WHAT IS PROVABLE WITH NO GAME, WHICH IS MORE THAN IT LOOKS:
+--   * the NAME TRANSLATION, in full. UE4SS binds by Microsoft virtual-key name ("INS") and
+--     Unreal names the same key "Insert"; a lookup that forgets this finds nothing and reports
+--     every key free, which is worse than reporting nothing. That map is pure data.
+--   * the REFUSAL RULES: Esc always, our own keys always, the game's keys unless overridden.
+--   * the ATTRIBUTION, by installing a synthetic reading. The whole point of the rewrite is that
+--     `arrived = 0` now says something different depending on what the game has on the key, and
+--     "different" is exactly what a test can assert.
+--
+-- What is NOT provable here: that any of it reads a real Palworld. That needs a loaded world and
+-- it is what the pf_keys action exists for.
+--=============================================================================
+
+local keymap = require("palforge.core.keyboard.base.keymap")
+local reg    = require("palforge.core.keyboard.base.registory")
+
+-- Install a synthetic keymap reading for the body of one test, and put the real state back
+-- afterwards whatever happens. Everything the status logic reads lives on keymap.state, so this
+-- is an honest substitution rather than a mock of the thing under test: the same code path runs,
+-- over an index somebody else filled in.
+local function withKeymap(index, fn)
+    local st = keymap.state
+    local saved = { index = st.index, actions = st.actions, read = st.read, at = st.at,
+                    dirty = st.dirty }
+    st.index, st.actions, st.read, st.at, st.dirty = index, {}, true, os.clock(), false
+    local ok, err = pcall(fn)
+    st.index, st.actions, st.read, st.at, st.dirty =
+        saved.index, saved.actions, saved.read, saved.at, saved.dirty
+    if not ok then error(err, 0) end
+end
+
+-- ⚠️ SYNTHETIC KEY NAMES, AND THEY ARE NOT A SHORTCUT. Every case below that ARMS something runs
+-- in a live game too — F1 is the test runner — and UE4SS has no unregister, so a case that armed
+-- a real key would take it for the rest of the session and leave a dead record pointing at a
+-- torn-down element. These names are not in UE4SS's Key table, so the bind is refused in EVERY
+-- environment for the same reason and the case reads identically headless and in game. Routing
+-- does not care: api/ui routes on the declared name, never on an engine code.
+local FAKE_TAKEN, FAKE_A, FAKE_B = "PALFORGE_TEST_TAKEN", "PALFORGE_TEST_KEY_A", "PALFORGE_TEST_KEY_B"
+
+-- Give a synthetic name an FKey spelling for the length of one test, so it is answerable at all
+-- (a name the map cannot translate is "unknown", which is a different case from "the game has
+-- it"). Restores whatever was there, which is nil.
+local function withFakeName(name, fkey, fn)
+    local saved = keymap.FKEY[name]
+    keymap.FKEY[name] = fkey
+    local ok, err = pcall(fn)
+    keymap.FKEY[name] = saved
+    if not ok then error(err, 0) end
+end
+
+s:test("every UE4SS key name translates to an Unreal FKey name, or says it cannot", function(t)
+    -- The two spellings, on the keys where they disagree. Each of these was a silent miss
+    -- waiting to happen: "SPACE" is never found in a keymap that spells it "SpaceBar".
+    local pairsOf = {
+        { "INS", "Insert" }, { "DEL", "Delete" }, { "SPACE", "SpaceBar" },
+        { "RETURN", "Enter" }, { "BACKSPACE", "BackSpace" }, { "LEFT_ARROW", "Left" },
+        { "NUM_ZERO", "NumPadZero" }, { "ZERO", "Zero" }, { "PAGE_UP", "PageUp" },
+        { "LEFT_MOUSE_BUTTON", "LeftMouseButton" }, { "XBUTTON_ONE", "ThumbMouseButton" },
+    }
+    for _, p in ipairs(pairsOf) do
+        local fkey, how = keymap.translate(p[1])
+        t:eq(fkey, p[2], p[1] .. " is Unreal's " .. p[2])
+        t:eq(how, "known", "and that is a fact about the naming, not an assumption")
+    end
+    -- The families that agree letter for letter still have to be present, or they fall into the
+    -- unknown bucket and every letter key becomes unanswerable.
+    t:eq(keymap.translate("A"), "A", "a letter key is spelled the same in both")
+    t:eq(keymap.translate("F5"), "F5", "and so is a function key up to F12")
+
+    -- The OEM punctuation keys name a POSITION, not a character, so the mapping is a
+    -- layout assumption and is reported as one rather than as a measurement.
+    local comma, how = keymap.translate("OEM_COMMA")
+    t:eq(comma, "Comma", "OEM_COMMA is the comma on a US layout")
+    t:eq(how, "layout", "and the answer says it is assuming a layout")
+
+    -- Absence is an answer too, and it must never degrade into the identity: "VOLUME_UP" is a
+    -- real UE4SS key with no Unreal FKey at all, and a fallback that returned "VOLUME_UP" would
+    -- look it up, miss, and report the key free on the strength of a name nobody uses.
+    t:eq(keymap.translate("VOLUME_UP"), nil, "a key Unreal has no FKey for translates to nothing")
+    t:eq(keymap.translate("F13"), nil, "Unreal's EKeys stops at F12, so F13 is unanswerable")
+    t:eq(keymap.translate("NOT_A_KEY_AT_ALL"), nil, "and so is a name that is not a key")
+    t:eq(select(2, keymap.translate("NOT_A_KEY_AT_ALL")), "none", "with 'none' as the confidence")
+end)
+
+s:test("the name map covers every key UE4SS can actually bind", function(t)
+    -- The live check, and the only one that can catch UE4SS growing its table underneath us: a
+    -- name UE4SS will bind and this map has never heard of is a name PalForge would answer
+    -- "unknown" for forever. Headless there is no Key table, so this skips rather than passing
+    -- vacuously.
+    local n = 0
+    if type(Key) == "table" then for _ in pairs(Key) do n = n + 1 end end
+    if n == 0 then t:skip("no UE4SS Key table in this session") end
+    local missing = {}
+    for name in pairs(Key) do
+        if keymap.FKEY[name] == nil then missing[#missing + 1] = name end
+    end
+    t:eq(#missing, 0, "every UE4SS key name has a row: missing " .. table.concat(missing, ", "))
+end)
+
+s:test("with no reading, a key is 'unknown' and never 'free'", function(t)
+    -- The failure this whole module exists to prevent, in one assertion. At the title screen the
+    -- config cannot be read; answering "free" there would be a guess wearing a measurement's
+    -- clothes, and the arm that trusted it would be the F7 story again.
+    local st = keymap.state
+    local saved = { read = st.read, at = st.at, dirty = st.dirty, index = st.index }
+    st.read, st.at, st.dirty, st.index = false, os.clock(), false, {}
+    local ok, err = pcall(function()
+        local s1 = keymap.status("INS")
+        t:eq(s1.state, "unknown", "no reading means no answer")
+        t:eq(s1.fkey, "Insert", "though the name still translates")
+        t:truthy(s1.why:find("loaded world", 1, true), "and the reason names what is missing")
+    end)
+    st.read, st.at, st.dirty, st.index = saved.read, saved.at, saved.dirty, saved.index
+    if not ok then error(err, 0) end
+end)
+
+s:test("a reading splits keys into taken-by-the-game and free, and names the action", function(t)
+    withKeymap({
+        insert = { key = "Insert", actions = { { action = "OpenInventory", via = "config/main" } } },
+        w      = { key = "W",      actions = { { action = "MoveForward",   via = "config/axis" } } },
+    }, function()
+        local ins = keymap.status("INS")
+        t:eq(ins.state, "game", "a key the config has an action on is the game's")
+        t:eq(ins.actions[1].action, "OpenInventory", "and the action is named, not merely counted")
+        t:truthy(ins.why:find("does not consume", 1, true),
+            "with the sentence that says taking it does not stop the game's own action")
+
+        t:eq(keymap.status("W").state, "game", "movement is an AXIS mapping and counts the same")
+
+        local free = keymap.status("END")
+        t:eq(free.state, "free", "a key nothing uses is free")
+        t:truthy(free.why:find("not a promise", 1, true),
+            "and 'free' still refuses to promise the press arrives: " .. tostring(free.why))
+    end)
+end)
+
+s:test("Esc is refused by the keyboard registry itself, and an override does not unlock it",
+function(t)
+    -- ⚠️ THE ONE RULE THAT OUTRANKS EVERY OTHER LINE IN THIS TREE. `override` exists to take a
+    -- key Palworld uses; if it also took Esc it would be a one-word route back to the failure
+    -- the whole input design is built around.
+    t:eq(reg.status("ESCAPE").state, "forbidden", "Esc is refused before anything else is asked")
+    local ok, st = reg.claim("ESCAPE", function() end, { override = true })
+    t:eq(ok, false, "claiming it fails")
+    t:eq(st.state, "forbidden", "with the same reason, override or not")
+    t:falsy(reg.isBound("ESCAPE"), "and nothing was bound")
+end)
+
+s:test("a key PalForge already holds is refused, and the refusal names the holder", function(t)
+    -- F1 runs the test suite. The old registry replaced a callback in place and said nothing,
+    -- so a panel asking for F1 would have swallowed the runner — which is the one collision this
+    -- tree can actually do something about, so it is checked BEFORE the game's.
+    if not reg.isBound("F1") then t:skip("F1 is not bound in this session") end
+    local st = reg.status("F1")
+    t:eq(st.state, "palforge", "our own binding is the answer")
+    t:truthy(st.why:find("REPLACE", 1, true), "and the reason says what registering again does")
+    local ok, refused = reg.claim("F1", function() end)
+    t:eq(ok, false, "claim refuses rather than replacing")
+    t:truthy(refused.why:find("never steals", 1, true),
+        "and points at reg.register for the case where the replacement is meant")
+    t:eq(reg.bound.F1.opts.desc, "tests: all suites", "the original binding is untouched")
+end)
+
+s:test("a key the GAME uses is refused unless the caller said override", function(t)
+    withFakeName(FAKE_TAKEN, "PalForgeTestTaken", function()
+        withKeymap({
+            palforgetesttaken = { key = "PalForgeTestTaken",
+                                  actions = { { action = "VolumeUp", via = "config/main" } } },
+        }, function()
+            local ok, st = reg.claim(FAKE_TAKEN, function() end)
+            t:eq(ok, false, "the game has it, so it is not taken by accident")
+            t:eq(st.state, "game", "and the refusal says which case it was")
+            t:truthy(st.why:find("VolumeUp", 1, true),
+                "naming the action it would collide with")
+            t:truthy(st.why:find("overrideKeys", 1, true),
+                "and the exact field that would take it anyway: " .. tostring(st.why))
+
+            -- With the override the GAME check no longer refuses. The bind itself still fails —
+            -- this is a name no Key table has — and that is a DIFFERENT refusal with a different
+            -- sentence, which is the point: the two are distinguishable in the log.
+            local ok2, st2 = reg.claim(FAKE_TAKEN, function() end, { override = true })
+            t:eq(ok2, false, "there is no such engine key to bind to")
+            t:truthy(st2.why:find("RegisterKeyBind", 1, true),
+                "but the refusal is now about the ENGINE, not the game: " .. tostring(st2.why))
+            t:falsy(st2.why:find("PalForge refused it", 1, true), "the game refusal is gone")
+            t:falsy(reg.isBound(FAKE_TAKEN), "and a bind that did not take leaves no record")
+        end)
+    end)
+end)
+
+s:test("`overrideKeys` is a declaration of its own, checked where it is written", function(t)
+    local f = function() end
+    -- Half a declaration is refused exactly as `keys` alone is: an overridden key with no
+    -- handler would bind a key of the player's, permanently, and route it to nothing.
+    t:errors(function() UI{ id = support.id("ui_ov1"), overrideKeys = { "F7" } } end,
+        "declares `keys` but no onKeyPressed")
+    -- ...and a handler with ONLY overrideKeys is complete, because the override list arms too.
+    local El = UI{ id = support.id("ui_ov2"), overrideKeys = { FAKE_A:lower() }, onKeyPressed = f }
+    t:eq(El:state().keySet[FAKE_A], true,
+        "an overridden key is upper-cased and routable like any other")
+    t:eq(El:state().overrideList[1], FAKE_A,
+        "and is kept apart, because that difference IS the override")
+    t:eq(#El:state().keyList, 0, "it is not in the ordinary list")
+
+    -- Naming one key in both lists is two opposite instructions about the same key.
+    t:errors(function()
+        UI{ id = support.id("ui_ov3"), keys = { "INS" }, overrideKeys = { "INS" },
+            onKeyPressed = f }
+    end, "BOTH `keys` and `overrideKeys`")
+end)
+
+s:test("an overridden key routes exactly like a declared one, and shows up in the stack",
+function(t)
+    ownStack(t)
+    local got
+    local El = UI{ id = support.id("z_ov"), z = 9080,
+                   keys = { FAKE_A }, overrideKeys = { FAKE_B },
+                   onKeyPressed = function(_, ctx) got = ctx.key end,
+                   render = function() end }
+    local el = El:new{}
+    el:mount(fakeRoot())
+
+    t:eq(UI.routeKey(FAKE_B), el:state().id, "the overridden key routes to the element")
+    t:eq(got, FAKE_B, "and the handler is the same one")
+    t:eq(UI.routeKey(FAKE_A), el:state().id, "the ordinary key still routes")
+
+    local row = UI.stack()[1]
+    t:eq(table.concat(row.keys, ","), FAKE_A .. "," .. FAKE_B,
+        "the stack row lists both, declared order first")
+    t:eq(row.overrideKeys[1], FAKE_B, "and says which of them was overridden")
+    el:unmount()
+    native.keys.keys[FAKE_A], native.keys.keys[FAKE_B] = nil, nil
+end)
+
+s:test("arm() returns one record per name, including the overridden ones", function(t)
+    local recs = native.keys.arm({ keys = { FAKE_A }, overrideKeys = { FAKE_B },
+                                   onKey = function() end })
+    t:eq(#recs, 2, "one record per declared name")
+    t:eq(recs[1].key, FAKE_A, "keys first, in declared order")
+    t:eq(recs[2].key, FAKE_B, "then the overrides")
+    t:eq(recs[2].override, true, "and the override is recorded on the record, not inferred")
+    t:eq(recs[1].state, "refused", "neither is a real engine key, so neither arms")
+    t:truthy(recs[1].why:find("RegisterKeyBind", 1, true),
+        "and the record carries the reason rather than an empty state: " .. tostring(recs[1].why))
+    native.keys.keys[FAKE_A], native.keys.keys[FAKE_B] = nil, nil
+end)
+
+s:test("the report ATTRIBUTES a silent key instead of shrugging at it", function(t)
+    -- The whole point of the rewrite, asserted. Three armed keys that have never been pressed,
+    -- and the reading says something different about each — so the report has to say three
+    -- different things rather than one sentence about all of them.
+    local K = native.keys.keys
+    local names = { "PALFORGE_TEST_GAME", "PALFORGE_TEST_FREE", "PALFORGE_TEST_UNMAPPED" }
+    K[names[1]] = { key = names[1], state = "armed", arrivals = 0, routed = 0, blocked = 0 }
+    K[names[2]] = { key = names[2], state = "armed", arrivals = 0, routed = 0, blocked = 0 }
+    K[names[3]] = { key = names[3], state = "armed", arrivals = 0, routed = 0, blocked = 0 }
+    -- The first two have to translate to an FKey to be answerable at all, so they borrow two
+    -- real names for the length of this case.
+    local savedMap = { keymap.FKEY[names[1]], keymap.FKEY[names[2]] }
+    keymap.FKEY[names[1]], keymap.FKEY[names[2]] = "TestGameKey", "TestFreeKey"
+
+    local ok, err = pcall(function()
+        withKeymap({
+            testgamekey = { key = "TestGameKey",
+                            actions = { { action = "Crouch", via = "config/main" } } },
+        }, function()
+            local text = table.concat(native.keys.report(), "\n")
+            t:truthy(text:find("Crouch", 1, true),
+                "the key the game uses is reported WITH the action it collides with")
+            t:truthy(text:find(names[1] .. " never arrived AND THE GAME HAS AN ACTION", 1, true),
+                "and its silence is attributed to the game")
+            t:truthy(text:find(names[2] .. " never arrived AND THE GAME'S KEY CONFIG HAS NOTHING",
+                               1, true),
+                "a free key's silence is explicitly NOT the game's fault")
+            t:truthy(text:find(names[3] .. " never arrived AND THE GAME'S KEY CONFIG COULD NOT BE READ",
+                               1, true),
+                "and an unanswerable key keeps the old, honest 'cannot tell' answer")
+            t:truthy(text:find("NOT ONE of the 3 armed key", 1, true),
+                "with the whole-route verdict first, because it outranks every per-key reading")
+        end)
+    end)
+
+    keymap.FKEY[names[1]], keymap.FKEY[names[2]] = savedMap[1], savedMap[2]
+    for _, n in ipairs(names) do K[n] = nil end
+    if not ok then error(err, 0) end
+end)
+
+s:test("the lookup table has a row for every bindable name and counts the four cases",
+function(t)
+    withKeymap({
+        insert = { key = "Insert", actions = { { action = "OpenInventory", via = "config/main" } } },
+    }, function()
+        local lines = keymap.lookup({ F1 = "tests: all suites" }, reg.FORBIDDEN)
+        -- One header, one row per UE4SS key name, one summary.
+        local rows = 0
+        for name in pairs(keymap.FKEY) do rows = rows + 1; local _ = name end
+        t:eq(#lines, rows + 2, "a header, a row per bindable name, and the counts")
+        local text = table.concat(lines, "\n")
+        t:truthy(text:find("INS  ", 1, true) and text:find("OpenInventory", 1, true),
+            "a taken key names what has it")
+        t:truthy(text:find("F1  ", 1, true) and text:find("tests: all suites", 1, true),
+            "a key PalForge holds is the third case and appears as such")
+        t:truthy(text:find("no Unreal FKey name is known", 1, true),
+            "and an unanswerable name says which kind of unanswerable it is")
+        -- Esc is a row of its own in the operator's reference table, because whatever the game
+        -- has on it is beside the point: PalForge will not take it either way.
+        t:truthy(text:find("ESCAPE", 1, true) and text:find("refused", 1, true),
+            "Esc reads as refused outright, not as free or as the game's")
+    end)
+end)
+
+s:test("keymap.refresh with no game reads nothing and blanks nothing", function(t)
+    -- A refresh attempted at the title screen must not destroy a reading taken inside a world:
+    -- the index is built into a fresh table and only swapped in if something landed.
+    withKeymap({ insert = { key = "Insert", actions = { { action = "Keep", via = "config/main" } } } },
+    function()
+        local n, note = keymap.refresh()
+        t:eq(n, 0, "nothing is readable with no game")
+        t:type(note, "string", "and the note names every source's state: " .. tostring(note))
+        t:eq(keymap.status("INS").state, "game", "the earlier reading survived the failed refresh")
+    end)
+end)
+
 s:test("slot padding is expanded to the four sides UMG names", function(t)
     local m = native.tree.margin(6)
     t:eq(m.Left, 6, "one number pads every side")

@@ -15,10 +15,20 @@
 # pf_spawn
 # 20 pf_teach
 
+# ★ pf_keys — PALWORLD'S WHOLE LIVE KEYMAP, PRINTED. Read-only, one shot, NOTHING TO DO IN GAME.
+# This is the one that turns every future key question into a lookup instead of a deploy-and-hope.
+# It reads the key config the PLAYER edits (UPalOptionSubsystem.KeyConfigSettings) plus the
+# shipped DefaultInput.ini defaults, and prints three blocks between #### BEGIN keymap and
+# #### END keymap:
+#   1. the sources and change-watches, with their state — so an empty result always says WHY
+#   2. every key Palworld has an action on, with the action name and where the mapping came from
+#   3. ★ THE LOOKUP TABLE: one row per name UE4SS can bind — free / game / palforge / refused /
+#      unknown. Copy that block out; it is the answer to "can I have F6?" forever after.
+# It needs a LOADED WORLD (the config lives on a world subsystem), touches nothing, and writes
+# nothing to your settings or save. 8 s is just to let the subsystem settle after world.ready.
+
 # NOW: the last UI slot question. Read-only, one shot, no in-game action needed. The 10 s delay
 # lets the game's own UI widgets come up, because the probe cross-checks against them.
-5 pf_native
-10 pf_uislot
 
 # THE MESH CHAIN, END TO END — nothing to do but LOOK. 15 s after the world is ready it
 # resolves every catalogued /Game/... path, then hangs a shipped wooden chest (SM_ChestWood)
@@ -36,7 +46,6 @@
 # first time an animation blueprint has ever been resolved from a path in this tree.
 # It touches only a component of PalForge's own and destroys it again — your character's own
 # mesh, materials and save are never written to.
-15 pf_mesh
 
 # THE UI RUN — the one that needs you to CLICK. A declared panel mounts into the game's own UI
 # root 20 s after the world is ready, and then it wants ninety seconds of your attention:
@@ -61,7 +70,6 @@
 #   `rootClass=Border`                      it is not; a [ui] warning above names what was missing.
 # Nothing is written to your save and the panel comes off with a reload (F9) or on leaving.
 # 20 pf_uidecl   (superseded by pf_uiz, which stacks two panels)
-20 pf_uiz
 
 # ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----
 #
@@ -76,3 +84,8 @@
 # The hooks stay armed across that (UE4SS has no unregister), so the second load's storm is
 # counted in full and the verdict prints itself. Leave the mod running; do not restart.
 #pf_uievents
+5 pf_native
+8 pf_keys
+10 pf_uislot
+15 pf_mesh
+20 pf_uiz

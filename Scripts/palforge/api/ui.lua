@@ -176,12 +176,25 @@
 --       buttons = { "middle" },    onMousePressed = function(self, ctx) ... end }
 --
 -- WHICH keys and WHICH buttons have to be declared, and that is not bureaucracy. A press is read
--- through UE4SS's RegisterKeyBind, which binds one named key — there is no "give me every key",
--- and there is no way to ask whether a key is free. Palworld claims keys without telling anyone:
--- F7 was its volume control, the bind succeeded, and the key never arrived (core/autorun.lua:19-22).
--- So the names are the author's to choose, `native/ui/keys.lua` counts what actually ARRIVES, and
--- UI.report() prints — in words — that an arrival count of zero cannot distinguish "the game took
--- this key" from "nobody pressed it". Esc is refused by name.
+-- through UE4SS's RegisterKeyBind, which binds one named key — there is no "give me every key".
+--
+-- WHETHER A KEY IS FREE IS NOW ASKED, NOT ASSUMED. core/keyboard/base/keymap.lua reads Palworld's
+-- own key config out of the running game (the struct the options screen edits) and answers per
+-- key, so a `keys = { "F7" }` that collides with the player's own binding is REFUSED at mount
+-- with the action it collides with named, instead of arming into silence. That is what F7 cost
+-- the first time: its bind succeeded, it was the game's volume control, and the key never
+-- arrived (core/autorun.lua:19-22).
+--
+--   keys         = { "INS" }   keys the game must NOT already use. Refused if it does.
+--   overrideKeys = { "F7" }    ⚠️ take it anyway, deliberately, said at the call site.
+--
+-- ⚠️ AN OVERRIDE BUYS EXACTLY ONE THING: PalForge stops refusing. The game's own action still
+-- fires (a UE4SS keybind observes and does not consume — the same sentence as the routing rule
+-- below), the player's key config is NOT rewritten, and nothing can make a press arrive that the
+-- game is taking below UE4SS. Sharing a key means both things happen and you may still get
+-- nothing. `native/ui/keys.lua` counts what actually ARRIVES and UI.report() now ATTRIBUTES a
+-- zero — against what the game has on the key, and against whether any key has arrived at all —
+-- rather than saying the count cannot be read. Esc is refused by name, override or not.
 --
 -- ⚠️ AND A MOUSE PRESS IS NOT A CLICK ON A WIDGET. onMousePressed is a global press notification
 -- routed by z; UE4SS cannot tell us what was under the cursor, and nothing here consumes the
@@ -691,7 +704,9 @@ local Spec = schema.define("UI.Spec", {
     { "z",           type = "number", default = 0,
                      doc = "stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down" },
     { "keys",        type = "table", sig = "string[]", check = keysCheck,
-                     doc = "the key names onKeyPressed wants, spelled as UE4SS's Key table spells them (\"INS\", \"END\", \"F4\", \"NUM_ZERO\"). Required alongside onKeyPressed: a press is read through RegisterKeyBind, which binds ONE named key. \"ESCAPE\" is refused by name" },
+                     doc = "the key names onKeyPressed wants, spelled as UE4SS's Key table spells them (\"INS\", \"END\", \"F4\", \"NUM_ZERO\"). Required alongside onKeyPressed (or `overrideKeys`): a press is read through RegisterKeyBind, which binds ONE named key. A key Palworld's live key config already uses is REFUSED with the action named — use `overrideKeys` to take it anyway. \"ESCAPE\" is refused by name" },
+    { "overrideKeys", type = "table", sig = "string[]", check = keysCheck,
+                     doc = "⚠️ keys to take DELIBERATELY even though Palworld's key config uses them. Same names, same routing, same onKeyPressed — the only difference is that PalForge stops refusing. It does NOT stop the game's own action firing (a UE4SS keybind observes, it does not consume), does NOT rewrite the player's key config, and cannot make a press arrive that the game takes below UE4SS. \"ESCAPE\" is still refused" },
     { "onKeyPressed", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
                      doc = "one of `keys` went down: (self = the element INSTANCE, ctx.key / ctx.z / ctx.id). Reaches ONLY the topmost mounted element — a panel gets no key while anything is above it" },
     { "buttons",     type = "table", sig = "string[]", check = buttonsCheck,
@@ -869,14 +884,16 @@ end
 -- element that unmounts stops receiving because the ROUTER stops choosing it, not because the
 -- bind went away. Every refusal is logged once per distinct message, never once per mount.
 function Class:armInput()
-    local wantsKeys = self.keyList and #self.keyList > 0
+    local wantsKeys = (self.keyList and #self.keyList > 0)
+        or (self.overrideList and #self.overrideList > 0)
     local wantsMouse = self.buttonList and #self.buttonList > 0
     if not (wantsKeys or wantsMouse) then return false end
     local tree = uiTree()
     if not tree then return false end
     local records
     pcall(function()
-        records = tree.armInput({ keys = self.keyList, buttons = self.buttonList,
+        records = tree.armInput({ keys = self.keyList, overrideKeys = self.overrideList,
+                                  buttons = self.buttonList,
                                   onKey = routeKey, onMouse = routeMouse })
     end)
     if type(records) ~= "table" then return false end
@@ -886,9 +903,12 @@ function Class:armInput()
         if self._loggedKeys[r.key] ~= line then
             self._loggedKeys[r.key] = line
             if r.state == "armed" then
-                log.info(string.format("%s: key %s armed — a press is ROUTED, never consumed, so "
-                    .. "the game still gets it. Whether it arrives at all is not knowable until "
-                    .. "one does; UI.report() says so too", tostring(self.id), r.key))
+                log.info(string.format("%s: key %s armed (%s) — a press is ROUTED, never "
+                    .. "consumed, so the game still gets it. The game's live key config was "
+                    .. "checked before binding; whether the press ARRIVES is still only knowable "
+                    .. "once one does, and UI.report() now attributes a zero rather than "
+                    .. "shrugging at it", tostring(self.id), r.key,
+                    (r.game and r.game.state) or "unchecked"))
             else
                 log.warn(string.format("%s: key %s %s — %s", tostring(self.id), r.key,
                     tostring(r.state), tostring(r.why)))
@@ -1048,12 +1068,12 @@ local function define(spec)
     -- `keys` with no handler binds a key of the player's, permanently (UE4SS has no unregister),
     -- to route it to nothing. Both read as working code and neither is, so both are errors here
     -- rather than a surprise in a log nobody is watching.
-    if spec.onKeyPressed and not spec.keys then
+    if spec.onKeyPressed and not (spec.keys or spec.overrideKeys) then
         fail(string.format("UI %q declares onKeyPressed but no `keys`. A press is read through "
             .. "UE4SS's RegisterKeyBind, which binds ONE named key — there is no way to ask for "
             .. "all of them — so name the ones you want: keys = { \"INS\" }.", spec.id))
     end
-    if spec.keys and not spec.onKeyPressed then
+    if (spec.keys or spec.overrideKeys) and not spec.onKeyPressed then
         fail(string.format("UI %q declares `keys` but no onKeyPressed, so the keys would be "
             .. "bound for the whole session (UE4SS has no unregister) and routed to nothing.",
             spec.id))
@@ -1071,12 +1091,33 @@ local function define(spec)
 
     -- Normalised ONCE, at define time, so neither router does string work per press: the LIST is
     -- what the engine seam arms, the SET is what a route test reads.
-    if spec.keys then
-        cls.keyList, cls.keySet = {}, {}
-        for _, k in ipairs(spec.keys) do
+    -- `keys` and `overrideKeys` are ONE routing surface and TWO arming policies. keySet is what a
+    -- route test reads and holds both; keyList and overrideList are what the engine seam arms,
+    -- kept apart because the difference between them is the whole of what an override means.
+    if spec.keys or spec.overrideKeys then
+        cls.keyList, cls.keySet, cls.overrideList = {}, {}, {}
+        local function take(k, list)
             local name = tostring(k):upper()
-            cls.keyList[#cls.keyList + 1] = name
-            cls.keySet[name] = true
+            if not cls.keySet[name] then
+                cls.keySet[name] = true
+                list[#list + 1] = name
+            end
+        end
+        for _, k in ipairs(spec.keys or {}) do take(k, cls.keyList) end
+        for _, k in ipairs(spec.overrideKeys or {}) do
+            local name = tostring(k):upper()
+            -- Naming a key in BOTH lists is two answers to one question — "refuse this if the
+            -- game has it" and "take it even if the game has it" — and there is no ordering of
+            -- the two that is not a surprise to somebody. Same reasoning as `root` and `render`.
+            for _, already in ipairs(cls.keyList) do
+                if already == name then
+                    fail(string.format("UI %q names %s in BOTH `keys` and `overrideKeys`. Those "
+                        .. "are opposite instructions about the same key: `keys` means refuse it "
+                        .. "if Palworld uses it, `overrideKeys` means take it anyway. Pick one.",
+                        spec.id, name))
+                end
+            end
+            take(k, cls.overrideList)
         end
         cls.onKeyPressed = spec.onKeyPressed
     end
@@ -1163,8 +1204,17 @@ end
 function UI.stack()
     local out = {}
     for i, st in ipairs(ordered()) do
+        -- Both key lists, in the order they were declared. A row that showed only `keys` would
+        -- leave an element's overridden keys out of the one place that says who would get a
+        -- press — and an overridden key is the one most likely to be the thing under suspicion.
+        local keys
+        if st.keyList or st.overrideList then
+            keys = {}
+            for _, k in ipairs(st.keyList or {}) do keys[#keys + 1] = k end
+            for _, k in ipairs(st.overrideList or {}) do keys[#keys + 1] = k end
+        end
         out[i] = { id = st.id, z = zOf(st), seq = st._stackSeq,
-                   keys = st.keyList, buttons = st.buttonList }
+                   keys = keys, overrideKeys = st.overrideList, buttons = st.buttonList }
     end
     return out
 end

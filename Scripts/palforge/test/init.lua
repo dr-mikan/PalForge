@@ -104,11 +104,19 @@ M.CASES = {
 -- `#### END <id>`, where <id> is the item's id in that file.
 -- ⚠️ F7 IS PALWORLD'S OWN VOLUME KEY. The game claims it before UE4SS sees it, so a probe bound
 -- there can never be pressed — `watch` sat on F8 and was simply unreachable. Nothing in the log
--- says so either: the bind succeeds, the key just never arrives.
+-- said so either: the bind succeeded, the key just never arrived.
 --
 -- So `watch` moved to F8 and `title` to F2. If another key turns out to be taken, change it
--- HERE and nowhere else — this table is the only place a probe key is written, and the kernel
--- prints the whole list at startup so the current bindings are always in the log.
+-- HERE and nowhere else — this table is the only place a probe key is written.
+--
+-- THE KEYS BELOW ARE NO LONGER A GUESS, and this is the one line worth re-reading. The kernel
+-- prints every binding at startup AND `pf_keys` prints Palworld's whole live key config with a
+-- status for every bindable name (core/keyboard/base/keymap.lua). So before moving a probe key,
+-- run pf_keys from inside a save and pick one the lookup table calls `free` — and if a key that
+-- reads `free` still never arrives, THAT is a finding about something outside the key config
+-- (the Steam overlay, the OS, UE's own console keys) rather than another blind swap.
+-- ⚠️ Note what pf_keys still cannot see: F7 may well read `free` there. The game's key config is
+-- not the only thing that can take a key, and the report says so in its own words.
 M.PROBES = {
     { name = "reflect", key = "F5", needs = "a loaded save",
       desc = "reflection dump: classes, functions, parameters, DataTable rows" },
@@ -134,6 +142,54 @@ M.PROBES = {
 -- is free, and core/autorun when there is neither.
 M.ACTIONS = {
     pf_tests = function() M.run() end,
+
+-- pf_keys — PRINT PALWORLD'S WHOLE LIVE KEYMAP, AND WHAT EVERY BINDABLE NAME'S STATUS IS.
+--
+-- The single highest-value action in this table, and the one that did not exist for the whole
+-- of the session that produced the three input failures at the top of this file. Until now
+-- "can I have F6?" cost a deploy, a world load, a keypress and a log that said nothing either
+-- way. It now costs a lookup.
+--
+-- READ-ONLY, ONE SHOT, NOTHING TO DO IN GAME. It walks properties only — no UFunction is
+-- called anywhere in the path (core/keyboard/base/keymap.lua's header says why that matters),
+-- nothing is written to the player's settings or save, and it takes about a second.
+--
+-- IT NEEDS A LOADED WORLD. UPalOptionSubsystem is a UPalWorldSubsystem: at the title screen it
+-- does not exist and the config half cannot be read. Run it from inside a save.
+--
+-- WHAT COMES OUT, in three blocks:
+--   1. the SOURCES and the change WATCHES, one line each with their state — so "the keymap is
+--      empty" can never be the whole story; the line above it says which read refused and why.
+--   2. every key the game has an action on, with the action names and where each mapping came
+--      from: [config/main] and [config/second] are the PLAYER'S own bindings, [config/axis] is
+--      movement, [config/ui] is the menu keys, [project/*] is the shipped DefaultInput.ini and
+--      [project/console] is UE's own console key.
+--   3. THE LOOKUP TABLE: one row per name UE4SS can bind, its Unreal FKey name, and its status —
+--      free / game / palforge / unknown. This is the block to copy out and keep.
+--
+-- HOW TO READ A STATUS:
+--   free      no action in the game's key config uses it. The strongest thing anyone can say
+--             about a key here — and STILL not a promise the press arrives, because the Steam
+--             overlay, the OS and UE's own bindings are outside this config.
+--   game      Palworld has an action on it. Binding it means both fire, or the press never
+--             reaches UE4SS at all. That is what F7 was.
+--   palforge  this mod already holds it (F1 is the test runner). The right-hand column says
+--             which binding, and a ⚠️ there means it collides with the game as well.
+--   unknown   the config could not be read (no world), or Unreal has no FKey name for that
+--             UE4SS name at all. Never treat one as free.
+pf_keys = function()
+    local keymap = require("palforge.core.keyboard.base.keymap")
+    local reg    = require("palforge.core.keyboard.base.registory")
+    log.info("#### BEGIN keymap")
+    local n, note = keymap.refresh()
+    log.info("pf_keys: refresh -> " .. tostring(note))
+    for _, line in ipairs(keymap.lines()) do log.info("pf_keys " .. line) end
+    for _, line in ipairs(reg.report()) do log.info("pf_keys " .. line) end
+    for _, line in ipairs(keymap.lookup(reg.owned(), reg.FORBIDDEN)) do log.info("pf_keys " .. line) end
+    log.info("#### END keymap")
+    support.announce(string.format("pf_keys: %d game mapping(s) in UE4SS.log — the lookup table "
+        .. "is the block to keep", n))
+end,
 -- ---- commands that CREATE the situation a source needs ----
 --
 -- Two channels are only observable while something specific is happening, and both used to
@@ -787,16 +843,14 @@ function M.probe(name)
     return tonumber(err) or 0
 end
 
----What is bound where, as printable lines. Handy from a console command.
+---What is bound where — AND what Palworld has on the same key. Handy from a console command.
+---
+---It delegates to core/keyboard's own report rather than re-formatting reg.bound, because the
+---second column is the one that was missing: `watch` sat unreachable on the game's volume key
+---for a whole session while the log cheerfully said it was bound. The game half reads "unknown"
+---at load (the config needs a loaded world) and fills in from world.ready onward.
 ---@return string[]
-function M.bindings()
-    local out = {}
-    for _, key in ipairs(reg.keys()) do
-        local rec = reg.bound[key]
-        out[#out + 1] = string.format("%-4s %s", key, (rec.opts and rec.opts.desc) or "?")
-    end
-    return out
-end
+function M.bindings() return reg.report() end
 
 -- Wire it up on require: load the cases, put the whole run on F1, and give each discovery
 -- probe its own key. Re-bind any of them from your own code — M.bind replaces a binding in
@@ -862,6 +916,10 @@ installCommands()
 -- here and simply never fires — that is how `watch` sat unreachable on Palworld's volume key —
 -- so the log has to carry which key is on what, or a probe that cannot be pressed looks exactly
 -- like a probe that found nothing.
-for _, line in ipairs(M.bindings()) do log.info("key " .. line) end
+--
+-- The `game:` column reads "the game's key config has not been read" HERE and that is correct
+-- rather than a defect: this runs at mod load, the config lives on a world subsystem, and there
+-- is no world yet. Run `pf_keys` from inside a save for the filled-in version.
+for _, line in ipairs(M.bindings()) do log.info(line) end
 
 return M
