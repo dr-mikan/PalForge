@@ -67,8 +67,14 @@ end
 -- WHAT THE DUMP ELIMINATED, so nobody re-walks it. UPalUIHUDLayoutBase (Pal.hpp:30707) has no
 -- panel child to find: it is a native UCommonActivatableWidget and declares no widget members
 -- at all. It offers an API instead — AddHUD(UPalUserWidget*, int32) / RemoveHUD (Pal.hpp:30714,
--- :30712) — and that route is NOT taken here, because its parameter is a UPalUserWidget
--- (Pal.hpp:31888) and M.screen builds a plain /Script/UMG.UserWidget. One route per host.
+-- :30712) — which M.screen cannot use, because its parameter is a UPalUserWidget (Pal.hpp:31888)
+-- and M.screen builds a plain /Script/UMG.UserWidget.
+--
+-- ⚠️ THAT IS A FACT ABOUT M.screen, NOT ABOUT THE ROUTE. UI.Frame builds WBP_PalCommonWindow_C,
+-- which IS a UPalUserWidget, and the whole family of game-owned entry points is therefore open
+-- to it: AddHUD with a z, BP_AddWidget onto a CommonUI layer, and the activatable's own
+-- InputConfig. Read "THE GAME'S OWN UI ROUTE" further down this file before adding a host — it
+-- is where the two live runs that broke Esc were finally explained.
 M.PATHS = {
     menuButton      = "/Game/Pal/Blueprint/UI/UserInterface/Title/WBP_Title_MenuButton.WBP_Title_MenuButton_C",
     palTextBlock    = "/Game/Pal/Blueprint/UI/PalTextBlock/BP_PalTextBlock.BP_PalTextBlock_C",
@@ -983,7 +989,9 @@ end
 -- UContentWidget (UMG.hpp:1042 -> :505), so it takes our content through SetContent.
 M.PANEL_CLASSES = { "WBP_PalCommonWindow_C" }
 
--- The game's own window chrome, with the slot our content goes into.
+-- The game's own window chrome, with the slot our content goes into — and, because it is the
+-- only widget in this tree that is a UPalUserWidget, the ONE node that unlocks the game's own
+-- input-mode route and its own layer route. Read the ⚠️⚠️ block further down before changing it.
 --
 -- Returns (frame, contentHost, className) or nil + a reason. `contentHost` is the frame's
 -- NamedSlot, NOT the frame: a caller adds its tree to that and the chrome draws around it.
@@ -991,17 +999,48 @@ M.PANEL_CLASSES = { "WBP_PalCommonWindow_C" }
 -- WHY IT IS SEPARATE FROM THE FRAME. Every other widget in this file is its own parent. This one
 -- is not, and pretending otherwise is how a panel ends up drawn behind the frame instead of
 -- inside it — so the two are returned as two things and the caller cannot conflate them.
+--
+-- opts = { input       = an M.INPUT_MODES key; its `pal` byte is written onto the widget BEFORE
+--                        it is activated, which is the only moment the router reads it,
+--          layer       = a layer-tag substring (or true for the first layer) to push onto
+--                        through the game's own BP_AddWidget instead of parenting by hand,
+--          backHandler = claim the CommonUI BACK action (that is Esc) — see below }
 ---@return userdata? frame, userdata? contentHost, string? whyOrName
-function M.gameFrame(pc)
+function M.gameFrame(pc, opts)
+    opts = opts or {}
     local cls, name = M.liveClass(M.PANEL_CLASSES)
     if not cls then
         return nil, nil, "no Palworld window class is loaded (tried " ..
             table.concat(M.PANEL_CLASSES, ", ") .. ")"
     end
-    -- A UUserWidget, so it goes through WidgetBlueprintLibrary::Create like every other blueprint
-    -- widget here — StaticConstructObject would leave its WidgetTree null.
-    local frame, e = M.createFromClass(pc, cls, name)
-    if not frame then return nil, nil, tostring(e) end
+
+    -- ROUTE A: THE GAME'S OWN. BP_AddWidget on a registered CommonUI layer creates the widget,
+    -- pushes it on that layer's activatable stack, activates it and registers it with the action
+    -- router — all the things we otherwise do by hand and one (the router) that we cannot.
+    -- Unmeasured; it refuses with a sentence, and the caller falls through to route B.
+    local frame, container, layerTag
+    if opts.layer ~= nil and opts.layer ~= false then
+        local w, c, tagOrWhy = M.pushToLayer(opts.layer ~= true and opts.layer or nil, cls)
+        if w then
+            frame, container, layerTag = w, c, tagOrWhy
+            log(string.format("frame: %s pushed onto CommonUI layer %s through BP_AddWidget — the "
+                .. "game's own route, so the action router owns its activation and its input mode",
+                name, tostring(layerTag)))
+        else
+            log("frame: the layer route was not available (" .. tostring(tagOrWhy)
+                .. "); building the window directly instead")
+        end
+    end
+
+    -- ROUTE B: build it ourselves. A UUserWidget, so it goes through WidgetBlueprintLibrary::
+    -- Create like every other blueprint widget here — StaticConstructObject would leave its
+    -- WidgetTree null. This is the route two live runs have watched draw (tree.lua:1-9).
+    if not alive(frame) then
+        local e
+        frame, e = M.createFromClass(pc, cls, name)
+        if not frame then return nil, nil, tostring(e) end
+    end
+
     local slot = M.findByName(frame, M.PATHS.windowSlot) or M.findByClass(frame, "NamedSlot")
     if not alive(slot) then
         pcall(function() frame:RemoveFromParent() end)
@@ -1012,45 +1051,63 @@ function M.gameFrame(pc)
     -- (WBP_PalCommonWindow.hpp:4 -> Pal.hpp:31888 -> :13367 -> UCommonActivatableWidget,
     -- CommonUI.hpp:147), and a CommonUI activatable is DEACTIVATED when it is created: it carries
     -- bSetVisibilityOnActivated / ActivatedVisibility (CommonUI.hpp:163-164) and normally gets its
-    -- visibility from being pushed onto a layer. Ours is not pushed onto anything — it is parented
-    -- straight into the canvas — so it has to be activated by hand or it can sit there collapsed,
-    -- which would read as "the Frame node does nothing" with nothing in the log.
-    -- ActivateWidget takes no arguments (CommonUI.hpp:177), so it goes through signature cleanly.
+    -- visibility from being pushed onto a layer. On route B ours is not pushed onto anything, so
+    -- it has to be activated by hand or it can sit there collapsed, which would read as "the
+    -- Frame node does nothing" with nothing in the log. ActivateWidget takes no arguments
+    -- (CommonUI.hpp:177), so it goes through signature cleanly.
     --
-    -- ⚠️ BUT NOT BEFORE THE THREE FLAGS BELOW ARE OFF, and this is the SECOND candidate cause of
-    -- "Esc could not close the game's menu" — the first being the focus argument, in the INPUT
-    -- block above. Activating a UCommonActivatableWidget registers it with the game's action
-    -- router (UPalCommonUIActionRouter, dumps/cxx/Pal.hpp:16698), and three of its declared
-    -- properties decide what that registration COSTS everybody else:
+    -- ⚠️ THE THREE ACTIVATION FLAGS ARE NO LONGER FORCED, AND THAT IS A CORRECTION.
     --
-    --   bIsBackHandler            CommonUI.hpp:149  this widget claims the BACK action — which is
-    --                                               what Esc is under CommonUI. Ours is not on any
-    --                                               layer and has no menu to close, so claiming it
-    --                                               can only swallow it.
+    --   bIsBackHandler            CommonUI.hpp:149  this widget claims the BACK action — Esc.
     --   bIsModal                  CommonUI.hpp:153  input does not reach anything underneath.
-    --   bSupportsActivationFocus  CommonUI.hpp:152  activating it moves focus onto it, which is
-    --                                               the same trap the focus argument sets.
+    --   bSupportsActivationFocus  CommonUI.hpp:152  activating it moves focus onto it.
     --
-    -- Their values on WBP_PalCommonWindow_C's CDO are not in the dump (a header lists declarations,
-    -- not defaults), so they are READ and LOGGED before being forced false: that log line is the
-    -- measurement of which of the two candidates was really doing it, and it costs one line per
-    -- frame built. All three are plain BoolProperties, so this is a property write and not a call.
+    -- The previous version forced all three to false as one of two candidate causes of "Esc
+    -- stopped closing the game's menu". The run MEASURED them first and printed
+    -- `bIsBackHandler=false bIsModal=false bSupportsActivationFocus=true` — i.e. two of the three
+    -- were already false before anything of ours ran, so this window was never the router's back
+    -- handler and was never modal, and the suspect is dead. Forcing a flag we now know was
+    -- already correct is not caution, it is noise that hides the next reading. So they are READ
+    -- and LOGGED, and written only where the CALLER declared one.
+    --
+    -- ⚠️ AND bIsBackHandler IS NOW OFFERED RATHER THAN SUPPRESSED. It is how a CommonUI screen
+    -- says "Esc closes ME" — the mechanism the game itself uses (BP_OnHandleBackAction,
+    -- CommonUI.hpp:172) and the only way a mod can be IN Esc's path rather than beside it. It is
+    -- opt-in because a widget that claims Back and cannot handle it swallows the key, and
+    -- because whether the router registers a widget of ours at all is exactly what is unmeasured.
     local were = {}
     for _, flag in ipairs({ "bIsBackHandler", "bIsModal", "bSupportsActivationFocus" }) do
         local was
         pcall(function() was = frame[flag] end)
         were[#were + 1] = flag .. "=" .. tostring(was)
-        pcall(function() frame[flag] = false end)
     end
-    log("frame: " .. name .. " CommonUI activation flags were " .. table.concat(were, " ")
-        .. " — all three forced false before ActivateWidget, so an unparented window of ours can "
-        .. "never become the action router's back handler (that is Esc) or its modal")
-    sig.call(frame, "ActivateWidget", {})
+    if opts.backHandler ~= nil then
+        pcall(function() frame.bIsBackHandler = opts.backHandler == true end)
+        were[#were + 1] = "-> bIsBackHandler=" .. tostring(opts.backHandler == true) .. " (declared)"
+    end
+
+    -- ⚠️ THE INPUT MODE GOES ON HERE, BEFORE ActivateWidget, AND NOWHERE ELSE. Palworld keeps the
+    -- mode on the widget (Pal.hpp:13369-13370) and the router reads it at activation; the two
+    -- live runs that broke Esc wrote it into the player controller instead, behind the router's
+    -- back. On route A the widget was already activated by BP_AddWidget, so the write may be one
+    -- activation late — that is stated on the log line rather than hidden.
+    local inputSpec = opts.input and M.INPUT_MODES[opts.input] or nil
+    if inputSpec and inputSpec.pal ~= nil then
+        local wrote, detail = M.setWidgetInputConfig(frame, inputSpec)
+        log(string.format("frame: input = %q -> %s  [%s%s]", tostring(opts.input), detail,
+            wrote and "written" or "NOT written",
+            container and ", AFTER BP_AddWidget activated it — the router may not re-read it"
+                or ", before ActivateWidget, which is when the router reads it"))
+    end
+
+    log("frame: " .. name .. " CommonUI activation flags " .. table.concat(were, " ")
+        .. " — read, not forced; see the ⚠️ note in M.gameFrame for why that changed")
+    if not container then sig.call(frame, "ActivateWidget", {}) end
     -- SelfHitTestInvisible (ESlateVisibility 4, UMG_enums.hpp:48-55): the chrome must not eat the
     -- clicks meant for the button inside it, and Visible on a container is exactly how that
     -- happens. Children stay hit-testable.
     pcall(function() frame:SetVisibility(4) end)
-    return frame, slot, name
+    return frame, slot, name, container
 end
 
 ---Deactivate a widget that IS a CommonUI activatable, and say nothing at all about one that is
@@ -1113,277 +1170,541 @@ function M.palText(tree, str, size)
 end
 
 --=============================================================================
--- INPUT — letting the mouse reach a widget, and giving it back
+-- ⚠️⚠️ THE GAME'S OWN UI ROUTE — how Palworld puts a screen up, decides the input mode,
+-- and delivers Esc. Read this before touching input or hosting.
 --
--- THE PROBLEM, and it is not a UI problem. A widget that draws inside the game's own UI root
--- still gets no click while the game holds mouse capture: in GameOnly input mode Slate is never
--- offered the pointer at all, so hit-testing, visibility and z-order are all irrelevant. Pressing
--- Esc is what usually fixes this by hand — the game's own menu switches the input mode and shows
--- the cursor, and our panel (added last to CanvasPanel_Root, therefore drawn last) is on top and
--- clickable. That is the DEFAULT route here and it costs the player nothing.
+-- EVERYTHING BELOW IS FROM THIS INSTALL'S OWN DUMP unless a line says otherwise, and the
+-- lines that are inference say so. It was written after TWO live runs in which a mounted
+-- PalForge panel broke Esc, and it is the answer to "what were we doing wrong": we were
+-- writing, by hand, state that this game derives from its widget stack.
 --
--- THE THREE CALLS, all struct-free, all on UWidgetBlueprintLibrary (UMG.hpp:1993):
---   :2003  SetInputMode_UIOnlyEx(APlayerController*, UWidget* InWidgetToFocus,
---                                EMouseLockMode, bool bFlushInput)
---   :2005  SetInputMode_GameAndUIEx(APlayerController*, UWidget*, EMouseLockMode,
---                                   bool bHideCursorDuringCapture, bool bFlushInput)
---   :2004  SetInputMode_GameOnly(APlayerController*, bool bFlushInput)
--- plus the cursor itself, which is a plain property: APlayerController::bShowMouseCursor
--- (Engine.hpp:9035). EMouseLockMode is Engine_enums.hpp:2246-2252; DoNotLock = 0.
+-- 1. A SCREEN IS AN ACTIVATABLE WIDGET, AND IT DECLARES ITS OWN INPUT MODE.
 --
--- WHAT CAN AND CANNOT BE RESTORED, stated plainly because it decides the design. There is no
--- GetInputMode: UE offers no way to read the mode back, so "restore what was there" is not
--- available. `bShowMouseCursor` IS readable, so that half is restored exactly. For the mode:
---   * "clicks" (GameAndUI) is NOT forced back to GameOnly on release. GameAndUI still lets the
---     player move and look, so leaving it is not the failure that matters; forcing GameOnly
---     would rip the mouse out of the game's OWN menu if one happens to be open. Palworld
---     re-asserts its own mode every time a menu opens or closes, so this self-heals.
---   * "exclusive" (UIOnly) IS forced back, with SetInputMode_GameOnly. UIOnly is precisely the
---     state that leaves a player unable to move the camera, and a mod that leaves someone stuck
---     there is worse than one whose button does nothing. It is still the dangerous mode: a
---     hot-reload (F9) drops this Lua state without ever calling release, and nobody would be
---     able to move. Do not use it for anything a player leaves running.
+--      class UPalActivatableWidget : public UCommonActivatableWidget   Pal.hpp:13367
+--          EPalWidgetInputMode InputConfig;                            Pal.hpp:13369
+--          EMouseCaptureMode   GameMouseCaptureMode;                   Pal.hpp:13370
+--      enum class EPalWidgetInputMode { Default, GameAndMenu, Game, Menu }  Pal_enums.hpp:5367
+--      enum class EMouseCaptureMode  { NoCapture, CapturePermanently,
+--                                      CapturePermanently_IncludingInitialMouseDown,
+--                                      CaptureDuringMouseDown, ... }        Engine_enums.hpp:2237
 --
--- ⚠️⚠️ THE FOCUS ARGUMENT, AND WHY ESC STOPPED CLOSING THE GAME'S MENU (2026-07-27)
+--    EVERY Palworld screen is a UPalUserWidget (Pal.hpp:31888), which IS a UPalActivatableWidget,
+--    and it carries those two BYTES as data. The game does not call SetInputMode when a menu
+--    opens: it ACTIVATES a widget, and CommonUI's action router reads the topmost activatable's
+--    declared config and applies it — then restores the previous one when that widget
+--    deactivates. Opening the inventory and closing it again is one activate and one deactivate.
 --
--- OBSERVED, in a live save: with a declared panel up under `input = "clicks"`, pressing Esc no
--- longer closed Palworld's own menu. That is the worst failure this file can have — a mod that
--- traps a player in a menu is worse than a mod whose button does nothing — so the second
--- argument to the two Ex calls is now the most load-bearing line in the module.
+--    THE GAME WATCHES THAT HAPPEN, which is the proof it is the router's decision and not the
+--    caller's: APalHUDInGame::OnActiveInputModeChanged(ECommonInputMode) — Pal.hpp:9742 — is a
+--    callback the HUD gets when the ROUTER's active mode changes. ECommonInputMode is
+--    { Menu, Game, All } (CommonInput_enums.hpp:8). Nothing broadcasts that when we call
+--    UWidgetBlueprintLibrary::SetInputMode_* ourselves, because that call never reaches the
+--    router. That is the whole of the desync.
 --
--- WHAT `InWidgetToFocus` DOES. It is not a hint. UWidgetBlueprintLibrary's implementation takes
--- the widget's underlying SWidget and hands it to FInputMode*::SetWidgetToFocus, and
--- APlayerController::SetInputMode applies that through the controller's own FReply
--- (SlateOperations) as a SetUserFocus. So the moment a grab succeeds, KEYBOARD FOCUS SITS ON
--- OUR PANEL and stays there — it is not scoped to the call, and nothing takes it back.
+-- 2. ESC IS NOT A KEY ON THIS BUILD. IT IS A NAMED UI ACTION.
 --
--- ⚠️ WHAT IS EVIDENCE HERE AND WHAT IS NOT, because the difference decides how much to believe.
--- FROM THE DUMP, i.e. from this game install: the parameter exists, it is a UWidget*, and it is
--- named InWidgetToFocus (UMG.hpp:2005); there is no non-Ex form (only :2003-2005 exist);
--- SetFocusToGameViewport exists and takes nothing (:2007); Palworld ships a CommonUI action
--- router (Pal.hpp:16698) and CommonUI resolves Esc as a BACK action against an activatable
--- widget rather than as a key (CommonUI.hpp:149, :172). FROM UE'S OWN ENGINE SOURCE, which this
--- repo cannot check: that SetWidgetToFocus becomes a SetUserFocus, and the FReply that carries
--- it is deferred. NOT MEASURED AT ALL: that the focus is what broke Esc. It is the leading
--- hypothesis and there is a SECOND one of equal standing — the UI.Frame's CommonUI activation
--- flags, see the ⚠️ block in M.gameFrame — and this file now closes both, because closing one
--- and guessing is how a session gets spent. THE MEASUREMENT IS THE RUN: `pf_uiz` prints the
--- frame's three flags as it found them and lists what the grab applied, and Esc either closes
--- the game's menu or it does not. Read those two log lines before believing either paragraph.
+--      DT_UIInputAction  /Game/Pal/DataTable/UI/DT_UIInputAction.DT_UIInputAction
+--                        244 rows, INCLUDING "UIEscape" and "UICancel"
+--                        (core/keyboard/base/actions.lua:60-121 carries the shipped list)
+--      FPalKeyConfigSettings.MouseAndKeyboardUIInputMappings : TMap<FName, FKey>  Pal.hpp:3978
+--                        the player's action-name -> key map for exactly those rows
+--      UPalUserWidget::RegisterActionBinding(FName ActionName, bool IsDisplayActionBar,
+--                        TEnumAsByte<EInputEvent> InputType, <delegate> Callback)
+--                        -> FPalUIActionBindData                            Pal.hpp:31898
+--      UPalUserWidget::RegisterActionBinding_NotConcume(... same ...)       Pal.hpp:31897
+--      UPalUserWidget::UnregisterActionBinding(FPalUIActionBindData&)       Pal.hpp:31895
+--      UPalUserWidget.BindedActionHandles : TArray<FPalUIActionBindData>    Pal.hpp:31892
+--      UPalUIActionWidgetBase::SetActionBinding_ForBP(FPalUIActionBindData) Pal.hpp:30203
+--                        the on-screen prompt glyph, a UCommonActionWidget
+--      UPalUIUtility::SetEnableCommonUIInput(WorldContext, FName flag, bool) Pal.hpp:31667
+--      UPalUIUtility::ResetEnableCommonUIInput(WorldContext)                Pal.hpp:31670
+--      UPalUIUtility::GetUIInputActionRowHandle(WorldContext, FName, out)   Pal.hpp:31694
 --
--- WHY THAT BREAKS ESC SPECIFICALLY, rather than all keys. Palworld's UI is CommonUI, and the
--- game ships its own action router: `UPalCommonUIActionRouter : UCommonUIActionRouterBase`
--- (dumps/cxx/Pal.hpp:16698, base at dumps/cxx/CommonUI.hpp:794). CommonUI does not read Esc as
--- a key at all — it resolves a BACK action against the activatable widget that owns the focused
--- widget (`bIsBackHandler`, CommonUI.hpp:149; `BP_OnHandleBackAction`, :172). A focus path that
--- ends inside a widget of ours, parented into CanvasPanel_Root and belonging to no activatable
--- tree the router knows, is a focus path with no back handler in it. The menu stays open.
+--    So a Palworld screen that wants Esc does not bind a KEY. It asks its own widget for the
+--    ACTION named "UIEscape" (or "UICancel"), the router resolves that action against the
+--    activatable tree that owns the focused widget, and the binding is CONSUMING or not by which
+--    of the two functions was called — `_NotConcume` is the game's own spelling of "observe".
+--    Underneath, the router is UCommonUIActionRouterBase (CommonUI.hpp:794), specialised as
+--    UPalCommonUIActionRouter (Pal.hpp:16698); the action table is
+--    UCommonUIInputSettings.InputActions : TArray<FUIInputAction> (CommonUI.hpp:810), and the
+--    generic BACK path is bIsBackHandler (CommonUI.hpp:149) + BP_OnHandleBackAction (:172).
 --
--- IS THERE A NON-FOCUSING FORM. No — and that was worth checking rather than assuming. This
--- build's UWidgetBlueprintLibrary declares exactly three input-mode entries, UMG.hpp:2003-2005,
--- and both of the ones that set a mode with a cursor take the UWidget* focus parameter. There is
--- no SetInputMode_GameAndUI without the Ex, and passing nil into an ObjectProperty is the one
--- marshalling shape nobody here has measured (a wrong TYPE faults where pcall cannot see it).
+--    ⚠️ WHAT THIS MEANS FOR RegisterKeyBind. A UE4SS keybind on Escape would OBSERVE the key and
+--    could never PARTICIPATE: it cannot consume, it cannot order itself against the router, and
+--    it would fire whether or not a screen of ours is up. That is why ESCAPE stays refused as a
+--    bindable key in core/keyboard — not as a safety rule, but because it is the wrong tool. The
+--    right tool is the action binding above, and native/ui/keys.lua's header says so now.
 --
--- SO THE FOCUS IS GIVEN STRAIGHT BACK. UMG.hpp:2007 declares
---   void SetFocusToGameViewport();
--- on the same library — no arguments at all, so it is the safest call in this file to make.
--- Called after the mode call, it puts keyboard focus back on the game viewport, which is where
--- the game's own input and CommonUI's router expect to find it. The MODE stays as asked, so
--- clicks still reach widgets: mouse routing in Slate is by what is under the cursor, not by what
--- has focus.
+--    ⚠️ AND WHAT IS NOT REACHABLE YET. RegisterActionBinding's fourth parameter is a DELEGATE.
+--    core/signature refuses DelegateProperty outright (signature.lua:60-63) and UE4SS has no
+--    documented way to push a Lua function into a delegate ARGUMENT (binding a delegate
+--    PROPERTY is a different thing and is supported). So PalForge cannot make that call today.
+--    Two routes remain and both are measurable rather than guessed:
+--      (a) bIsBackHandler = true on our own activatable + a hook on
+--          /Script/CommonUI.CommonActivatableWidget:BP_OnHandleBackAction. The click router in
+--          this file already proves hooks take in the CommonUI module.
+--      (b) a hook on /Script/Pal.PalUserWidget:RegisterActionBinding, which OBSERVES every
+--          action the game's own screens bind, with the name and the widget. That is what
+--          test/init.lua's pf_uiroute arms; it is a reading instrument, not a binding.
 --
--- IT IS DONE TWICE, AND THAT IS NOT BELT-AND-BRACES. The focus the input mode asks for is
--- DEFERRED — it rides the player controller's FReply and is processed when Slate next handles
--- input, i.e. AFTER our immediate call returns. So the second pass, one heartbeat later on
--- core/poll (elapsed seconds, never a tick count), is the one that actually wins; the immediate
--- one covers the case where the reply was already flushed.
+-- 3. A SCREEN IS PUT UP THROUGH A LAYER, NOT BY PARENTING INTO A CANVAS.
 --
--- "exclusive" DOES NOT GET THE HAND-BACK, and the reason is that it would be theatre: UIOnly
--- makes the viewport ignore game input outright, so Esc cannot reach the game whether we hold
--- focus or not. What that mode gets instead is a DEAD-MAN RELEASE (M.EXCLUSIVE_MAX_SECONDS): an
--- exclusive grab that is still held after that many seconds is released and the mode forced back
--- to GameOnly, loudly. It is not a substitute for unmounting; it is the floor under the promise
--- that the player always gets out.
+--      class UPrimaryGameLayout : public UCommonUserWidget                CommonGame.hpp:156
+--          TMap<FGameplayTag, UCommonActivatableWidgetContainerBase*> Layers;  :158
+--          void RegisterLayer(FGameplayTag, UCommonActivatableWidgetContainerBase*);  :160
+--      class UPalPrimaryGameLayoutBase : public UPrimaryGameLayout        Pal.hpp
+--      class UCommonActivatableWidgetContainerBase : public UWidget       CommonUI.hpp:180
+--          UCommonActivatableWidget* BP_AddWidget(TSubclassOf<UCommonActivatableWidget>);  :194
+--          void RemoveWidget(UCommonActivatableWidget*);                       :190
+--          UCommonActivatableWidget* GetActiveWidget();                        :192
+--          TArray<UCommonActivatableWidget*> WidgetList;                       :185
+--      class UPalActivatableWidgetContainer : public UCommonActivatableWidgetStack  Pal.hpp
+--
+--    PalForge ALREADY FINDS THE RIGHT OBJECT and then goes round the front door: M.gameUIRoot
+--    does FindFirstOf("PalPrimaryGameLayoutBase") and reaches past it into CanvasPanel_Root.
+--    That draws — it is confirmed drawing, tree.lua:1-9 — and it is not how the game does it.
+--    BP_AddWidget on one of that layout's LAYERS creates the widget, pushes it on the stack,
+--    activates it, gives it the transition, hands it to the router, and hands the instance back.
+--    RemoveWidget takes it off and the router restores whatever was underneath.
+--
+--    The alternatives the game also uses, for completeness — all instance-or-class calls that
+--    exist on this build and none of which need a struct:
+--      APalHUDInGame::AddHUD(TSubclassOf<UPalUserWidget>, EPalHUDWidgetPriority,
+--                            UPalHUDDispatchParameterBase*) -> FGuid          Pal.hpp:9755
+--      APalHUDInGame::CloseHUDWidget(UPalUserWidget*) / RemoveHUD(FGuid)      Pal.hpp:9751, :9739
+--      APalHUDInGame::PushWidgetStackableUI(TSubclassOf<...>, Param) -> FGuid Pal.hpp:9740
+--      UPalUIHUDLayoutBase::AddHUD(UPalUserWidget* Widget, int32 ZOrder)      Pal.hpp:30714
+--      UPalUIHUDLayoutBase::RemoveHUD(UPalUserWidget* Widget)                 Pal.hpp:30712
+--      UPalUserWidget::Push(TSubclassOf<UPalUserWidgetOverlayUI>, Param)      Pal.hpp:31894
+--    EPalHUDWidgetPriority is Pal_enums.hpp:2007. Note AddHUD takes an INSTANCE and a ZORDER —
+--    it is the game's own answer to the z question this tree solves with SetZOrder — but its
+--    parameter is a UPalUserWidget, so only a widget built from a Palworld class may be handed
+--    to it. WBP_PalCommonWindow_C is one (WBP_PalCommonWindow.hpp:4), which is exactly why
+--    UI.Frame is the node that unlocks the game's own route.
+--
+-- 4. ⚠️ WHY ESC DIED, AND HOW THAT IS KNOWN. Two live runs, one variable between them.
+--
+--      RUN 1  input = "clicks" -> SetInputMode_GameAndUIEx, no focus hand-back.
+--             Esc OPENED the game's menu and would not CLOSE it.
+--      RUN 2  the same, plus SetFocusToGameViewport immediately and again a heartbeat later,
+--             plus the frame's three CommonUI activation flags read and forced false.
+--             Esc did NOTHING AT ALL — it did not even open the menu.
+--
+--    The flags were measured `bIsBackHandler=false bIsModal=false bSupportsActivationFocus=true`
+--    BEFORE being written, so the frame was never claiming Back and was never modal: that
+--    suspect is dead, in both runs. The only behavioural change between the two runs was the
+--    focus hand-back, and it made things STRICTLY WORSE — which rules the focus argument out as
+--    the cause of run 1 and rules the hand-back in as a second, independent harm. What is left,
+--    present in both runs and in no run where Esc worked, is SetInputMode_GameAndUIEx itself.
+--
+--    That is consistent with §1 and §2 and with nothing else: the mode is the router's, derived
+--    from the activatable stack and broadcast to the game (Pal.hpp:9742); Esc is an action the
+--    router resolves against that stack. Writing the mode behind the router leaves it holding a
+--    description of the input state that is no longer true, and forcing focus onto the bare
+--    SViewport takes the focused widget OUT of every activatable tree the router owns, so the
+--    action has nothing to resolve against at all. Worse, then, is exactly what one would
+--    predict.
+--
+--    ⚠️ WHAT IS INFERENCE AND WHAT IS NOT. The dump gives §1, §2 and §3 outright — the
+--    properties, the functions, the enums and the HUD callback are all this install's. The
+--    step "and therefore the router's cached config goes stale" is UE/CommonUI behaviour this
+--    repo cannot read, and it is the one link in the chain that is reasoning rather than
+--    evidence. It is testable, cheaply, and pf_uiroute tests it: hook
+--    APalHUDInGame:OnActiveInputModeChanged and watch whether it fires when the GAME opens a
+--    menu (it must) and whether it fires when WE mount a panel (today it must not).
+--
+-- 5. SO THE RULE IN THIS FILE IS NOW: THE MODE IS NEVER WRITTEN DIRECTLY.
+--    An element that wants the mouse declares it, the declaration is written onto the
+--    ACTIVATABLE WIDGET as InputConfig / GameMouseCaptureMode before it is activated, and the
+--    router does the rest — including putting it back. UWidgetBlueprintLibrary's three
+--    input-mode entries (UMG.hpp:2003-2005) and SetFocusToGameViewport (:2007) are deliberately
+--    NOT CALLED anywhere in this module any more. They are named here so nobody has to find
+--    them again, and so the next person knows the calls were tried and what they cost.
 --=============================================================================
 
-M.MOUSE_LOCK = { DO_NOT_LOCK = 0, ON_CAPTURE = 1, ALWAYS = 2, IN_FULLSCREEN = 3 }
+---EPalWidgetInputMode (Pal_enums.hpp:5367) — what a Palworld screen declares it needs.
+M.PAL_INPUT_MODE = { DEFAULT = 0, GAME_AND_MENU = 1, GAME = 2, MENU = 3 }
 
----How long an "exclusive" (UIOnly) grab may be held before it is released without being asked.
----Bounded on ELAPSED SECONDS through core/poll, never on a tick count (core/poll.lua:51-56).
-M.EXCLUSIVE_MAX_SECONDS = 120
+---EMouseCaptureMode (Engine_enums.hpp:2237) — the other byte on the same widget.
+M.MOUSE_CAPTURE = { NO_CAPTURE = 0, PERMANENT = 1, PERMANENT_INCLUDING_INITIAL_DOWN = 2,
+                    DURING_MOUSE_DOWN = 3, DURING_RIGHT_MOUSE_DOWN = 4 }
 
----The modes M.grabInput accepts, as a set, so api/ui can declare the same list without
----duplicating it and without loading this module.
-M.INPUT_MODES = { none = true, cursor = true, clicks = true, exclusive = true }
-
-local function inputLibrary()
-    local lib
-    pcall(function() lib = StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary") end)
-    return alive(lib) and lib or nil
-end
-
----Put keyboard focus back on the GAME VIEWPORT — the counter-move to the `InWidgetToFocus`
----argument the two Ex input-mode calls insist on. See the ⚠️⚠️ block above for why this is the
----line that decides whether Esc closes the game's own menu.
+---api/ui's `input` names, translated into what a Palworld screen would declare for the same
+---thing. `pal` nil means the element asks for no mode at all and the router is never involved.
 ---
----`void SetFocusToGameViewport()` (dumps/cxx/UMG.hpp:2007) takes NO arguments, which makes it the
----one call in this file with nothing to marshal and nothing to get wrong. It still goes through
----core/signature, so a build that does not declare it logs a named refusal rather than raising.
----@return boolean ok, string? why
-function M.releaseFocusToGame()
-    local lib = inputLibrary()
-    if not lib then
-        return false, "UWidgetBlueprintLibrary's CDO did not resolve, so focus could not be "
-            .. "handed back to the game viewport"
+---This table is the single place the two vocabularies meet. api/ui declares the same NAMES (it
+---makes no engine call, so it cannot read this) and the two are kept in step by test/cases/ui.
+M.INPUT_MODES = {
+    none      = { pal = nil, cursor = false,
+                  doc = "takes nothing at all" },
+    cursor    = { pal = nil, cursor = true,
+                  doc = "shows the cursor (a plain restorable property) and nothing else" },
+    clicks    = { pal = M.PAL_INPUT_MODE.GAME_AND_MENU, capture = M.MOUSE_CAPTURE.DURING_MOUSE_DOWN,
+                  cursor = true, needsActivatable = true,
+                  doc = "the game's GameAndMenu: clicks reach widgets, the player still moves" },
+    exclusive = { pal = M.PAL_INPUT_MODE.MENU, capture = M.MOUSE_CAPTURE.NO_CAPTURE,
+                  cursor = true, needsActivatable = true,
+                  doc = "the game's Menu: a modal, exactly what an inventory screen declares" },
+}
+
+--=============================================================================
+-- reading the declaration before calling — the literal version
+--
+-- core/signature refuses a call whose declared parameter kinds do not match what the caller
+-- said it would pass. That is the right default and it costs one thing: a caller who does not
+-- KNOW the kind (is TSubclassOf a ClassProperty or an ObjectProperty on this build?) has to
+-- guess, and a wrong guess logs a refusal that reads like a defect. So ask the declaration for
+-- its kinds and pass those. Nothing is loosened by this — signature still walks the live
+-- UFunction, still refuses the unverifiable kinds, and still checks the arguments; the only
+-- change is that the EXPECTED list comes from the build instead of from a header.
+--=============================================================================
+
+---The first `n` declared parameter kinds of `owner:fnName`, or nil when the build will not walk
+---the UFunction (in which case the caller must fall back to a written-down shape).
+---@return string[]? kinds
+function M.declaredKinds(owner, fnName, n)
+    local fn = sig.find(owner, fnName)
+    if not fn then return nil end
+    local params = sig.paramsOf(fn)
+    if type(params) ~= "table" then return nil end
+    local out = {}
+    for i = 1, n do
+        local p = params[i]
+        if not p or type(p.kind) ~= "string" then return nil end
+        out[i] = p.kind
     end
-    local ok = sig.call(lib, "SetFocusToGameViewport", {})
-    if ok then return true end
-    return false, "SetFocusToGameViewport was refused or raised (core/signature logged which)"
+    return out
 end
 
--- Ride the ONE heartbeat for the deferred second pass. Required lazily and inside a pcall so
--- this module still loads in a session where core/poll is unavailable — the immediate call above
--- has already run by then, and losing the second pass is a degraded fix, not a broken load.
-local function laterOnHeartbeat(name, seconds, fn)
-    local registered = false
-    pcall(function()
+--=============================================================================
+-- the game's UI layers
+--=============================================================================
+
+---The live UPalPrimaryGameLayoutBase, or nil + why. The same object M.gameUIRoot reaches past.
+---@return userdata? layout, string? why
+function M.gameLayout()
+    local layout = M.findFirst(M.PATHS.gameUILayout)
+    if not layout then
+        return nil, "no " .. M.PATHS.gameUILayout .. " live (title screen, or still loading)"
+    end
+    return layout
+end
+
+---Every registered CommonUI layer of the in-game layout: { tag, container, class, count }.
+---
+---`Layers` is a TMap<FGameplayTag, UCommonActivatableWidgetContainerBase*> (CommonGame.hpp:158)
+---and this WALKS it — ForEach only. It never calls Find/Contains, because those push the key
+---through UE4SS's pusher and an FGameplayTag key has no measured push shape here; the crash that
+---rule exists for is written out in core/keyboard/base/keymap.lua:118-127.
+---@return table[] layers, string how
+function M.uiLayers()
+    local out = {}
+    local layout = M.gameLayout()
+    if not layout then return out, "no layout" end
+    local map
+    pcall(function() map = layout.Layers end)
+    if map == nil then return out, "the layout has no readable Layers map" end
+    local n = 0
+    local ok = pcall(function()
+        map:ForEach(function(k, v)
+            n = n + 1
+            local tag, container
+            pcall(function() tag = k:get() end); tag = tag or k
+            pcall(function() container = v:get() end); container = container or v
+            local name
+            pcall(function() name = tag.TagName:ToString() end)
+            if name == nil then pcall(function() name = tostring(tag) end) end
+            local cls, count
+            pcall(function() cls = container:GetClass():GetFName():ToString() end)
+            pcall(function() count = #container.WidgetList end)
+            out[#out + 1] = { tag = name or "?", container = alive(container) and container or nil,
+                              class = cls or "?", count = count }
+        end)
+    end)
+    if not ok then return out, "the Layers map refused to iterate" end
+    if n == 0 then return out, "the Layers map iterated nothing (it may genuinely be empty)" end
+    return out, string.format("%d layer(s) by ForEach", n)
+end
+
+---The layers as printable lines. A report rather than a return, because "which layer" is a
+---question nobody can answer from a header and the first run that prints this settles it.
+---@return string[]
+function M.layerReport()
+    local layers, how = M.uiLayers()
+    local out = { string.format("layers: %s", how) }
+    for i, l in ipairs(layers) do
+        out[#out + 1] = string.format("layers:   %d. %-44s %-34s widgets=%s",
+            i, tostring(l.tag), tostring(l.class), tostring(l.count))
+    end
+    if #layers == 0 then
+        out[#out + 1] = "layers: nothing to push onto — host = \"layer\" cannot resolve, and an "
+            .. "element declaring it stays unmounted and says so (which is what autoMount retries)"
+    end
+    return out
+end
+
+---Push a widget CLASS onto one of the game's own CommonUI layers, the way the game does.
+---
+---`tag` is a layer tag substring (case-insensitive) or nil for the first layer found. Returns the
+---created widget, the container it went onto, and the tag that matched — or nil + why.
+---
+---⚠️ UNMEASURED. Every fact this rests on is from the dump (CommonUI.hpp:180-195, CommonGame.hpp:
+---156-160) and no run has yet watched BP_AddWidget answer here. It refuses rather than raises at
+---every step, so an element that declares this host simply stays unmounted with a sentence.
+---@return userdata? widget, userdata? container, string? tagOrWhy
+function M.pushToLayer(tag, cls)
+    if not alive(cls) then return nil, nil, "no widget class to push" end
+    local layers, how = M.uiLayers()
+    if #layers == 0 then return nil, nil, "no CommonUI layer is readable: " .. tostring(how) end
+    local want = tag and tostring(tag):lower() or nil
+    local chosen
+    for _, l in ipairs(layers) do
+        if l.container and (want == nil or tostring(l.tag):lower():find(want, 1, true)) then
+            chosen = l; break
+        end
+    end
+    if not chosen then
+        local names = {}
+        for _, l in ipairs(layers) do names[#names + 1] = tostring(l.tag) end
+        return nil, nil, string.format("no layer matching %q — this layout registers %s",
+            tostring(tag), table.concat(names, ", "))
+    end
+
+    -- TSubclassOf<UCommonActivatableWidget> — ClassProperty on paper, asked for in fact.
+    local kinds = M.declaredKinds(chosen.container, "BP_AddWidget", 1) or { "ClassProperty" }
+    local ok, w = sig.call(chosen.container, "BP_AddWidget", kinds, cls)
+    if not ok or not alive(w) then
+        return nil, nil, string.format("BP_AddWidget on layer %s did not answer with a widget "
+            .. "(core/signature logged the declaration it read)", tostring(chosen.tag))
+    end
+    return w, chosen.container, tostring(chosen.tag)
+end
+
+---Take a widget back off the layer it was pushed onto. The router restores whatever was
+---underneath — which is the half SetInputMode could never do.
+---@return boolean removed
+function M.removeFromLayer(container, w)
+    if not (alive(container) and alive(w)) then return false end
+    local kinds = M.declaredKinds(container, "RemoveWidget", 1) or { "ObjectProperty" }
+    return sig.call(container, "RemoveWidget", kinds, w) == true
+end
+
+---Write an element's declared input mode onto the ACTIVATABLE WIDGET, which is where Palworld
+---keeps it (Pal.hpp:13369-13370). Two plain byte properties: a read, a write and a read-back, no
+---UFunction and no struct — the same class of operation core/keyboard/base/keymap.lua argues is
+---safe, and the reason this route is takeable at all.
+---
+---⚠️ IT MUST HAPPEN BEFORE ActivateWidget. The router reads the config when the widget activates;
+---writing it afterwards changes a byte nobody re-reads.
+---@param w userdata     # a UPalActivatableWidget (or subclass)
+---@param spec table     # one row of M.INPUT_MODES
+---@return boolean wrote, string detail
+function M.setWidgetInputConfig(w, spec)
+    if not alive(w) then return false, "no widget" end
+    if type(spec) ~= "table" or spec.pal == nil then
+        return false, "this input mode asks the router for nothing"
+    end
+    if not M.isA(w, "PalActivatableWidget") then
+        return false, "the widget is not a UPalActivatableWidget, so it has no InputConfig for "
+            .. "the router to read (Pal.hpp:13367-13370)"
+    end
+    local wasMode, wasCapture
+    pcall(function() wasMode = w.InputConfig end)
+    pcall(function() wasCapture = w.GameMouseCaptureMode end)
+    local wroteMode = pcall(function() w.InputConfig = spec.pal end)
+    local wroteCapture = (spec.capture == nil)
+        or pcall(function() w.GameMouseCaptureMode = spec.capture end)
+    local nowMode
+    pcall(function() nowMode = w.InputConfig end)
+    -- The read-back is the measurement. A byte that will not take the write is a fact worth one
+    -- line; a byte that took it and changed nothing on screen is a DIFFERENT fact, and only the
+    -- router's own callback (Pal.hpp:9742) can tell them apart — see pf_uiroute.
+    local detail = string.format("InputConfig %s -> %s (read back %s), GameMouseCaptureMode %s -> %s",
+        tostring(wasMode), tostring(spec.pal), tostring(nowMode),
+        tostring(wasCapture), tostring(spec.capture))
+    return (wroteMode and wroteCapture and nowMode == spec.pal), detail
+end
+
+--=============================================================================
+-- INPUT — what an element takes from the player, and the dead-man that gives it back
+--
+-- WHAT IS LEFT HERE AFTER §5 ABOVE. Exactly one engine write: bShowMouseCursor
+-- (Engine.hpp:9035), a plain bool property that is READ before it is written and restored
+-- exactly. Everything about the input MODE now happens on the activatable widget, before it is
+-- activated, in M.setWidgetInputConfig — so grabInput's whole job is the cursor, the bookkeeping
+-- and the dead-man.
+--
+-- THE DEAD-MAN, AND WHY IT IS A REGISTRY RATHER THAN A TIMER PER GRAB. Every grab goes into a
+-- list on _G — the same trick core/poll.lua:28-30 uses and for the same reason: _G survives a
+-- hot reload and the module tables do not. One poller sweeps that list on the heartbeat, on
+-- ELAPSED SECONDS (core/poll.lua:51-56), and releases anything that can no longer be answered
+-- for. It retires itself when the list is empty and is re-armed by the next grab, so an idle
+-- session pays nothing.
+--
+-- THREE WAYS A GRAB BECOMES ORPHANED, and the sweep catches all three:
+--   * the Lua state that took it is gone (F9 hot reload). Each grab is stamped with the LOAD
+--     table of the module instance that created it, and the registry holds the current one; a
+--     mismatch means nothing will ever call release, because the code that would have is gone.
+--   * the element that took it is no longer mounted or no longer points at this grab. api/ui
+--     supplies that answer as a closure, so the engine seam never has to know what an element is.
+--   * nobody supplied an answer at all (a direct caller of this module). Then, and only then, a
+--     wall-clock cap applies, because there is nothing else to go on.
+-- The previous version armed a dead-man ONLY inside the "exclusive" branch and only after the
+-- mode call succeeded, so a "cursor" grab, a degraded grab and every "clicks" grab had none.
+--=============================================================================
+
+---How long a grab NOBODY can answer for may be held. Elapsed seconds, never ticks.
+M.GRAB_MAX_SECONDS = 120
+
+-- A fresh table per LOAD of this module: the identity of the Lua state that is running now.
+local LOAD = {}
+
+local function grabRegistry()
+    local g = _G.__PalForgeInputGrabs
+    if type(g) ~= "table" then g = { list = {}, sweeping = false }; _G.__PalForgeInputGrabs = g end
+    return g
+end
+grabRegistry().load = LOAD
+
+---Release every outstanding grab that can no longer be answered for. Returns how many are still
+---outstanding afterwards. Published so a probe can force a sweep and so the poller body is one
+---named function rather than an anonymous closure nobody can call by hand.
+---@return integer outstanding
+function M.sweepGrabs()
+    local g = grabRegistry()
+    local keep = {}
+    for _, grab in ipairs(g.list) do
+        if not grab.released then
+            local why
+            if grab.load ~= g.load then
+                why = "the Lua state that took it has been reloaded since (F9), so nothing will "
+                    .. "ever call release for it"
+            elseif type(grab.alive) == "function" then
+                local ok, still = pcall(grab.alive)
+                if not ok then
+                    why = "the owner's liveness check raised: " .. tostring(still)
+                elseif not still then
+                    why = "the element that took it is no longer mounted and holding it"
+                end
+            elseif (os.clock() - (grab.t0 or 0)) > M.GRAB_MAX_SECONDS then
+                why = string.format("it has been held for more than %d s and nobody is answering "
+                    .. "for it", M.GRAB_MAX_SECONDS)
+            end
+            if why then
+                err(string.format("input grab held by %s is being released without being asked: %s",
+                    tostring(grab.id or "an unnamed caller"), why))
+                M.releaseInput(grab)
+            else
+                keep[#keep + 1] = grab
+            end
+        end
+    end
+    g.list = keep
+    return #keep
+end
+
+-- Arm the sweeper, lazily and at most once at a time. It rides core/poll's one heartbeat and
+-- retires itself when there is nothing outstanding, so the next grab re-arms it — which also
+-- means a poll.clear() cannot leave the list unwatched forever.
+local function armSweeper()
+    local g = grabRegistry()
+    if g.sweeping then return end
+    g.sweeping = true
+    local ok = pcall(function()
         local poll = require("palforge.core.poll")
-        -- poll.every's own answer, not the pcall's: it REFUSES past its bound (core/poll.lua:63-67)
-        -- and reporting a pass that never registered is the silent failure this tree keeps paying
-        -- for. What is reported is what was really installed.
-        registered = poll.every(name, function(elapsed)
-            if elapsed < seconds then return false end
-            pcall(fn)
-            return true
+        g.sweeping = poll.every("ui input dead-man", function()
+            if M.sweepGrabs() == 0 then grabRegistry().sweeping = false; return true end
+            return false
         end) == true
     end)
-    return registered
+    if not ok then g.sweeping = false end
 end
 
----Give the mouse to a widget. Returns a grab token to hand back to M.releaseInput, or nil plus
----a reason — and "none" is a reason, not a failure: it is the default and it means the player's
----input was deliberately not touched.
+---Take what `mode` asks for. Returns a grab token to hand back to M.releaseInput, or nil plus a
+---reason — and "none" is a reason rather than a failure.
 ---
----`focus` must be a LIVE widget. The two Ex calls take a UWidget* to focus and this passes ours
----rather than nil, because nil into an ObjectProperty is the one marshalling shape nobody here
----has measured, and a wrong argument TYPE faults inside UE4SS where pcall cannot see it. No
----widget means no call: the mode degrades to "cursor" and says so.
----@param mode string   # "none" | "cursor" | "clicks" | "exclusive"
----@param focus userdata # the widget to focus (the element's own root)
+---⚠️ THE MODE HALF IS NOT DONE HERE ANY MORE. `clicks` and `exclusive` are carried on the
+---activatable widget's own InputConfig (M.setWidgetInputConfig, called by M.gameFrame before it
+---activates), because that is how Palworld does it and because writing the mode by hand is what
+---broke Esc twice — see §4 and §5 of the block above. What arrives here for those two modes is
+---the cursor plus a note saying whether the widget-side write actually happened, so a run can
+---tell "the game's route was taken" from "the panel is not an activatable and got nothing".
+---
+---@param mode string    # a key of M.INPUT_MODES
+---@param focus userdata # the element's own root widget; only inspected, never focused
+---@param owner table?   # { id = string, alive = fun():boolean } — the dead-man's answer
 ---@return table? grab, string? reason
-function M.grabInput(mode, focus)
+function M.grabInput(mode, focus, owner)
     if mode == nil or mode == "none" then
-        return nil, "input = \"none\": the player's mouse was not touched"
+        return nil, "input = \"none\": the player's input was not touched"
     end
-    if not M.INPUT_MODES[mode] then return nil, "unknown input mode " .. tostring(mode) end
+    local spec = M.INPUT_MODES[mode]
+    if not spec then return nil, "unknown input mode " .. tostring(mode) end
 
     local pc = M.findFirst("PalPlayerController") or M.findFirst("PlayerController")
-    if not pc then return nil, "no PlayerController to set an input mode on" end
+    if not pc then return nil, "no PlayerController to read the cursor flag off" end
 
-    -- Read the cursor flag BEFORE anything is written: it is the only half that can be restored
-    -- exactly, so it is the only half worth recording.
     local cursorWas
     pcall(function() cursorWas = pc.bShowMouseCursor end)
-    local grab = { pc = pc, mode = mode, cursorWas = cursorWas, applied = {} }
-    if pcall(function() pc.bShowMouseCursor = true end) then
+    local grab = { pc = pc, mode = mode, cursorWas = cursorWas, applied = {}, t0 = os.clock(),
+                   load = LOAD, id = owner and owner.id, alive = owner and owner.alive }
+
+    -- IN THE REGISTRY BEFORE ANYTHING IS WRITTEN. The dead-man must cover a grab that fails
+    -- half-way as surely as one that succeeds; the previous version registered nothing until
+    -- after the mode call, which is why three of its five paths had no cover at all.
+    local g = grabRegistry()
+    g.list[#g.list + 1] = grab
+    armSweeper()
+
+    if spec.cursor and pcall(function() pc.bShowMouseCursor = true end) then
         grab.applied[#grab.applied + 1] = "bShowMouseCursor = true"
     end
 
-    if mode == "cursor" then return grab end
-
-    local lib = inputLibrary()
-    if not lib then
-        grab.mode = "cursor"
-        grab.note = "UWidgetBlueprintLibrary's CDO did not resolve, so only the cursor was shown"
-        return grab
+    if spec.needsActivatable then
+        -- Say, on the token, whether the game's own route was available at all. api/ui logs it.
+        if M.isA(focus, "PalActivatableWidget") then
+            grab.applied[#grab.applied + 1] = "the mode is carried on the widget's own InputConfig"
+        else
+            grab.note = string.format("input = %q asks for the game's %s mode, which Palworld "
+                .. "carries on the ACTIVATABLE WIDGET (Pal.hpp:13369) — and this element's root "
+                .. "is not one, so only the cursor was shown. Wrap the tree in UI.Frame{ }, which "
+                .. "builds WBP_PalCommonWindow_C (a UPalUserWidget), and the mode is declared "
+                .. "where the router reads it. PalForge no longer calls SetInputMode itself: "
+                .. "doing that stopped Esc reaching the game's own menu, twice",
+                mode, mode == "exclusive" and "Menu" or "GameAndMenu")
+        end
     end
-    if not alive(focus) then
-        grab.mode = "cursor"
-        grab.note = "no live widget to focus, so the input MODE was left alone and only the "
-            .. "cursor was shown"
-        return grab
-    end
-
-    local ok, level
-    if mode == "exclusive" then
-        ok, _, level = sig.call(lib, "SetInputMode_UIOnlyEx",
-            { "ObjectProperty", "ObjectProperty", "ByteProperty", "BoolProperty" },
-            pc, focus, M.MOUSE_LOCK.DO_NOT_LOCK, false)
-    else
-        ok, _, level = sig.call(lib, "SetInputMode_GameAndUIEx",
-            { "ObjectProperty", "ObjectProperty", "ByteProperty", "BoolProperty", "BoolProperty" },
-            pc, focus, M.MOUSE_LOCK.DO_NOT_LOCK, false, false)
-    end
-    if ok then
-        grab.applied[#grab.applied + 1] = (mode == "exclusive" and "SetInputMode_UIOnlyEx"
-            or "SetInputMode_GameAndUIEx") .. " [" .. tostring(level) .. "]"
-    else
-        -- The call was refused or raised; core/signature has already logged which and why. The
-        -- cursor is still shown, so say what the caller actually got rather than claiming a mode.
-        grab.mode = "cursor"
-        grab.note = "the input-mode call did not go through (core/signature logged the reason); "
-            .. "only the cursor was shown"
-        return grab
-    end
-
-    if mode == "exclusive" then
-        -- No hand-back (it would be theatre in UIOnly — the viewport ignores game input either
-        -- way). A dead-man release instead, so this mode cannot outlive the player's patience.
-        grab.deadman = true
-        laterOnHeartbeat("ui exclusive dead-man", M.EXCLUSIVE_MAX_SECONDS, function()
-            if grab.released then return end
-            err(string.format("input = \"exclusive\" was still held after %d s and is being "
-                .. "released without being asked: UIOnly stops game input, and nothing unattended "
-                .. "may leave a player unable to move. Unmount the element that took it.",
-                M.EXCLUSIVE_MAX_SECONDS))
-            M.releaseInput(grab)
-        end)
-        return grab
-    end
-
-    -- THE LINE THAT KEEPS ESC WORKING. Immediately, and again one heartbeat later, because the
-    -- focus the mode call asks for is applied through the controller's deferred FReply and would
-    -- otherwise land AFTER this. Read the ⚠️⚠️ block above before changing either half.
-    local okFocus, whyFocus = M.releaseFocusToGame()
-    if okFocus then
-        grab.applied[#grab.applied + 1] = "SetFocusToGameViewport"
-    else
-        grab.note = (grab.note and (grab.note .. "; ") or "")
-            .. "keyboard focus could NOT be handed back to the game viewport (" .. tostring(whyFocus)
-            .. ") — Esc may not reach the game's own menu while this element is mounted"
-    end
-    local again = laterOnHeartbeat("ui focus hand-back", 0.4, function()
-        if grab.released then return end
-        M.releaseFocusToGame()
-    end)
-    if again then grab.applied[#grab.applied + 1] = "SetFocusToGameViewport (again next heartbeat)" end
     return grab
 end
 
----Hand a grab back. Restores the cursor flag exactly, and the input MODE only for "exclusive" —
----see the block comment above for why that asymmetry is deliberate rather than an oversight.
+---Hand a grab back: the cursor flag exactly as it was found, and nothing else to undo, because
+---nothing else was written. The MODE goes back when the activatable deactivates and the router
+---restores what was underneath — which is the half this file could never do by hand.
 ---@return boolean released
 function M.releaseInput(grab)
-    if type(grab) ~= "table" or not alive(grab.pc) then return false end
-    -- Latched so the deferred passes armed by grabInput (the focus hand-back, the exclusive
-    -- dead-man) become no-ops rather than acting on an element that is already down.
+    if type(grab) ~= "table" then return false end
     if grab.released then return false end
     grab.released = true
     local pc = grab.pc
-    if grab.mode == "exclusive" then
-        local lib = inputLibrary()
-        if lib then
-            sig.call(lib, "SetInputMode_GameOnly", { "ObjectProperty", "BoolProperty" }, pc, true)
-        else
-            err("releaseInput: UIOnly was set and UWidgetBlueprintLibrary is gone — the player "
-                .. "may be unable to move until a menu is opened and closed")
-        end
-    end
-    if grab.cursorWas ~= nil then
+    if alive(pc) and grab.cursorWas ~= nil then
         pcall(function() pc.bShowMouseCursor = grab.cursorWas end)
     end
     return true
+end
+
+---How many grabs are outstanding, and what they are — for UI.report and for a probe.
+---@return string[]
+function M.grabReport()
+    local g = grabRegistry()
+    if #g.list == 0 then return { "input: no element is holding any part of the player's input" } end
+    local out = { string.format("input: %d grab(s) outstanding", #g.list) }
+    for i, grab in ipairs(g.list) do
+        out[#out + 1] = string.format("input:   %d. %-34s mode=%-10s held=%.0fs  %s%s", i,
+            tostring(grab.id or "?"), tostring(grab.mode), os.clock() - (grab.t0 or 0),
+            table.concat(grab.applied or {}, " + "),
+            grab.note and ("  [" .. grab.note .. "]") or "")
+    end
+    return out
 end
 
 -- ---- slot helpers (return the created slot for further tweaking) ----

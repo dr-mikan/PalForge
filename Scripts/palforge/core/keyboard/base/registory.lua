@@ -53,9 +53,18 @@ M.bound = {}
 ---this one. Declared here rather than in native/ui/keys.lua because it binds every caller of the
 ---keyboard, not only the UI seam; keys.lua re-exports it.
 M.FORBIDDEN = {
-    ESCAPE = "Esc is the player's way out of the game's own menu, and PalForge does not put "
-        .. "itself in its path — a panel that wants a close key should use any other key, or a "
-        .. "Button{ onClick = function(self) self:unmount() end }",
+    ESCAPE = "Esc is not a KEY on this build and binding it as one is the wrong tool, not just "
+        .. "an unsafe one. Palworld's UI is CommonUI: Esc is the named UI action \"UIEscape\" / "
+        .. "\"UICancel\" (rows of DT_UIInputAction), mapped through "
+        .. "FPalKeyConfigSettings.MouseAndKeyboardUIInputMappings (Pal.hpp:3978) and resolved by "
+        .. "UPalCommonUIActionRouter (Pal.hpp:16698) against the ACTIVATABLE WIDGET tree — the "
+        .. "game's own screens take it with UPalUserWidget::RegisterActionBinding (Pal.hpp:31898) "
+        .. "or by claiming bIsBackHandler (CommonUI.hpp:149). A UE4SS keybind can only OBSERVE "
+        .. "the key: it cannot consume it, it has no place in the router's ordering, and it fires "
+        .. "whether or not a panel of yours is up. Want Esc to close YOUR panel? Declare "
+        .. "UI{ backHandler = true } on a Frame-rooted element, which is that mechanism. Want any "
+        .. "close key at all? Use another key, or Button{ onClick = function(self) self:unmount() "
+        .. "end }. native/ui/keys.lua's header has the whole path with citations",
 }
 
 -- Built-in behaviour files shipped with PalForge (always loaded by load()). New
@@ -236,9 +245,18 @@ function M.claim(keyName, fn, opts)
     end
     if st.state == "game" and not opts.override then
         st.refused = true
-        st.why = st.why .. ". PalForge refused it. If you MEAN to share the key with the game, "
-            .. "say so at the call site — UI{ overrideKeys = { \"" .. name .. "\" } }, or "
-            .. "reg.claim(key, fn, { override = true })"
+        -- ⚠️ THE SUGGESTED SPELLING HAS TO BE THE RIGHT ONE FOR THE KIND OF INPUT THIS IS. A
+        -- mouse button named in `overrideKeys` is armed as a KEY — same name, wrong router — and
+        -- the press then arrives where no element declared it, which is silence from a
+        -- declaration that reads correct (native/ui/keys.lua:M.arm says the same thing at the
+        -- other end). So the message names `overrideButtons` for the three mouse names.
+        local MOUSE = { LEFT_MOUSE_BUTTON = "left", RIGHT_MOUSE_BUTTON = "right",
+                        MIDDLE_MOUSE_BUTTON = "middle" }
+        local how = MOUSE[name]
+            and ("UI{ overrideButtons = { \"" .. MOUSE[name] .. "\" } }")
+            or ("UI{ overrideKeys = { \"" .. name .. "\" } }")
+        st.why = st.why .. ". PalForge refused it. If you MEAN to share it with the game, say so "
+            .. "at the call site — " .. how .. ", or reg.claim(key, fn, { override = true })"
         return false, st
     end
 

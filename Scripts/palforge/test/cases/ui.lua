@@ -708,15 +708,23 @@ s:test("a Sprite takes an asset path or a vanilla id, and fills the rest in", fu
     t:errors(function() UI.Sprite{ UI.Label{} } end, "UI.Sprite holds no children")
 end)
 
-s:test("a Frame wraps ONE child and takes only a FALLBACK colour", function(t)
+s:test("a Frame wraps ONE child and REFUSES a colour, naming Border instead", function(t)
     local f = UI.Frame{ UI.Label{ text = "inside" } }
     t:eq(f.kind, "frame", "it is a frame")
     t:eq(#f.children, 1, "with its one child")
     t:errors(function() UI.Frame{ UI.Label{}, UI.Label{} } end, "UI.Frame holds ONE child, 2 given")
-    -- The distinction that matters: a Border's colour IS the border, a Frame's colour is only
-    -- what is used when the game's own window class turns out not to be loaded.
-    t:truthy(schema.get("UI.Node.Frame"):field("color").doc:find("FALLBACK", 1, true),
-        "the colour field says it is the fallback's, not the frame's")
+
+    -- ⚠️ THE CORRECTION A LIVE RUN PAID FOR. `color` used to be declared here as "the FALLBACK
+    -- Border's tint", i.e. a field that did something in the rare case and nothing in the
+    -- ordinary one — and a run duly reported a Frame that drew black with a colour on it. A
+    -- field that silently does nothing is the defect class this vocabulary exists to prevent, so
+    -- it is refused with a sentence that names the node that DOES take a colour.
+    t:errors(function() UI.Frame{ color = { 1, 0, 0, 1 }, UI.Label{} } end, "takes no colour")
+    t:errors(function() UI.Frame{ color = { 1, 0, 0, 1 }, UI.Label{} } end, "Border{ color =")
+    t:truthy(schema.get("UI.Node.Frame"):field("color").doc:find("REFUSED", 1, true),
+        "and the field's own doc says so, so an editor shows it before the call is made")
+    -- A Border still takes one, which is the whole point of the redirection.
+    t:eq(UI.Border{ color = { 1, 0, 0, 1 } }.color[1], 1, "a Border's colour IS the border")
 end)
 
 s:test("a Label can ask for the game's OWN label widget", function(t)
@@ -739,14 +747,61 @@ end)
 --
 -- Every case here is pure: the field is validated in api/ui and the engine calls live in
 -- _widget, so what an element DECLARES and what the lifecycle does with it are both provable
--- with no game. Whether SetInputMode_GameAndUIEx lands is not — that is the in-game run.
+-- with no game. Whether Palworld's CommonUI action router actually reads a declaration off a
+-- widget of ours is not — that is the in-game run (pf_uiroute, then pf_uiz).
 --=============================================================================
 
 s:test("`input` defaults to none: an element takes nothing unless it asked", function(t)
     local El = UI{ id = support.id("ui_input_default") }
     t:eq(El:state().inputMode, "none", "the default is the SAFE one — nobody's mouse is touched")
-    local Grab = UI{ id = support.id("ui_input_clicks"), input = "clicks" }
+    local Grab = UI{ id = support.id("ui_input_clicks"),
+                     input = "clicks", root = UI.Frame{ UI.Label{ text = "x" } } }
     t:eq(Grab:state().inputMode, "clicks", "and an element that wants clicks says so")
+end)
+
+-- ⚠️ THE FINDING THIS WHOLE SESSION TURNED ON. Palworld never calls SetInputMode when a menu
+-- opens: every screen is a UPalActivatableWidget and DECLARES the mode it wants as a byte on
+-- itself (InputConfig, Pal.hpp:13369), and CommonUI's action router applies it on activation and
+-- puts it back on deactivation. Writing the mode onto the player controller instead broke Esc in
+-- two live runs. So the modes that need the router need an activatable — and UI.Frame is the one
+-- node here that builds one (WBP_PalCommonWindow_C is a UPalUserWidget).
+s:test("`input` modes that need the game's router are refused without a Frame root", function(t)
+    for _, mode in ipairs({ "clicks", "exclusive" }) do
+        t:errors(function()
+            UI{ id = support.id("ui_input_noframe"), input = mode,
+                root = UI.VBox{ UI.Label{ text = "x" } } }
+        end, "ACTIVATABLE WIDGET")
+        t:errors(function()
+            UI{ id = support.id("ui_input_noframe2"), input = mode,
+                root = UI.Border{ UI.Label{ text = "x" } } }
+        end, "UI.Frame")
+    end
+    -- With a Frame it is accepted, and so is `backHandler`, which lands on the same widget.
+    local ok = UI{ id = support.id("ui_input_frame"), input = "exclusive", backHandler = true,
+                   root = UI.Frame{ UI.Label{ text = "x" } } }
+    t:eq(ok:state().inputMode, "exclusive", "a Frame-rooted element may declare the modal mode")
+    t:eq(ok:state().backHandler, true, "and may claim the CommonUI back action")
+    -- The two vocabularies — api/ui's declared names and _widget's translation of them into what
+    -- a Palworld screen declares — are separate on purpose (api/ui makes no engine call), so the
+    -- one thing that can drift is the NAME LIST. Assert it here rather than discovering it live.
+    for _, name in ipairs(schema.get("UI.Spec"):field("input").values) do
+        t:truthy(widget.INPUT_MODES[name],
+            string.format("_widget knows what %q means to the game", name))
+    end
+end)
+
+s:test("`backHandler` without a Frame root is refused, and says which flag it needs", function(t)
+    t:errors(function()
+        UI{ id = support.id("ui_back_noframe"), backHandler = true,
+            root = UI.VBox{ UI.Label{ text = "x" } } }
+    end, "bIsBackHandler")
+end)
+
+s:test("\"layer\" is a host name, and an unknown one names it in the complaint", function(t)
+    local El = UI{ id = support.id("ui_host_layer"), host = "layer",
+                   root = UI.Frame{ UI.Label{ text = "x" } } }
+    t:eq(El:state().hostSpec, "layer", "the game's own CommonUI-layer route is declarable")
+    t:errors(function() UI{ id = support.id("ui_host_bad"), host = "canvas" } end, "\"layer\"")
 end)
 
 s:test("an input mode outside the list is refused at define time", function(t)
@@ -1368,6 +1423,61 @@ function(t)
     t:eq(row.overrideKeys[1], FAKE_B, "and says which of them was overridden")
     el:unmount()
     native.keys.keys[FAKE_A], native.keys.keys[FAKE_B] = nil, nil
+end)
+
+-- ⚠️ THE MOUSE HALF OF AN OVERRIDE, AND WHY IT IS A FIELD OF ITS OWN. On a default Palworld
+-- install ALL THREE mouse buttons are bound by the game (a live run reported MIDDLE_MOUSE_BUTTON
+-- -> DirectAttackOrder), so `buttons` alone can never arm one and the mouse half of the routing
+-- design was never exercised. The obvious workaround — naming MIDDLE_MOUSE_BUTTON in
+-- `overrideKeys` — half-works in the worst way: keys.arm would arm it as a KEY, mark the name
+-- seen, skip the buttons pass, and deliver a middle-click to the key router where nothing wants
+-- it. Silence, from a declaration that reads correct. Hence `overrideButtons`, in button names.
+s:test("`overrideButtons` is the mouse half of an override, and stays out of the key router",
+function(t)
+    local f = function() end
+    t:errors(function() UI{ id = support.id("ui_ob1"), overrideButtons = { "middle" } } end,
+        "declares `buttons` but no onMousePressed")
+    t:errors(function()
+        UI{ id = support.id("ui_ob2"), buttons = { "middle" }, overrideButtons = { "middle" },
+            onMousePressed = f }
+    end, "BOTH `buttons` and `overrideButtons`")
+
+    local El = UI{ id = support.id("ui_ob3"), overrideButtons = { "MIDDLE" },
+                   onMousePressed = f }
+    t:eq(El:state().buttonSet.middle, true, "the name is lower-cased and routable like any other")
+    t:eq(El:state().overrideButtonList[1], "middle", "and kept apart, because that IS the override")
+    t:eq(#El:state().buttonList, 0, "it is not in the ordinary list")
+
+    -- The engine seam: one record, on the MOUSE name, flagged as an override — and the record's
+    -- `button` field is what proves it went to the mouse dispatcher and not the key one.
+    --
+    -- The record is cleared FIRST because a bind is for the life of the session and so is its
+    -- record: an earlier case in this file already arms MIDDLE_MOUSE_BUTTON, install() returns
+    -- the existing record untouched, and this case would then be asserting that one's history.
+    native.keys.keys.MIDDLE_MOUSE_BUTTON = nil
+    local recs = native.keys.arm({ overrideButtons = { "middle" }, onMouse = f })
+    t:eq(#recs, 1, "one record")
+    t:eq(recs[1].key, "MIDDLE_MOUSE_BUTTON", "under the engine's name for it")
+    t:eq(recs[1].button, "middle", "carrying the BUTTON, so a press routes through routeMouse")
+    t:eq(recs[1].override, true, "and the override is recorded rather than inferred")
+    native.keys.keys.MIDDLE_MOUSE_BUTTON = nil
+end)
+
+s:test("a mounted element's overridden button routes and appears in the stack row", function(t)
+    ownStack(t)
+    local got
+    local El = UI{ id = support.id("z_obr"), z = 9090, overrideButtons = { "middle" },
+                   onMousePressed = function(_, ctx) got = ctx.button end,
+                   render = function() end }
+    local el = El:new{}
+    el:mount(fakeRoot())
+    t:eq(UI.routeMouse("middle"), el:state().id, "the overridden button routes to the element")
+    t:eq(got, "middle", "through the mouse handler, with the button in the context")
+    local row = UI.stack()[1]
+    t:eq(table.concat(row.buttons, ","), "middle", "the stack row lists it")
+    t:eq(row.overrideButtons[1], "middle", "and says it was taken from the game on purpose")
+    el:unmount()
+    native.keys.keys.MIDDLE_MOUSE_BUTTON = nil
 end)
 
 s:test("arm() returns one record per name, including the overridden ones", function(t)

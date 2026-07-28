@@ -47,29 +47,48 @@
 # It touches only a component of PalForge's own and destroys it again — your character's own
 # mesh, materials and save are never written to.
 
-# THE UI RUN — the one that needs you to CLICK. A declared panel mounts into the game's own UI
-# root 20 s after the world is ready, and then it wants ninety seconds of your attention:
+# ★ THE UI RUN. Two actions, in this order, and between them they answer everything the last
+# run left open. Nothing here can trap you: no input mode is written by PalForge any more, and
+# every panel takes itself down on the clock.
 #
-#   1. WAIT until the panel appears, top-left. It has the game's window chrome, an item icon,
-#      a line that counts seconds, and a button that says "clicked 0x".
-#   2. WITHOUT pressing anything, move the mouse onto the button and click it TWICE.
-#      (The panel declares input = "clicks", so it asks the game for a cursor and Game+UI mode.
-#      If no cursor appears, that call did not land — go to step 3, which is the fallback.)
-#   3. PRESS ESC to open the game's own menu. The game shows its own cursor here whatever we did.
-#      Click OUR button again, then click one of the GAME's own menu buttons (any of them —
-#      that one is the control: it is how we find out whether the click hook fires at all).
-#   4. PRESS ESC again to close the menu, and carry on. At 95 s a verdict block prints itself.
-#
-# WHAT EACH OUTCOME MEANS is written out in the log by the run itself; the short version:
-#   the button's label counts up            everything works, end to end.
-#   `seen=0` on both routes                 no click hook fires on this build — the click PATH.
-#   `seen>0 dispatched=0`                   hooks fire for the game's buttons, never for ours —
-#                                           the mouse is not reaching our widget (the INPUT half).
-#   `dispatched>0` but the label is stuck   router delivered; the handler or the binding is wrong.
-#   `rootClass=WBP_PalCommonWindow_C`       the panel is wearing the game's own chrome.
-#   `rootClass=Border`                      it is not; a [ui] warning above names what was missing.
-# Nothing is written to your save and the panel comes off with a reload (F9) or on leaving.
-# 20 pf_uidecl   (superseded by pf_uiz, which stacks two panels)
+# ---- pf_uiroute (25 s) — READ-ONLY + WATCHERS. What PALWORLD does with UI, input and Esc. ----
+# It prints, from the running game: which CommonUI layer tags the in-game layout registers, what
+# every ACTIVE Palworld screen declares in InputConfig / GameMouseCaptureMode (that is where the
+# input mode lives on this build — UPalActivatableWidget, Pal.hpp:13369), and the live parameter
+# lists of BP_AddWidget / RegisterActionBinding / AddHUD. Then it arms six counting hooks.
+#   WHAT TO DO: open your INVENTORY and close it, then press ESC to open the pause menu and ESC
+#   again to close it. Nothing else. Verdicts print themselves at 30 s, 60 s and 90 s.
+#   THE LINE THAT MATTERS: `inputModeChanged fired=N`. N > 0 confirms that Palworld's CommonUI
+#   action router owns the input mode and derives it from the activatable widget stack — which is
+#   why PalForge no longer calls SetInputMode at all, and therefore why Esc should work again.
+#   N == 0 while you opened and closed menus would falsify that, and is the most valuable
+#   possible result. `actionBound` SAMPLES name the UI actions the game binds — look for UIEscape
+#   / UICancel, which is the mechanism a mod must join to be IN Esc's path rather than beside it.
+# ⚠️ It arms hooks and UE4SS cannot unregister one; they stay until you quit the game.
+
+# ---- pf_uiz (110 s) — THREE PANELS. Esc, the mouse half, the frame colour, and the new route. ----
+#   1. WAIT for the panels: a RED one on top and a MAGENTA one under it, top-left. A third,
+#      TEAL, appears only if the game's own layer route works — its absence is a result too.
+#   2. ⚠️ PRESS ESC TWICE, FIRST. The game's menu must open AND close, exactly as with no mod
+#      loaded. Two earlier runs broke this and it is the whole point of the run.
+#   3. WITH THE MENU OPEN, click the MAGENTA panel's button. Its label must count up — that is
+#      the click router reaching our own widget while the game has given the mouse away.
+#   4. CLOSE the menu. Press INS, then END: only the RED panel's counter may move.
+#   5. PRESS THE MIDDLE MOUSE BUTTON: only the MAGENTA panel's counter may move. ⚠️ your pal will
+#      also be given an attack order — the button is the game's DirectAttackOrder and PalForge
+#      declares `overrideButtons = { "middle" }` to SHARE it; a UE4SS keybind never consumes.
+#   6. At 45 s the red panel leaves; press INS/END again and the magenta one must take them.
+#      At 90 s the teal one goes, at 100 s the magenta one, and a verdict block prints at 105 s.
+# WHAT EACH OUTCOME MEANS is written out in the log by the run itself. The short version:
+#   Esc opens AND closes            the diagnosis holds and the mod is out of the router's way
+#   Esc still broken                the diagnosis is WRONG — pf_uiroute's counters say who owns it
+#   rootClass=WBP_PalCommonWindow_C the magenta panel wears the game's own window chrome
+#   rootClass=Border                it does not; a [ui] warning above names what was missing
+#   the MAGENTA is visible          a declared colour lands on a Border INSIDE a Frame, which is
+#                                   the only place it can — `Frame{ color = }` is now refused
+#   the TEAL panel appeared         BP_AddWidget works: PalForge can put a screen up the way the
+#                                   game does, activated and registered with the action router
+# Nothing is written to your save and every panel comes off by itself or with a reload (F9).
 
 # ---- THE LAST TWO UI ITEMS. Uncomment ONE of the two blocks below, not both. ----
 #
@@ -86,6 +105,5 @@
 #pf_uievents
 5 pf_native
 8 pf_keys
-10 pf_uislot
-15 pf_mesh
-20 pf_uiz
+15 pf_uiroute
+130 pf_uiz

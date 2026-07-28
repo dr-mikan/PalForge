@@ -26,13 +26,50 @@
 -- unreadable zero into cases that each point somewhere different, and that is the whole of the
 -- improvement.
 --
+-- ⚠️⚠️ ESC IS NOT A KEY ON THIS BUILD, AND THAT IS WHY BINDING IT WAS NEVER GOING TO WORK.
+--
+-- This was the session's real finding and it belongs at the top of this file, because it changes
+-- what "refused" means here from a safety rule into a statement about the wrong tool.
+--
+-- Palworld's UI input is CommonUI's, and CommonUI resolves NAMED ACTIONS against the activatable
+-- widget tree — not key presses against a global table. The whole path is readable in this
+-- install's dump:
+--
+--   DT_UIInputAction   /Game/Pal/DataTable/UI/DT_UIInputAction.DT_UIInputAction — 244 rows,
+--                      among them "UIEscape" and "UICancel" (the shipped list is in
+--                      core/keyboard/base/actions.lua:60-121)
+--   FPalKeyConfigSettings.MouseAndKeyboardUIInputMappings : TMap<FName, FKey>   Pal.hpp:3978
+--                      the player's own action-name -> key map for exactly those rows
+--   UPalUserWidget::RegisterActionBinding(FName ActionName, bool IsDisplayActionBar,
+--                      TEnumAsByte<EInputEvent>, <delegate>) -> FPalUIActionBindData  Pal.hpp:31898
+--   UPalUserWidget::RegisterActionBinding_NotConcume(...)                            Pal.hpp:31897
+--   UPalUserWidget::UnregisterActionBinding(FPalUIActionBindData&)                   Pal.hpp:31895
+--   UPalCommonUIActionRouter : UCommonUIActionRouterBase        Pal.hpp:16698, CommonUI.hpp:794
+--   UCommonActivatableWidget.bIsBackHandler / BP_OnHandleBackAction   CommonUI.hpp:149, :172
+--
+-- So the game's own answer to "I want Esc" is: be an activatable widget, and either claim the
+-- BACK action (bIsBackHandler) or register the named action on yourself — CONSUMING or not,
+-- which is the difference between the two RegisterActionBinding entries. `_NotConcume` is
+-- Palworld's own spelling of what a UE4SS keybind can only ever be.
+--
+-- A UE4SS RegisterKeyBind on Escape would therefore OBSERVE and never PARTICIPATE: it cannot
+-- consume, it has no place in the router's ordering, and it fires whether or not a screen of
+-- ours is up. It is refused for that reason first and for the player's sake second.
+--
+-- ⚠️ WHAT IS NOT REACHABLE YET, stated so nobody re-derives it: RegisterActionBinding's fourth
+-- parameter is a DELEGATE, core/signature refuses DelegateProperty outright (signature.lua:60-63),
+-- and UE4SS has no documented way to push a Lua function into a delegate ARGUMENT. So PalForge
+-- cannot make that call today. api/ui's `backHandler` takes the other route — bIsBackHandler on
+-- our own window — and test/init.lua's pf_uiroute HOOKS RegisterActionBinding to watch which
+-- actions the game's own screens bind and on what, which is how the remaining half gets measured
+-- rather than guessed.
+--
 -- THREE REFUSALS, all deliberate:
 --
---   ESCAPE is never bound, by anything, ever. A mod in Esc's path is one keystroke away from
---   being the reason a player cannot close the game's own menu, which is the exact failure the
---   whole input design exists to prevent (see the INPUT block in _widget.lua). The rule and its
---   reason live in core/keyboard's registry now, because they bind every caller of the keyboard
---   and not only this seam; M.FORBIDDEN re-exports them. `overrideKeys` does NOT unlock it.
+--   ESCAPE is never bound as a KEY, by anything, ever — see above. The rule and its reason live
+--   in core/keyboard's registry, because they bind every caller of the keyboard and not only this
+--   seam; M.FORBIDDEN re-exports them. `overrideKeys` does NOT unlock it, and unlocking it would
+--   not give you the thing you wanted anyway.
 --
 --   A key somebody else in PalForge has already bound is not taken. The registry REPLACES the
 --   callback on a second register() of the same key, so binding F1 from a panel would silently
@@ -160,6 +197,17 @@ function M.arm(spec)
     spec = spec or {}
     local override = {}
     for _, k in ipairs(spec.overrideKeys or {}) do override[tostring(k):upper()] = true end
+    -- ⚠️ `overrideButtons` EXISTS BECAUSE THE OBVIOUS SPELLING IS A TRAP. The registry's refusal
+    -- message used to suggest `overrideKeys = { "MIDDLE_MOUSE_BUTTON" }`, and writing that would
+    -- have half-worked in the worst way: the overrideKeys loop below arms a name with
+    -- `button = nil` and `dispatch = spec.onKey`, so the name would be marked seen, the buttons
+    -- loop would skip it, and a middle-click would have arrived at the KEY router — where no
+    -- element declares it — instead of the mouse router. Silence, from a declaration that reads
+    -- correct. So the two lists stay apart and a mouse override is named as a BUTTON.
+    for _, b in ipairs(spec.overrideButtons or {}) do
+        local name = M.MOUSE[tostring(b):lower()]
+        if name then override[name] = true end
+    end
 
     -- Ordered, and de-duplicated by name: `keys` first, then any `overrideKeys` that were not
     -- also listed there. pairs() order is not stable and a report whose row order moves between
@@ -175,6 +223,10 @@ function M.arm(spec)
     for _, k in ipairs(spec.keys or {}) do one(tostring(k):upper(), nil, spec.onKey) end
     for _, k in ipairs(spec.overrideKeys or {}) do one(tostring(k):upper(), nil, spec.onKey) end
     for _, b in ipairs(spec.buttons or {}) do
+        local button = tostring(b):lower()
+        one(M.MOUSE[button], button, spec.onMouse)
+    end
+    for _, b in ipairs(spec.overrideButtons or {}) do
         local button = tostring(b):lower()
         one(M.MOUSE[button], button, spec.onMouse)
     end

@@ -101,6 +101,17 @@
 --                     WBP_PalOverallUILayout, a UCanvasPanel and therefore a UPanelWidget
 --                     (dumps/cxx/WBP_PalOverallUILayout.hpp:9), live under BP_PalGameInstance
 --                     (dumps/reflection/03_widgets.txt:54)
+--   host = "layer"    ⚠️ THE GAME'S OWN ROUTE, and the one to reach for when a panel should
+--                     behave like a Palworld screen rather than merely look like one. The
+--                     in-game layout is a UPrimaryGameLayout and registers its CommonUI layers
+--                     in `Layers : TMap<FGameplayTag, UCommonActivatableWidgetContainerBase*>`
+--                     (CommonGame.hpp:156-160); pushing onto one through BP_AddWidget
+--                     (CommonUI.hpp:194) makes the game create, stack, activate, transition and
+--                     register the widget, and RemoveWidget (:190) undoes every part of that
+--                     including the input mode. It needs a UI.Frame root (only a Palworld
+--                     activatable may go on a layer) and it is UNMEASURED — no run has watched
+--                     BP_AddWidget answer here — so an element that declares it and cannot get
+--                     on stays unmounted with the reason, which is what :autoMount retries.
 --   host = { widget = "PalUITitleBase", panel = "VerticalBox_0" }
 --                     any live widget class and the panel inside it — which is how a pack
 --                     EXTENDS a screen the game already draws, without owning it
@@ -112,36 +123,54 @@
 --
 -- WHETHER THE MOUSE CAN REACH IT: `input`. Drawing a widget and being able to CLICK it are two
 -- different problems, and the second one is not a UI problem at all. While the game holds mouse
--- capture — ordinary gameplay, input mode GameOnly — Slate is never offered the pointer, so
--- hit-testing, z-order and visibility are all irrelevant and every button in every mod is inert.
--- Pressing Esc is what fixes it by hand: the game's own menu switches the input mode and shows
--- the cursor, and a panel in CanvasPanel_Root is added last and therefore drawn on top.
+-- capture — ordinary gameplay — Slate is never offered the pointer, so hit-testing, z-order and
+-- visibility are all irrelevant and every button in every mod is inert. Pressing Esc is what
+-- fixes it by hand: the game's own menu switches the input mode and shows the cursor, and a
+-- panel in CanvasPanel_Root is added last and therefore drawn on top.
 --
 --   input = "none"       THE DEFAULT. Take nothing. The panel is clickable while the game has
 --                        already given the mouse away (a menu is open), and it never interferes
 --                        with anyone's camera. A HUD readout wants exactly this.
---   input = "cursor"     show the mouse cursor, leave the input MODE alone.
---   input = "clicks"     also switch to Game+UI, so clicks reach widgets while the player can
---                        still move and look. What a panel with buttons wants.
---   input = "exclusive"  a MODAL: game input stops entirely. ⚠️ this is the state that leaves a
---                        player unable to move the camera, and a hot-reload drops the Lua state
---                        without ever unmounting. Do not leave one of these running.
+--   input = "cursor"     show the mouse cursor and nothing else. `bShowMouseCursor` is a plain
+--                        readable property (Engine.hpp:9035), so it is restored exactly.
+--   input = "clicks"     the game's own GameAndMenu mode: clicks reach widgets while the player
+--                        can still move and look. What a panel with buttons wants.
+--   input = "exclusive"  the game's own Menu mode — a MODAL, exactly what an inventory screen
+--                        declares. Game input stops. Do not leave one running unattended.
 --
--- THE DEFAULT IS THE SAFE ONE ON PURPOSE. A mod that leaves the player unable to move is worse
--- than one whose button does nothing, so nothing happens unless the element asked. On unmount
--- the cursor flag is restored exactly (it is readable) and the input mode is put back only for
--- "exclusive" (it is NOT readable — UE has no GetInputMode — and forcing GameOnly would rip the
--- mouse out of the game's own menu if one were open). native/ui/_widget.lua's INPUT block states
--- that asymmetry in full.
+-- ⚠️⚠️ HOW THE LAST TWO ARE DONE IS THE WHOLE LESSON OF THIS FILE, AND IT CHANGED. They used to
+-- call UWidgetBlueprintLibrary::SetInputMode_GameAndUIEx / _UIOnlyEx on the player controller.
+-- That broke Esc in TWO live runs — first the game's menu would not close, then it would not
+-- open at all — because it is not how Palworld works. Palworld never calls SetInputMode when a
+-- menu opens. Every one of its screens is a UPalActivatableWidget and DECLARES the mode it wants
+-- as two bytes on itself (`InputConfig`, `GameMouseCaptureMode` — Pal.hpp:13369-13370); CommonUI's
+-- action router reads the topmost activatable's declaration, applies it, and RESTORES the
+-- previous one when that widget deactivates. The game watches it happen from the outside
+-- (APalHUDInGame::OnActiveInputModeChanged, Pal.hpp:9742). Writing the mode by hand leaves that
+-- router describing an input state that is no longer true — and Esc is not a key on this build,
+-- it is a UI ACTION the same router resolves against the same activatable stack.
+--
+-- SO `input` IS NOW CARRIED WHERE THE GAME CARRIES IT, and that has a consequence you can see
+-- from the declaration: "clicks" and "exclusive" need the element's root to be a UI.Frame{ },
+-- because WBP_PalCommonWindow_C is the one widget in this vocabulary that IS a Palworld
+-- activatable. Declaring either without one is refused at define time with this paragraph's
+-- short form. UNMOUNTING is what gives the mode back, and it gives it back through the router
+-- rather than by forcing anything — which is the half no call in the old design could do.
 --
 -- ⚠️ AND THE ONE PROMISE THAT OUTRANKS EVERY OTHER LINE IN THIS FILE: THE PLAYER CAN ALWAYS
--- CLOSE THE GAME'S OWN MENU. A live run found that a mounted panel with input = "clicks" stopped
--- Esc from closing Palworld's menu — the failure this whole design was supposed to prevent, and
--- one that is worse than a button that does nothing. Both halves of the fix are in
--- native/ui/_widget.lua (keyboard focus is handed straight back to the game viewport; a Frame's
--- CommonUI back-handler and modal flags are forced off before it is activated) and its ⚠️⚠️ block
--- is the one to read. What belongs HERE is the rule those halves serve: no element of this tree
--- may sit between the player and the game's own menu, whatever it declares.
+-- CLOSE THE GAME'S OWN MENU. Two live runs broke that, and the fix is not a guard bolted on top
+-- — it is using the mechanism the game uses, so that the router is never lied to in the first
+-- place. Underneath it there is still a floor: every input grab is registered on _G and swept on
+-- core/poll's heartbeat, so one that nobody can answer for any more — because the element is
+-- gone, or because a hot reload took the whole Lua state with it — releases itself. See the
+-- INPUT block in native/ui/_widget.lua.
+--
+-- BEING IN ESC'S PATH ON PURPOSE: `backHandler`. The counterpart to all of the above. A CommonUI
+-- screen that closes on Esc says so with `bIsBackHandler` (CommonUI.hpp:149) and answers
+-- BP_OnHandleBackAction (:172); that is the mechanism, and `backHandler = true` on a Frame-rooted
+-- element sets it. It is opt-in and it is honest about being unmeasured: whether the router
+-- registers a widget of ours at all is exactly the open question, and test/init.lua's pf_uiroute
+-- is the instrument that answers it.
 --
 -- WHICH PANEL IS ON TOP, AND WHICH ONE GETS THE KEY: `z`.
 --
@@ -336,9 +365,24 @@ kind("Label",     "label",    "none", { TEXT,
 -- node to reach for when a panel should not look like a mod. Where UI.Border is a rectangle in
 -- a colour you chose, a Frame is the game's chrome and takes no colour of its own — `color` is
 -- only the fallback Border's, for the case where the class is not loaded.
+--
+-- ⚠️ AND IT TAKES NO COLOUR, WHICH IS A CORRECTION RATHER THAN A LIMITATION. `color` used to be
+-- declared here as "the fallback Border's tint", which meant it did something in the rare case
+-- (the window class is not resident) and nothing in the ordinary one — and a live run duly
+-- reported a Frame that "drew black" with a colour declared on it. That is the defect class this
+-- vocabulary exists to prevent, so the field is REFUSED with the sentence below instead of
+-- quietly working one time in twenty. There is no honest way to make it work: the only call that
+-- would tint a UUserWidget is SetColorAndOpacity (UMG.hpp:1709), which takes a struct AND
+-- multiplies over the CONTENT as well as the chrome — a different thing from a background.
+local FRAME_NO_COLOUR =
+    "a Frame takes no colour: it wears the GAME's own window art (WBP_PalCommonWindow_C) and "
+    .. "nothing here can tint it — the only call that would, UUserWidget::SetColorAndOpacity "
+    .. "(UMG.hpp:1709), is a struct call and would tint the CONTENT too. For a coloured panel "
+    .. "write Border{ color = { r, g, b, a } }; for the game's chrome AROUND a colour of your "
+    .. "own, put the Border inside it — Frame{ Border{ color = {...}, ... } }"
 kind("Frame",     "frame",    "one",  { CHILDREN,
-    { "color", type = "table",
-      doc = "the FALLBACK Border's tint { r, g, b, a }, used only when the game's window class is not loaded" } })
+    { "color", type = "table", check = function() return false, FRAME_NO_COLOUR end,
+      doc = "⚠️ REFUSED — " .. FRAME_NO_COLOUR } })
 -- A Button is the GAME's own WBP_Title_MenuButton wired through the shared click router —
 -- the same widget and the same route as the imperative native/ui/button.lua, so there is one
 -- button in this tree rather than two that drift apart. `self` inside onClick is the element
@@ -507,13 +551,13 @@ local function buttonsCheck(v)
     return true
 end
 
-local HOST_NAMES = { screen = true, game = true }
+local HOST_NAMES = { screen = true, game = true, layer = true }
 
 local function hostCheck(v)
     if type(v) == "string" then
         if HOST_NAMES[v] then return true end
-        return false, string.format("%q is not a host name — use \"screen\", \"game\", or "
-            .. "{ widget = <class>, panel = <member> }", v)
+        return false, string.format("%q is not a host name — use \"screen\", \"game\", \"layer\", "
+            .. "or { widget = <class>, panel = <member> }", v)
     end
     -- The nested spec does the real work and raises the real message; check() reports by
     -- RETURNING, so the raise is turned back into a rejection here. Its "PalForge: " prefix is
@@ -689,9 +733,9 @@ local Spec = schema.define("UI.Spec", {
     { "description", type = "string",   doc = "one-line description, for UI and tooling" },
     { "root",        type = "table", sig = "UI.Node", check = nodeCheck,
                      doc = "the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question" },
-    { "host",        type = "string|table", sig = "UI.Spec.Host|\"screen\"|\"game\"",
+    { "host",        type = "string|table", sig = "UI.Spec.Host|\"screen\"|\"game\"|\"layer\"",
                      check = hostCheck,
-                     doc = "where to mount when mount() is given no root: \"screen\" (a viewport layer of our own), \"game\" (the game's own in-game UI root canvas), or { widget = <class>, panel = <member> } for a panel the game already draws" },
+                     doc = "where to mount when mount() is given no root: \"screen\" (a viewport layer of our own), \"game\" (the game's own in-game UI root canvas), \"layer\" (⚠️ the GAME's own route — pushed onto a CommonUI layer through BP_AddWidget so the action router owns its activation, focus and input mode; needs a Frame root and is unmeasured), or { widget = <class>, panel = <member> } for a panel the game already draws" },
     { "render",      type = "function", sig = "fun(self: UI.Handle, root: any): boolean?",
                      doc = "build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted" },
     { "update",      type = "function", sig = "fun(self: UI.Handle)",
@@ -700,7 +744,9 @@ local Spec = schema.define("UI.Spec", {
                      doc = "remove the widgets render() built (self); runs on :unmount()" },
     { "input",       type = "string", default = "none",
                      values = { "none", "cursor", "clicks", "exclusive" },
-                     doc = "how much of the player's mouse this element takes while it is mounted. \"none\" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). \"cursor\" shows the cursor. \"clicks\" also switches the game to Game+UI so clicks reach widgets while the player can still move and look. \"exclusive\" is a modal and stops game input — see the warning on it" },
+                     doc = "how much of the player's input this element takes while it is mounted. \"none\" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). \"cursor\" shows the cursor and nothing else. \"clicks\" and \"exclusive\" are the GAME's own GameAndMenu and Menu modes, declared on the element's activatable widget the way every Palworld screen declares them (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and put back by the CommonUI action router on unmount — so both REQUIRE a UI.Frame root. PalForge never calls SetInputMode itself; doing that broke Esc twice" },
+    { "backHandler", type = "boolean",
+                     doc = "⚠️ claim the CommonUI BACK action (that is Esc) on this element's window: sets bIsBackHandler (CommonUI.hpp:149) before the widget is activated, which is how a Palworld screen says \"Esc closes ME\". Needs a UI.Frame root. UNMEASURED — whether the action router registers a widget of ours at all is the open question pf_uiroute exists to answer — so a panel that declares it must still have another way down" },
     { "z",           type = "number", default = 0,
                      doc = "stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down" },
     { "keys",        type = "table", sig = "string[]", check = keysCheck,
@@ -710,7 +756,9 @@ local Spec = schema.define("UI.Spec", {
     { "onKeyPressed", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
                      doc = "one of `keys` went down: (self = the element INSTANCE, ctx.key / ctx.z / ctx.id). Reaches ONLY the topmost mounted element — a panel gets no key while anything is above it" },
     { "buttons",     type = "table", sig = "string[]", check = buttonsCheck,
-                     doc = "which mouse buttons onMousePressed wants: \"left\", \"right\", \"middle\". Required alongside onMousePressed" },
+                     doc = "which mouse buttons onMousePressed wants: \"left\", \"right\", \"middle\". Required alongside onMousePressed. A button Palworld's live key config already uses is REFUSED with the action named — every mouse button on a default install is one, so this list is usually empty and `overrideButtons` is what you want" },
+    { "overrideButtons", type = "table", sig = "string[]", check = buttonsCheck,
+                     doc = "⚠️ mouse buttons to take DELIBERATELY even though Palworld's key config uses them — the mouse counterpart of `overrideKeys`, and on a default install the only way to get any of the three, because all of them are bound (middle is DirectAttackOrder). Same routing, same onMousePressed; the only difference is that PalForge stops refusing. The game's own action STILL fires — a UE4SS keybind observes and does not consume" },
     { "onMousePressed", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
                      doc = "one of `buttons` went down: (self, ctx.button / ctx.z / ctx.id). Goes to the TOPMOST element that declared it and stops there. ⚠️ a global press, not a hit test — nothing says what was under the cursor and the game still receives it; for a click ON a widget use Button{ onClick = }" },
     { "data",        type = "table",    doc = "default fields shared by every instance of this element" },
@@ -757,6 +805,12 @@ function Class:renderTree(root)
             host  = root,
             outer = (self._host and self._host.outer) or root,
             self  = self,
+            -- The three declarations that have to reach the WIDGET rather than the element,
+            -- because Palworld keeps them on the widget and reads them at activation. A Frame
+            -- node is what receives them; every other node ignores them.
+            input       = self.inputMode,
+            backHandler = self.backHandler,
+            layer       = self._host and self._host.layer or nil,
         })
     end)
     if not ok then return refuse(self, err) end
@@ -886,7 +940,8 @@ end
 function Class:armInput()
     local wantsKeys = (self.keyList and #self.keyList > 0)
         or (self.overrideList and #self.overrideList > 0)
-    local wantsMouse = self.buttonList and #self.buttonList > 0
+    local wantsMouse = (self.buttonList and #self.buttonList > 0)
+        or (self.overrideButtonList and #self.overrideButtonList > 0)
     if not (wantsKeys or wantsMouse) then return false end
     local tree = uiTree()
     if not tree then return false end
@@ -894,6 +949,7 @@ function Class:armInput()
     pcall(function()
         records = tree.armInput({ keys = self.keyList, overrideKeys = self.overrideList,
                                   buttons = self.buttonList,
+                                  overrideButtons = self.overrideButtonList,
                                   onKey = routeKey, onMouse = routeMouse })
     end)
     if type(records) ~= "table" then return false end
@@ -934,7 +990,15 @@ function Class:grabInput()
     -- headless one they are plain tables and grabInput refuses on the missing controller first.
     local focus = (self._tree and self._tree.root) or self._root
     local grab, why = nil, nil
-    pcall(function() grab, why = tree.grabInput(mode, focus) end)
+    -- THE DEAD-MAN'S ANSWER, supplied as a closure so the engine seam never has to know what an
+    -- element is. It is asked on core/poll's heartbeat, and a grab it answers `false` for is
+    -- released without being asked — which covers the case unmount() cannot: an element that was
+    -- dropped, whose destroy raised, or whose whole Lua state went away in a hot reload.
+    local owner = {
+        id = tostring(self.id or "ui element"),
+        alive = function() return self._mounted == true and self._input == grab end,
+    }
+    pcall(function() grab, why = tree.grabInput(mode, focus, owner) end)
     self._input = grab
     if not grab then
         log.warn(string.format("%s: input = %q did not take: %s",
@@ -1059,7 +1123,9 @@ local function define(spec)
         for k, v in pairs(spec.data) do cls[k] = v end
     end
     cls.hostSpec  = spec.host   -- read by mount() when it is given no root
-    cls.inputMode = spec.input  -- read by mount() once the render has succeeded
+    cls.inputMode = spec.input  -- handed to the tree at build time (a Frame carries it) AND to
+                                -- grabInput after the render, which is only the cursor half now
+    cls.backHandler = spec.backHandler  -- same route: written onto the activatable before it activates
     cls.zOrder    = spec.z or 0 -- read by mount() (drawing) and by the routers (order)
 
     -- A HANDLER AND ITS NAMES ARE ONE DECLARATION, and half of one is refused rather than
@@ -1078,15 +1144,36 @@ local function define(spec)
             .. "bound for the whole session (UE4SS has no unregister) and routed to nothing.",
             spec.id))
     end
-    if spec.onMousePressed and not spec.buttons then
+    if spec.onMousePressed and not (spec.buttons or spec.overrideButtons) then
         fail(string.format("UI %q declares onMousePressed but no `buttons`. Name them: "
             .. "buttons = { \"left\" }. ⚠️ and if what you want is a click ON something, that is "
             .. "Button{ onClick = ... } — onMousePressed is a global press with no hit test.",
             spec.id))
     end
-    if spec.buttons and not spec.onMousePressed then
+    if (spec.buttons or spec.overrideButtons) and not spec.onMousePressed then
         fail(string.format("UI %q declares `buttons` but no onMousePressed, so the buttons would "
             .. "be bound for the whole session and routed to nothing.", spec.id))
+    end
+
+    -- ⚠️ `input` AND `backHandler` BOTH LAND ON THE ELEMENT'S ACTIVATABLE WIDGET, AND ONLY A
+    -- UI.Frame BUILDS ONE. Palworld keeps the input mode and the back-handler flag on the widget
+    -- (Pal.hpp:13369-13370, CommonUI.hpp:149) and its action router reads them when the widget
+    -- activates; a VBox or a Border is not an activatable and never will be. Declaring either
+    -- without a Frame root used to mean "PalForge calls SetInputMode on the player controller
+    -- instead", which is what broke Esc in two live runs — so it is refused here, at the call
+    -- site, rather than degrading into the thing that caused the failure.
+    local wantsActivatable = (spec.input == "clicks") or (spec.input == "exclusive")
+        or (spec.backHandler == true)
+    if wantsActivatable and spec.root and spec.root.kind ~= "frame" then
+        fail(string.format("UI %q declares %s, which Palworld carries on an ACTIVATABLE WIDGET "
+            .. "(UPalActivatableWidget.InputConfig / bIsBackHandler) — and this element's root is "
+            .. "a %s, which is not one. Wrap the tree in UI.Frame{ ... }: that builds "
+            .. "WBP_PalCommonWindow_C, the game's own window, which IS an activatable and is the "
+            .. "one node here the CommonUI action router can read a declaration off. PalForge "
+            .. "does NOT set the input mode on the player controller instead — doing that stopped "
+            .. "Esc reaching the game's own menu, twice.", spec.id,
+            spec.backHandler == true and "backHandler = true" or ("input = " .. string.format("%q", tostring(spec.input))),
+            tostring(spec.root.kind)))
     end
 
     -- Normalised ONCE, at define time, so neither router does string work per press: the LIST is
@@ -1121,12 +1208,33 @@ local function define(spec)
         end
         cls.onKeyPressed = spec.onKeyPressed
     end
-    if spec.buttons then
-        cls.buttonList, cls.buttonSet = {}, {}
-        for _, b in ipairs(spec.buttons) do
+    -- The same two-lists-one-surface shape as `keys` / `overrideKeys`, for the same reason:
+    -- buttonSet is what a route test reads and holds both, buttonList and overrideButtonList are
+    -- what the engine seam arms, and the difference between them is the whole of what an override
+    -- means. On a default Palworld install ALL THREE mouse buttons are bound by the game (middle
+    -- is DirectAttackOrder), so `buttons` alone is refused at arm time and `overrideButtons` is
+    -- the only list that ever produces a working mouse route.
+    if spec.buttons or spec.overrideButtons then
+        cls.buttonList, cls.buttonSet, cls.overrideButtonList = {}, {}, {}
+        local function takeButton(b, list)
             local name = tostring(b):lower()
-            cls.buttonList[#cls.buttonList + 1] = name
-            cls.buttonSet[name] = true
+            if not cls.buttonSet[name] then
+                cls.buttonSet[name] = true
+                list[#list + 1] = name
+            end
+        end
+        for _, b in ipairs(spec.buttons or {}) do takeButton(b, cls.buttonList) end
+        for _, b in ipairs(spec.overrideButtons or {}) do
+            local name = tostring(b):lower()
+            for _, already in ipairs(cls.buttonList) do
+                if already == name then
+                    fail(string.format("UI %q names %q in BOTH `buttons` and `overrideButtons`. "
+                        .. "Those are opposite instructions about the same button: `buttons` means "
+                        .. "refuse it if Palworld uses it, `overrideButtons` means take it anyway. "
+                        .. "Pick one.", spec.id, name))
+                end
+            end
+            takeButton(b, cls.overrideButtonList)
         end
         cls.onMousePressed = spec.onMousePressed
     end
@@ -1213,8 +1321,18 @@ function UI.stack()
             for _, k in ipairs(st.keyList or {}) do keys[#keys + 1] = k end
             for _, k in ipairs(st.overrideList or {}) do keys[#keys + 1] = k end
         end
-        out[i] = { id = st.id, z = zOf(st), seq = st._stackSeq,
-                   keys = keys, overrideKeys = st.overrideList, buttons = st.buttonList }
+        -- Both button lists too, for the same reason the key row carries both: an OVERRIDDEN
+        -- button is the one most likely to be under suspicion, and on a default install it is
+        -- the only kind that can ever have been armed.
+        local buttons
+        if st.buttonList or st.overrideButtonList then
+            buttons = {}
+            for _, b in ipairs(st.buttonList or {}) do buttons[#buttons + 1] = b end
+            for _, b in ipairs(st.overrideButtonList or {}) do buttons[#buttons + 1] = b end
+        end
+        out[i] = { id = st.id, z = zOf(st), seq = st._stackSeq, input = st.inputMode,
+                   keys = keys, overrideKeys = st.overrideList,
+                   buttons = buttons, overrideButtons = st.overrideButtonList }
     end
     return out
 end
@@ -1248,8 +1366,8 @@ function UI.report()
             .. "only the first row; a MOUSE press reaches the first row that declared buttons",
             #list)
         for i, row in ipairs(list) do
-            out[#out + 1] = string.format("ui:   %d. %-34s z=%-5d keys=%s buttons=%s", i,
-                tostring(row.id), row.z,
+            out[#out + 1] = string.format("ui:   %d. %-34s z=%-5d input=%-9s keys=%s buttons=%s", i,
+                tostring(row.id), row.z, tostring(row.input or "none"),
                 (row.keys and #row.keys > 0) and table.concat(row.keys, ",") or "-",
                 (row.buttons and #row.buttons > 0) and table.concat(row.buttons, ",") or "-")
         end
@@ -1260,9 +1378,14 @@ function UI.report()
             .. "any key is bound"
         return out
     end
-    local ok, lines = pcall(tree.keyReport)
-    if ok and type(lines) == "table" then
-        for _, line in ipairs(lines) do out[#out + 1] = line end
+    -- Three questions, three sources, and none of them answers another's: the stack says WHO
+    -- would get a press, the key binds say whether a press can arrive at all, and the grab list
+    -- says what is still being held from the player — which is the one that used to be invisible.
+    for _, fn in ipairs({ tree.keyReport, tree.grabReport }) do
+        local ok, lines = pcall(fn)
+        if ok and type(lines) == "table" then
+            for _, line in ipairs(lines) do out[#out + 1] = line end
+        end
     end
     return out
 end

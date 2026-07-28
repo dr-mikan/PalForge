@@ -548,57 +548,273 @@ pf_uidecl = function()
     end)
 end,
 
--- pf_uiz — TWO OVERLAPPING PANELS. The z-order and the event-routing rule, put on screen where
--- they can be watched instead of asserted, and the ESC REGRESSION in the same run.
+-- pf_uiroute — ⚠️ WHAT PALWORLD ITSELF DOES WITH ITS UI, ITS INPUT MODE AND ESC.
 --
--- WHAT THIS ANSWERS, and each answer is separable from the others:
+-- THE MOST IMPORTANT ACTION IN THIS FILE, and the one that should have existed before anything
+-- of ours ever touched an input mode. Two live runs broke Esc while a PalForge panel was up, and
+-- both times the diagnosis was a guess about UE internals this repo cannot read. This does not
+-- guess: it reads the game's own objects and then WATCHES the game do the thing, with hooks whose
+-- whole body is a counter.
 --
---   1. ⚠️ DOES ESC STILL CLOSE THE GAME'S OWN MENU. This is the one that matters. The BOTTOM
---      panel is deliberately the exact configuration that broke it — a UI.Frame (the game's own
---      WBP_PalCommonWindow chrome, a CommonUI activatable) plus input = "clicks" (which calls
---      SetInputMode_GameAndUIEx and therefore hands our widget the keyboard focus). Both halves
---      of the fix are on that path: the focus is handed straight back to the game viewport
---      (SetFocusToGameViewport, dumps/cxx/UMG.hpp:2007) and the frame's CommonUI back-handler /
---      modal / activation-focus flags are forced off before it is activated. Press Esc twice.
---      If the menu opens and closes, the fix holds. If it opens and will not close, it does not,
---      and the two log lines named below say which half failed.
+-- WHAT THE DUMP ALREADY SETTLED (so this probe only has to confirm it in the running process):
+--   * Palworld screens declare their input mode as DATA on the widget —
+--     UPalActivatableWidget.InputConfig / .GameMouseCaptureMode (Pal.hpp:13369-13370),
+--     EPalWidgetInputMode { Default, GameAndMenu, Game, Menu } (Pal_enums.hpp:5367).
+--   * CommonUI's action router applies it, and the game WATCHES it change from the outside:
+--     APalHUDInGame::OnActiveInputModeChanged(ECommonInputMode) (Pal.hpp:9742).
+--   * Esc is not a key: it is the UI action "UIEscape" / "UICancel" (rows of DT_UIInputAction),
+--     bound by UPalUserWidget::RegisterActionBinding (Pal.hpp:31898) or claimed generically with
+--     bIsBackHandler / BP_OnHandleBackAction (CommonUI.hpp:149, :172).
+--   * A screen is put up through a LAYER: UPrimaryGameLayout.Layers (CommonGame.hpp:158) and
+--     UCommonActivatableWidgetContainerBase::BP_AddWidget (CommonUI.hpp:194).
 --
---   2. WHICH PANEL IS DRAWN ON TOP. They overlap on purpose and the top one is smaller, so the
---      bottom one shows around its edges. TOP declares z = 20, BOTTOM z = 10.
+-- WHAT ONLY A RUN CAN ANSWER, and each is one line of this block's output:
+--   1. WHICH LAYER TAGS this layout registers. They are registered at runtime
+--      (RegisterLayer, CommonGame.hpp:160) and no header lists them. `host = "layer"` needs one.
+--   2. WHAT THE GAME'S OWN SCREENS DECLARE in InputConfig — i.e. what value PalForge should be
+--      writing for "clicks" and for "exclusive", read off the widgets rather than chosen.
+--   3. DOES OnActiveInputModeChanged FIRE when a menu opens. If it does, the router really is
+--      the thing that owns the mode, and writing the mode anywhere else is writing behind it.
+--   4. WHICH ACTIONS the game binds, on what, and whether Esc arrives as one.
+--   5. WHETHER BP_OnHandleBackAction IS EVEN CALLED on this build — the route api/ui's
+--      `backHandler` depends on.
 --
---   3. WHO GETS A KEY. Both panels want the same keys. Only the TOP one may have them — a key
---      does not reach a panel while anything is above it. At 45 s the top panel takes itself
---      down and the same key starts reaching the bottom one, which is the rule changing its
---      answer while you watch.
+-- ⚠️ IT ARMS HOOKS, AND UE4SS CANNOT UNREGISTER ONE (core/event.lua:779-782). They stay for the
+-- session. Every handler here is a counter plus one pcall'd string read, capped at the first few
+-- dozen samples, which is the shape probes/uievents.lua established as survivable.
 --
---   4. WHO GETS A MOUSE PRESS. Only the BOTTOM panel declares one, and it gets middle-click even
---      though it is covered — because a press goes to the topmost panel that WANTS it, where a
---      key is blocked by the topmost panel full stop. That difference is the whole design, and
---      this is the one run in which both halves are visible at once.
+-- WHAT TO DO IN GAME: open the INVENTORY and close it, then press ESC to open the pause menu and
+-- ESC again to close it. That is all. Verdicts print themselves at 30 s, 60 s and 90 s.
+pf_uiroute = function()
+    local native = require("palforge.native.ui")
+    local widget, tree = native.widget, native.tree
+    local sig  = require("palforge.core.signature")
+    local poll = require("palforge.core.poll")
+
+    local S = { hooks = {}, counts = {}, samples = {}, armed = {} }
+    local function say(fmt, ...) log.info("pf_uiroute: " .. string.format(fmt, ...)) end
+    local function sample(bucket, text)
+        local list = S.samples[bucket]
+        if not list then list = {}; S.samples[bucket] = list end
+        if #list < 24 then list[#list + 1] = tostring(text) end
+    end
+
+    log.info("#### BEGIN ui-common-route")
+
+    -- [1] THE LAYERS. The one question `host = "layer"` cannot be written without.
+    say("[1/5] the in-game layout's registered CommonUI layers (UPrimaryGameLayout.Layers, "
+        .. "CommonGame.hpp:158) — these tag names are the argument host = \"layer\" takes")
+    for _, line in ipairs(tree.layerReport()) do log.info("pf_uiroute " .. line) end
+
+    -- [2] THE CENSUS. Every live Palworld activatable, and the two bytes that ARE the input mode
+    -- on this build. Reading them off the game's own screens is how PalForge learns what to
+    -- write, instead of picking an enum value out of a header and hoping.
+    say("[2/5] live UPalActivatableWidget census — InputConfig is EPalWidgetInputMode "
+        .. "{0 Default, 1 GameAndMenu, 2 Game, 3 Menu} (Pal_enums.hpp:5367); GameMouseCaptureMode "
+        .. "is EMouseCaptureMode {0 NoCapture .. 3 DuringMouseDown} (Engine_enums.hpp:2237)")
+    local seen, active, shown = 0, 0, 0
+    for _, className in ipairs({ "PalActivatableWidget", "PalUserWidget" }) do
+        local all = {}
+        pcall(function() all = FindAllOf(className) or {} end)
+        for _, w in ipairs(all) do
+            seen = seen + 1
+            local row = {}
+            local isActive
+            pcall(function() isActive = w.bIsActive end)
+            if isActive then active = active + 1 end
+            -- Only the ACTIVE ones are printed in full: an in-game session holds hundreds of
+            -- widget archetypes and a census that prints all of them is a census nobody reads.
+            if isActive and shown < 24 then
+                shown = shown + 1
+                for _, f in ipairs({ "InputConfig", "GameMouseCaptureMode", "bIsBackHandler",
+                                     "bIsModal", "bSupportsActivationFocus", "bAutoActivate" }) do
+                    local v; pcall(function() v = w[f] end)
+                    row[#row + 1] = f .. "=" .. tostring(v)
+                end
+                local cls; pcall(function() cls = w:GetClass():GetFName():ToString() end)
+                log.info(string.format("pf_uiroute VALUE active %-44s %s",
+                    tostring(cls), table.concat(row, " ")))
+            end
+        end
+        if seen > 0 then break end
+    end
+    say("[2/5] %d activatable(s) live, %d ACTIVE, %d printed", seen, active, shown)
+    if active == 0 then
+        say("[2/5] nothing is active — either this ran before the HUD came up, or FindAllOf does "
+            .. "not reach these. Open a menu and run pf_uiroute again; the number is the answer.")
+    end
+
+    -- [3] THE DECLARATIONS. sig.describe calls NOTHING; it prints the live parameter list, which
+    -- is the fact a correct call needs and the fact no header can be trusted for.
+    say("[3/5] the shapes, read off the live UFunctions — nothing is called")
+    local layers = widget.uiLayers()
+    if layers[1] and layers[1].container then
+        sig.describe(layers[1].container, "BP_AddWidget")
+        sig.describe(layers[1].container, "RemoveWidget")
+        sig.describe(layers[1].container, "GetActiveWidget")
+    else
+        say("[3/5] no layer container to read BP_AddWidget off — see block [1/5]")
+    end
+    local anyWidget = widget.findFirst("PalUserWidget")
+    if anyWidget then
+        sig.describe(anyWidget, "RegisterActionBinding")
+        sig.describe(anyWidget, "RegisterActionBinding_NotConcume")
+        sig.describe(anyWidget, "ActivateWidget")
+    end
+    local hudLayout = widget.findFirst("PalUIHUDLayoutBase")
+    if hudLayout then sig.describe(hudLayout, "AddHUD") end
+    local hud = widget.findFirst("PalHUDInGame")
+    if hud then sig.describe(hud, "AddHUD") end
+
+    -- [4] THE HOOKS. Counters, and a capped pcall'd sample of the one string that matters.
+    say("[4/5] arming the watchers — they cannot be unregistered and stay for the session")
+    local HOOKS = {
+        { key = "inputModeChanged", path = "/Script/Pal.PalHUDInGame:OnActiveInputModeChanged",
+          why = "the ROUTER telling the game its active input mode changed. If this fires when "
+             .. "you open a menu, the router owns the mode and writing it anywhere else is "
+             .. "writing behind it — which is the whole diagnosis of the two broken Esc runs" },
+        { key = "actionBound",      path = "/Script/Pal.PalUserWidget:RegisterActionBinding",
+          why = "every named UI action the game's own screens bind. Look for UIEscape / UICancel" },
+        { key = "actionBoundFree",  path = "/Script/Pal.PalUserWidget:RegisterActionBinding_NotConcume",
+          why = "the same, in the game's own non-consuming form" },
+        { key = "backAction",       path = "/Script/CommonUI.CommonActivatableWidget:BP_OnHandleBackAction",
+          why = "the generic BACK handler. If this never fires, api/ui's `backHandler` cannot "
+             .. "work on this build and the action-name route is the only one left" },
+        { key = "activated",        path = "/Script/CommonUI.CommonActivatableWidget:ActivateWidget",
+          why = "a screen coming up — the moment the router reads InputConfig" },
+        { key = "deactivated",      path = "/Script/CommonUI.CommonActivatableWidget:DeactivateWidget",
+          why = "a screen going down — the moment the router puts the previous mode back" },
+    }
+    for _, h in ipairs(HOOKS) do S.counts[h.key] = 0 end
+    if type(RegisterHook) ~= "function" then
+        say("[4/5] RegisterHook is unavailable this session; nothing is watched and blocks 3-5 "
+            .. "of the question list stay open")
+    else
+        for _, h in ipairs(HOOKS) do
+            local key = h.key
+            local ok = pcall(RegisterHook, h.path, function(ctx, p1)
+                S.counts[key] = S.counts[key] + 1
+                -- ONE pcall'd read, capped. The context and the first parameter are the only two
+                -- things worth having, and both are read through :get() inside a pcall because a
+                -- half-initialised object is exactly the read that has faulted natively before.
+                pcall(function()
+                    local o = ctx and ctx.get and ctx:get() or nil
+                    local cls = o and o:GetClass():GetFName():ToString() or "?"
+                    local arg = ""
+                    if p1 and p1.get then
+                        local v = p1:get()
+                        arg = " " .. tostring(v and v.ToString and v:ToString() or v)
+                    end
+                    sample(key, cls .. arg)
+                end)
+            end)
+            S.armed[key] = ok == true
+            log.info(string.format("pf_uiroute VALUE armed %-62s -> %s", h.path,
+                ok and "ok" or "FAILED (not hookable on this build)"))
+        end
+    end
+    log.info("#### END ui-common-route")
+
+    say("[5/5] NOW, IN GAME, and it is two ordinary actions: (a) open your INVENTORY and close "
+        .. "it. (b) press ESC to open the pause menu and ESC again to close it. Nothing else. "
+        .. "Verdicts print at 30 s, 60 s and 90 s.")
+    support.announce("pf_uiroute: open the inventory, then press Esc twice")
+
+    local phase = 0
+    poll.every("pf_uiroute", function(elapsed)
+        local due = (elapsed >= 30 and phase < 1) and 1
+            or (elapsed >= 60 and phase < 2) and 2
+            or (elapsed >= 90 and phase < 3) and 3 or nil
+        if not due then return elapsed >= 95 end
+        phase = due
+        log.info(string.format("#### BEGIN ui-common-route-%d", phase))
+        for _, h in ipairs(HOOKS) do
+            log.info(string.format("pf_uiroute VALUE %-18s fired=%-6d armed=%s",
+                h.key, S.counts[h.key], tostring(S.armed[h.key])))
+            for _, s in ipairs(S.samples[h.key] or {}) do
+                log.info("pf_uiroute SAMPLE " .. h.key .. ": " .. s)
+            end
+        end
+        if phase == 3 then
+            log.info("pf_uiroute NOTE HOW TO READ IT, in the order the answers matter:")
+            for _, h in ipairs(HOOKS) do
+                log.info(string.format("pf_uiroute NOTE   %-18s %s", h.key, h.why))
+            end
+            log.info("pf_uiroute NOTE inputModeChanged > 0 CONFIRMS the design PalForge now "
+                .. "follows: the mode belongs to the CommonUI action router, is derived from the "
+                .. "activatable stack, and is restored by DEACTIVATION rather than by any call. "
+                .. "inputModeChanged == 0 while menus opened and closed would falsify it, and "
+                .. "would be the single most valuable line in this log.")
+            log.info("pf_uiroute NOTE actionBound / actionBoundFree SAMPLES name the UI actions "
+                .. "the game binds and the widget class each is bound on. A \"UIEscape\" or "
+                .. "\"UICancel\" among them is the exact mechanism a mod would have to join to be "
+                .. "IN Esc's path rather than beside it — and the reason ESCAPE stays refused as "
+                .. "a UE4SS keybind is that a keybind can only ever be beside it.")
+            log.info("#### END ui-common-route-3")
+            return true
+        end
+        log.info(string.format("#### END ui-common-route-%d", phase))
+        return false
+    end)
+end,
+
+-- pf_uiz — THREE PANELS, AND THE THREE THINGS THE LAST RUN LEFT OPEN.
 --
--- ⚠️ WHETHER THE KEYS ARRIVE AT ALL IS NOT SOMETHING THIS CAN PROMISE. Palworld claims keys
--- without telling anyone — F7 was its volume control, the bind succeeded, the key never came —
--- and there is no call that asks whether a key is free. So two keys are declared (INS and END),
--- and the keys report prints, in words, that an arrival count of zero cannot tell "the game took
--- it" from "nobody pressed it". If neither key arrives, THAT is the finding, and the panels still
--- prove the z-order and the mouse half.
+-- The previous run answered the z-order and BOTH halves of the key-routing rule, and they are
+-- not re-litigated here; they ride along because the same two panels prove them for free. What
+-- it left open, and what this run is shaped around:
 --
--- SAFE BY CONSTRUCTION: the top panel unmounts itself at 45 s and the bottom at 100 s, on ELAPSED
--- SECONDS through core/poll — no key is needed to get rid of either, precisely because no key can
--- be relied on. Unmounting is also what gives the cursor back.
+--   ⚠️ 1. DOES ESC WORK. The last run made it WORSE — the game's menu would not even open — and
+--      the cause is now understood: PalForge was calling SetInputMode_GameAndUIEx on the player
+--      controller, which is not how Palworld works. Palworld declares the mode on the WIDGET
+--      (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and lets CommonUI's action router
+--      apply and restore it. PalForge no longer makes that call ANYWHERE. So the first thing to
+--      do in this run is press Esc, and it should behave exactly as it does with no mod loaded.
+--
+--   2. THE MOUSE HALF, which has never once been exercised. The last run refused
+--      MIDDLE_MOUSE_BUTTON, correctly: the keymap knows the game binds it (DirectAttackOrder)
+--      and PalForge does not take a bound input without being told to. On a default install ALL
+--      THREE mouse buttons are bound, so there is no "free" one to pick instead — the honest
+--      move is to say so at the call site, which is what `overrideButtons = { "middle" }` is.
+--      ⚠️ THE GAME'S OWN ACTION STILL FIRES: a UE4SS keybind observes and never consumes, so
+--      middle-clicking will ALSO order your pal to attack. That is what an override means and
+--      this run is where it gets demonstrated honestly rather than described.
+--
+--   3. THE FRAME COLOUR. The last run reported the bottom panel drawing BLACK where a colour was
+--      declared on the Frame. `Frame{ color = ... }` is now REFUSED at define time — a Frame
+--      wears the game's own window art and nothing here can tint it — so this run declares the
+--      colour where it belongs, on a Border INSIDE the frame, in a colour nobody can mistake for
+--      black. Whether the game's chrome is there at all is answered by the `rootClass=` line:
+--      WBP_PalCommonWindow_C means the chrome, Border means it fell back and a [ui] warning
+--      above says why.
+--
+--   4. ⚠️ AND THE NEW ROUTE, measured for the first time: a third panel declares host = "layer"
+--      and asks the GAME to put it up — BP_AddWidget on one of the layout's own CommonUI layers
+--      (CommonUI.hpp:194), which creates, stacks, activates and registers it with the action
+--      router, and RemoveWidget takes all of that back. It also declares backHandler = true,
+--      i.e. it CLAIMS the CommonUI back action, which is how a Palworld screen says "Esc closes
+--      me". If it never mounts, its lastError() says which step refused and nothing is lost.
+--
+-- SAFE BY CONSTRUCTION, and deliberately so even though the Esc understanding may still be
+-- wrong: every panel unmounts itself on ELAPSED SECONDS through core/poll (45 s, 90 s, 100 s),
+-- no key is needed to get rid of any of them, and the only thing any of them takes from the
+-- player is the cursor flag — which is readable, restored exactly, and additionally swept by the
+-- dead-man in native/ui/_widget.lua if this Lua state disappears without unmounting.
 pf_uiz = function()
     local UI   = require("palforge.api.ui")
     local tree = require("palforge.native.ui").tree
     local poll = require("palforge.core.poll")
-    local VBox, Label, Border, SizeBox, Frame = UI.VBox, UI.Label, UI.Border, UI.SizeBox, UI.Frame
+    local VBox, Label, Border, SizeBox, Frame, Button =
+        UI.VBox, UI.Label, UI.Border, UI.SizeBox, UI.Frame, UI.Button
 
-    -- Two keys rather than one, for the reason in the header: neither is known to be free, and
-    -- two independent chances cost nothing. Middle-click for the mouse half — the least likely of
-    -- the three to be in the middle of something the player is doing.
+    -- Two keys rather than one: neither is known to be free, and two independent chances cost
+    -- nothing. The mouse button is OVERRIDDEN rather than declared, for the reason in the header.
     local KEYS, BUTTON = { "INS", "END" }, "middle"
 
-    -- THE BOTTOM PANEL. The game's own window chrome, and the input mode that broke Esc — this
-    -- one is the regression test as much as it is the lower half of the stack.
+    -- THE BOTTOM PANEL. The game's own window chrome, with the declared colour where a declared
+    -- colour can actually land — on a Border INSIDE the frame. Bright magenta on purpose: the
+    -- last run could not tell "the colour worked" from "the colour did nothing" because the
+    -- colour that was declared, {0.05,0.07,0.12}, is very nearly black itself.
     local Bottom = UI{
         id    = "palforge_test:ZBottom",
         name  = "z = 10, the panel underneath",
@@ -611,30 +827,45 @@ pf_uiz = function()
             log.info(string.format("pf_uiz: BOTTOM took key %s (z=%d) — so nothing is above it "
                 .. "any more", tostring(ctx.key), ctx.z))
         end,
-        buttons = { BUTTON },
+        overrideButtons = { BUTTON },
         onMousePressed = function(self, ctx)
             self.mouseHits = (self.mouseHits or 0) + 1
             log.info(string.format("pf_uiz: BOTTOM took mouse %q (z=%d) THROUGH the panel above "
-                .. "it — a press goes to the topmost panel that WANTS it", tostring(ctx.button), ctx.z))
+                .. "it — a press goes to the topmost panel that WANTS it. The game's own "
+                .. "DirectAttackOrder fired too; an override shares, it does not steal",
+                tostring(ctx.button), ctx.z))
         end,
-        root = Frame{ color = { 0.05, 0.07, 0.12, 0.95 },
-            SizeBox{ width = 470, height = 250,
-                VBox{ padding = 12,
-                    Label{ text = "PalForge  BOTTOM  z = 10", size = 20, native = true },
-                    Label{ text = "input = \"clicks\"  +  the game's own window chrome" },
-                    Label{ name = "counts", text = function(self)
-                        return string.format("keys taken %d   |   middle-click taken %d",
-                            self.keyHits or 0, self.mouseHits or 0)
-                    end },
-                    Label{ text = "a key reaches me only once the RED panel is gone" },
-                    Label{ text = "I go away by myself at 100 s" },
+        root = Frame{
+            Border{ color = { 0.62, 0.10, 0.55, 0.92 },
+                SizeBox{ width = 470, height = 260,
+                    VBox{ padding = 12,
+                        Label{ text = "PalForge  BOTTOM  z = 10", size = 20, native = true },
+                        Label{ text = "this MAGENTA is a Border INSIDE the game's Frame" },
+                        Label{ name = "counts", text = function(self)
+                            return string.format("keys taken %d   |   middle-click taken %d",
+                                self.keyHits or 0, self.mouseHits or 0)
+                        end },
+                        Label{ text = "a key reaches me only once the RED panel is gone" },
+                        Button{ text = function(self)
+                                    return string.format("clicked %dx  (press Esc first)",
+                                        self.clicks or 0)
+                                end,
+                                onClick = function(self)
+                                    self.clicks = (self.clicks or 0) + 1
+                                    log.info("pf_uiz: BOTTOM's button was CLICKED — the click "
+                                        .. "router reached our widget")
+                                end },
+                        Label{ text = "I go away by myself at 100 s" },
+                    },
                 },
             },
         },
     }
 
-    -- THE TOP PANEL. Takes nothing at all (input = "none" is the default and is the right default),
-    -- declares no mouse interest, and is smaller so the panel underneath shows around it.
+    -- THE TOP PANEL. Takes nothing at all (input = "none" is the default and is the right
+    -- default), declares no mouse interest, and is smaller so the panel underneath shows around
+    -- it. It is also the control for the frame question: a plain Border, in a colour that has
+    -- always worked.
     local Top = UI{
         id    = "palforge_test:ZTop",
         name  = "z = 20, the panel on top",
@@ -660,13 +891,42 @@ pf_uiz = function()
         },
     }
 
-    local bottom = Bottom:new{ keyHits = 0, mouseHits = 0 }
+    -- ⚠️ THE PANEL THAT ASKS THE GAME TO PUT IT UP. host = "layer" pushes a real Palworld window
+    -- onto one of the in-game layout's own CommonUI layers through BP_AddWidget, so the action
+    -- router — not us — owns its activation, its focus and its input mode; and backHandler = true
+    -- claims the CommonUI BACK action, which is the mechanism a Palworld screen uses to say "Esc
+    -- closes me". BOTH ARE UNMEASURED. If the push refuses, this element simply never mounts and
+    -- its lastError() names the step; the other two panels are unaffected either way.
+    local Layer = UI{
+        id    = "palforge_test:ZLayer",
+        name  = "the game's own route: pushed onto a CommonUI layer",
+        host  = "layer",
+        z     = 30,
+        input = "clicks",
+        backHandler = true,
+        root = Frame{
+            Border{ color = { 0.05, 0.55, 0.52, 0.92 },
+                SizeBox{ width = 420, height = 150,
+                    VBox{ padding = 12,
+                        Label{ text = "PalForge  LAYER  (BP_AddWidget)", size = 20, native = true },
+                        Label{ text = "the GAME pushed me: activated, focused and input-configured" },
+                        Label{ text = "backHandler = true — Esc may close ME. I go at 90 s anyway" },
+                    },
+                },
+            },
+        },
+    }
+
+    local bottom = Bottom:new{ keyHits = 0, mouseHits = 0, clicks = 0 }
     local top    = Top:new{ keyHits = 0 }
-    -- autoMount for both: the in-game layout may not be up yet, and the same subscription that
-    -- retries the mount is the one that re-evaluates the counters once it is in.
+    local layer  = Layer:new{}
+    -- autoMount for all three: the in-game layout may not be up yet, and the same subscription
+    -- that retries the mount is the one that re-evaluates the counters once it is in.
     bottom:autoMount(nil, 1000)
     top:autoMount(nil, 1000)
-    log.info("pf_uiz: two panels are trying to mount into the game's own UI root (z = 10 and 20)")
+    layer:autoMount(nil, 1000)
+    log.info("pf_uiz: three panels are trying to mount — two into the game's UI root (z = 10, 20) "
+        .. "and one through the game's own BP_AddWidget layer route")
 
     local function report(when)
         for _, line in ipairs(UI.report()) do log.info("pf_uiz " .. when .. ": " .. line) end
@@ -674,8 +934,9 @@ pf_uiz = function()
     end
 
     -- What a panel actually got, read off its built tree rather than inferred: which slot class
-    -- the host handed back (a CanvasPanelSlot is the one that has a ZOrder at all) and what the
-    -- input grab really applied — "SetFocusToGameViewport" in that list is the Esc fix having run.
+    -- the host handed back (a CanvasPanelSlot is the one that has a ZOrder at all), what the root
+    -- widget really is (WBP_PalCommonWindow_C = the game's chrome; Border = the fallback), and
+    -- what the input grab did — which is now only ever the cursor, by design.
     local function evidence(tag, h)
         local st = h:state()
         if not h:isMounted() then
@@ -685,9 +946,11 @@ pf_uiz = function()
         local slotCls, rootCls = "?", "?"
         pcall(function() slotCls = st._tree.slot:GetClass():GetFName():ToString() end)
         pcall(function() rootCls = st._tree.root:GetClass():GetFName():ToString() end)
-        log.info(string.format("pf_uiz: %s mounted | z=%s | slot=%s | rootClass=%s | input -> %s",
-            tag, tostring(st.zOrder), slotCls, rootCls,
-            st._input and table.concat(st._input.applied or {}, " + ") or "nothing taken"))
+        log.info(string.format("pf_uiz: %s mounted | z=%s | slot=%s | rootClass=%s | layer=%s | "
+            .. "input -> %s%s", tag, tostring(st.zOrder), slotCls, rootCls,
+            tostring(st._tree and st._tree.layer and "yes" or "no"),
+            st._input and table.concat(st._input.applied or {}, " + ") or "nothing taken",
+            (st._input and st._input.note) and ("  [" .. st._input.note .. "]") or ""))
     end
 
     local phase = 0
@@ -696,11 +959,18 @@ pf_uiz = function()
             phase = 1
             evidence("TOP   ", top)
             evidence("BOTTOM", bottom)
+            evidence("LAYER ", layer)
             report("at 12 s")
-            log.info("pf_uiz: NOW — (a) press Esc TWICE: the game's menu must open AND close. "
-                .. "(b) press INS, then END: only the RED panel's counter may move. "
-                .. "(c) press the MIDDLE mouse button: only the BLUE panel's counter may move.")
-            support.announce("pf_uiz: press Esc twice, then INS / END, then middle-click")
+            log.info("pf_uiz: NOW, in this order — "
+                .. "(a) ⚠️ PRESS ESC TWICE. The game's menu must open AND close, exactly as it "
+                .. "does with no mod loaded. This is the whole point of the run. "
+                .. "(b) with the menu OPEN, click BOTTOM's button; its label must count up. "
+                .. "(c) close the menu, then press INS and END: only the RED panel's counter may "
+                .. "move. "
+                .. "(d) press the MIDDLE mouse button: only the MAGENTA panel's counter may move, "
+                .. "and your pal will be given an attack order as well — that is the game's own "
+                .. "binding, which an override shares rather than takes.")
+            support.announce("pf_uiz: press Esc TWICE first, then click, INS/END, middle-click")
         elseif elapsed >= 45 and phase < 2 then
             phase = 2
             top:unmount()
@@ -710,28 +980,40 @@ pf_uiz = function()
         elseif elapsed >= 55 and phase < 3 then
             phase = 3
             report("at 55 s")
-        elseif elapsed >= 100 and phase < 4 then
+        elseif elapsed >= 90 and phase < 4 then
             phase = 4
+            layer:unmount()
+            log.info("pf_uiz: the LAYER panel has unmounted itself — through RemoveWidget if the "
+                .. "game had put it on a layer, which is also what makes the action router "
+                .. "restore whatever input config was underneath.")
+        elseif elapsed >= 100 and phase < 5 then
+            phase = 5
             bottom:unmount()
             log.info("pf_uiz: the BOTTOM panel has unmounted itself; the cursor flag is restored "
                 .. "exactly as it was found (it is the one half that is readable).")
         elseif elapsed >= 105 then
             report("final")
             log.info("pf_uiz: HOW TO READ IT — "
-                .. "(a) Esc opened AND closed the game's menu -> the Esc fix holds; look for "
-                .. "`SetFocusToGameViewport` in BOTTOM's input line and for the `[PalForge.ui] "
-                .. "frame: ... CommonUI activation flags were ...` line, which is the measurement "
-                .. "of which half was the cause. "
-                .. "(b) Esc opened it and would not close it -> the fix does NOT hold; those two "
-                .. "lines say which half did not run. "
-                .. "(c) the red panel's key counter moved and the blue one's did not -> the key "
-                .. "rule holds; after 45 s the blue one's moving instead is the same rule. "
-                .. "(d) the blue panel's mouse counter moved while the red panel was still up -> "
-                .. "the mouse rule holds, and it is genuinely different from the key rule. "
-                .. "(e) `arrived=0` on both keys -> Palworld has claimed INS and END, or nobody "
-                .. "pressed them, and the keys line above says in words that this count cannot "
-                .. "tell those two apart. The z-order and the mouse half are unaffected by it.")
-            support.announce("pf_uiz: done — both panels are down")
+                .. "(a) ⚠️ Esc opened AND closed the game's menu -> the diagnosis holds: the "
+                .. "input mode belongs to Palworld's CommonUI action router, and PalForge not "
+                .. "writing it is what fixed this. Esc still broken -> the diagnosis is WRONG and "
+                .. "something else in the mount path is in the router's way; run pf_uiroute, "
+                .. "whose `inputModeChanged` counter says whether the router is even involved. "
+                .. "(b) BOTTOM's button counted up with the menu open -> the click router reaches "
+                .. "our widget; it did not -> read the `clicks:` lines above for seen/dispatched. "
+                .. "(c) the red panel's key counter moved and the magenta one's did not -> the key "
+                .. "rule holds; after 45 s the magenta one's moving instead is the same rule. "
+                .. "(d) the magenta counter moved on middle-click -> the mouse half works and the "
+                .. "override is what unlocked it; `keys: MIDDLE_MOUSE_BUTTON refused` again means "
+                .. "overrideButtons did not reach the arm call. "
+                .. "(e) rootClass=WBP_PalCommonWindow_C -> the panel wears the game's own chrome, "
+                .. "and the MAGENTA is the Border inside it, which is where a declared colour can "
+                .. "land. rootClass=Border -> the chrome was not available and a [ui] warning "
+                .. "above names what was missing. "
+                .. "(f) the LAYER panel mounted at all -> BP_AddWidget works and PalForge can put "
+                .. "a screen up the way the game does. It did not -> its lastError() names the "
+                .. "step, and `host = \"game\"` remains the proven route.")
+            support.announce("pf_uiz: done — all three panels are down")
             return true
         end
         return false

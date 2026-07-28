@@ -314,16 +314,36 @@ end
 -- world and not necessarily at the title screen, and a declared panel that vanishes because its
 -- chrome is missing is worse than one that draws in PalForge's own colours. The substitution is
 -- NOTED, never silent.
+-- ⚠️ A FRAME IS ALSO THE ELEMENT'S ONE ROUTE INTO PALWORLD'S OWN INPUT AND ACTIVATION SYSTEM,
+-- which is why the element's `input` / `backHandler` / `layer` declarations are handed down to
+-- it here rather than applied afterwards. WBP_PalCommonWindow_C is a UPalUserWidget and
+-- therefore a UPalActivatableWidget, which is the class that CARRIES the input mode as data
+-- (Pal.hpp:13369-13370); a VBox or a Border is not, and no amount of asking will make one. The
+-- ⚠️⚠️ block in _widget.lua's "THE GAME'S OWN UI ROUTE" section is the one to read for why the
+-- mode may only be written there and never on the player controller.
 MAKE.frame = function(node, ctx, built)
     local okPc, pc = pcall(controller, ctx)
     if okPc then
-        local frame, host, why = widget.gameFrame(pc)
-        if frame then return frame, host end
+        local frame, host, why, container = widget.gameFrame(pc, {
+            input = ctx.input, backHandler = ctx.backHandler, layer = ctx.layer,
+        })
+        if frame then
+            -- The game put it on a layer itself, so nothing else may parent it and only
+            -- RemoveWidget may take it off. Recorded on the built tree, which is what mount and
+            -- destroy read instead of guessing from the widget.
+            if container then built.layer = { container = container, widget = frame } end
+            return frame, host
+        end
         note(built, "frame: " .. tostring(why) .. " — a PalForge Border was used instead")
     else
         note(built, "frame: " .. tostring(pc) .. " — a PalForge Border was used instead")
     end
-    return widget.border(ctx.outer, node.color)
+    -- ⚠️ NO COLOUR HERE, AND THAT IS THE POINT OF THE REFUSAL IN api/ui. A Frame wears the game's
+    -- own window art and takes no tint (UUserWidget::SetColorAndOpacity, UMG.hpp:1709, is a
+    -- struct call AND would tint our content along with the chrome). The fallback is PalForge's
+    -- default panel colour, and the note above says the substitution happened — so "my frame is
+    -- the wrong colour" can never again mean "the field silently did nothing".
+    return widget.border(ctx.outer, nil)
 end
 
 -- A button is one of the GAME'S OWN, wired through the shared click router — the identical
@@ -441,7 +461,13 @@ end
 ---
 ---ctx = { host  = the panel this tree hangs in (must answer AddChild),
 ---        outer = the UObject the primitives are constructed under (default: the host),
----        self  = the element instance handed to every binding and click handler }
+---        self  = the element instance handed to every binding and click handler,
+---        input = the element's declared `input` mode, handed down to a Frame node so the
+---                mode is written where Palworld keeps it (on the activatable, before it
+---                activates) rather than onto the player controller,
+---        backHandler = the element's declared `backHandler`, same route, same reason,
+---        layer = push the Frame onto one of the game's own CommonUI layers instead of
+---                parenting it by hand }
 ---
 ---ABOUT `outer`. Every native primitive needs a construct outer, and a UUserWidget of our
 ---own has a WidgetTree to be that (_widget.screen builds one — the crux recorded at
@@ -463,6 +489,14 @@ function M.mount(node, ctx)
     if not w then
         M.destroy(built)     -- release whatever the partial build already registered
         return nil, why
+    end
+
+    -- A root the GAME already placed is not ours to place again. BP_AddWidget parented it onto a
+    -- CommonUI layer's activatable stack (widget.pushToLayer), which is the whole point of that
+    -- route: the container owns the widget, the transition and the removal.
+    if built.layer and built.layer.widget == w then
+        built.root, built.slot = w, nil
+        return built
     end
 
     local slot = widget.addChild(ctx.host, w)
@@ -502,13 +536,29 @@ function M.destroy(built)
         pcall(function() widget.releaseClicks(built.clicks) end)
     end
     local w = built.root
-    -- A UI.Frame root is a CommonUI activatable that mount() activated, and an activated widget
-    -- is registered with the game's action router. Deactivate it before it leaves the tree; the
-    -- call is a no-op for every other kind of root (widget.deactivate gates on the class).
-    pcall(function() widget.deactivate(w) end)
-    built.root, built.slot = nil, nil
+    local layer = built.layer
+    built.root, built.slot, built.layer = nil, nil, nil
     built.byName, built.binds, built.clicks, built.notes = {}, {}, {}, {}
     if not alive(w) then return false end
+
+    -- ⚠️ A ROOT THE GAME PUT ON A LAYER COMES OFF THE GAME'S WAY, and that is not tidiness: it is
+    -- the half of the input problem this tree could never do by hand. RemoveWidget
+    -- (CommonUI.hpp:190) pops the activatable off the stack, which deactivates it, which is what
+    -- makes the action router RESTORE the input config that was underneath. RemoveFromParent
+    -- would leave the router holding a node for a widget that is no longer anywhere.
+    if layer and layer.container then
+        local removed = false
+        pcall(function() removed = widget.removeFromLayer(layer.container, w) end)
+        if removed then return true end
+        -- Fall through rather than strand it: a widget still on screen is worse than an
+        -- unregistered one, and widget.removeFromLayer has already logged the refusal.
+    end
+
+    -- A UI.Frame root built the direct way is a CommonUI activatable that mount() activated, and
+    -- an activated widget is registered with the action router. Deactivate it before it leaves
+    -- the tree; the call is a no-op for every other kind of root (widget.deactivate gates on the
+    -- class).
+    pcall(function() widget.deactivate(w) end)
     return pcall(function() w:RemoveFromParent() end) == true
 end
 
@@ -552,6 +602,23 @@ function M.host(spec, opts)
         return { panel = panel, outer = panel,
                  what = widget.PATHS.gameUILayout .. "." .. widget.PATHS.gameUIRoot }
     end
+    -- "layer" is not a panel at all, which is why it resolves to a host with `layer = true` and
+    -- no panel: the tree's ROOT is placed by the game (BP_AddWidget on a CommonUI layer), not by
+    -- us, so there is nothing to add a child to and the construct outer is the layout itself.
+    -- Everything about it is in _widget's "THE GAME'S OWN UI ROUTE" block. It requires a Frame
+    -- root — only a Palworld activatable can go on a layer — and says so rather than half-working.
+    if spec == "layer" or (type(spec) == "table" and spec.layer) then
+        local layout, why = widget.gameLayout()
+        if not layout then return nil, tostring(why) end
+        local layers, how = widget.uiLayers()
+        if #layers == 0 then
+            return nil, "the in-game layout registers no readable CommonUI layer (" .. tostring(how)
+                .. "), so there is nothing to push onto"
+        end
+        return { panel = layout, outer = layout,
+                 layer = (type(spec) == "table" and spec.layer) or true, zApplied = "the layer stack",
+                 what = string.format("a CommonUI layer of %s (%s)", widget.PATHS.gameUILayout, how) }
+    end
     if type(spec) == "table" then
         local panel, why = widget.hostPanel(spec.widget, spec.panel)
         if not panel then return nil, tostring(why) end
@@ -570,15 +637,36 @@ end
 -- property: it makes no engine call, which is what lets the whole lifecycle be proved headlessly.
 --=============================================================================
 
----Give the mouse to `focus` in the manner `mode` asks for. nil + a reason when nothing was
----touched — and "none", the default, is one of those reasons rather than a failure.
+---Take what `mode` asks for. nil + a reason when nothing was touched — and "none", the default,
+---is one of those reasons rather than a failure.
+---
+---⚠️ THE INPUT MODE IS NOT SET HERE AND IS NOT SET BY ANY CALL ON THE PLAYER CONTROLLER. Palworld
+---keeps it on the ACTIVATABLE WIDGET (`UPalActivatableWidget.InputConfig`, Pal.hpp:13369) and its
+---CommonUI action router applies it on activation and restores it on deactivation. A UI.Frame
+---node is what carries the declaration there, which is why `input` and `Frame{}` are one story
+---and not two. `owner` is the dead-man's answer to "is anyone still holding this".
 ---@return table? grab, string? reason
-function M.grabInput(mode, focus) return widget.grabInput(mode, focus) end
+function M.grabInput(mode, focus, owner) return widget.grabInput(mode, focus, owner) end
 
----Hand a grab back. See _widget's INPUT block for exactly which half can be restored and which
----cannot: the cursor flag is readable and is restored precisely, the input MODE is not readable
----at all and is only forced back for the one mode that would otherwise strand the player.
+---Hand a grab back: the cursor flag, restored exactly as it was found. The MODE goes back when
+---the activatable deactivates — that is the router's job and it is the half no call here could do.
 function M.releaseInput(grab) return widget.releaseInput(grab) end
+
+---Release every grab nobody can answer for any more. The dead-man rides core/poll's one heartbeat
+---inside _widget; this is the manual pull, for a probe or a console command.
+---@return integer outstanding
+function M.sweepGrabs() return widget.sweepGrabs() end
+
+---What is outstanding, as printable lines.
+---@return string[]
+function M.grabReport() return widget.grabReport() end
+
+---The game's own CommonUI layers, as printable lines: which tags this layout registers, what
+---container class each is, and how many widgets are on it. This is the question `host = "layer"`
+---turns on, and no header can answer it — the tags are registered at runtime
+---(UPrimaryGameLayout::RegisterLayer, CommonGame.hpp:160).
+---@return string[]
+function M.layerReport() return widget.layerReport() end
 
 ---The base viewport z-order a "screen" host sits at, before the element's declared `z` is added.
 ---1000 is what every shipped PalForge screen used (_widget.show's own default), so a declared
