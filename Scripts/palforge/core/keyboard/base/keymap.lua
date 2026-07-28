@@ -1,3 +1,23 @@
+-- OBSERVED WORKING, 2026-07-28, in a loaded save:
+--
+--   source config   empty  0 mapping(s)    every container reports its own Num() as 0
+--   source project  read   107 mapping(s)  ActionMappings 75, AxisMappings 28, ConsoleKeys 4
+--   last refresh took 0.032 s and made 0 name look-up(s)
+--   64 free, 24 taken by the game, 9 held by PalForge, 1 refused outright, 67 unanswerable
+--
+-- W -> MoveForward [project/axis], X -> AutoRun, Z -> VoiceChatPushToTalk. The axis half was
+-- the half worth insisting on: W/A/S/D are axis mappings, and a keymap that read only the
+-- action maps would have called the four most-used keys in the game free.
+--
+-- BOTH source verdicts are real answers, and they are different answers. `project read` is the
+-- shipped bindings. `config empty` is the game saying the player has not rebound anything —
+-- Palworld stores the key config as OVERRIDES — which is why the three-state verdict
+-- (read/empty/refused) had to exist: a two-state one would have called this a failure.
+--
+-- The look-up route cost nothing here, and that is by design rather than luck: it runs only for
+-- a container whose own Num() disagrees with what the walk produced. A clean walk builds not one
+-- FName.
+--
 -- palforge/core/keyboard/base/keymap.lua — WHAT PALWORLD HAS ALREADY TAKEN, read out of the
 -- running game instead of guessed at.
 --
