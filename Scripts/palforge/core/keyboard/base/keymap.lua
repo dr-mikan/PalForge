@@ -50,6 +50,74 @@
 -- ones, and native/ui/keys.lua's report says which of the resulting cases holds. That is the
 -- whole of the improvement and it is stated in those terms rather than as "keys work now".
 --
+--=============================================================================
+-- WHAT THE FIRST LIVE RUN MEASURED, AND WHAT IT COST TO EXPLAIN
+--
+-- The first version of this file ran in a loaded world and reported, precisely:
+--
+--     source config  refused 0 mapping(s)   [the subsystem and its KeyConfigSettings both read,
+--                                            and every map inside came back empty]
+--     source project refused 0 mapping(s)   [UInputSettings resolved and every mapping array
+--                                            came back empty]
+--
+-- Both objects resolved. Every container read as nothing. The diagnostic separated "absent" from
+-- "resolved but empty", which was worth having — and then it stopped, because "empty" was doing
+-- the work of three different facts. Three things are now known and each one is a line of code
+-- below rather than a paragraph of hope.
+--
+-- 1. ⚠️ THE ARRAY READER WAS DROPPING EVERY ELEMENT, AND THAT IS ALMOST CERTAINLY THE WHOLE OF
+--    THE `project` ZERO. UE4SS's TArray:ForEach hands the callback (index, elem) where elem is a
+--    **RemoteUnrealParam / LocalUnrealParam wrapper**, and the real value is behind `:get()`
+--    (RE-UE4SS UE4SS/src/LuaType/LuaTArray.cpp, ForEach pushes with Operation::GetParam;
+--    ue4ss/Docs/lua-api/classes/remoteunrealparam.md). eachArray unwrapped nothing, so every
+--    element reached the callback as a wrapper, `elem.ActionName` read nil off a userdata whose
+--    __index only carries Get/get/set/type, and the mapping was silently dropped. The array
+--    iterated the right NUMBER of times and produced nothing — which is exactly the shape
+--    core/icons.lua:362-375 already recorded ("the right LENGTH with every value blank") for the
+--    same wrapper, in the same tree, three weeks earlier. eachMap unwrapped; eachArray did not.
+--    That asymmetry was the bug.
+--
+-- 2. TMap ITERATION EXISTS ON THIS BUILD. The install ships
+--    ue4ss/Docs/lua-api/classes/tmap.md documenting Find / Add / Contains / Remove / Empty /
+--    #TMap **and ForEach**, and RE-UE4SS's UE4SS/src/LuaType/LuaTMap.cpp implements ForEach for
+--    the UE4SS this game actually runs (v3.0.1 Beta, SHA c838a8ac). So "a TMap cannot be walked
+--    from Lua" is NOT true here and is not the explanation for the config zero. What is left,
+--    and what is now MEASURED instead of assumed, is `#map` — the __len metamethod is
+--    FScriptMap::Num(). `#map == 0` is the map itself saying it is empty, which is a real and
+--    reportable answer: Palworld stores the player's key config as OVERRIDES, so a player who
+--    has never rebound a key leaves those maps genuinely empty and the defaults live in the
+--    project source. Every container below records its own `#`, so "empty" and "unreadable" can
+--    never be confused again.
+--
+-- 3. AND THE LOOK-UP ROUTE, FOR WHEN A WALK IS NOT ENOUGH. A map that will not iterate can still
+--    be asked about a key it might hold — Contains(key) then Find(key) — provided you know the
+--    key. core/keyboard/base/actions.lua supplies the names (Palworld's own, from
+--    DT_UIInputAction and from the project arrays). It runs only when `#map` says there is
+--    something in there that the walk did not produce, so the normal case costs nothing.
+--
+-- ⚠️⚠️ THE ONE WAY TO CRASH THE GAME FROM HERE, WRITTEN OUT BECAUSE IT IS NOT GUESSABLE.
+-- TMap's Find / Contains / Remove push the key through UE4SS's pusher for the key property, and
+-- for an FName key that is push_nameproperty with Operation::Set, whose entire body is
+--     auto& lua_object = params.lua.get_userdata<LuaType::FName>(params.stored_at_index);
+-- (RE-UE4SS UE4SS/src/LuaType/LuaUObject.cpp, push_nameproperty). get_userdata does NO type
+-- check — it reads an internal uservalue and casts lua_touserdata's result. Hand it a Lua STRING
+-- and lua_touserdata returns NULL and the cast dereferences it: a native access violation inside
+-- UE4SS's marshalling, precisely the class of fault core/signature.lua exists to prevent and
+-- precisely what closed the game once this session. So `map:Find("Jump")` is a crash and
+-- `map:Find(FName("Jump"))` is correct. Every call below builds an FName first, and fnameFor()
+-- is the only place one is made.
+--   (This is also why the module still calls NO UFunction. Find/Contains/ForEach/#/GetRowNames
+--    are UE4SS's own bindings on the container object, not marshalled Palworld functions, so
+--    core/signature.lua's parameter-list check has nothing to check and nothing to refuse. The
+--    hazard here is the ARGUMENT TYPE, and it is closed by construction rather than by a check.)
+--
+-- ⚠️ AND ONE WAY TO CORRUPT THE GAME'S DATA. UE4SS's TArray __index is not a read: LuaTArray.cpp
+-- prepare_to_handle calls AddZeroed when the index is past Num(), so `arr[i]` for i > #arr GROWS
+-- THE GAME'S ARRAY. Nothing below indexes an array outside 1..#arr, and nothing below ever will.
+-- (`arr:Get(i)` was in the old ladder and has been removed: TArray has no Get member, so it fell
+-- through to that same __index with the string "Get" as the subscript, which can only ever throw.)
+--=============================================================================
+--
 -- THE TWO NAMESPACES, which is the part nobody warns you about. UE4SS binds by MICROSOFT
 -- VIRTUAL-KEY NAME ("INS", "SPACE", "NUM_ZERO", "OEM_COMMA" — ue4ss/Docs/lua-api/table-
 -- definitions/key.md lists all 156). Unreal names the same keys quite differently ("Insert",
@@ -60,9 +128,16 @@
 --   local keymap = require("palforge.core.keyboard.base.keymap")
 --   local st = keymap.status("INS")     -- { state = "game", actions = {...}, why = "..." }
 --   for _, line in ipairs(keymap.lines()) do print(line) end
-local log = require("palforge.utils.log").scope("keymap")
+local log     = require("palforge.utils.log").scope("keymap")
+-- Palworld's own action names and key names, live table first and a shipped copy behind it.
+-- Data only: requiring it makes no engine call, so this module stays loadable headless.
+local actions = require("palforge.core.keyboard.base.actions")
 
 local M = {}
+
+---Re-exported so a caller can see which names the look-up route will ask about without reaching
+---past this module.
+M.actions = actions
 
 --=============================================================================
 -- THE NAME MAP — UE4SS's Microsoft virtual-key names -> Unreal's FKey names
@@ -246,43 +321,114 @@ local function keyNameOf(fkey)
     return str(field(fkey, "KeyName"))
 end
 
--- Walk a UE4SS TArray. Three shapes exist depending on build and element type (:ForEach, a
--- #-indexable userdata, :Get(i-1)) and all three are tried in that order — the same ladder
--- core/event.lua:735-746 documents as the one array reader in this tree that has been read back
--- from a live save.
-local function eachArray(arr, fn)
-    if arr == nil then return 0 end
-    local n = 0
-    local function push(v) if v ~= nil then n = n + 1; pcall(fn, v) end end
-    if pcall(function() arr:ForEach(function(_, v) push(v) end) end) and n > 0 then return n end
-    local len; pcall(function() len = #arr end)
-    if type(len) ~= "number" or len <= 0 then return n end
-    for i = 1, len do local v; pcall(function() v = arr[i] end); push(v) end
-    if n > 0 then return n end
-    for i = 1, len do local v; pcall(function() v = arr:Get(i - 1) end); push(v) end
-    return n
-end
-
--- Walk a UE4SS TMap. ForEach is the documented iterator and the only one
--- (ue4ss/Docs/lua-api/classes/tmap.md), and it hands both halves in as params that may or may
--- not need :get() unwrapping depending on whether the element is local or remote — so both
--- shapes are accepted rather than one being assumed.
+-- ⚠️ THE UNWRAP, AND IT APPLIES TO ARRAYS TOO. UE4SS hands a container's elements to Lua as a
+-- RemoteUnrealParam (remote data) or a LocalUnrealParam (local copy); both are dynamic wrappers
+-- and the value is behind :get() (ue4ss/Docs/lua-api/classes/{remote,local}unrealparam.md). The
+-- old eachMap did this and the old eachArray did NOT, which is how the project source read the
+-- right number of elements and produced zero mappings — the identical failure core/icons.lua:
+-- 362-375 records for GetDataTableColumnAsString. One unwrap, used by both walkers, so the two
+-- cannot drift apart again.
 local function unwrap(p)
     if type(p) ~= "userdata" and type(p) ~= "table" then return p end
-    local v; if pcall(function() v = p:get() end) and v ~= nil then return v end
+    local v; if pcall(function() v = p:get() end) and v ~= nil and v ~= p then return v end
     return p
 end
 
-local function eachMap(m, fn)
-    if m == nil then return 0 end
+-- A container's OWN count. `#` on a UE4SS TArray or TMap is the __len metamethod and it is
+-- FScriptArray::Num() / FScriptMap::Num() — the container answering for itself, before any
+-- iteration and before any of our code can lose anything. nil means the value would not answer
+-- `#` at all, which is a different fact from answering 0 and is reported as one.
+local function sizeOf(c)
+    if c == nil then return nil end
+    local n; local ok = pcall(function() n = #c end)
+    if ok and type(n) == "number" then return n end
+    return nil
+end
+
+-- Walk a UE4SS TArray. Returns how many elements reached `fn`, and which route carried them.
+--
+-- ⚠️ THE INDEX FALLBACK STAYS INSIDE 1..#arr AND MUST. LuaTArray.cpp's prepare_to_handle calls
+-- AddZeroed when the subscript is past Num(), so reading `arr[i]` out of bounds APPENDS TO THE
+-- GAME'S ARRAY. The loop bound is the array's own `#`, never a guess.
+local function eachArray(arr, fn)
+    if arr == nil then return 0, "absent" end
     local n = 0
-    pcall(function()
+    local function push(v) if v ~= nil then n = n + 1; pcall(fn, unwrap(v)) end end
+    if pcall(function() arr:ForEach(function(_, v) push(v) end) end) and n > 0 then
+        return n, "ForEach"
+    end
+    local len = sizeOf(arr)
+    if len == nil then return n, "no-length" end
+    if len <= 0 then return n, "empty" end
+    for i = 1, len do local v; pcall(function() v = arr[i] end); push(v) end
+    return n, (n > 0) and "index" or "refused"
+end
+
+-- Walk a UE4SS TMap. ForEach is documented on this install
+-- (ue4ss/Docs/lua-api/classes/tmap.md) and implemented in RE-UE4SS's LuaTMap.cpp, so it is tried
+-- first; what it cannot do is tell us it iterated nothing BECAUSE the map is empty rather than
+-- because the walk failed, which is why the caller measures `#` separately.
+local function eachMap(m, fn)
+    if m == nil then return 0, "absent" end
+    local n = 0
+    local ok = pcall(function()
         m:ForEach(function(k, v)
             n = n + 1
             pcall(fn, unwrap(k), unwrap(v))
         end)
     end)
-    return n
+    if n > 0 then return n, "ForEach" end
+    return 0, ok and "iterated-nothing" or "refused"
+end
+
+--=============================================================================
+-- LOOKING A MAP UP INSTEAD OF WALKING IT
+--
+-- Contains(key) answers without throwing; Find(key) THROWS when the key is absent
+-- (ue4ss/Docs/lua-api/classes/tmap.md says so in as many words). So a miss is normal traffic
+-- here, not a fault, and it is counted rather than logged — 244 "not found" lines would bury the
+-- one line that matters.
+--
+-- Contains FIRST, and that is not a micro-optimisation. UE4SS's throw path runs
+-- LuaMadeSimple::handle_error, which does `lua_settop(state, 0)` — it CLEARS THE WHOLE LUA STACK
+-- — before longjmp'ing to the enclosing pcall, and it does so from inside a C++ frame holding a
+-- TArray local. Doing that several hundred times per refresh to ask a question Contains answers
+-- for free is not something to build on. Find runs only on a hit.
+--=============================================================================
+
+-- Build the FName for a name, or nil.
+--
+-- ⚠️ NEVER PASS THE STRING. See the header: TMap's key pusher casts lua_touserdata's result to an
+-- FName with no type check, so a Lua string is a NULL dereference inside UE4SS.
+--
+-- The round-trip check is not paranoia either. UE4SS's FName(string) returns the FName for
+-- "None" when the string has never been registered in this build's global name table
+-- (ue4ss/Docs/lua-api.md:150-152). Asking Contains about "None" is asking a different question
+-- than the one intended, and a map that happened to hold a None key would answer yes to every
+-- unregistered name we tried. A name that does not round-trip is dropped and counted.
+local function fnameFor(name)
+    if type(FName) ~= "function" then return nil end
+    local fn; if not pcall(function() fn = FName(name) end) then return nil end
+    if fn == nil then return nil end
+    if str(fn) ~= name then return nil end
+    return fn
+end
+
+-- Ask one map about every candidate name. `fn(name, value)` is called for each hit.
+-- Returns how many keys were found.
+local function findIn(m, pool, fn)
+    local found = 0
+    for _, c in ipairs(pool) do
+        local hit; pcall(function() hit = m:Contains(c.fname) end)
+        if hit == true then
+            local v; local ok = pcall(function() v = m:Find(c.fname) end)
+            if ok and v ~= nil then
+                found = found + 1
+                pcall(fn, c.name, unwrap(v))
+            end
+        end
+    end
+    return found
 end
 
 --=============================================================================
@@ -295,6 +441,9 @@ end
 local state = {
     read     = false,   -- has any source ever produced a single mapping
     at       = nil,     -- os.clock() when it last did
+    tried    = nil,     -- os.clock() of the last ATTEMPT, successful or not (see snapshot)
+    cost     = nil,     -- seconds the last refresh took
+    lookups  = 0,       -- Contains() calls the last refresh made
     index    = {},
     actions  = {},      -- action name -> { <FKey name>, ... }
     dirty    = true,    -- something says the config may have moved; re-read on next demand
@@ -320,10 +469,69 @@ M.SOURCES = {
       what = "UInputSettings.ActionMappings/AxisMappings — the project's own DefaultInput.ini "
           .. "(Engine.hpp:13683-13684)" },
 }
-for _, s in ipairs(M.SOURCES) do s.state, s.entries = "unread", 0 end
+for _, s in ipairs(M.SOURCES) do s.state, s.entries, s.containers = "unread", 0, {} end
 
 local function source(id)
     for _, s in ipairs(M.SOURCES) do if s.id == id then return s end end
+end
+
+--=============================================================================
+-- THE PER-CONTAINER RECORD — the thing whose absence made "empty" unfalsifiable
+--
+-- One of these per TMap / TArray we touch. It is the difference between the old log line
+--
+--     source config refused 0 mapping(s)  [every map inside came back empty]
+--
+-- and a line that can be acted on, because it separates the four things that sentence was
+-- covering for:
+--
+--   num = nil               the property did not read back at all, or would not answer `#`
+--   num = 0                 THE CONTAINER SAYS IT IS EMPTY. A real answer, not a failure —
+--                           Palworld keeps the player's key config as OVERRIDES, so a player who
+--                           has never rebound anything leaves these maps genuinely empty.
+--   num > 0, visited = 0    the container has entries and neither route produced one: a READ
+--                           fault, and the one case worth chasing.
+--   num > 0, added < found  entries came out and could not be turned into a (key, action) pair —
+--                           a shape problem in the value, not in the walk.
+--=============================================================================
+
+local function container(rec, id, what)
+    local c = { id = id, what = what, num = nil, route = "unread", visited = 0, found = 0, added = 0 }
+    rec.containers[#rec.containers + 1] = c
+    return c
+end
+
+-- One printable line per container. This is what a future session reads first.
+local function containerLine(sid, c)
+    local size = (c.num == nil) and "?" or tostring(c.num)
+    local plural = (c.num == 1) and "entry" or "entries"
+    local note
+    if c.num == nil then
+        note = "the property did not read back, or would not answer `#` — nothing is claimed "
+            .. "about whether the game has entries here"
+    elseif c.num == 0 then
+        note = "THE CONTAINER ITSELF SAYS IT IS EMPTY (its own Num()), so there is nothing to "
+            .. "read and no read has failed"
+    elseif c.visited > 0 and c.added == 0 then
+        note = string.format("⚠️ %d %s came out of the walk and NOT ONE BECAME A MAPPING — the "
+            .. "elements are reaching Lua and their shape is not what this reader expects. A "
+            .. "fault in PalForge.", c.visited, (c.visited == 1) and "entry" or "entries")
+    elseif c.found == 0 then
+        note = string.format("⚠️ it holds %d %s and neither route reached one. Two things do "
+            .. "that and the `via` column says which were tried: the walk and the look-up both "
+            .. "refused on this build, OR every key in it is a name no action-name source lists "
+            .. "(the look-up can only ask about names it has).", c.num, plural)
+    elseif c.added == 0 then
+        note = string.format("⚠️ %d %s was reached and none became a mapping — the value's shape, "
+            .. "not the walk", c.found, (c.found == 1) and "entry" or "entries")
+    elseif c.found < c.num then
+        note = string.format("%d of %d %s reached; the rest carry a key no action-name source "
+            .. "lists, so they are UNSEEN rather than absent", c.found, c.num, plural)
+    else
+        note = "read in full"
+    end
+    return string.format("keymap:   %-8s %-32s #=%-5s via %-18s visited=%d found=%d added=%d | %s",
+        sid, c.id, size, c.route, c.visited, c.found, c.added, note)
 end
 
 -- Put one (key, action) pair into the index. `via` says which source and which slot it came
@@ -344,11 +552,66 @@ local function add(index, actions, fkeyName, action, via, mods)
     return true
 end
 
+--=============================================================================
+-- THE CANDIDATE NAMES — built once per refresh, and only if something needs them
+--
+-- Materialising the pool costs one FName per name, and an FName is an engine call. A session
+-- where every map walks cleanly (or is honestly empty) must not pay for it, so the pool is a
+-- CLOSURE that builds on first demand and never twice. Every reader that wants it calls
+-- pool.get(); a refresh that never needs a look-up never touches FName at all.
+--
+-- The pool is the UNION of two halves, and neither is enough alone:
+--   * the UI action names, from the live DT_UIInputAction or the shipped copy of its 244 row
+--     names (core/keyboard/base/actions.lua)
+--   * every ActionName / AxisName the PROJECT source produced this refresh — the gameplay
+--     names ("Jump", "Attack", the movement axes) that DT_UIInputAction does not contain
+-- which is why refresh() reads the project source FIRST.
+--=============================================================================
+local function newPool()
+    local raw, seen, built = {}, {}, nil
+    local p = {}
+    -- Add a name discovered while reading a source. Free — no engine call until get().
+    function p.offer(name)
+        if type(name) == "string" and #name > 0 and not seen[name] then
+            seen[name] = true
+            raw[#raw + 1] = name
+        end
+    end
+    ---@return table list, table stats
+    function p.get()
+        if built then return built, p.stats end
+        local names, rec = actions.names()
+        for _, n in ipairs(names) do p.offer(n) end
+        built = {}
+        local unregistered = 0
+        for _, n in ipairs(raw) do
+            local fn = fnameFor(n)
+            if fn then built[#built + 1] = { name = n, fname = fn }
+            else unregistered = unregistered + 1 end
+        end
+        p.stats = { total = #raw, usable = #built, unregistered = unregistered,
+            source = rec.source, why = rec.why }
+        actions.note()
+        log.info(string.format("action names: %d candidate(s), %d have an FName in this build's "
+            .. "name table, %d do not and cannot be looked up", #raw, #built, unregistered))
+        return built, p.stats
+    end
+    function p.wanted() return #raw end
+    return p
+end
+
 -- SOURCE 1: the player's own config. This is the one that matters — it is what the options
 -- screen writes and what the game actually obeys, so a player who moved Inventory onto F7 is
 -- reflected here and nowhere else.
-local function readConfig(index, actions)
+--
+-- ⚠️ AND IT IS AN OVERRIDE STORE, WHICH IS WHY EMPTY IS A REAL ANSWER. Palworld writes into
+-- FPalKeyConfigSettings what the player CHANGED; the shipped bindings live in the project source
+-- below. So `#MouseAndKeyboardActionMappings == 0` on a save where nobody has opened the key
+-- config screen is the game telling the truth, not a read that failed — and the container record
+-- is what lets the log say which of the two it is instead of guessing.
+local function readConfig(index, actions_, pool)
     local rec = source("config")
+    rec.containers = {}
     local subsys; pcall(function() subsys = FindFirstOf("PalOptionSubsystem") end)
     if not alive(subsys) then
         rec.state, rec.why, rec.entries = "absent",
@@ -366,35 +629,110 @@ local function readConfig(index, actions)
     end
 
     local n = 0
-    -- The action bindings: FName -> FPalKeyConfigKeys { MainKey, SecondaryKey }.
-    eachMap(field(kc, "MouseAndKeyboardActionMappings"), function(k, v)
-        local action = str(k)
-        if not action then return end
-        if add(index, actions, keyNameOf(field(v, "MainKey")), action, "config/main") then n = n + 1 end
-        if add(index, actions, keyNameOf(field(v, "SecondaryKey")), action, "config/second") then n = n + 1 end
-    end)
-    -- The UI bindings: FName -> FKey directly, no Main/Secondary pair (Pal.hpp:3979).
-    eachMap(field(kc, "MouseAndKeyboardUIInputMappings"), function(k, v)
-        local action = str(k)
-        if add(index, actions, keyNameOf(v), action, "config/ui") then n = n + 1 end
-    end)
+
+    -- Walk a map, then — only if its own `#` says entries are still unaccounted for — look the
+    -- rest up by name. `onPair(actionName, value)` does the adding and returns how many mappings
+    -- it produced. Both routes go through the same body, so a mapping found by Find is indexed
+    -- identically to one found by ForEach.
+    local function readMap(id, what, onPair)
+        local c = container(rec, id, what)
+        local m = field(kc, id)
+        c.num = sizeOf(m)
+        if m == nil then c.route = "absent"; return 0 end
+        if c.num == 0 then c.route = "empty"; return 0 end
+
+        -- Counted by DISTINCT KEY, not by callback. When both routes run, Find re-finds
+        -- everything ForEach already handed over; add() would dedupe the mappings anyway, but
+        -- `found` is compared against the container's own `#` in the report and a double count
+        -- there would make an incomplete read look complete.
+        local added, seen = 0, {}
+        local function take(name, v)
+            if not name or seen[name] then return end
+            seen[name] = true
+            c.found = c.found + 1
+            added = added + (onPair(name, v) or 0)
+        end
+
+        local visited, route = eachMap(m, function(k, v) take(str(k), v) end)
+        c.visited, c.route = visited, route
+
+        -- The look-up route. It runs when the walk did not account for everything the map says
+        -- it holds — which covers both "ForEach produced nothing" and "ForEach produced some".
+        if c.num == nil or c.found < c.num then
+            local list = pool.get()
+            state.lookups = state.lookups + #list
+            local before = c.found
+            findIn(m, list, take)
+            c.route = (visited > 0) and (route .. "+Find") or "Find"
+            if c.found == before and visited == 0 then c.route = route .. "/Find-miss" end
+        end
+        c.added = added
+        return added
+    end
+
+    -- The action bindings: FName -> FPalKeyConfigKeys { MainKey, SecondaryKey } (Pal.hpp:3974).
+    n = n + readMap("MouseAndKeyboardActionMappings",
+        "FName -> FPalKeyConfigKeys, the player's rebound actions (Pal.hpp:3974)",
+        function(name, v)
+            local a = 0
+            if add(index, actions_, keyNameOf(field(v, "MainKey")), name, "config/main") then a = a + 1 end
+            if add(index, actions_, keyNameOf(field(v, "SecondaryKey")), name, "config/second") then a = a + 1 end
+            return a
+        end)
+
+    -- The UI bindings: FName -> FKey directly, no Main/Secondary pair (Pal.hpp:3978).
+    n = n + readMap("MouseAndKeyboardUIInputMappings",
+        "FName -> FKey, the menu keys (Pal.hpp:3978)",
+        function(name, v)
+            return add(index, actions_, keyNameOf(v), name, "config/ui") and 1 or 0
+        end)
+
     -- The axis bindings: an array, and each element carries its own AxisName because
     -- FPalAxisKeyConfigKeys extends FPalKeyConfigKeys with one (Pal.hpp:623-628). Movement
     -- lives here — W/A/S/D are axis mappings, not actions — so a keymap without this half
-    -- would report the four most-used keys in the game as free.
-    eachArray(field(kc, "MouseAndKeyboardAxisMappings"), function(e)
-        local axis = str(field(e, "AxisName"))
-        if not axis then return end
-        if add(index, actions, keyNameOf(field(e, "MainKey")), axis, "config/axis") then n = n + 1 end
-        if add(index, actions, keyNameOf(field(e, "SecondaryKey")), axis, "config/axis2") then n = n + 1 end
-    end)
+    -- would report the four most-used keys in the game as free. No look-up route is needed or
+    -- possible: an array is enumerable and each element names itself.
+    do
+        local c = container(rec, "MouseAndKeyboardAxisMappings",
+            "FPalAxisKeyConfigKeys[], the player's rebound movement axes (Pal.hpp:3975)")
+        local arr = field(kc, "MouseAndKeyboardAxisMappings")
+        c.num = sizeOf(arr)
+        local added = 0
+        local visited, route = eachArray(arr, function(e)
+            local axis = str(field(e, "AxisName"))
+            if not axis then return end
+            c.found = c.found + 1
+            pool.offer(axis)
+            if add(index, actions_, keyNameOf(field(e, "MainKey")), axis, "config/axis") then added = added + 1 end
+            if add(index, actions_, keyNameOf(field(e, "SecondaryKey")), axis, "config/axis2") then added = added + 1 end
+        end)
+        c.visited, c.route, c.added = visited, route, added
+        n = n + added
+    end
 
     rec.entries = n
     if n == 0 then
-        rec.state, rec.why = "refused",
-            "the subsystem and its KeyConfigSettings both read, and every map inside came back "
-            .. "empty — either this build does not iterate a TMap property from Lua, or the "
-            .. "player's config genuinely has no entries yet"
+        -- Say WHICH of the two it is, from the containers' own counts, rather than offering the
+        -- reader both hypotheses again.
+        local anySize, allEmpty = false, true
+        for _, c in ipairs(rec.containers) do
+            if c.num ~= nil then anySize = true; if c.num > 0 then allEmpty = false end end
+        end
+        if anySize and allEmpty then
+            rec.state, rec.why = "empty",
+                "every container inside KeyConfigSettings reports its own size as 0. That is the "
+                .. "game answering, not a read failing: Palworld stores the player's key config "
+                .. "as OVERRIDES, so a save where nobody has rebound a key has nothing here and "
+                .. "the shipped bindings are the `project` source's job"
+        else
+            rec.state, rec.why = "refused",
+                "KeyConfigSettings read and at least one container reports entries, and neither "
+                .. "the walk nor the name look-up turned one into a mapping. The per-container "
+                .. "lines below say where it stopped, and there are only two ways to get here: "
+                .. "both routes refuse on this build, or every key in that container is a name "
+                .. "no action-name source lists (core/keyboard/base/actions.lua is where that "
+                .. "list comes from, and the project arrays are the other half of it)"
+        end
     else
         rec.state, rec.why = "read", nil
     end
@@ -404,8 +742,14 @@ end
 -- SOURCE 2: the project's defaults. Weaker evidence than the player's config — it is what the
 -- game SHIPPED with, not necessarily what it is obeying — but it covers the actions the config
 -- map has no entry for, and it is readable at the title screen where the subsystem is not.
-local function readProject(index, actions)
+--
+-- READ FIRST, and not only for its own sake: every ActionName and AxisName it yields goes into
+-- the candidate pool, and those are the gameplay names ("Jump", the movement axes) that no
+-- DataTable in the catalog contains. Without this half the config maps could only ever be looked
+-- up by UI action name.
+local function readProject(index, actions_, pool)
     local rec = source("project")
+    rec.containers = {}
     local is
     -- The CDO is where a UInputSettings' ini-loaded values live, and FindFirstOf explicitly
     -- returns the first NON-default instance (ue4ss/Docs/lua-api.md), so it can never find it.
@@ -430,26 +774,75 @@ local function readProject(index, actions)
         table.sort(out)
         return #out > 0 and table.concat(out, "+") or nil
     end
-    eachArray(field(is, "ActionMappings"), function(m)
-        local action = str(field(m, "ActionName"))
-        if add(index, actions, keyNameOf(field(m, "Key")), action, "project/action", mods(m)) then
-            n = n + 1
-        end
-    end)
-    eachArray(field(is, "AxisMappings"), function(m)
-        local axis = str(field(m, "AxisName"))
-        if add(index, actions, keyNameOf(field(m, "Key")), axis, "project/axis") then n = n + 1 end
-    end)
+
+    local function readArr(id, what, onElem)
+        local c = container(rec, id, what)
+        local arr = field(is, id)
+        c.num = sizeOf(arr)
+        local added = 0
+        local visited, route = eachArray(arr, function(e)
+            c.found = c.found + 1
+            added = added + (onElem(e) or 0)
+        end)
+        c.visited, c.route, c.added = visited, route, added
+        return added
+    end
+
+    n = n + readArr("ActionMappings",
+        "FInputActionKeyMapping[], the shipped DefaultInput.ini actions (Engine.hpp:13683)",
+        function(m)
+            local action = str(field(m, "ActionName"))
+            if action then pool.offer(action) end
+            return add(index, actions_, keyNameOf(field(m, "Key")), action, "project/action", mods(m))
+                and 1 or 0
+        end)
+    n = n + readArr("AxisMappings",
+        "FInputAxisKeyMapping[], the shipped movement axes (Engine.hpp:13684)",
+        function(m)
+            local axis = str(field(m, "AxisName"))
+            if axis then pool.offer(axis) end
+            return add(index, actions_, keyNameOf(field(m, "Key")), axis, "project/axis") and 1 or 0
+        end)
     -- UE's own console keys. Not an action mapping and easy to miss: these are the keys that
     -- open the engine console, they are claimed below the game entirely, and a mod that binds
-    -- one gets exactly the F7 experience (Engine.hpp:13690).
-    eachArray(field(is, "ConsoleKeys"), function(k)
-        if add(index, actions, keyNameOf(k), "<UE console>", "project/console") then n = n + 1 end
-    end)
+    -- one gets exactly the F7 experience (Engine.hpp:13689).
+    n = n + readArr("ConsoleKeys",
+        "FKey[], the keys that open UE's own console (Engine.hpp:13689)",
+        function(k)
+            return add(index, actions_, keyNameOf(k), "<UE console>", "project/console") and 1 or 0
+        end)
 
     rec.entries = n
-    rec.state, rec.why = (n > 0) and "read" or "refused", (n == 0)
-        and "UInputSettings resolved and every mapping array came back empty" or nil
+    if n > 0 then
+        rec.state, rec.why = "read", nil
+        return n
+    end
+
+    -- ⚠️ THE THREE ZEROES, KEPT APART. The old code collapsed them into "every mapping array came
+    -- back empty", which is what made the first live run unactionable.
+    local sized, populated, visited = 0, 0, 0
+    for _, c in ipairs(rec.containers) do
+        if c.num ~= nil then sized = sized + 1; if c.num > 0 then populated = populated + 1 end end
+        visited = visited + c.visited
+    end
+    if sized == 0 then
+        rec.state, rec.why = "refused",
+            "UInputSettings resolved but not one of ActionMappings / AxisMappings / ConsoleKeys "
+            .. "would answer `#` — the properties are declared (Engine.hpp:13683-13689) and this "
+            .. "build did not hand them over as containers at all"
+    elseif populated == 0 then
+        rec.state, rec.why = "empty",
+            "UInputSettings resolved and every array reports its own size as 0. On a build whose "
+            .. "input runs through its own key config (FPalKeyConfigSettings) and its own UI "
+            .. "action table (DT_UIInputAction), the legacy DefaultInput.ini arrays being genuinely "
+            .. "empty is a REAL answer and not a failed read — but it also means the only place "
+            .. "left that can name a key is the config source"
+    else
+        rec.state, rec.why = "refused", string.format(
+            "UInputSettings resolved and %d array(s) report entries, %d element(s) reached the "
+            .. "reader, and not one became a mapping — a shape fault in the element, not an "
+            .. "empty array. See the per-container lines", populated, visited)
+    end
     return n
 end
 
@@ -458,35 +851,71 @@ end
 ---Builds into a fresh index and swaps it in only if something was read, so a refresh attempted
 ---at the title screen (where the subsystem does not exist) cannot blank a good reading taken
 ---inside a world.
+---WHAT A REFRESH COSTS, because 244 look-ups per re-read is not free and pretending otherwise is
+---how a demand-driven read becomes a stall.
+---
+---  the walk           four property reads, three container walks and one `#` per container.
+---                     This is what a refresh costs in the ordinary case and it is what the old
+---                     version cost: microseconds.
+---  the look-up route  runs ONLY for a map whose own `#` says it holds entries the walk did not
+---                     produce. When it runs it is one FName per candidate name (built once per
+---                     refresh, shared by both maps) plus one Contains per name per map, plus one
+---                     Find per HIT. With the shipped 244 UI names and whatever the project
+---                     arrays add, that is a few hundred Contains calls — each one a hash lookup
+---                     in an FScriptMap, no allocation, no throw. `state.lookups` counts them and
+---                     `state.cost` records the wall-clock seconds, both printed by M.lines(), so
+---                     this paragraph can be checked against a real run instead of believed.
+---
+---AND IT STILL HAPPENS ON DEMAND ONLY. M.MAX_AGE bounds it in ELAPSED SECONDS (core/poll.lua's
+---rule: never a tick count), nothing polls, and the change hooks below only set a flag.
 ---@return integer mappings, string note
 function M.refresh()
-    local index, actions = {}, {}
-    local n = readConfig(index, actions) + readProject(index, actions)
+    local t0 = os.clock()
+    state.lookups = 0
+    local index, actions_ = {}, {}
+    local pool = newPool()
+    -- PROJECT FIRST. Its arrays are the only source of the gameplay action and axis NAMES, and
+    -- the config maps are looked up by name — so reading them the other way round would leave
+    -- every non-UI action unaskable.
+    local n = readProject(index, actions_, pool)
+    n = n + readConfig(index, actions_, pool)
     state.dirty = false
+    state.tried = os.clock()
+    state.cost = state.tried - t0
     if n == 0 then
         local parts = {}
         for _, s in ipairs(M.SOURCES) do
             parts[#parts + 1] = string.format("%s=%s", s.id, s.state)
         end
-        return 0, "no source produced a mapping (" .. table.concat(parts, " ") .. ")"
+        return 0, string.format("no source produced a mapping (%s) in %.3f s, %d look-up(s)",
+            table.concat(parts, " "), state.cost, state.lookups)
     end
-    state.index, state.actions = index, actions
-    state.read, state.at = true, os.clock()
+    state.index, state.actions = index, actions_
+    state.read, state.at = true, state.tried
     local keys = 0
     for _ in pairs(index) do keys = keys + 1 end
-    return n, string.format("%d mapping(s) over %d key(s)", n, keys)
+    return n, string.format("%d mapping(s) over %d key(s) in %.3f s, %d look-up(s)",
+        n, keys, state.cost, state.lookups)
 end
 
 ---The current reading, refreshing first if it is stale or something said it moved.
 ---
----There is no poller behind this and there never will be: a re-read costs a handful of property
----walks and only matters when somebody is about to ask a question, so it happens when they ask.
+---There is no poller behind this and there never will be: a re-read only matters when somebody is
+---about to ask a question, so it happens when they ask.
+---
+---⚠️ THE STALENESS BOUND IS ON THE LAST ATTEMPT, NOT THE LAST SUCCESS, and that is a bug fix
+---rather than a nicety. The old test was `not state.read or ... state.at == nil`, and `at` is only
+---set by a refresh that READ something — so in a session where nothing is readable (the title
+---screen, or the first live run of this module) every single question re-read the whole game.
+---M.lookup() asks 156 of them in a row, so that one run performed 156 full refreshes and the log
+---never said so. With the look-up route now in the path that would have been tens of thousands of
+---engine calls to answer a question that had already failed. `tried` is stamped by every refresh,
+---successful or not, so a failure is cached for M.MAX_AGE exactly like a success.
 ---@return table index
 function M.snapshot()
-    local stale = (not state.read)
-        or state.dirty
-        or (state.at == nil)
-        or ((os.clock() - state.at) > M.MAX_AGE)
+    local stale = state.dirty
+        or (state.tried == nil)
+        or ((os.clock() - state.tried) > M.MAX_AGE)
     if stale then pcall(M.refresh) end
     return state.index
 end
@@ -692,17 +1121,33 @@ function M.lines()
         out[#out + 1] = string.format("keymap: source %-8s %-8s %d mapping(s) | %s%s",
             s.id, s.state, s.entries or 0, s.what,
             s.why and ("  [" .. tostring(s.why) .. "]") or "")
+        -- ⚠️ THE LINES THAT DID NOT EXIST, and their absence is why the first live run ended in
+        -- two hypotheses instead of an answer. One row per container, carrying the container's
+        -- OWN size next to what our reader got out of it.
+        for _, c in ipairs(s.containers or {}) do out[#out + 1] = containerLine(s.id, c) end
     end
     for _, r in ipairs(M.WATCH) do
         out[#out + 1] = string.format("keymap: watch  %-8s %-8s fired=%d | %s%s",
             r.id, r.state, r.fired, r.what,
             r.why and ("  [" .. tostring(r.why) .. "]") or "")
     end
+    local names = (actions.state.source == "unread")
+        and "no action-name source was needed — every container either walked cleanly or said it "
+            .. "was empty, so not one FName was built"
+        or string.format("action names came from the %s copy of %s: %s",
+            actions.state.source, actions.TABLE, tostring(actions.state.why))
+    out[#out + 1] = string.format("keymap: last refresh took %.3f s and made %d name look-up(s); "
+        .. "%s. The re-read is on DEMAND with a %d s staleness bound in ELAPSED SECONDS — nothing "
+        .. "here polls and no tick count is used.",
+        state.cost or 0, state.lookups or 0, names, M.MAX_AGE)
 
     if not state.read then
         out[#out + 1] = "keymap: NOTHING HAS BEEN READ, so every `is this key free` answer this "
-            .. "session is \"unknown\" and says so. The config source needs a LOADED WORLD "
-            .. "(UPalOptionSubsystem is a world subsystem); run this from inside a save."
+            .. "session is \"unknown\" and says so. READ THE CONTAINER LINES ABOVE BEFORE "
+            .. "CONCLUDING ANYTHING: `#=0` is the game saying that container is empty, which is a "
+            .. "real answer; `#=?` is a property that would not answer at all; and `#=N` with "
+            .. "added=0 is the only one of the three that is a fault in this code. The config "
+            .. "source also needs a LOADED WORLD (UPalOptionSubsystem is a world subsystem)."
         return out
     end
 

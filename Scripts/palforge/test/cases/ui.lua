@@ -1047,8 +1047,9 @@ end)
 -- it is what the pf_keys action exists for.
 --=============================================================================
 
-local keymap = require("palforge.core.keyboard.base.keymap")
-local reg    = require("palforge.core.keyboard.base.registory")
+local keymap      = require("palforge.core.keyboard.base.keymap")
+local reg         = require("palforge.core.keyboard.base.registory")
+local actionNames = require("palforge.core.keyboard.base.actions")
 
 -- Install a synthetic keymap reading for the body of one test, and put the real state back
 -- afterwards whatever happens. Everything the status logic reads lives on keymap.state, so this
@@ -1057,11 +1058,17 @@ local reg    = require("palforge.core.keyboard.base.registory")
 local function withKeymap(index, fn)
     local st = keymap.state
     local saved = { index = st.index, actions = st.actions, read = st.read, at = st.at,
-                    dirty = st.dirty }
-    st.index, st.actions, st.read, st.at, st.dirty = index, {}, true, os.clock(), false
+                    dirty = st.dirty, tried = st.tried }
+    -- `tried` as well as `at`: the staleness bound is on the last ATTEMPT now (keymap.snapshot's
+    -- header says why — a failed read used to be re-attempted on every single question, so
+    -- keymap.lookup's 156 questions were 156 full refreshes). Leaving it nil here would make
+    -- every status() inside the body re-read the game, which headless is harmless and in a live
+    -- run would not be.
+    st.index, st.actions, st.read, st.dirty = index, {}, true, false
+    st.at, st.tried = os.clock(), os.clock()
     local ok, err = pcall(fn)
-    st.index, st.actions, st.read, st.at, st.dirty =
-        saved.index, saved.actions, saved.read, saved.at, saved.dirty
+    st.index, st.actions, st.read, st.at, st.dirty, st.tried =
+        saved.index, saved.actions, saved.read, saved.at, saved.dirty, saved.tried
     if not ok then error(err, 0) end
 end
 
@@ -1138,8 +1145,10 @@ s:test("with no reading, a key is 'unknown' and never 'free'", function(t)
     -- config cannot be read; answering "free" there would be a guess wearing a measurement's
     -- clothes, and the arm that trusted it would be the F7 story again.
     local st = keymap.state
-    local saved = { read = st.read, at = st.at, dirty = st.dirty, index = st.index }
+    local saved = { read = st.read, at = st.at, dirty = st.dirty, index = st.index,
+                    tried = st.tried }
     st.read, st.at, st.dirty, st.index = false, os.clock(), false, {}
+    st.tried = os.clock()
     local ok, err = pcall(function()
         local s1 = keymap.status("INS")
         t:eq(s1.state, "unknown", "no reading means no answer")
@@ -1147,7 +1156,100 @@ s:test("with no reading, a key is 'unknown' and never 'free'", function(t)
         t:truthy(s1.why:find("loaded world", 1, true), "and the reason names what is missing")
     end)
     st.read, st.at, st.dirty, st.index = saved.read, saved.at, saved.dirty, saved.index
+    st.tried = saved.tried
     if not ok then error(err, 0) end
+end)
+
+s:test("a failed reading is cached for MAX_AGE, so one question is not one whole re-read",
+function(t)
+    -- ⚠️ THE REGRESSION THIS LOCKS DOWN COST A LIVE RUN 156 FULL REFRESHES AND SAID NOTHING.
+    -- snapshot() used to call a reading stale whenever `state.read` was false — and `read` stays
+    -- false for the whole of a session where the game is not readable (the title screen, or the
+    -- first run of this module, which is exactly when it happened). keymap.lookup() asks
+    -- status() once per bindable name, so a session that could read nothing re-read the game once
+    -- per row. With the name look-up route now in that path it would be hundreds of engine calls
+    -- per row. The bound is on the last ATTEMPT.
+    local st = keymap.state
+    local saved = { read = st.read, at = st.at, dirty = st.dirty, index = st.index,
+                    tried = st.tried }
+    local calls, realRefresh = 0, keymap.refresh
+    keymap.refresh = function() calls = calls + 1; return realRefresh() end
+    local ok, err = pcall(function()
+        st.read, st.at, st.index, st.dirty = false, nil, {}, false
+        st.tried = os.clock()
+        for _ = 1, 20 do keymap.snapshot() end
+        t:eq(calls, 0, "a fresh failure is not re-attempted on every question")
+
+        st.tried = os.clock() - (keymap.MAX_AGE + 1)
+        keymap.snapshot()
+        t:eq(calls, 1, "and once it is older than MAX_AGE seconds it is attempted again")
+
+        -- The flag the change hooks set still forces one immediately, whatever the clock says.
+        calls, st.dirty = 0, true
+        keymap.snapshot()
+        t:eq(calls, 1, "a config change re-reads at once rather than waiting out the bound")
+    end)
+    keymap.refresh = realRefresh
+    st.read, st.at, st.dirty, st.index, st.tried =
+        saved.read, saved.at, saved.dirty, saved.index, saved.tried
+    if not ok then error(err, 0) end
+end)
+
+s:test("the FKey names are cross-checked against Palworld's own key-icon table", function(t)
+    -- INDEPENDENT EVIDENCE, and the only kind available headless. keymap.M.FKEY's right-hand
+    -- column is Unreal's spelling of each key, and a typo there is invisible until it silently
+    -- reports a taken key as free. DT_PalRichTextControlKeyIcon's 117 row names are the same
+    -- namespace written by the GAME (dumps/catalog/datatables/DT_PalRichTextControlKeyIcon.json),
+    -- so anything we spell that the game also spells has to match exactly.
+    --
+    -- ⚠️ ABSENCE PROVES NOTHING HERE. It is a KEYBOARD icon table: it has no LeftMouseButton, no
+    -- ThumbMouseButton, and nothing for a key Palworld never draws. So the assertion is only over
+    -- names the table DOES carry, and the rest are counted rather than failed.
+    local shipped = {}
+    for _, n in ipairs(actionNames.KEY_NAMES) do shipped[n] = true end
+    -- Case-insensitive index, so a mis-CASED spelling is caught rather than passing as "absent".
+    local byLower = {}
+    for n in pairs(shipped) do byLower[n:lower()] = n end
+
+    local checked, uncovered, wrong = 0, 0, {}
+    for ue4ss, fkey in pairs(keymap.FKEY) do
+        if type(fkey) == "string" then
+            if shipped[fkey] then
+                checked = checked + 1
+            elseif byLower[fkey:lower()] then
+                wrong[#wrong + 1] = string.format("%s -> %q, and the game spells it %q",
+                    ue4ss, fkey, byLower[fkey:lower()])
+            else
+                uncovered = uncovered + 1
+            end
+        end
+    end
+    t:eq(#wrong, 0, "every FKey name the game also names is spelled the game's way: "
+        .. table.concat(wrong, "; "))
+    t:truthy(checked > 80, string.format("and the cross-check is worth something: %d name(s) "
+        .. "matched the game's own table, %d are outside it (mouse buttons and keys Palworld "
+        .. "draws no icon for, which proves nothing either way)", checked, uncovered))
+end)
+
+s:test("the candidate action names are Palworld's own, and every one of them is usable",
+function(t)
+    -- The look-up route can only ask about names it has. This asserts the shipped half is intact
+    -- — 244 row names of DT_UIInputAction, non-empty, unique — because a truncated or duplicated
+    -- list would quietly narrow what the keymap can ever find and nothing would say so.
+    local names, rec = actionNames.names()
+    t:truthy(#names >= 244, "at least the 244 shipped UI action names are available: " .. #names)
+    t:type(rec.source, "string", "and the record says which copy answered: " .. tostring(rec.source))
+    t:eq(rec.source, "shipped", "headless there is no live table, so the shipped copy answers")
+    local seen, dupes, blank = {}, 0, 0
+    for _, n in ipairs(names) do
+        if type(n) ~= "string" or #n == 0 then blank = blank + 1 end
+        if seen[n] then dupes = dupes + 1 end
+        seen[n] = true
+    end
+    t:eq(blank, 0, "no empty name, which would be a Contains() call that asks nothing")
+    t:eq(dupes, 0, "and no duplicate, which would be a look-up paid for twice")
+    t:truthy(seen.OpenWorldMap and seen.UICancel and seen.Interact_1,
+        "and they really are Palworld's UI actions, not a placeholder")
 end)
 
 s:test("a reading splits keys into taken-by-the-game and free, and names the action", function(t)

@@ -157,9 +157,22 @@ M.ACTIONS = {
 -- IT NEEDS A LOADED WORLD. UPalOptionSubsystem is a UPalWorldSubsystem: at the title screen it
 -- does not exist and the config half cannot be read. Run it from inside a save.
 --
--- WHAT COMES OUT, in three blocks:
+-- WHAT COMES OUT, in four blocks:
 --   1. the SOURCES and the change WATCHES, one line each with their state — so "the keymap is
 --      empty" can never be the whole story; the line above it says which read refused and why.
+--   1b. ★ NEW, AND THE FIRST THING TO READ: one CONTAINER line per TMap and TArray touched,
+--      carrying the container's OWN size (`#=`) beside what the reader got out of it. The first
+--      live run of this probe ended with "resolved but empty" and two hypotheses, because
+--      nothing separated "the game has nothing here" from "our reader dropped it". These lines
+--      settle it every time:
+--        #=0                     the container says it is empty. A REAL ANSWER. Palworld keeps
+--                                the key config as OVERRIDES, so a save where nobody rebound a
+--                                key legitimately has nothing in it.
+--        #=?                     the property would not answer `#` at all — nothing is claimed.
+--        #=N with added=0        ⚠️ the only one of the three that is a bug in PalForge.
+--        found<N                 the map has entries no action-name source could name; they are
+--                                unseen rather than absent, and the count says how many.
+--      `via` names the route that carried it: ForEach, index, Find, or ForEach+Find.
 --   2. every key the game has an action on, with the action names and where each mapping came
 --      from: [config/main] and [config/second] are the PLAYER'S own bindings, [config/axis] is
 --      movement, [config/ui] is the menu keys, [project/*] is the shipped DefaultInput.ini and
@@ -177,6 +190,11 @@ M.ACTIONS = {
 --             which binding, and a ⚠️ there means it collides with the game as well.
 --   unknown   the config could not be read (no world), or Unreal has no FKey name for that
 --             UE4SS name at all. Never treat one as free.
+--
+-- WHAT IT COSTS, so the number in the log can be checked rather than trusted: the refresh line
+-- prints its own wall-clock seconds and the number of name look-ups it made. Zero look-ups means
+-- every container walked cleanly or was honestly empty; a few hundred means a map held entries
+-- the walk did not produce and each candidate action name was asked about with Contains().
 pf_keys = function()
     local keymap = require("palforge.core.keyboard.base.keymap")
     local reg    = require("palforge.core.keyboard.base.registory")
@@ -187,8 +205,10 @@ pf_keys = function()
     for _, line in ipairs(reg.report()) do log.info("pf_keys " .. line) end
     for _, line in ipairs(keymap.lookup(reg.owned(), reg.FORBIDDEN)) do log.info("pf_keys " .. line) end
     log.info("#### END keymap")
-    support.announce(string.format("pf_keys: %d game mapping(s) in UE4SS.log — the lookup table "
-        .. "is the block to keep", n))
+    support.announce(string.format("pf_keys: %d game mapping(s) in %.3f s (%d name look-up(s)) "
+        .. "— UE4SS.log has the lookup table, and the `keymap:   <source> <container>` lines "
+        .. "above it say what each container held", n,
+        keymap.state.cost or 0, keymap.state.lookups or 0))
 end,
 -- ---- commands that CREATE the situation a source needs ----
 --

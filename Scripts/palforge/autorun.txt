@@ -18,7 +18,7 @@
 # ★ pf_keys — PALWORLD'S WHOLE LIVE KEYMAP, PRINTED. Read-only, one shot, NOTHING TO DO IN GAME.
 # This is the one that turns every future key question into a lookup instead of a deploy-and-hope.
 # It reads the key config the PLAYER edits (UPalOptionSubsystem.KeyConfigSettings) plus the
-# shipped DefaultInput.ini defaults, and prints three blocks between #### BEGIN keymap and
+# shipped DefaultInput.ini defaults, and prints four blocks between #### BEGIN keymap and
 # #### END keymap:
 #   1. the sources and change-watches, with their state — so an empty result always says WHY
 #   2. every key Palworld has an action on, with the action name and where the mapping came from
