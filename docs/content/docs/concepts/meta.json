@@ -1,4 +1,12 @@
 {
   "title": "Concepts",
-  "pages": ["definitions", "schema", "lifecycle", "editor-setup"]
+  "pages": [
+    "definitions",
+    "identity-and-ownership",
+    "schema",
+    "lifecycle",
+    "status-and-icons",
+    "spatial-index",
+    "editor-setup"
+  ]
 }

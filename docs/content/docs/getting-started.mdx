@@ -36,18 +36,37 @@ different layout breaks every part of it.
 ue4ss/
 └── Mods/
     └── PalForge/
-        ├── enabled.txt
+        ├── enabled.txt          <- empty file; UE4SS starts a mod only when this exists
         └── Scripts/
             ├── main.lua
             └── palforge/
-                ├── env.lua
-                ├── types.lua
-                ├── api/
-                ├── core/
-                ├── native/
-                ├── tests/
-                └── utils/
+                ├── env.lua      <- the dev/release switches and the declared game build
+                ├── types.lua    <- editor annotations only; nothing loads it at runtime
+                ├── autorun.txt  <- the keyless dev queue (core/autorun.lua reads it here)
+                ├── api/         <- the public surface a pack writes against
+                ├── core/        <- the engine: kernel, event system, Palworld bridges
+                ├── native/      <- Palworld's own content as data catalogs
+                ├── test/        <- the in-game API suite (SINGULAR - see below)
+                ├── tests/       <- the headless unit bundle, run at startup in dev
+                └── utils/       <- log, json, file, items
 ```
+
+That is the same list `tools/deploy.sh` copies: `Scripts/main.lua` plus all of
+`Scripts/palforge/`, minus `deprecated/` and `tmp/`, which are reference-only and are not needed
+at runtime.
+
+Two entries are easy to leave out, and both have consequences that look like something else:
+
+- **`palforge/test/`, singular.** `core/registry.lua` requires `palforge.test`, and that module
+  is what binds **F1**. An install without this directory has no test suite and no F1 key in dev
+  mode, with nothing else in the log to explain it. (`palforge/tests/`, *plural*, is a different
+  thing — the headless unit bundle the kernel runs at startup in dev, and the module behind the
+  `ps_catalog` console command. It ships too: the `.gitignore` line that used to hide it was
+  removed once it turned out `core/registry.lua` requires it at boot, so a clone carries it. If
+  it is missing anyway, the kernel names it in its "dev tooling NOT loaded" line.)
+- **`palforge/autorun.txt`.** `core/autorun.lua` reads it from beside `palforge/` and runs named
+  actions on world load. It is how anything gets run on a machine where no key and no console
+  works — three input routes have failed in turn on this project.
 
 `Scripts/palforge/types.lua` is annotations only — nothing loads it while the game is running. It
 is there so your editor can complete every field of a definition as you type. See
@@ -64,16 +83,18 @@ folder, or a line in `ue4ss/Mods/mods.txt`.
 
 ```text title="ue4ss/Mods/mods.txt"
 CheatManagerEnablerMod : 1
-ConsoleEnablerMod : 1
 PalForge : 1
 ```
 
-`CheatManagerEnablerMod` is what gives PalForge the game's own admin object, `UPalCheatManager`.
-Keep it on: putting a pal in the world goes through it, and without it `Pal.Handle:spawn` is
-refused before it reaches the game — it writes this line and gives up:
+`CheatManagerEnablerMod` gives PalForge the game's own admin object, `UPalCheatManager`, which is
+what a world spawn goes through. It is a convenience rather than a hard requirement:
+`core/spawn.lua`'s `cheatManager()` looks for a live one, then for the controller's own
+`CheatManager`, and if the session has neither it builds one itself with
+`StaticConstructObject(pc.CheatClass, pc)`. What it cannot do is build one with no player
+controller to hang it on, and that is the case this line reports:
 
 ```text
-[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager and none could be constructed (no player controller yet?)
 ```
 
 </Step>
@@ -98,10 +119,18 @@ for are in the next two sections.
 1. Points Lua's `package.path` at its own folder
    (`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`), so `require("palforge.api")` finds the
    modules sitting next to it.
-2. Loads `palforge.env` and prints the version and the dev flag.
-3. Calls `registry.initialize()` inside a `pcall`, printing `initialize failed: <err>` if that
+2. Requires the optional module `palforge_dev` — `Scripts/palforge_dev.lua` — and records which
+   of three things happened: `loaded`, `absent (release copy)`, or `FAILED TO LOAD`. That one
+   file is the whole dev switch, and the third case is warned about separately, because a dev
+   overlay with a syntax error and a framework ignoring the flag look identical otherwise.
+3. Asks the running game for its build string through the `UKismetSystemLibrary` CDO and stores
+   the answer in `env.gameBuildLive`. Nothing answering is normal at that point — a Lua mod
+   starts early — so the read is retried once at the first `world.ready`.
+4. Prints the startup banner: version, declared and live game build, `dev` and `debug`, and
+   whether the dev overlay was there. Then the single-player statement, in full.
+5. Calls `registry.initialize()` inside a `pcall`, printing `initialize failed: <err>` if that
    raises and `ready` if it does not.
-4. Publishes `_G.PalForge` so other mods can use the same running copy.
+6. Publishes `_G.PalForge` so other mods can use the same running copy.
 
 ```lua title="Scripts/main.lua (excerpt)"
 local thisDir = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
@@ -111,7 +140,12 @@ local env      = require("palforge.env")
 local registry = require("palforge.core.registry")
 local log      = require("palforge.utils.log").scope("main")
 
-log.info("PalForge v" .. tostring(env.version) .. " starting (dev=" .. tostring(env.dev) .. ")")
+log.info(string.format(
+    "PalForge v%s starting | game build: declared %s, live %s | dev=%s debug=%s | dev overlay: %s",
+    tostring(env.version),
+    tostring(env.gameBuild),
+    liveBuild and (liveBuild .. " (" .. buildSource .. ")") or ("unknown (" .. buildSource .. ")"),
+    tostring(env.dev), tostring(env.debug), devOverlay))
 ```
 
 `registry.initialize()` is where everything comes up. It runs five steps:
@@ -128,20 +162,26 @@ flowchart TD
 ```
 
 The catalogs load in this order: `buildings`, `items`, `pals`, `skills`, `effects`, `audio`,
-`ui`. Loading one is what registers its content — a definition call writes itself into
-`core/object_manager` as it runs. The long id lists inside those files stay plain data until
-something asks for one by `get(id)`, so startup never registers the thousands of row ids at once.
+`ui`. Requiring one runs its curated definition calls, and a definition call writes itself into
+`core/object_manager` as it runs. The long id lists inside those files stay plain data, and a
+lazy `get(id)` builds its handle with `{ register = false }` and stops there — so neither startup
+nor a single lookup registers a row. `<catalog>.publish(id)` is the opt-in that does.
+`native/buildings` registers nothing at all: its curated `WorkBench` and `PalBoxV2` carry
+`{ register = false }` too, because registering a building is not inert — `core/event`'s scan
+then tracks and persists every matching structure already standing in your world.
 
 `_G.PalForge` carries everything another mod might want:
 
 ```lua
 _G.PalForge = {
-    env = env,
-    api = require("palforge.api"),
+    env  = env,
+    api  = api,
+    pack = api.pack,       -- PalForge.pack("mypack").Item{ ... } records the owning pack
     utils = { log = ..., json = ..., file = ..., items = ... },
     core = {
         registry = ..., event = ..., object_manager = ..., spawn = ..., mesh = ...,
         sound = ..., player = ..., spatial = ..., icons = ...,
+        uobject = ..., assetpath = ...,
     },
     native = require("palforge.native"),
 }
@@ -149,23 +189,50 @@ _G.PalForge = {
 
 ## A healthy startup log
 
-`env.dev = true` is the shipped default. With it, a clean start looks like this:
+Every dev tool ships off, so the log a player sees is the shorter one. A clean release start:
 
 ```text
-[PalForge.main][info] PalForge v0.3.0 starting (dev=true)
+[PalForge.main][info] PalForge v0.3.0 starting | game build: declared v1.0.2.101103, live unknown (UKismetSystemLibrary CDO did not resolve) | dev=false debug=false | dev overlay: absent (release copy)
+[PalForge.main][info] PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not supported and are not tested: there is no replication layer, and the item, spawn and event routes are all client-authoritative. A pack may appear to work for the host and do nothing for anyone else.
 [PalForge.event][info] tick source live
-[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard have no native source) + dispatch
-[PalForge.keyboard][info] bound F4
-[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
-[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
-[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
-[PalForge.keyboard][info] bound F1
-[PalForge.registry][info] initialized (dev=true, 19 class(es) registered)
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item/skill; onBuild, the three onSpawned candidates and the three passive ones arm at world.ready; skill.activate has three sources and skill.hit two, and the log says which one carried it; building.leftclick and building.break have no native source and never will) + dispatch
+[PalForge.registry][info] dev tooling NOT loaded (env.dev = false, the shipped default): no dev keybinds — including F4, unlock all technologies — no F1 API suite, no F9 reload, no ps_catalog dumper, no headless unit bundle and no test hooks. ...
+[PalForge.registry][info] initialized (dev=false, debug=false, 17 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-The class count is simply how many definitions registered: the ones the shipped catalogs declare,
-plus your own. `[PalForge.main][info] ready` is the line that means PalForge started.
+`live` is whatever the running game answered when asked for its build string. UE4SS starts a Lua
+mod early, so `unknown` at that moment is ordinary rather than a failure — the read is retried
+once at the first world load and the answer logged there. PalForge prints `unknown` rather than a
+guess, and when the declared and live builds disagree it warns once, naming both.
+
+The class count is how many definitions are registered. 17 is what the shipped catalogs alone
+produce (6 audio, 3 item, 3 effect, 2 pal, 2 ui, 1 skill, and 0 building), and your own
+definitions add to it. `[PalForge.main][info] ready` is the line that means PalForge started.
+
+A dev deploy adds the tooling lines. Each bind reports what the game's own key config had on that
+key, on the same line as the bind:
+
+```text
+[PalForge.main][info] PalForge v0.3.0 starting | game build: ... | dev=true debug=true | dev overlay: loaded
+[PalForge.keyboard][info] bound F4 [keymap: unknown — the game's key config has not been read yet (the config source needs a loaded world), so nothing is claimed either way; run pf_keys inside a save]
+[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
+[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
+[PalForge.keyboard][info] bound F9 [keymap: ...]
+[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
+[PalForge.keyboard][info] bound F1 [keymap: ...]
+[PalForge.test][info] keyboard: F1                   unknown  tests: all suites                        game: the game's key config has not been read
+[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, ps_catalog console command, F9 reload, headless unit bundle (palforge.tests), in-game API suite on F1 (palforge.test), game-required test hooks (palforge.test.hooks)
+[PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
+[PalForge.main][info] ready
+```
+
+`tests: 8 passed ...` is the headless unit bundle, `palforge/tests/` — plural, and part of the
+repository, so this is the normal line. An install that dropped the directory gets it listed by
+name on a `dev tooling NOT loaded` line instead. That line is printed in both modes and names
+every piece that did not load, and why: a
+key that was never bound and a key that was bound and never arrived look identical from outside,
+and it is what tells them apart.
 
 Two more lines belong to the world gate. PalForge waits for a save to finish loading before it
 touches anything in the world; the first line appears when the save is ready, the second when you
@@ -184,39 +251,87 @@ heartbeat is the one source that runs from mod load. If the check loop cannot be
 the log says `ready-watch unavailable (...) - dispatch always on` and everything runs anyway.
 </Callout>
 
-## The dev toggle
+## The dev switch
 
 `Scripts/palforge/env.lua` holds the settings PalForge reads at runtime. `require()` caches it, so
-every module sees the same table:
+every module sees the same table — and every switch in it ships **off**:
 
 ```lua title="Scripts/palforge/env.lua"
 return {
-    dev     = true,        -- THE dev/release switch (dev tools load only when true)
-    name    = "PalForge",
-    version = "0.3.0",
+    dev        = false,       -- THE dev/release switch (dev tools load only when true)
+    debug      = false,       -- game-required test hooks (test/hooks); needs dev too
+    debugHooks = {},          -- per-hook opt-in for the hooks that WRITE
+    name       = "PalForge",
+    version    = "0.3.0",
+    gameBuild     = "v1.0.2.101103",
+    gameBuildLive = nil,
+    multiplayer   = false,
 }
 ```
 
-When `dev` is true, `registry.initialize()` also:
+Nothing in the framework turns `dev` on. One optional file does: `Scripts/palforge_dev.lua`,
+which `main.lua` requires immediately before `registry.initialize()` and ignores when it is
+absent.
 
-- loads the keybind files under `core/keyboard/`, which put **F4** on `utils.items.unlockAllTech`
-  — press it and your custom buildings and chests appear in the build menu;
-- registers the `ps_catalog` console command, a DataTable dumper you run by hand and that never
-  starts on its own;
-- runs the headless test bundle in `palforge.tests`, which is where the `tests: ...` line comes
-  from;
-- loads `palforge.test`, the in-game test suite, and puts it on **F1**. Nothing there runs until
-  you press the key, because those tests touch the live world.
-
-Set `dev = false` for a quiet release build with only the content catalogs registered:
-
-```lua title="Scripts/palforge/env.lua"
-return {
-    dev     = false,
-    name    = "PalForge",
-    version = "0.3.0",
-}
+```lua title="Scripts/palforge_dev.lua"
+local env = require("palforge.env")
+env.dev   = true
+env.debug = true
+-- env.debugHooks["pal-skills-equip"] = true   -- per-hook opt-in for the hooks that WRITE
 ```
+
+That file is gitignored, so it cannot reach a player through the repository, and `tools/deploy.sh`
+writes it for you. The script replaces the deployed `Scripts/` wholesale — staged first, then two
+renames, so the game never sees a half-populated tree — stamps the copy with a build timestamp,
+and never edits `env.lua`:
+
+```bash
+tools/deploy.sh                        # dev deploy into the default install; writes the overlay
+tools/deploy.sh "/path/to/Palworld"    # dev deploy somewhere else
+tools/deploy.sh --release              # no overlay, and any stale copy is deleted by name
+```
+
+So the loop is: **edit a file → `tools/deploy.sh` → press F9 in game (or restart, the first time
+after a fresh deploy) → press F1**. Lua is read at mod load, so a deployed file changes nothing in
+a running game until the reload; the build stamp is what makes a stale run visible in the log
+instead of diagnosed for an hour.
+
+### What `dev` arms: nine keys
+
+`registry.initialize()` loads the keybind files under `core/keyboard/`, the F9 reload, the
+`ps_catalog` DataTable dumper, the headless unit bundle, and `palforge.test` — which is what binds
+F1 and gives each discovery probe its own key. Nine keys in total:
+
+| Key | What it does | What it needs on screen |
+| --- | --- | --- |
+| **F1** | run the in-game API suite: 14 suites, 481 checks | works anywhere, but 28 checks skip without a loaded save |
+| **F2** | probe `title` — the game's own title menu button, so yours can match it | the title screen |
+| **F3** | probe `uislot` — that button's inner slot, read from a world | a loaded save |
+| **F4** | **unlock every technology in the loaded save** | a loaded save |
+| **F5** | probe `reflect` — classes, functions, parameters, DataTable rows | a loaded save |
+| **F6** | probe `pal` — a pal's mesh component, anim class and materials | a pal standing near you |
+| **F8** | probe `watch` — arms native hooks and logs what fires while you act | a loaded save, then craft / drop / spawn |
+| **F9** | reload every `palforge.*` module | — |
+| **F10** | probe `uievents` — counts the four UI-rebuild hooks | a loaded save, then a quit to title and a reload |
+
+Seven of the nine only read and print. **Two change something:**
+
+- **F4** writes into the loaded save. One press, no confirmation, every technology unlocked.
+- **F8** registers native hooks, and UE4SS has no way to unregister one — everything it arms
+  stays armed until you quit the game. It also spawns one ChickenPal in front of you, and it
+  refuses F9 for about 60 seconds afterwards, because its two long asynchronous chains are still
+  outstanding and a reload inside that window takes the engine-tick hook down with them.
+
+F7 is deliberately not among them: it is Palworld's own volume control, and a bind there succeeds,
+logs happily, and never once arrives. Every action also has a console command (`pf_tests`,
+`pf_watch`, `pf_hooks`, one per probe and one per hook), and `core/autorun.lua` runs named actions
+from `palforge/autorun.txt` on world load — three separate ways in, because three input routes
+have failed in turn on this project.
+
+`env.debug` is the second, narrower switch: it loads `palforge/test/hooks/`, the 13 measurements
+that cannot run without a running game. They are declared rather than run — ask for one by name
+with `pf_hook <id>`, and `pf_hooks` lists every hook with the reason each would skip. The ones
+that write into a save need `env.debugHooks[id] = true` on top of that.
 
 Any module can read the same table:
 
@@ -231,8 +346,8 @@ end
 
 <Callout type="warn">
 The dev gate is read inside `registry.initialize()`. Changing `require("palforge.env").dev` after
-that changes what your own code sees, but it will not load or unload the dev tooling. Edit
-`env.lua` to switch it for real.
+that changes what your own code sees, but it will not load or unload the dev tooling. The overlay
+file works because `main.lua` requires it *before* `initialize()` runs.
 </Callout>
 
 ## Your first definition
@@ -309,16 +424,21 @@ api.Building{
 ```
 
 One id holds one definition, keyed by kind and id in `object_manager`, so defining an id PalForge
-already ships a definition for replaces that one. `native/buildings` ships `WorkBench` and
-`PalBoxV2`, `native/items` ships `Wood`, `Berries` and `Arrow`, and `native/pals` ships
-`ChickenPal` and `SheepBall`. Pick another id unless replacing one is what you want.
+has already registered replaces that one. What the shipped catalogs actually register is the 17
+classes in the startup line: `Wood`, `Berries` and `Arrow` from `native/items`, `ChickenPal` and
+`SheepBall` from `native/pals`, plus the audio, effect, skill and UI ones. `native/buildings`
+registers **nothing** — its `WorkBench` and `PalBoxV2` are built with `{ register = false }` and
+handed out by `native.buildings.publish(id)` on request — so `ItemChest` above collides with
+nothing, and a cross-pack collision is now warned about by name rather than silently overwritten.
 
-And a pal, to see an action rather than a handler. Give the spawn a few seconds: the creature
-turns up four to eight seconds after the call, wearing the mesh and carrying the handlers you
-declared.
+And a pal, to see an action rather than a handler. Give the spawn a few seconds: `SpawnMonster`
+is asynchronous, the one arrival anyone has timed took 5.9 seconds, and `core/spawn` watches the
+world for up to 12 and logs the arrival when it sees it. The boolean `:spawn` returns is about
+the call, not about a pal standing in front of you.
 
 ```lua
 local api = require("palforge.api")
+local log = require("palforge.utils.log").scope("mypack")
 
 -- Pal.get works for any game CharacterID, defined or not.
 api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- the pal arrives a few seconds later
@@ -335,8 +455,10 @@ local chicken = api.Pal{
         animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C",
     },
     events = {
+        -- The mesh declared above is attached FOR YOU on pal.spawned; nothing here calls
+        -- renderOn. Your own handler runs after that attach, and may fire more than once.
         onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)
+            log.info("chicken spawned: " .. tostring(ctx.actor))
         end,
     },
 }
@@ -426,8 +548,10 @@ end
 
 </Steps>
 
-With `env.dev = true` you also have **F1** (run the in-game test suite) and **F4** (unlock all
-technology) as quick smoke tests.
+`object_manager.owner(type, id)` names the pack a registration belongs to, and `entry` and
+`byResolved` answer the same question from the other two directions. With a dev deploy, **F1** is
+the quickest smoke test there is: it runs all 14 suites, and the summary says how many checks
+could not be answered and in which direction.
 
 ## Reaching the API
 
@@ -629,11 +753,19 @@ The call never half-succeeds: a failing check raises before anything is register
 
 ### A handler never fires
 
-- Check that the hook has something to fire it. `onCraft` and `onDiscard` on items, and
-  `onLeftClick` and `onBreak` on buildings, can be written but nothing emits them yet — use
-  `onUse` / `onObtain` and `onRightClick` / `onRemove` instead.
+- Check that the hook has something to fire it. All four item events fire: `onObtain` and `onUse`
+  from the inventory and use paths, `onCraft` from `OnFinishWorkInServer` on the two map-object
+  models, `onDiscard` from `RequestDrop_ToServer` / `RequestDispose_ToServer`. The two that never
+  fire are building `onLeftClick` and `onBreak`, settled negatively by reading the complete
+  function lists of every class that could own one — use `onRightClick`, and `onRemove`, which
+  covers disappearance as `reason = "missing"`. Skill `onHit` is the third, and it is still open.
   [Lifecycle](/docs/concepts/lifecycle) lists what is live.
-- Check the world gate: nothing runs before `world ready - building dispatch enabled`.
+- Check the world gate: nothing runs before `world ready - building dispatch enabled`. The
+  `onBuild`, `onSpawned` and passive-skill sources are armed *at* `world.ready` rather than at mod
+  load, so they also stay silent in a session where the world never finishes loading.
+- Check the log for the line that names the source. The first time a channel carries anything,
+  it says so: `channel item.craft carried its first event this session — the native source is
+  LIVE, whether or not any definition handled it`. No such line means the game never called it.
 - Check for a hook the game would not let PalForge install:
 
   ```text
@@ -676,16 +808,20 @@ events = {
 
 ### Spawning does nothing
 
-Wait a few more seconds first. A pal arrives four to eight seconds after `:spawn` returns, and
-the log says when it did — see [Pal](/docs/api/pal). If nothing has turned up after that, look
-for this line:
+Wait a few more seconds first. `:spawn` returning `true` means the native call was issued, not
+that a pal exists: the coordinate form was measured arriving about 5.9 seconds later, and
+`core/spawn` watches the world for it and logs the arrival on its own line — see
+[Pal](/docs/api/pal). If nothing has turned up after that, look for one of these:
 
 ```text
-[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager and none could be constructed (no player controller yet?)
+[PalForge.spawn][err] spawn.pal: SpawnMonster did not execute for ChickenPal [evidence ...]
 ```
 
-It means the call was refused before it reached the game. A world spawn needs
-`UPalCheatManager`, so turn on `CheatManagerEnablerMod` in `mods.txt`.
+The first means there was no player controller to build a cheat manager on — you are not in a
+world yet. The second means `core/signature` refused the call because the live class does not
+declare `SpawnMonster` the way the header dump does, and it has already logged which arity it
+wanted.
 
 ## Where to go next
 
@@ -707,7 +843,11 @@ It means the call was refused before it reached the game. A world spawn needs
 ## Summary
 
 - PalForge lives at `ue4ss/Mods/PalForge/Scripts/`, with `palforge/` next to `main.lua`. Any other
-  layout breaks it.
+  layout breaks it. Copy `palforge/test/` and `palforge/autorun.txt` with the rest: without the
+  first there is no F1, without the second there is no keyless way in.
+- Every dev tool ships off. `Scripts/palforge_dev.lua` — written by `tools/deploy.sh`, gitignored,
+  never in a player's copy — is what arms the nine keys, and F4 unlocks every technology in the
+  loaded save.
 - `[PalForge.main][info] ready` means PalForge started;
   `world ready - building dispatch enabled` means your handlers can now fire.
 - Put your content in your own file next to `main.lua` and `require` it at the bottom of

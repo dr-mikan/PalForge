@@ -4,10 +4,24 @@
 -- Building{ ... } accepts and rejects, what it puts on the registered class, that the mesh
 -- field really is the derived Building.Spec.Mesh (static by default, every other field
 -- inherited from Mesh.Spec), that every declared event installs over the inert base hook,
--- and what the Handle queries answer. Only the last two tests need a world, and only to
--- read: they look at the structures the player has ALREADY placed, because there is no api
--- to place or destroy one and a test must never ask the player to build something. Nothing
+-- and what the Handle queries answer. The three tests in the LIVE section at the bottom need
+-- a world, and only to read: they look at the structures the player has ALREADY placed,
+-- because there is no api to place or destroy one and a test must never ask the player to
+-- build something. One test is INVERSE-gated and needs no world (unlock) — its skip reason
+-- says which direction it skipped in, so two runs cover this file rather than one. Nothing
 -- here writes a save, attaches a mesh to a real actor, or unlocks anything.
+--
+-- THE THREE FUNCTIONS THAT HAD NO COVERAGE AT ALL until 2026-08-02 — Handle:unlock,
+-- Class:currentColor and Class:neighbors — are covered below, and each one is a different kind
+-- of check because each is a different kind of unverifiable:
+--   * currentColor is pure Lua and is tested outright, including the override that makes it
+--     worth having (a tint driven by the instance's own state).
+--   * neighbors is pure Lua over core.spatial's grid, so its refusals and one real query are
+--     tested headlessly against instance-shaped tables that are put into the LIVE index by hand
+--     and taken back out before anything is asserted. The real-base version is world-gated.
+--   * unlock cannot be verified at all — nothing on this build can read back whether a
+--     technology is unlocked — so only its refusal path is asserted here, and the half that
+--     needs a save is the declared hook test/hooks/building-unlock.
 local T        = require("palforge.core.unittests")
 local support  = require("palforge.test.support")
 local Building = require("palforge.api.building")
@@ -348,6 +362,130 @@ s:test("the instance registry answers for an unplaced definition and for a nil a
 end)
 
 --=============================================================================
+-- currentColor + update — the state-driven tint, all of it without a world
+--=============================================================================
+
+s:test("currentColor answers the declared colour and stays nil when none was declared", function(t)
+    local tint = { 0.2, 0.4, 0.6, 1 }
+    local id = support.id("building")
+    Building{ id = id, color = tint }
+    t:eq(classOf(id):currentColor(), tint,
+        "the declared base tint by reference — this is what update() re-writes")
+
+    local bare = support.id("building")
+    Building{ id = bare }
+    t:eq(classOf(bare):currentColor(), nil, "nothing declared, so there is nothing to re-tint")
+end)
+
+s:test("currentColor is the override point for a state-driven tint, and update() reads through it", function(t)
+    local id = support.id("building")
+    Building{ id = id, color = { 1, 1, 1, 1 } }
+    local cls = classOf(id)
+
+    -- How a pack colours by working state, and the only reason this method exists: replace it
+    -- on the definition CLASS, which every live instance resolves through (define() sets
+    -- cls.__index = cls precisely so cls:new() instances find the class methods).
+    cls.currentColor = function(self)
+        return (self.state and self.state.hot) and { 1, 0, 0, 1 } or { 0, 0, 1, 1 }
+    end
+    local cold = cls:new({ state = { hot = false } })
+    local hot  = cls:new({ state = { hot = true } })
+    t:eq(cold:currentColor()[3], 1, "the cold instance reads blue out of its own state")
+    t:eq(hot:currentColor()[1], 1, "and the hot one red, from the very same class")
+    t:eq(cls:currentColor()[3], 1, "the definition has no state, so it takes the else branch")
+
+    -- update() is currentColor's only consumer. With no live actor it must answer false before
+    -- it reaches the mesh layer at all — that guard is exactly what makes this callable from a
+    -- headless test, and asserting it here is the tripwire if the order ever changes.
+    t:eq(hot:update(), false, "no live actor: no write, no throw, and false")
+    t:eq(cls:update(), false, "and a definition never has one")
+end)
+
+--=============================================================================
+-- neighbors — the api-level consumer of core.spatial's hash grid
+--=============================================================================
+
+s:test("neighbors refuses a definition and a bad radius, and never answers nil", function(t)
+    local id = support.id("building")
+    Building{ id = id }
+    local cls = classOf(id)
+
+    -- A DEFINITION has no .pos: it stands for every structure of that id rather than for one
+    -- of them, so there is no point to measure from.
+    local none = cls:neighbors(350)
+    t:type(none, "table", "a definition answers with a list, not nil")
+    t:eq(#none, 0)
+
+    local inst = cls:new({ pos = { x = 0, y = 0, z = 0 } })
+    t:eq(#inst:neighbors(0), 0, "a zero radius is refused rather than treated as a point query")
+    t:eq(#inst:neighbors(-1), 0, "and a negative one")
+    t:eq(#inst:neighbors("350"), 0, "a string radius is refused rather than compared")
+    t:eq(#inst:neighbors(), 0, "no radius at all is refused")
+end)
+
+s:test("neighbors returns what is inside the radius, never itself, never what is outside", function(t)
+    local id = support.id("building")
+    Building{ id = id }
+    local cls = classOf(id)
+
+    -- Instance-shaped tables at a coordinate no save has anything near (90 km out; the
+    -- playable map is a few km across), put into core.spatial's LIVE index by hand — the same
+    -- index the building runtime queries — and taken out again before a single assertion runs,
+    -- so a failure here cannot leak three phantom structures into the rest of the session.
+    local FAR = 9.0e6
+    local me   = cls:new({ key = "self",    pos = { x = FAR,       y = 0, z = 0 } })
+    local near = cls:new({ key = "near",    pos = { x = FAR + 120, y = 0, z = 0 } })  -- 1.2 m
+    local far  = cls:new({ key = "outside", pos = { x = FAR + 900, y = 0, z = 0 } })  -- 9 m
+    spatial.indexAdd(me); spatial.indexAdd(near); spatial.indexAdd(far)
+
+    -- Computed first, asserted after the cleanup, for the reason above. 350 cm spans two
+    -- buckets either way (BUCKET_CM is 200), which is what makes the 1.2 m hit a boundary case
+    -- worth having rather than a same-bucket read.
+    local found = me:neighbors(350)
+    local keys = {}
+    for _, inst in ipairs(found) do keys[inst.key] = true end
+    local count = #found
+
+    spatial.indexRemove(me); spatial.indexRemove(near); spatial.indexRemove(far)
+
+    t:eq(count, 1, "exactly one structure is within 350 cm of the one that asked")
+    t:truthy(keys.near, "and it is the one 1.2 m away, across a bucket boundary")
+    t:falsy(keys.self, "a structure is never its own neighbour (that is the `exclude` argument)")
+    t:falsy(keys.outside, "the one 9 m away is outside the radius and is not returned")
+end)
+
+--=============================================================================
+-- unlock — the one action in this domain that cannot be verified at all
+--=============================================================================
+
+s:test("unlock answers false rather than raising when the cheat manager is not there (inverse-gated (needs NO world): the world half is test/hooks/building-unlock)", function(t)
+    local id = support.id("building")
+    local h  = Building{ id = id }
+    t:type(h.unlock, "function", "the action exists on the handle")
+
+    -- INVERSE-GATED, and deliberately so. In a loaded world this call would issue
+    -- PalCheatManager:UnlockOneTechnology against the player's own technology state, and this
+    -- file's promise is that it writes nothing. There is also nothing to assert if it did:
+    -- UnlockOneTechnology returns nothing and no "is this unlocked" accessor exists anywhere on
+    -- this build, so the only real verification is a human looking at the build menu — which is
+    -- what the declared hook test/hooks/building-unlock is for.
+    -- skipNeedsNoWorld, not the bare t:skip: the reason already said the direction in prose, but
+    -- only the typed call puts it in the summary's NOWORLD bucket. Ten checks in this suite skip
+    -- this way and they now all count as one kind instead of one plus nine unattributed.
+    if support.player() then
+        t:skipNeedsNoWorld("a world IS loaded, and unlock() would write to the player's "
+            .. "technology state — the world direction is test/hooks/building-unlock")
+    end
+
+    -- EXPECTED IN THE LOG: one [PalForge.items][err] line saying the cheat manager is not
+    -- available. That is the assertion, in log form — the point is that the failure is REPORTED
+    -- and converted into a false, not raised into the caller.
+    local ok, answered = pcall(function() return h:unlock() end)
+    t:truthy(ok, "unlock never raises, whatever the cheat-manager route does")
+    t:eq(answered, false, "no world, no cheat manager, no technology row: false")
+end)
+
+--=============================================================================
 -- LIVE — read-only, over whatever the player has already built
 --=============================================================================
 
@@ -375,6 +513,28 @@ s:test("a curated building's live instances are well-shaped", function(t)
         t:type(inst.save, "function")
         t:type(inst.isValid, "function")
         t:type(inst.mesh, "function", "the class methods resolve on the instance")
+    end
+end)
+
+s:test("neighbors over a real tracked structure answers instances, and never the asker (needs a world)", function(t)
+    support.needWorld(t)
+
+    -- The headless check above proves the grid maths against tables this file made. This one
+    -- proves the whole path against structures the PLAYER built: core/event's registry, the
+    -- reindexAll pass Class:neighbors runs first, and core.spatial's index all agreeing.
+    local list = Building.get(support.GAME.building):instances()
+    if #list == 0 then
+        t:skip("no " .. support.GAME.building .. " is tracked near the player, so there is "
+            .. "nothing to measure from — build or stand near one and run this again")
+    end
+
+    local inst = list[1]
+    local near = inst:neighbors(1000)   -- 10 m: a base has something inside that, a wilderness camp may not
+    t:type(near, "table", "neighbors is always a list")
+    for _, n in ipairs(near) do
+        t:type(n.pos, "table", "every neighbour is a tracked instance carrying a position")
+        t:type(n.key, "string", "and the key it is tracked under")
+        t:neq(n, inst, "the structure that asked is never in its own answer")
     end
 end)
 

@@ -163,7 +163,12 @@ local function injectMissing(self, root)
     return n
 end
 
-return UI{
+-- ⚠️ REGISTERED UNDER THE PACK ID "palforge", for the reason spelled out at the head of
+-- native/ui/button.lua's own definition: this writes into the same ("ui", id) bucket a pack's
+-- UI{ ... } writes into, under the same last-wins rule, so a pack defining "palforge:TitleMenu"
+-- replaces this one. Naming the owner does not stop that — last-wins stays — it makes the
+-- replacement ATTRIBUTABLE in object_manager's warning instead of silent.
+return UI({
     id          = "palforge:TitleMenu",
     name        = "Title Menu",
 
@@ -203,4 +208,4 @@ return UI{
         self.vbox, self.host = nil, nil
         return true
     end,
-}
+}, { pack = "palforge" })

@@ -22,22 +22,21 @@
 --                   ([PAL.damage], 9 times, on both BP_ChickenPal_C and BP_Player_Female_C).
 --     onDeath    <- PalCharacter:OnDeadCharacter         (ctx.actor). OBSERVED FIRING
 --                   ([PAL.dead], on BP_ChickenPal_C).
---     onSpawned  <- PalCharacter:BroadcastOnCompleteInitializeParameter (ctx.actor).
---                   The FUNCTION is confirmed to exist — dumps/reflection/02_reflection.txt
---                   lists it on /Script/Pal.PalCharacter next to Bind/UnbindOnComplete-
---                   InitializeParameterDelegate and the OnCompleteInitializeParameter-
---                   DelegateMap property — so the hook path is real and registerable. What
---                   is still UNCONFIRMED is that it FIRES for a fresh post-load spawn:
---                   06_events carries no line for it, but the probe mod that wrote that log
---                   had dropped it from its arming list (dumps/palsmith-dump-mod/Scripts/
---                   main.lua says so in as many words, after a run of it froze the UE4SS
---                   callback layer during the world-load storm) — so the absence proves
---                   nothing. It stays ARMED LATE for that same reason: core/event registers
---                   it on world.ready, never at mod load, so the load-storm firing cannot
---                   wedge the shared hook dispatch and take the three confirmed hooks down
---                   with it. Late arming protects them; it does not make the hook proven.
---                   It is still unshown that it signals a FRESH spawn rather than a re-init,
---                   so keep the handler idempotent.
+--     onSpawned  <- PalNPC:OnCompletedInitParam and PalPlayerCharacter:OnCompleteInitialize-
+--                   Parameter (ctx.actor) — the bound TARGETS of the initialise broadcast.
+--                   OBSERVED FIRING, 2026-07-26, which is what closed pal-spawned-hook.
+--                   NOT the broadcaster: PalCharacter:BroadcastOnCompleteInitializeParameter
+--                   is what this file used to name here, it registered fine, and it is
+--                   MEASURED SILENT (core/event.lua:1683-1688). That is the general lesson —
+--                   RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
+--                   The sources stay ARMED LATE, on world.ready and never at mod load: the
+--                   broadcast fires in the world-load pal-init storm, and a firing there
+--                   wedged the SHARED UE4SS hook dispatch once and took the confirmed hooks
+--                   down with it (core/event.lua:46-53).
+--                   WHAT IS STILL UNKNOWN is narrower than "does it fire": every firing seen
+--                   so far landed in the same second as world.ready, so it is unshown that
+--                   one means a pal that did not exist a moment ago rather than a re-init.
+--                   Keep the handler idempotent — TODO(pal-spawned-fresh) on Pal.Spec.Events.
 --     onTick     <- core/event's pal sweep. There is NO native hook behind this one; the
 --                   sweep is the source, and it is described in full below.
 --   NOT WIRED: nothing. All five declared events have a source.
@@ -151,7 +150,19 @@ local Mesh = schema.get("Mesh.Spec")
 
 local Material = schema.define("Pal.Spec.Material", {
     { "color",    type = "table",  doc = "tint { r, g, b, a } in 0..1" },
-    { "texture",  type = "string", doc = "absolute path to a png applied to the mesh" },
+    -- TWO ACCEPTED SHAPES, not one. Renderer.resolveTexture (core/mesh/base/renderer.lua:488)
+    -- branches on assets.isObjectPath: a "/Game/..." reference is LOADED as an existing
+    -- UTexture2D, anything else is handed to ImportFileAsTexture2D as a file on disk. The asset
+    -- route is the stronger of the two by evidence — StaticFindObject and LoadAsset run every
+    -- session; the import route has a correct signature and no observation behind it.
+    -- ⚠️ ABSOLUTE, on this field. Mesh.Spec runs `model` and `texture` through
+    -- file.resolvePackPath inside its own Spec:validate (api/mesh.lua:175-176); Pal.Spec has no
+    -- custom validate, so a relative path declared HERE reaches the renderer verbatim and is
+    -- looked for relative to the game's working directory. Name a "/Game/..." asset, or give an
+    -- absolute file path, or declare the mesh as a named Mesh{ ... } and reference that.
+    { "texture",  type = "string",
+      doc = "a \"/Game/...\" UTexture2D to load, or an ABSOLUTE path to a png to import; "
+          .. "not pack-relative — only Mesh.Spec resolves those" },
     { "params",   type = "table",  doc = "extra material parameters passed through" },
     { "material", type = "string", doc = "base material asset path to instance from" },
 })
@@ -174,8 +185,15 @@ local Events = schema.define("Pal.Spec.Events", {
     -- To settle it: release a pal from the box well after the world has loaded, or let a wild one
     -- stream in while travelling, and watch for a pal.spawned line whose timestamp is nowhere
     -- near world.ready.
+    --
+    -- WHAT A PACK CAN RELY ON TODAY, since the marker above is about the one thing it cannot:
+    -- the channel FIRES, with ctx.actor being a live pawn of this pal's id, at least once per
+    -- pawn, and it is the earliest moment that pawn's .Mesh component is real — which is why a
+    -- declared `mesh` is attached on exactly this channel (see define()). Write the handler so
+    -- that being called twice for one pawn is harmless, and it is correct under either answer
+    -- to the question above. What it must NOT be used for is counting how many pals appeared.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-                    doc = "fires when a pal finishes initialising; observed at world load, not yet on a fresh spawn" },
+                    doc = "LIVE - a pal finished initialising (ctx.actor); may repeat per pawn, keep it idempotent" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE - took damage" },
     { "onDeath",    type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
@@ -187,8 +205,12 @@ local Events = schema.define("Pal.Spec.Events", {
 })
 
 ---What you pass to Pal{ ... }. `id` is the only required field.
+-- `id` carries schema.validId, not schema.nonEmpty: the spawn route and the icon table both
+-- want the resolved row spelling ("pack:Boss" -> "pack_Boss"), so an id that cannot resolve —
+-- "my-pack:Boss", a hyphen — is refused at define time instead of registering and being
+-- silently inert. The rule is written once, in core/schema.lua.
 local Spec = schema.define("Pal.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "pal id: a game CharacterID (\"ChickenPal\") or \"pack:name\"" },
     { "name",        type = "string", doc = "shown in UI (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
@@ -198,7 +220,15 @@ local Spec = schema.define("Pal.Spec", {
     { "material",    type = "table", of = Material, doc = "material override applied to that mesh" },
     { "color",       type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
     { "texture",     type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
-    { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
+    -- ONE KIND OF THING, declared — the same decision as Item.Spec.icon and Skill.Spec.icon.
+    -- core/icons answers a /Game/... asset PATH as a plain string (the icon column is read as
+    -- text; the TSoftObjectPtr in the row answers none of the nineteen member names a soft
+    -- pointer could expose, so it cannot be unwrapped from Lua at all), so the declared
+    -- fallback is a string path too and :iconOf answers string|nil, always. Before this, the
+    -- field carried no `type =` and the accessor could hand back a string path or whatever the
+    -- author declared, which is a union every caller had to branch on.
+    { "icon",        type = "string",
+                     doc = "/Game/... texture path used when the icon DataTable has no row for this id" },
     { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
     { "data",        type = "table",  doc = "free-form payload of your own, carried onto the definition" },
 })
@@ -247,8 +277,18 @@ end
 -- The icon table read WORKS as of 2026-07-26: core/icons read DT_PalCharacterIconDataTable in a
 -- live save and 674 of 674 rows carry an icon. So a vanilla pal id resolves to the game's own
 -- artwork here, and the declared `icon` really is the fallback it was always described as.
+-- THE ID IS RESOLVED FIRST (F-3/C5). The row PalSchema writes for "pack:Boss" is spelled
+-- "pack_Boss", so handing icons.resolve the raw namespaced id could never hit the live table —
+-- every namespaced pal fell back to its declared icon and looked like an unmeasured capability
+-- rather than a call that was never made. `or self.id` is the boundary rule: an id that will
+-- not resolve falls back to the LITERAL, never to nothing.
+-- Note the case trap this does NOT fix, because it is a different one and the catalogs record
+-- it honestly: the same creature is spelled two ways on this build — SheepBall is the blueprint
+-- id dispatch keys on, Sheepball is the DataTable row this lookup answers to — and the match
+-- here is case-SENSITIVE (core/icons.lua:40-42).
 function Class:iconOf()
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.pal, self.id) end)
+    local id = om.resolve(self.id) or self.id
+    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.pal, id) end)
     if ok and tex ~= nil then return tex end
     return self.icon
 end
@@ -259,16 +299,27 @@ end
 
 ---The pal domain. CALL it to define a pal; the two named functions look existing ones up.
 ---@class palforge.pal
----@overload fun(spec: Pal.Spec): Pal.Handle
+---@overload fun(spec: Pal.Spec, opts: table?): Pal.Handle
 local Pal = {}
 
 local wrap  -- forward decl; the Pal.Handle wrapper is defined in the BOTTOM section
 
 ---Define a NEW pal and register it. Returns a handle you can chain :spawn on.
 ---`spec` is validated against Pal.Spec: `id` is required, unknown fields are an error.
+---
+---`opts` is optional and omitting it behaves exactly as it always has:
+---  { register = false }   build and return the handle, register NOTHING — what a native
+---                         catalog uses so that READING native.pals.ChickenPal stops writing
+---                         to the registry. A definition that is not registered receives no
+---                         lifecycle events, which is the point: it is a value, not content.
+---  { pack = "mypack" }    register attributed to that pack, which is what gives a collision
+---                         a "who". PalForge.pack("mypack").Pal is the same thing without
+---                         passing it per call.
 ---@param spec Pal.Spec
+---@param opts table?
 ---@return Pal.Handle
-local function define(spec)
+local function define(spec, opts)
+    local register, pack = schema.defineOpts(opts, "Pal")
     spec = Spec:validate(spec, "Pal")
     local cls = setmetatable({
         id           = spec.id,
@@ -303,9 +354,19 @@ local function define(spec)
     -- PAL_SCAN_MS forever, and paying that for a mesh that only ever needs setting once is the
     -- wrong trade — so this is on the one channel that fires once per pawn and nowhere else.
     --
-    -- Buildings needed no equivalent: core/event.lua:486 already defers `inst:render()` onto a
-    -- placed structure, so `Building{ mesh = { model = ... } }` has always drawn itself. This
-    -- closes the same gap on the pal side.
+    -- THE BUILDING SIDE, stated carefully because this comment used to overclaim it. It said
+    -- buildings "needed no equivalent — core/event.lua already defers inst:render(), so
+    -- Building{ mesh = ... } has always drawn itself". The deferred render call is real and is
+    -- still there; what was never true is the "has always drawn itself" that was inferred from
+    -- it. The 2026-08-01 asset audit (A-1/A-2) found the mesh layer keying its per-actor
+    -- records on a UE4SS handle, and a handle is minted fresh per lookup — so the attach could
+    -- not find, guard or undo anything it had stored, and a declared building mesh probably
+    -- never reached the structure at all. What is guaranteed once that keying is fixed (uobject.key,
+    -- owned by the mesh/event work) is this and no more: a placed structure gets ONE deferred
+    -- inst:render() call, at the moment its actor is tracked. Whether the pack SEES a mesh
+    -- after that is a fact about core.mesh, not about this module, and nobody has watched one
+    -- appear on a building yet. The pal side above is the same shape and carries the same
+    -- caveat: the attach is issued on the one channel that fires per pawn.
     --
     -- The author's own onSpawned still runs, and runs AFTER: a handler that wants to move,
     -- rename or re-tint the pawn should find the mesh already on it. mesh.attachOnce guards
@@ -324,17 +385,22 @@ local function define(spec)
     -- type and the spec guarantees a non-empty id — so a refusal means the registry itself
     -- moved under us. Say so: an unregistered definition is a pal whose every event is
     -- silently dead, and that must not be invisible.
-    local called, okReg, regErr = pcall(om.register, "pal", spec.id, cls)
-    if not called then okReg, regErr = nil, okReg end   -- it raised: the message is arg 2
-    if not okReg then
-        log.err(string.format("Pal '%s' could NOT be registered (%s) — it will receive no "
-            .. "lifecycle events and Pal.get will not find it", tostring(spec.id), tostring(regErr)))
+    -- opts.register == false skips the whole paragraph deliberately and silently: the caller
+    -- asked for a definition that is not content, so "it will receive no lifecycle events" is
+    -- the requested outcome rather than the failure the log line describes.
+    if register then
+        local called, okReg, regErr = pcall(om.register, "pal", spec.id, cls, { pack = pack })
+        if not called then okReg, regErr = nil, okReg end   -- it raised: the message is arg 2
+        if not okReg then
+            log.err(string.format("Pal '%s' could NOT be registered (%s) — it will receive no "
+                .. "lifecycle events and Pal.get will not find it", tostring(spec.id), tostring(regErr)))
+        end
     end
     return handle
 end
 
 -- Calling the module IS defining:  Pal{ id = "NewPal", ... }
-setmetatable(Pal, { __call = function(_, spec) return define(spec) end })
+setmetatable(Pal, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get an EXISTING pal by id: a previously-defined one, else a thin definition over any
 ---game CharacterID (so a native / other-mod id takes the same routes as a defined one).
@@ -423,6 +489,12 @@ end
 ---names, because no dump records what a Palworld material actually calls its tint — so a
 ---true return means the mesh was swapped and the material write ran, not that the pawn
 ---visibly changed colour (the mesh-material-params marker in core/mesh/base/renderer.lua).
+---A COLOUR HAS NEVER BEEN WATCHED CHANGING. mesh-material-params closed on the measured
+---parameter NAMES, which is a different claim, and nothing in this tree has ever reported
+---seeing a pawn's tint move. That is a measurement only the running game can make, so it
+---belongs in a named hook — test/hooks/mesh-color-change: find or spawn one pawn, renderOn it
+---with an unmistakable colour, and record in the log whether a human saw it change. Until that
+---hook exists and has been run, read every `true` from this function as "the write ran".
 ---@param actor any   # the pawn to decorate (e.g. ctx.actor)
 ---@return boolean ok
 function Handle:renderOn(actor)
@@ -487,7 +559,10 @@ function Handle:teachAll(actor)
 end
 ---@return table?
 function Handle:mesh() return self._cls.meshSpec end
----@return any?  # texture ref from the icon DataTable, else the declared icon
+---The paldeck icon as a /Game/... asset path: the live DataTable's row for this id (674 of
+---674 rows carry one), else the declared `icon`, else nil. One kind of value, never an engine
+---object — see the Pal.Spec `icon` note.
+---@return string?
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
 function Handle:name() return self._cls.name or self.id end

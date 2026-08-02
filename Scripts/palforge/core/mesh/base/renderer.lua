@@ -50,13 +50,21 @@
 -- FLinearColor argument is a struct passed as a Lua table, which is the same marshalling
 -- the proven procedural chain already performs on FVector (SetWorldScale3D).
 --
--- The PARAM NAMES remain the open question, and the dump cannot close it: a CXXHeaderDump
--- records CLASS declarations, and a material's parameter names are asset DATA that lives
--- in the .uasset, not in any header. So each candidate below is still written in turn and
--- the ones the material does not carry are no-ops (see the TODO at COLOR_PARAMS). Every
--- call is individually pcall'd; the layer never throws.
+-- The PARAM NAMES could never have come out of the dump: a CXXHeaderDump records CLASS
+-- declarations, and which parameters a material exposes is asset DATA inside the .uasset,
+-- not in any header. They were read off a live material instead, 2026-07-26 — the ANSWERED
+-- note above COLOR_PARAMS records that read, and Renderer.describeMaterials below is the
+-- probe that performed it. So the candidates below are measured names rather than guesses,
+-- and each is still written in turn because any one material carries only some of them and
+-- the ones it does not carry are silent no-ops. WHAT IS STILL OWED is stated at the same
+-- note and is a third thing, distinct from both "the write executed" and "the names are
+-- real": nobody has watched a colour actually CHANGE on screen.
+-- test/hooks/mesh_color_change.lua is the declared hook that makes that measurement, and
+-- it is explicit that it cannot judge its own pixels — it prints a verdict form for the
+-- person watching. Every call here is individually pcall'd; the layer never throws.
 local signature = require("palforge.core.signature")
 local assets    = require("palforge.core.mesh.assets")
+local uo        = require("palforge.core.uobject")
 
 local Renderer = {}
 Renderer.__index = Renderer
@@ -149,11 +157,14 @@ function Renderer.byteColor(c)
              B = math.floor(lc.B * 255 + 0.5), A = math.floor((lc.A or 1) * 255 + 0.5) }
 end
 
-local function isLive(o)
-    if not o then return false end
-    local ok, v = pcall(function() return o:IsValid() end)
-    return ok and v == true
-end
+-- Liveness is core.uobject's (contract C6). This was the last of the four private copies the
+-- asset audit named — assets.live, renderer.isLive, icons.isValid, sound.alive — and it is
+-- kept as a local NAME rather than spelled `uo.live` at each of its fifteen call sites
+-- because that is the smaller diff and the name reads better inside this file. The body was
+-- `pcall(function() return o:IsValid() end)`, which answers exactly what uo.live answers for
+-- every input: an object with no IsValid raises inside the pcall there and fails the
+-- `o.IsValid ~= nil` test here, and both come back false.
+local isLive = uo.live
 
 -- Only SUCCESSES are cached; a miss (candidate not loaded yet) retries on the next
 -- attach — otherwise a mesh dressed before the material streams in would be stuck white
@@ -390,7 +401,34 @@ function Renderer.describeOneComponent(comp, say, out)
     return out
 end
 
+-- The UKismetRenderingLibrary CDO, cached POSITIVES-ONLY. It used to latch: a single
+-- StaticFindObject miss wrote `false` and the import route was dead for the rest of the
+-- session, which is the opposite of every other cache in this layer (resolveBaseMaterial and
+-- core/mesh/assets both cache successes and retry misses, for the stated reason that a miss
+-- is usually "not streamed in yet"). /Script/ CDOs are unlikely to arrive late, so this was
+-- unlikely to bite — but "unlikely" is not a reason to keep the one asymmetric cache in a
+-- file whose whole argument is that retries are cheap and a permanent silent no-op is not.
+-- Re-validated with isLive on every call, so a handle that goes stale re-resolves.
 local kismetRendering = nil
+
+-- Textures imported off disk, by the EXACT path string that imported them. POSITIVES ONLY,
+-- the same rule as the /Game/... branch (core/mesh/assets.lua's `cache`) and for the same
+-- reason: a failed import is usually a file that is not there YET, and caching that would
+-- make a texture unimportable for the rest of the session.
+--
+-- WHY THIS WAS MISSING, because the asymmetry is easy to miss in review rather than
+-- deliberate: the two halves of resolveTexture were written at different times. The /Game/
+-- branch is core/mesh/assets.load, which has carried a cache since it was extracted from the
+-- backends; the disk branch is this file's importTexture, which was added beside it and
+-- never got one. Nothing about the call sites makes the disk branch cheaper — the reverse:
+-- resolveTexture is reached on EVERY attach (writeMaterial calls it once for def.texture and
+-- once per params.texture entry), so `Pal{ mesh = { texture = ".../body.png" } }` imported a
+-- fresh UTexture2D for every pal that spawned, tracked by nothing and destroyed by nothing.
+--
+-- Weak values, with the same honest reading as assets.lua's cache: nothing PalForge holds
+-- ever pinned a UObject, so __mode = "v" does not shorten a texture's life — it only lets a
+-- dead entry evaporate, which the isLive re-check below already handles anyway.
+local importedTextures = setmetatable({}, { __mode = "v" })
 
 -- The declared shape of UKismetRenderingLibrary::ImportFileAsTexture2D, in the order
 -- core.signature checks it. dumps/cxx/Engine.hpp:14694 —
@@ -408,15 +446,21 @@ local IMPORT_TEXTURE_PARAMS = { "ObjectProperty", "StrProperty" }
 -- string says which of the two it was.
 function Renderer.importTexture(worldCtx, absPath)
     if type(absPath) ~= "string" or #absPath == 0 then return nil, "no path" end
-    if kismetRendering == nil then
+
+    local hit = importedTextures[absPath]
+    if isLive(hit) then return hit end
+    importedTextures[absPath] = nil
+
+    if not isLive(kismetRendering) then
+        kismetRendering = nil
         local ok, o = pcall(StaticFindObject, "/Script/Engine.Default__KismetRenderingLibrary")
-        kismetRendering = (ok and o) or false
+        if ok and isLive(o) then kismetRendering = o end
     end
     if not kismetRendering then return nil, "no KismetRenderingLibrary" end
     local ok, tex = signature.call(kismetRendering, "ImportFileAsTexture2D",
                                    IMPORT_TEXTURE_PARAMS, worldCtx, absPath)
     if not ok then return nil, "ImportFileAsTexture2D did not fire (see the signature log)" end
-    if isLive(tex) then return tex end
+    if isLive(tex) then importedTextures[absPath] = tex; return tex end
     return nil, "ImportFileAsTexture2D ran and returned nothing importable"
 end
 
@@ -474,21 +518,55 @@ end
 -- material layer — the per-actor MID record
 --=============================================================================
 
--- backend class -> (actor -> record). Keyed by the backend as well as the actor because
--- two backends can legitimately have dressed the same actor (a procedural marker hung on
--- a pawn whose own skeletal mesh was also swapped), and each must re-tint ITS OWN
--- component. Inner tables are weak-keyed, so an actor that goes away drops out on its own.
+-- backend class -> (UObject KEY -> record). Keyed by the backend as well as by the object
+-- because two backends can legitimately have dressed the same actor (a procedural marker
+-- hung on a pawn whose own skeletal mesh was also swapped), and each must re-tint ITS OWN
+-- component. The backend half is a plain Lua class table, so it is a sound key; the object
+-- half is NOT and used to be one.
+--
+-- WHAT THE OBJECT HALF IS NOW AND WHY (contract C1). UE4SS mints a fresh userdata wrapper
+-- per lookup, so two references to one UObject are not the same Lua value and Lua indexes a
+-- table by userdata IDENTITY. This table was keyed on the actor handle, which meant setColor
+-- called with an actor from a later FindAllOf — or from a subsequent event's ctx.actor —
+-- found no record, re-created MIDs on a component that already had ours, and returned false
+-- when even that failed. The key is core.uobject.key (GetFullName) and the handle lives in
+-- the record's VALUE, refreshed from whatever fresher handle the caller brings.
+--
+-- The fallback to the COMPONENT's key is kept from the original code: createMids is called
+-- with `actor` nil by nothing today, but the store has always tolerated it, and a component
+-- names itself just as well as an actor does.
 local midStore = {}
 local function storeFor(self)
     local t = midStore[self]
-    if not t then t = setmetatable({}, { __mode = "k" }); midStore[self] = t end
+    if not t then t = {}; midStore[self] = t end
     return t
+end
+
+-- The key a MID record is filed under: the actor's full name, or the component's when there
+-- is no actor. nil when neither will answer its own name (dead, or mid-teardown), which the
+-- callers must treat as "no record" — t[nil] raises.
+local function midKey(actor, comp)
+    return (actor ~= nil and uo.key(actor)) or (comp ~= nil and uo.key(comp)) or nil
+end
+
+-- The live record for `actor` under this backend, with its stored handles re-validated and
+-- the actor handle refreshed from the caller's. A record whose COMPONENT is gone is dropped
+-- rather than kept: the MIDs it lists hang off that component and cannot outlive it.
+local function recordFor(self, actor, comp)
+    local k = midKey(actor, comp)
+    if not k then return nil, nil end
+    local store = storeFor(self)
+    local rec = store[k]
+    if rec == nil then return nil, k end
+    if rec.comp ~= nil and not isLive(rec.comp) then store[k] = nil; return nil, k end
+    if actor ~= nil then rec.actor = actor end
+    return rec, k
 end
 
 -- The MIDs this backend created on `actor`, as a list, or nil.
 function Renderer:midsFor(actor)
     if not actor then return nil end
-    local rec = storeFor(self)[actor]
+    local rec = recordFor(self, actor)
     if not (rec and rec.mids and #rec.mids > 0) then return nil end
     return rec.mids, rec
 end
@@ -499,9 +577,11 @@ end
 -- own body — leaves the pawn as it found it. Returns true when a restore executed.
 function Renderer:forgetMaterial(actor)
     if not actor then return false end
+    local k = midKey(actor)
+    if not k then return false end
     local store = storeFor(self)
-    local rec   = store[actor]
-    store[actor] = nil
+    local rec   = store[k]
+    store[k] = nil
     if not (rec and rec.comp and rec.originals) then return false end
     if not isLive(rec.comp) then return false end
     local restored = false
@@ -537,8 +617,14 @@ function Renderer:createMids(comp, actor, opts)
     -- Keep the FIRST originals we ever captured for this actor. A second attach reads
     -- back the MID the first one installed, so overwriting here would make :detach
     -- "restore" our own dynamic material instead of the mesh's authored one.
-    local prev      = storeFor(self)[actor or comp]
-    local originals = (prev and prev.comp == comp and prev.originals) or {}
+    --
+    -- `uo.same`, not `==`: the previous record's component and the one handed in here are
+    -- two lookups of the same UObject and therefore two different Lua values. The `==` this
+    -- used to compare with was false every time the record came from an earlier attach, so
+    -- the "keep the FIRST originals" discipline this comment describes was defeated in
+    -- exactly the case it exists for.
+    local prev, key = recordFor(self, actor, comp)
+    local originals = (prev and uo.same(prev.comp, comp) and prev.originals) or {}
 
     local mids = {}
     for elem = 0, slotCount(comp) - 1 do
@@ -560,8 +646,12 @@ function Renderer:createMids(comp, actor, opts)
             if orig ~= nil then originals[elem] = orig end
         end
     end
-    if #mids > 0 then
-        storeFor(self)[actor or comp] = { mids = mids, comp = comp, originals = originals }
+    -- `key` came back from recordFor above and is nil only when neither the actor nor the
+    -- component would answer its own name. The MIDs are still returned and still written to
+    -- in that case — the paint lands — there is simply nothing to file them under, so a
+    -- later setColor will make them again rather than find them.
+    if #mids > 0 and key then
+        storeFor(self)[key] = { mids = mids, comp = comp, actor = actor, originals = originals }
     end
     return mids, basePath
 end

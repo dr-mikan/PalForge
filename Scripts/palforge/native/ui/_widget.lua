@@ -17,6 +17,7 @@
 -- clicked button; it is installed lazily on the first registerClick().
 
 local sig = require("palforge.core.signature")
+local uo  = require("palforge.core.uobject")
 
 local M = {}
 
@@ -26,10 +27,14 @@ local function err(msg) pcall(print, "[PalForge.ui] ERR " .. tostring(msg)) end
 -- Is this a widget we can still talk to? Everything here goes through pcall: the
 -- engine globals may be absent (no game) and a widget the game already destroyed
 -- can throw on IsValid itself.
-function M.alive(w)
-    local ok, v = pcall(function() return w and w:IsValid() end)
-    return ok and v == true
-end
+--
+-- It IS core.uobject.live now (contract C6), kept under this module's own name because it is
+-- part of _widget's published surface — native/ui/tree.lua and title_menu.lua call
+-- `widget.alive(w)`. The body was `pcall(function() return w and w:IsValid() end)`, which
+-- answers exactly what uo.live answers for every input this file can hand it: nil is false in
+-- both, a destroyed widget that throws on IsValid is false in both, and a value with no
+-- IsValid at all raises inside the pcall there and fails the `o.IsValid ~= nil` test here.
+M.alive = uo.live
 local alive = M.alive
 
 -- FindFirstOf that cannot throw, not even when UE4SS is not there at all.
@@ -184,10 +189,14 @@ M.clickRoutes = {
       what = "WBP_PalCommonButtonBase_C::BP_OnClicked (WBP_PalCommonButtonBase.hpp:20)" },
 }
 
-local function fullName(w)
-    local ok, n = pcall(function() return w:GetFullName() end)
-    return ok and n or nil
-end
+-- The click router's key, and it is core.uobject.fullName (contract C1: there is one identity
+-- helper for a UObject and nothing invents a second). This file was already doing the right
+-- thing in substance — `handlers` has always been keyed on the widget's NAME rather than on
+-- the widget handle, which is why clicking a button found its handler even though the hook's
+-- ctx:get() is a different userdata wrapper from the one registerClick was handed — it just
+-- carried its own copy of the call. The copy is gone; the property it bought is written down
+-- on M.registerClick.
+local fullName = uo.fullName
 
 -- One click, arriving through one route. `ctx` is UE4SS's RemoteUnrealParam for the hook's
 -- context object (LuaMod.cpp:144 constructs it as an ObjectProperty), so `:get()` is how
@@ -627,9 +636,16 @@ end
 --     WBP_PalOverallUILayout's CanvasPanel_Root takes (dumps/cxx/WBP_PalOverallUILayout.hpp:9),
 --     and a tree walk would find the same object more slowly and could find a different one;
 --   * a widget whose designer "Is Variable" box is unchecked gets NO member and still exists in
---     the WidgetTree — the same fact recorded against HorizontalBox_0 at the TODO further down
---     this file — so the name search is what reaches those, and TitleMenu already finds
---     VerticalBox_0 that way (title_menu.lua:147).
+--     the WidgetTree. WBP_Title_MenuButton is this tree's measured case and it is worth carrying
+--     the fact here rather than a pointer: the class declares five widget members and
+--     HorizontalBox_0 has never been one of them (dumps/cxx/WBP_Title_MenuButton.hpp:11-15), yet
+--     the box IS in the button's own template tree, and its slot is a CanvasPanelSlot — the one
+--     slot class of the six that declares no SetHorizontalAlignment (UMG.hpp:350-374), which is
+--     why the label has always stayed centred. That is the CLOSED item
+--     `ui-menubutton-inner-slot`, written out in full in the ANSWERED note above M.menuButton
+--     further down this file; no marker of any kind is left here. So the name search is what
+--     reaches a widget like that, and TitleMenu already finds VerticalBox_0 that way
+--     (title_menu.lua:147).
 -- `panelName` omitted means the found widget IS the panel; it is returned as-is and whether it
 -- takes children is answered by the first AddChild, not guessed at here.
 ---@return userdata? panel, string? reason
@@ -911,17 +927,45 @@ function M.menuButton(tree, pc, label, onClick)
     return btn, inv, clickName
 end
 
--- A clickable, LEFT-ALIGNED row that still looks native.
--- Returns (rowWidget, invBtn, clickName).
+-- A clickable, LEFT-ALIGNED row that still looks native — the game's own button with our own
+-- text laid over the top of it.
+--
+-- ⚠️ THIS IS THE ONLY ROUTE THERE IS TO A LEFT-ALIGNED BUTTON LABEL ON THIS BUILD, and it is a
+-- different mechanism from the one that was closed negatively rather than a second try at it.
+-- `ui-menubutton-inner-slot` established, by reading WBP_Title_MenuButton's own template tree,
+-- that the button's inner HorizontalBox_0 sits in a CanvasPanelSlot — the one slot class of the
+-- six that declares no SetHorizontalAlignment (UMG.hpp:350-374) — so core/signature refused that
+-- call every time, correctly, and a game button's own label has always been centred and always
+-- will be. What this does instead does not touch the button's inside at all: an Overlay holds the
+-- button stretched to FILL, and a plain TextBlock of ours sits over it at ESlateVisibility
+-- HitTestInvisible (3), which is what lets every click pass through to the button underneath. A
+-- UOverlaySlot DOES declare the alignment calls, so the alignment happens on a slot class that
+-- has one.
+--
+-- The construction is not new and has been on screen: the shipped two-pane Mod Manager was built
+-- out of exactly this row (deprecated/modmanager.lua:264, deprecated/nativeui.lua:176). What has
+-- never been watched is a DECLARED tree building one, which is true of every node in this kit.
+--
+-- The cost, stated because it is why UI.Button{ labelAlign = "left" } is opt-in: the text is OURS
+-- and not the button's own label, so it inherits none of the button's font, hover states or
+-- localisation, and it is written through SetText on the TextBlock rather than through
+-- M.setButtonText.
+--
+-- Returns (rowWidget, invBtn, clickName, labelWidget) — the fourth is what a declared tree binds
+-- a dynamic `text` to, and it is the reason this returns the TextBlock at all. nil + a reason
+-- when the button could not be built, matching M.menuButton's contract exactly, because the
+-- caller has to be able to tell "no button class loaded" from "built".
+---@return userdata? row, userdata|string? invOrWhy, string? clickName, userdata? labelWidget
 function M.clickableRow(tree, pc, label, onClick, opts)
     opts = opts or {}
-    local overlay = M.overlay(tree)
     local btn, inv, clickName = M.menuButton(tree, pc, "", onClick)
-    if btn then
-        local bs = overlay:AddChildToOverlay(btn)
-        pcall(function() bs:SetHorizontalAlignment(M.HALIGN.FILL) end)
-        pcall(function() bs:SetVerticalAlignment(M.VALIGN.FILL) end)
-    end
+    -- The button FIRST, so a build with no button class returns menuButton's own reason instead
+    -- of leaving a bare Overlay with a caption in it that nothing can click.
+    if not btn then return nil, inv end
+    local overlay = M.overlay(tree)
+    local bs = overlay:AddChildToOverlay(btn)
+    pcall(function() bs:SetHorizontalAlignment(M.HALIGN.FILL) end)
+    pcall(function() bs:SetVerticalAlignment(M.VALIGN.FILL) end)
     -- ESlateVisibility HitTestInvisible=3 so text shows but clicks pass through.
     local t = M.text(tree, label, opts.size or 18, opts.color)
     pcall(function() t:SetVisibility(3) end)
@@ -929,7 +973,7 @@ function M.clickableRow(tree, pc, label, onClick, opts)
     pcall(function() ts:SetHorizontalAlignment(M.HALIGN.LEFT) end)
     pcall(function() ts:SetVerticalAlignment(M.VALIGN.CENTER) end)
     pcall(function() ts:SetPadding({ Left = opts.indent or 28, Top = 0, Right = 12, Bottom = 0 }) end)
-    return overlay, inv, clickName
+    return overlay, inv, clickName, t
 end
 
 -- Generic: clone any Palworld BP widget, optionally set a label child's text and
@@ -1708,11 +1752,17 @@ function M.grabReport()
 end
 
 -- ---- slot helpers (return the created slot for further tweaking) ----
-local function setVAlign(slot, halign)
-    pcall(function() slot:SetHorizontalAlignment(halign) end)
-    pcall(function() slot.HorizontalAlignment = halign end)
-end
-
+--
+-- ⚠️ THREE MORE OF THESE WERE DELETED, 2026-08-02, AND THE REASON IS WORTH KEEPING so nobody
+-- re-derives them. M.addV / M.addH / M.addScroll were one-line wrappers over tryAdd with a fixed
+-- typed method name — addV also wrote a fixed padding and a LEFT alignment — and nothing in the
+-- live tree had ever called one: every hit for those three names was in deprecated/, against
+-- deprecated/nativeui.lua's own copies of them, which are a different module and are untouched.
+-- They duplicated M.addChild, which asks the panel what it is instead of being told, and
+-- native/ui/tree.lua's applySlot, which writes padding and alignment from what a node DECLARED
+-- rather than from a hard-coded default. Two ways to place a child, one of them unreachable, is
+-- how a fix lands in the wrong one.
+--
 -- Call one AddChildTo* on `panel`; nil unless a slot really came back. Fail-soft on
 -- purpose: `panel` may be nil, a plain table, or a widget of the wrong kind, and none of
 -- those is worth raising over — the caller reads the nil and reports that nothing was placed.
@@ -1726,8 +1776,10 @@ end
 -- Put `child` into whatever kind of panel `panel` is, and return its slot (nil if it would
 -- not take it). AddChild FIRST, deliberately: it is UPanelWidget's generic entry, every
 -- panel overrides it to build its own slot type (a VerticalBox answers with a
--- VerticalBoxSlot), and it is the call the verified two-pane Mod Manager used through
--- addScroll. The typed names are only a fallback, and they go last because UE4SS does not
+-- VerticalBoxSlot), and it is the call the verified two-pane Mod Manager used to fill both of
+-- its scroll panes (deprecated/nativeui.lua:240 — the deleted M.addScroll here was a copy of
+-- that one line, and the EVIDENCE belongs to the deprecated module's version, which really
+-- shipped). The typed names are only a fallback, and they go last because UE4SS does not
 -- always answer an unknown method with nil — V7a recorded it handing back a TrivialObject —
 -- so asking a ScrollBox for AddChildToVerticalBox is a question worth not asking first.
 local function slotClassName(slot)
@@ -1756,18 +1808,6 @@ function M.addChild(panel, child)
     end
     return slot
 end
-
-function M.addV(vbox, child, padTop)
-    local slot = tryAdd(vbox, "AddChildToVerticalBox", child)
-    if not slot then return nil end
-    pcall(function() slot:SetPadding({ Left = 0, Top = padTop or 2, Right = 0, Bottom = padTop or 2 }) end)
-    pcall(function() slot.Padding = { Left = 0, Top = padTop or 2, Right = 0, Bottom = padTop or 2 } end)
-    setVAlign(slot, M.HALIGN.LEFT)
-    return slot
-end
-
-function M.addH(hbox, child) return tryAdd(hbox, "AddChildToHorizontalBox", child) end
-function M.addScroll(scroll, child) return tryAdd(scroll, "AddChild", child) end
 
 -- Armed at load. See the note on installClicks for what conditional arming cost.
 M.installClicks()

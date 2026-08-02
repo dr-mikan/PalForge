@@ -144,8 +144,15 @@ end)
 
 s:test("with no world every entry point answers nil instead of raising", function(t)
     -- The mirror image of the live tests below: whichever state the run is in, one of the two
-    -- halves is real coverage.
-    if support.worldReady() then t:skip("a world is loaded; this asserts the no-world path") end
+    -- halves is real coverage, and NEITHER state runs both. The skip is directed
+    -- (NEEDS.NOWORLD) so the summary can say how many checks are waiting on a title screen —
+    -- this is one of the TEN inverse-gated checks in the API suite, and until the direction
+    -- existed a run in a world reported them indistinguishably from the world-gated ones. This
+    -- was the ONLY one of the ten going through support.needNoWorld for a while; the other nine
+    -- spelled the direction in prose and still landed in the summary's "did not say which"
+    -- bucket, so a run in a save read "1 need no world, 9 did not say which". All ten are typed
+    -- now (cases/ui.lua's skipNeedsNoGame covers six; building, events and audio one each).
+    support.needNoWorld(t)
 
     t:eq(Player.character(), nil, "no pawn means no character")
     t:eq(Player.coordinate(), nil, "no pawn means no coordinate")

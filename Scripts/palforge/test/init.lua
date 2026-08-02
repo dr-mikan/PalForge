@@ -23,15 +23,37 @@
 -- The last two exist because there is no way to make anyone press a key: they are reachable
 -- from core/autorun as pf_uislot and pf_uievents, and both work from a LOADED WORLD.
 --
--- Results land in UE4SS.log under [PalForge.test] and [PalForge.unittests]:
+-- ⚠️ AND THE MEASUREMENTS THAT NEED THE GAME RUNNING ARE NOT HERE. They are DECLARED HOOKS
+-- under test/hooks/, loaded only when `env.debug` is true and never run unless asked for by
+-- name: `pf_hooks` lists them with each one's gate state, `pf_hook <id>` runs one,
+-- `pf_hooks_all` runs every one whose gate is open. That is where "does the waza write land",
+-- "can a recipe row be read", "does a colour change" and the rest live now — see
+-- test/hooks/init.lua. A suite ASKS WHETHER SOMETHING WORKS; a hook MEASURES WHAT THE ENGINE
+-- DOES, and the two do not belong on the same key.
 --
---   [PalForge.test][info] running 13 suite(s): schema, registry, definitions, pal, ...
+-- Results land in UE4SS.log under [PalForge.test] and [PalForge.unittests], in this SHAPE —
+-- deliberately with no numbers written into this comment, because the ones that used to be
+-- here ("13 suite(s)", "294 total") were contradicted by M.CASES below within a month and a
+-- comment nobody can verify is worse than no comment:
+--
+--   [PalForge.test][info] build <stamp> | dev=<b> debug=<b> | game <declared> (live <read>) |
+--                         running <n> suite(s): schema, registry, definitions, pal, ...
 --   [PalForge.unittests][info] SKIP [pal] spawns at a coordinate: no world loaded
---   [PalForge.unittests][info] tests: 276 passed, 0 failed, 18 skipped (294 total)
---   [PalForge.test][info] swept 217 test definition(s)
+--   [PalForge.unittests][info] tests: <p> passed, <f> failed, <s> skipped (<total> total)
+--   [PalForge.unittests][info] tests: <s> skipped (<n> need a world, <n> need no world, ...)
+--   [PalForge.unittests][info] tests: NO SINGLE RUN MEASURES EVERYTHING — ...
+--   [PalForge.test][info] swept <n> test definition(s)
 --
--- A test that needs a world SKIPS rather than fails when there is none, so the same run
--- is meaningful at the title screen and in a save — the 18 skips above are the world ones.
+-- The last two of those also go ON SCREEN through support.announce (M.run below), because the
+-- direction of a skip is the whole reason the direction exists and the log is not what a tester
+-- is looking at while the game is running.
+--
+-- The AUTHORITATIVE suite count is `#M.CASES` in this file and nowhere else; the check count
+-- is whatever the run prints. A test that needs a world SKIPS rather than fails when there is
+-- none, so the same run is meaningful at the title screen and in a save — and note that the
+-- skips go BOTH ways: some checks are inverse-gated and skip when a world IS loaded (the UI
+-- element's refusal paths, for instance), so no single press can run every check and two runs
+-- are needed for full coverage.
 -- Every definition a run creates is namespaced (palforge_test:*) and swept afterwards, so
 -- pressing the key repeatedly leaves the registry exactly as it found it.
 --
@@ -75,9 +97,34 @@ local function buildStamp()
     return (ok and type(stamp) == "string") and stamp or "unstamped (not deployed by tools/deploy.sh)"
 end
 
+-- THE SAME DISCIPLINE, EXTENDED TO THE THREE OTHER THINGS A RESULT DEPENDS ON — and each one
+-- has already been mistaken for a defect once:
+--   dev / debug   which tooling was even LOADED. `dev = false` loads no suite and no key at
+--                 all, and `debug = false` loads no test/hooks — so "the hook printed nothing"
+--                 and "the hook was never loaded" produce identical silence unless the flags
+--                 are in the log beside the result.
+--   game build    which Palworld the numbers were measured against. This tree has been bitten
+--                 once by exactly that gap: AddItem declared five parameters where
+--                 dumps/cxx/Pal.hpp had four, because the header dump predated the installed
+--                 build by a single patch. `gameBuildLive` is what the running game reports and
+--                 a mismatch with `gameBuild` is visible here rather than inferred from a
+--                 broken call.
+---@return string
+local function envStamp()
+    local env = require("palforge.env")
+    return string.format("build %s | dev=%s debug=%s | game %s (live %s)",
+        buildStamp(), tostring(env.dev), tostring(env.debug),
+        tostring(env.gameBuild), tostring(env.gameBuildLive or "not read yet"))
+end
+
 local M = {}
 
 M.support = support
+
+-- Exported so the hook runner and anything else that reports a result can print the same
+-- provenance line, rather than growing a second copy of it that drifts.
+M.buildStamp = buildStamp
+M.envStamp   = envStamp
 
 -- Case files, in run order: the pure ones first so a structural break is reported before
 -- anything touches the world.
@@ -142,6 +189,44 @@ M.PROBES = {
 -- is free, and core/autorun when there is neither.
 M.ACTIONS = {
     pf_tests = function() M.run() end,
+
+-- ---- the game-required measurements (test/hooks) ----
+--
+-- THE USER'S SECOND EXPLICIT ASK, and the reason this block exists rather than another five
+-- pf_* actions: everything that can only be settled with Palworld RUNNING is a DECLARED HOOK
+-- under test/hooks/, loaded only when env.debug is true, each one naming the plan/TODO.md item
+-- it closes, what it needs on screen and whether it writes into a save. The scatter of
+-- `_G.PALFORGE_TEST_*` globals it replaces could not be listed, could not say why it had
+-- skipped, and had to be set by hand from a console that ships switched off.
+--
+--   pf_hooks       list every declared hook, its gate state, and the sentence that opens it
+--   pf_hook <id>   run one by its plan/TODO.md id (the console passes the argument through)
+--   pf_hooks_all   run every hook whose gate is open, read-only ones first
+--
+-- ⚠️ A CLOSED GATE IS PRINTED, NEVER SKIPPED SILENTLY. Three input routes and one skipped test
+-- have each cost this tree a session by being indistinguishable from "ran and found nothing".
+pf_hooks = function()
+    local hooks = require("palforge.test.hooks")
+    for _, line in ipairs(hooks.report()) do log.info(line) end
+end,
+
+-- Takes the id as its one argument. From the UE4SS console that is `pf_hook pal-skills-equip`;
+-- from autorun.txt it is the generated per-hook name instead (pf_hook_pal_skills_equip),
+-- because core/autorun.lua reads `[delay] name` and has no way to carry an argument.
+pf_hook = function(id)
+    local hooks = require("palforge.test.hooks")
+    if id == nil or id == "" then
+        log.warn("pf_hook needs an id: pf_hook <id>. `pf_hooks` lists them.")
+        for _, line in ipairs(hooks.report()) do log.info(line) end
+        return
+    end
+    hooks.run(tostring(id))
+end,
+
+pf_hooks_all = function()
+    local hooks = require("palforge.test.hooks")
+    hooks.runAll()
+end,
 
 -- pf_keys — PRINT PALWORLD'S WHOLE LIVE KEYMAP, AND WHAT EVERY BINDABLE NAME'S STATUS IS.
 --
@@ -355,8 +440,14 @@ pf_teach = function()
     end
     -- A PASSIVE, deliberately. Passives go in as FNames through AddPassiveSkill, which is
     -- the call this tree hooks for skill.equip; the ACTIVE-move write is a different call
-    -- (AddEquipWaza) and is still opt-in behind _G.PALFORGE_TEST_WRITE_WAZA because it once
-    -- correlated with the game closing.
+    -- (AddEquipWaza), it once correlated with the game closing, and it is still opt-in.
+    -- WHERE THAT OPT-IN LIVES HAS MOVED: it is the declared hook `pal-skills-equip`
+    -- (test/hooks/pal_skills_equip.lua), armed with `env.debugHooks["pal-skills-equip"] = true`
+    -- and run by name with `pf_hook pal-skills-equip`. The old spelling
+    -- `_G.PALFORGE_TEST_WRITE_WAZA = true` still works and is still honoured — plan/TODO.md,
+    -- test/cases/skill.lua and core/character.lua:59 all name it — but the hook is where the
+    -- measurement is written down now, and it is the one that reads its target's class back
+    -- before it writes.
     local SKILL = "Legend"
     log.info(string.format("pf_teach: giving %s to the nearest pal (a %s)", SKILL, tostring(cls)))
     local ok = character.addSkill(pal, SKILL)
@@ -579,7 +670,7 @@ end,
 --   5. WHETHER BP_OnHandleBackAction IS EVEN CALLED on this build — the route api/ui's
 --      `backHandler` depends on.
 --
--- ⚠️ IT ARMS HOOKS, AND UE4SS CANNOT UNREGISTER ONE (core/event.lua:779-782). They stay for the
+-- ⚠️ IT ARMS HOOKS, AND UE4SS CANNOT UNREGISTER ONE (core/event.lua:33 and :2161). They stay for the
 -- session. Every handler here is a counter plus one pcall'd string read, capped at the first few
 -- dozen samples, which is the shape probes/uievents.lua established as survivable.
 --
@@ -1024,6 +1115,30 @@ for _, p in ipairs(M.PROBES) do
     M.ACTIONS["pf_" .. p.name] = function() M.probe(p.name) end
 end
 
+-- LOAD THE GAME-REQUIRED HOOKS, and generate one action per hook.
+--
+-- The env.debug gate lives inside hooks.load(): with it off nothing under test/hooks is
+-- required, no action is generated, and the ONE line it logs says so and says how to turn it
+-- on. `pf_hooks` still exists and still answers — a runner that vanishes with its hooks is a
+-- runner that cannot tell you why they are missing.
+--
+-- ONE NAME PER HOOK because core/autorun.lua parses `[delay] name` and cannot carry an
+-- argument (core/autorun.lua:62-67), so `pf_hook <id>` is a console-only spelling. This is the
+-- same trick the six probes above use, and it is what makes every measurement in this tree
+-- reachable with no key and no console — which matters because three input routes have failed
+-- in turn on a real machine.
+do
+    local okHooks, hooks = pcall(require, "palforge.test.hooks")
+    if not okHooks then
+        log.err("test/hooks failed to load: " .. tostring(hooks))
+    else
+        hooks.load()
+        for _, id in ipairs(hooks.ids()) do
+            M.ACTIONS[hooks.actionName(id)] = function() hooks.run(id) end
+        end
+    end
+end
+
 M.loaded = {}   -- case name -> suite (or false when the file failed to load)
 
 ---Load every case file so its suite registers. Idempotent: require caches, and
@@ -1071,8 +1186,8 @@ function M.run(which)
     if names == nil then names = M.suites() end
     if type(names) == "string" then names = { names } end
 
-    log.info(string.format("build %s | running %d suite(s): %s",
-        buildStamp(), #names, table.concat(names, ", ")))
+    log.info(string.format("%s | running %d suite(s): %s",
+        envStamp(), #names, table.concat(names, ", ")))
     support.announce("tests: running " .. #names .. " suite(s)")
 
     local results = T.run(names)
@@ -1083,9 +1198,23 @@ function M.run(which)
     local removed = support.sweep()
     if removed > 0 then log.info("swept " .. removed .. " test definition(s)") end
 
+    -- THE ON-SCREEN SUMMARY CARRIES THE DIRECTION TOO, and that is not cosmetic. A skip has a
+    -- direction now (core/unittests: NEEDS.WORLD / NOWORLD / HOOK / OPTIN / SETUP / SESSION),
+    -- and the world-gated and the inverse-gated checks CANNOT both run in one press — so a
+    -- bare "N skipped" on screen is the exact shape of the failure this tree has been bitten by
+    -- three times: a run that measured two thirds of itself and reported the same "0 failed" as
+    -- a run that measured all of it. The full breakdown is in UE4SS.log; the announce is what a
+    -- tester actually reads without alt-tabbing, so it gets the same clause and the same
+    -- sentence, formatted by core/unittests rather than spelled a second time here.
     local line = string.format("tests: %d passed, %d failed, %d skipped",
         results.passed, results.failed, results.skipped)
+    local breakdown = T.needsPhrase and T.needsPhrase(results.needs)
+    if breakdown then line = line .. " (" .. breakdown .. ")" end
     support.announce(line)
+    if T.needsTwoRuns and T.needsTwoRuns(results.needs) then
+        support.announce("tests: NO SINGLE RUN MEASURES EVERYTHING — press the key once in a "
+            .. "loaded save and once at the title screen; a green run is two runs")
+    end
 
     -- Repeat each failure on screen; a summary that says "3 failed" and nothing else
     -- means going back to the log anyway.
@@ -1164,12 +1293,17 @@ for _, p in ipairs(M.PROBES) do
         { desc = string.format("probe %s (%s) - needs %s", p.name, p.desc, p.needs) })
 end
 
--- A CONSOLE COMMAND FOR EVERY PROBE, so a key the game has taken can never block one again.
+-- A CONSOLE COMMAND FOR EVERY ACTION, so a key the game has taken can never block one again.
 -- F7 turned out to be Palworld's own volume control: the bind succeeded, the key never arrived,
 -- and from the log that was indistinguishable from a probe that ran and found nothing. Keys are
 -- convenient and they are not ours to reserve; a command is.
 --
---   pf_watch     pf_reflect     pf_pal     pf_title     pf_tests     pf_mesh
+-- ⚠️ THE NAMES ARE NOT LISTED HERE ANY MORE, and that is deliberate. A hand-written list in a
+-- comment is exactly what went stale in this file and in autorun.txt at the same time: this
+-- block used to name six commands while M.ACTIONS held fifteen, and autorun.txt:7 named ten
+-- while running four others as live lines a hundred lines further down. The AUTHORITATIVE list
+-- is M.ACTIONS, and installCommands PRINTS it, sorted, every session — that line in the log is
+-- the one to read, and it cannot drift because it is generated from the table it describes.
 --
 -- Open the UE4SS console (its GUI window) and type one. Same work, same output, no key involved.
 local function installCommands()
@@ -1191,11 +1325,18 @@ local function installCommands()
     -- The body is queued onto the game thread, because everything it touches is a live UObject.
     -- It is also wrapped: a console command that raises takes UE4SS's handler down with it, and
     -- a typo in a dev command is not worth a broken console.
+    --
+    -- THE ARGUMENT IS PASSED THROUGH, which it was not before. UE4SS hands a console handler
+    -- (fullCommand, parameters, outputDevice) and this wrapper used to discard all three, so an
+    -- action could only ever be a verb with no object — which is why `pf_hook <id>` needs it.
+    -- Every existing action ignores the extra value (Lua drops a surplus argument), so nothing
+    -- else changes shape.
     local function register(name, run)
         pcall(function()
-            RegisterConsoleCommandHandler(name, function()
+            RegisterConsoleCommandHandler(name, function(_fullCommand, parameters)
+                local arg = (type(parameters) == "table") and parameters[1] or nil
                 local body = function()
-                    local ok, err = pcall(run)
+                    local ok, err = pcall(run, arg)
                     if not ok then log.err(name .. " failed: " .. tostring(err)) end
                 end
                 if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(body) else body() end

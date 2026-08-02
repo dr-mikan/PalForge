@@ -69,9 +69,11 @@ flowchart LR
     C --> U["your own event.on subscriber"]
 ```
 
-後ろ 2 段階はあるのに、まだ何も流し込まれないチャンネルもあります。`item.craft` がそれで、
-`onCraft` ハンドラは受理されますが実行されません。その処理は、実際に動く場所に書いてください。
-作ったアイテムがインベントリに入った時点で `onObtain` が発火します。
+`event.CHANNELS` のチャンネルには、すべて SOURCE が用意されています。ただし 1 つ、`skill.hit`
+だけは一度もイベントを運んだことがありません。ネイティブ候補は 2 つとも登録に成功したうえで、
+確実にダメージが入った戦闘のあいだ沈黙し続けました。これが未解決項目 `skill-hit-source` です。
+建築物の `onLeftClick` と `onBreak` にはそもそもチャンネルがありません。ダンプを読んでも供給元に
+できるものが存在しないからです。どれがどれなのかは、後述のチャンネル表に載っています。
 
 ### 起動時の配線順序
 
@@ -83,15 +85,47 @@ flowchart TD
     A["registry.initialize"] --> B["require palforge.api"]
     B --> C["load the native catalogs"]
     C --> D["event.start"]
-    D --> E["install SOURCES - tick / world / building / pal / item"]
+    D --> E["install SOURCES - tick / world / building / pal / item / skill"]
     D --> F["install DISPATCH - one subscriber per channel"]
     E --> G["emit gameStart"]
     F --> G
 ```
 
-`event.start()` が実際に走るのは一度だけで、二度目以降の呼び出しは何もしません。
+`event.start()` がエンジン側の層を武装させるのは、セッションごとに一度だけです。UE4SS は
+`RegisterHook` も `LoopAsync` も取り消せないため、二重に武装すればすべてのハンドラが 2 回、次は
+3 回走ってしまいます。2 回目以降の呼び出しはもう一方の分岐に入り、`installDispatch()` を再実行
+します。これは前回のチャンネル購読を破棄し、ロードし直された定義クラスにすべてのチャンネルを
+つなぎ直す処理です。この分岐こそが F9 リロードの正体です。
+
 `event.CHANNELS` のすべてのチャンネルは最初のゲームイベントより先に存在するので、パックの
 ロード中に購読しても取りこぼしはありません。
+
+### F9 リロードが差し替えるもの
+
+F9 は `palforge.*` のモジュールをすべて `package.loaded` から落とし、`registry.initialize()` を
+もう一度走らせます。定義・スペック・ハンドラ・API 面・テストスイート、そして自分のパックの
+コードは本当に差し替わります。一方で、4 つのものは意図的にワイプを生き延びます。どれも一度は
+代償を払って分かったことです。
+
+| 生き延びるもの | 置き場所 | 理由 |
+| --- | --- | --- |
+| エンジン側のフックとループ | 一度だけ武装し、`_G.__PalForgeArmed` がそれを記録 | 最初のロードで武装したフックは、そのとき作られたコールバックを走らせ続けます。だからイベント SOURCE の中身を書き換えたときだけはゲームの再起動が要ります。それ以外はリロードで反映されます。 |
+| 登録済みの定義すべて | `core.object_manager`（`reload.KEEP` に明記） | コンテンツパックは独自の require 名前空間を持つ別の UE4SS Mod なので、ワイプしても定義呼び出しは再実行されません。レジストリを残すことが、押した後もパックの内容を残すことです。 |
+| チャンネル本体 | `_G.__PalForgeBus` | 最初のロードで武装したフックは、そのとき掴んだ subjects テーブルに流し込みます。新しく作り直すと、古い emitter は誰にも届かない場所へ流し続け、新しいディスパッチは空のバスを聴くことになります。 |
+| 建築物ランタイムのレジストリ | `_G.__PalForgeBuildingRegistry`、および `_G.__PalForgeSpatialIndex` の空間インデックス | 再構築スキャンは一度だけ武装され、そのとき掴んだテーブルを持ち続けます。`_G` 上の 1 枚のテーブルが、スキャンとディスパッチが別々のレジストリを見てしまう事態を防ぎます。 |
+
+さらに、繰り返し実行のコールバックが残っているあいだ、押しても **拒否** されます。`core/poll` の
+ポーラーと `pf_watch` の長いチェーン 2 本は、いずれもリロードガードに自分を申告します。残ってい
+る状態で押すと、どのチェーンを待っているのか、いつ武装されたのかがログに出て、リロードは行われ
+ません。スケジュール済みの UE4SS コールバックの足元で `package.loaded` を消すと、そのレジストリ
+参照が関数でないものを指しかねず、UE4SS はそれに対してエンジンの tick フックを外すという答えを
+返します。tick フックは `ExecuteInGameThread` を捌く仕組みなので、ゲームは平然と動いたまま Mod の
+キーバインドだけが再起動まで反応しなくなります。申告は 180 秒で自動的に失効し、拒否メッセージ
+には解除用のコンソール行 `require('palforge.core.reload').asyncReset()` が出ます。
+
+リロードが取り消さないものも 2 つあります。押す前に設置された建築物インスタンスは、スキャンが
+発見し直すまで生成時のハンドラテーブルを持ち続けます。押す前に登録されたポーラーも、登録時の
+クロージャを走らせ続けます。
 
 ### イベントが起きたオブジェクトを特定する
 
@@ -108,59 +142,86 @@ flowchart TD
     B2 -->|hit| BI
     B3 -->|hit| BI
     P["pal ctx"] --> P1["actor BP class name to a pal id"]
-    P1 --> PX["exact id or a walk for a namespaced match"]
+    P1 --> PX["exact id, else the resolved-form index"]
     PX --> PC["the registered Pal class"]
-    I["item ctx"] --> I1["ctx.itemId"]
-    I1 --> IX["exact id or a walk for a namespaced match"]
-    IX --> IC["the registered Item class"]
+    I["item or skill ctx"] --> I1["ctx.itemId or ctx.skillId"]
+    I1 --> IX["exact id, else the resolved-form index"]
+    IX --> IC["the registered Item or Skill class"]
+    V["building.build ctx"] --> V1["ctx.buildId against the definition index"]
+    V1 --> VC["the registered Building class"]
 ```
 
-建築物は **ライブインスタンス**、つまりイベントが起きたその 1 棟に解決されます。パルとアイテムは
-1 体ずつ・1 個ずつ追跡されていないので、登録済みの **クラス** に解決され、ハンドラは `ctx` から
+建築物は **ライブインスタンス**、つまりイベントが起きたその 1 棟に解決されます。パル・アイテム・
+スキルは 1 つずつ追跡されていないので、登録済みの **クラス** に解決され、ハンドラは `ctx` から
 アクターを読み取ります。定義していないバニラのパルやアイテムは何にも解決されず、フックは
-呼ばれません。
+呼ばれません。建築物のチャンネルでクラスに解決されるのは `building.build` だけで、これはアクター
+が存在するより前に発火するからです。
 
-パルとアイテムの照合は 2 段階です。まず ID の完全一致をテーブル参照 1 回で試し、外れたらその
-ドメインの登録済み ID を走査して、各 ID を解決した DataTable 行名とゲームが報告した ID を
-突き合わせます。名前空間付きの ID にもイベントが届くのはこのためです。ゲームがスポーンさせるのは
-`BP_example_Boss_C`、報告されるアイテム行は `example_Ration` で、コロン形式が現れることは
-ありません。
+クラスの照合はテーブル参照 2 回で終わります。まずゲームが報告した ID そのまま、外れたら
+`object_manager.byResolved` です。これはレジストリが登録時に維持しているインデックスで、解決後の
+行名から、それが定義された ID へ逆に引きます。名前空間付きの ID にもイベントが届くのはこのためで
+（ゲームがスポーンさせるのは `BP_example_Boss_C`、報告されるアイテム行は `example_Ration` で、
+コロン形式が現れることはありません）、同時に、1 つの行に解決される 2 つの ID がイベントごとの
+運任せではなく定義時の警告になる理由でもあります。
 
 ## チャンネル
 
-チャンネルは、名前の付いた 1 つの瞬間です。`event.CHANNELS` が全リストで、宣言順に並んでいます。
+チャンネルは、名前の付いた 1 つの瞬間です。`event.CHANNELS` には 21 個あり、宣言順に並んでいます。
 
 ```lua
 event.CHANNELS   --> {
 --   "gameStart",
 --   "world.ready", "world.left",
 --   "building.place", "building.load", "building.interact", "building.remove",
+--   "building.build",
 --   "pal.spawned", "pal.damaged", "pal.death", "pal.captured",
 --   "item.obtain", "item.use", "item.craft", "item.discard",
+--   "skill.activate", "skill.hit", "skill.equip", "skill.unequip",
 --   "tick",
 -- }
 ```
 
+チャンネルのイベントがどこから来るかは 3 つの語で表せます。この違いが、その上に機能を組めるか
+どうかを決めます。
+
+- **LIVE** — 名前の分かっているネイティブ関数が emit し、実際のセーブデータでイベントを運ぶところ
+  が観測されています。
+- **synthetic** — PalForge が再構築スキャンやループから自前で導出しています。背後にネイティブ
+  呼び出しはなく、PalForge の外の何かが協力しなくても、このビルドで確実に発火します。
+- **armed, unseen** — ネイティブフックは登録済みですが、まだ一度も何も運んでいません。
+
 それぞれを送っているもの、`ctx` に入れる内容、最終的に呼ばれるフックは次の通りです。
 
-| チャンネル | emit するもの | `ctx` の内容 | ディスパッチ先 |
-| --- | --- | --- | --- |
-| `gameStart` | `registry.initialize`、`event.start()` の後 | ペイロードなし | なし。直接の購読者のみ |
-| `world.ready` | ゲートが開いた後に最初に完走した再構築スキャン。ゲート自体は ready ウォッチで、`LoopAsync(1000)` が `PalPlayerCharacter` をポーリングし、5 回連続で有効だったときに開きます | ペイロードなし | 全ライブ建築物インスタンスの `onWorldReady`。その最初のスキャンが追跡を済ませています |
-| `world.left` | 同じウォッチ。ポーンが無効になったとき | ペイロードなし | 全ライブ建築物インスタンスの `onWorldLeft`。その後ライブインスタンスは破棄されます |
-| `building.place` | 再構築スキャン。新しいインスタンスが作られ、保留中の設置意図と一致したとき | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
-| `building.load` | 再構築スキャン。新しく追跡対象になったすべてのインスタンス | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
-| `building.interact` | `/Script/Pal.PalBuildObject:OnBeginInteractBuilding` | `actor`, `player`, `buildId` | `onRightClick` |
-| `building.remove` | スキャンの削除スイープ。6 回連続で見失ったとき | `key`, `buildId`, `actor`, `reason` | `onRemove` |
-| `pal.spawned` | `/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter` | `actor` | `onSpawned` |
-| `pal.damaged` | `/Script/Pal.PalCharacter:OnDamageReaction` | `actor` | `onDamaged` |
-| `pal.death` | `/Script/Pal.PalCharacter:OnDeadCharacter` | `actor` | `onDeath` |
-| `pal.captured` | `/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing`。引数が `true` のときのみ | `actor`, `comp` | `onCaptured` |
-| `item.obtain` | `/Script/Pal.PalPlayerState:AddItemGetLog_ToClient` | `itemId`, `count` | `onObtain` |
-| `item.use` | `/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal` | `itemId`, `actor`, `processor` | `onUse` |
-| `item.craft` | まだ何もない | — | `onCraft` |
-| `item.discard` | まだ何もない | — | `onDiscard` |
-| `tick` | `ExecuteInGameThread` 内の `LoopAsync(500)` | `count`, `now` | ティックリスト経由で建築物の `onTick` |
+| チャンネル | 状態 | emit するもの | `ctx` の内容 | ディスパッチ先 |
+| --- | --- | --- | --- | --- |
+| `gameStart` | synthetic | `registry.initialize`、`event.start()` の後（つまり F9 リロードのたびにも） | ペイロードなし | なし。直接の購読者のみ |
+| `world.ready` | synthetic | ゲートが開いた後に最初に完走した再構築スキャン。ゲート自体は ready ウォッチで、`LoopAsync(1000)` が `PalPlayerCharacter` をポーリングし、5 回連続で有効だったときに開きます | ペイロードなし | 全ライブ建築物インスタンスの `onWorldReady`。その最初のスキャンが追跡を済ませています |
+| `world.left` | synthetic | 同じウォッチ。ポーンが応答しなくなったとき | ペイロードなし | 全ライブ建築物インスタンスの `onWorldLeft`。その後ライブインスタンスは破棄されます |
+| `building.place` | synthetic | スキャンが、保留中の `RequestBuild_ToServer` の意図と 300 cm 以内で一致するインスタンスを作ったとき | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
+| `building.load` | synthetic | スキャン。新しく追跡対象になったすべてのインスタンス | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
+| `building.interact` | LIVE | `/Script/Pal.PalBuildObject:OnBeginInteractBuilding` | `actor`, `player`, `buildId` | `onRightClick` |
+| `building.remove` | synthetic | スキャンの削除スイープ。6 回連続で見失ったとき | `key`, `buildId`, `actor`, `reason` | `onRemove` |
+| `building.build` | LIVE | `/Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal`（`world.ready` で武装） | `buildId`, `model` | 定義クラスの `onBuild` |
+| `pal.spawned` | LIVE | `/Script/Pal.PalNPC:OnCompletedInitParam` と `/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter`（どちらも `world.ready` で武装） | `actor`, `via` | `onSpawned` |
+| `pal.damaged` | LIVE | `/Script/Pal.PalCharacter:OnDamageReaction` | `actor` | `onDamaged` |
+| `pal.death` | LIVE | `/Script/Pal.PalCharacter:OnDeadCharacter` | `actor` | `onDeath` |
+| `pal.captured` | LIVE | `/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing`。引数が `true` のときのみ | `actor`, `comp` | `onCaptured` |
+| `item.obtain` | LIVE | `/Script/Pal.PalPlayerState:AddItemGetLog_ToClient`。隣に `/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal` も武装 | `itemId`, `count`, `via` | `onObtain` |
+| `item.use` | LIVE | `/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal` | `itemId`, `actor`, `player`, `itemData`, `targetId`, `processor` | `onUse` |
+| `item.craft` | LIVE | `/Script/Pal.PalMapObjectConvertItemModel` と `/Script/Pal.PalMapObjectProductItemModel` の `OnFinishWorkInServer` | `itemId`, `recipeId`, `count`（常に nil）, `model`, `work`, `via` | `onCraft` |
+| `item.discard` | LIVE | `/Script/Pal.PalNetworkItemComponent:RequestDrop_ToServer` と `:RequestDispose_ToServer` | `itemId`, `count`, `reason` | `onDiscard` |
+| `skill.activate` | LIVE | `/Script/Pal.PalActionBase:OnBeginAction`。隣に `PalPlayerCharacter:OnBeginAction` と `PalUtility:PlayActionByWazaID` も武装 | `skillId`, `wazaId`, `owner`, `actor`, `target`, `action`, `via` | `onActivate`（第 2 引数は owner） |
+| `skill.hit` | armed, unseen | `/Script/Pal.PalUtility:MakeDamageInfoByWazaType` と `/Script/Pal.PalAnimNotifyState_AttackCollision:OnHit`。どちらも沈黙を実測 | `skillId`, `wazaId`, `target`, `owner`, `attacker`, `location`, `via` | `onHit`（第 2 引数は target） |
+| `skill.equip` | LIVE | `/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill` と、`PalPassiveSkillComponent:SetupSkillFromSelf` のリスト差分（どちらも `world.ready` で武装） | `skillId`, `owner`, `actor`, `params` または `component`, `overrides`, `via` | `onEquip` |
+| `skill.unequip` | LIVE | `:RemovePassiveSkill` と、同じリスト差分 | `skillId`, `owner`, `actor`, `via` | `onUnequip` |
+| `tick` | synthetic | `ExecuteInGameThread` 内の `LoopAsync(500)` | `count`, `now` | ティックリスト経由で建築物の `onTick` |
+
+複数の SOURCE を同時に抱えるチャンネルがいくつかありますが、これは雑さではなく意図です。7 月の
+セッションで、4 つのフックが登録に成功したまま一度も発火せず、その裏で 10 個のチャンネルが名乗り
+を上げました。UE4SS はフックを解除できず、沈黙しているフックのコストはゼロなので、ヘッダダンプが
+挙げた候補は、黙った側の **隣に** 並べて武装してあります。どれも必要な同一性でガードされている
+ため、増えた SOURCE は沈黙を足すことはできても、誤ったイベントを足すことはできません。どれが運ん
+だかは `ctx.via` が示し、チャンネルごと・SOURCE ごとの初回発火はログが告知します。
 
 <Callout type="info">
 `world.ready` と `world.left` はペイロードなしで emit されるため、直接の購読者が受け取るのは
@@ -170,11 +231,14 @@ event.CHANNELS   --> {
 
 <Callout type="warn">
 ハートビート以外のネイティブフックは、ワールドが準備できていない間はすべて即座に return します。
-建築物スキャン、interact フック、設置意図フック、パルの 4 フックとアイテムの 2 フックは、いずれも
-先に `worldReady` を確認します。ready ウォッチ自体をインストールできなかった場合、ゲートは開いた
+建築物スキャン、interact フック、設置意図フック、そしてパル・アイテム・スキルのフックはいずれも
+同じゲート確認から始まります。うち 7 つ（`building.build`、`pal.spawned` の候補 3 つ、パッシブ
+スキル関連の 3 つ）は、そもそもその時点まで武装すらされません。どれもワールドロードの嵐で既存
+オブジェクトぶんも発火し、初期化途中のメモリを読むと `pcall` では捕まえられないネイティブの
+アクセス違反が起きたためです。ready ウォッチ自体をインストールできなかった場合、ゲートは開いた
 ままの状態でフォールバックし、ディスパッチは最初から動作します。このフォールバックでは
 `world.ready` も予約されますが、emit するものはありません。`LoopAsync` がない以上ハートビートも
-なく、告知役のスキャンも走らないためです。
+なく、告知役のスキャンも走らず、遅延武装のフックも武装しないためです。
 </Callout>
 
 チャンネル名は自分で作れます。`event.emit` と `event.on` は初めて名前を書いた時点でチャンネルを
@@ -216,6 +280,7 @@ flowchart LR
     S --> W["emit world.ready - once on the first scan after the gate opens"]
     T --> B["tickAll - building onTick"]
     T --> E["effect step - advance live applications"]
+    T --> P["pal onTick sweep - every PAL_SCAN_MS"]
     T --> U["event.every callbacks"]
 ```
 
@@ -271,13 +336,26 @@ SOURCE を持つフックはすべて LIVE です。構造物ごとの状態を�
 | `onTick` | LIVE | ハートビート。`tickInterval` で間引かれます |
 | `onWorldReady` | LIVE | ready ゲートが開いた後、最初に完走したスキャン |
 | `onWorldLeft` | LIVE | ready ウォッチ |
-| `onBuild` | 宣言のみ | ネイティブ SOURCE がまだありません |
-| `onLeftClick` | 宣言のみ | ネイティブ SOURCE がまだありません |
-| `onBreak` | 宣言のみ | ネイティブ SOURCE がまだありません |
+| `onBuild` | LIVE | `OnCompleteBuild_ServerInternal`（`world.ready` で武装） |
+| `onLeftClick` | 宣言のみ | ネイティブ SOURCE なし。探索は打ち切り済み |
+| `onBreak` | 宣言のみ | ネイティブ SOURCE なし。探索は打ち切り済み |
 
-`onBuild`、`onLeftClick`、`onBreak` はスペックとしては受理されますが、呼ばれることはありません。
-`onBuild` の代わりに `onPlace`、`onBreak` の代わりに `onRemove` を使い、プレイヤーの操作には
-`onRightClick` を使ってください。
+建築物のフックのうち、ライブインスタンスを渡されないのは `onBuild` だけです。これは建築完了の
+時点、つまりスキャンがインスタンスを作る（最大 500 ms 後）より前に発火し、ネイティブ呼び出しが
+運ぶのはアクターではなく `UPalMapObjectModel` です。そのためディスパッチは build id から定義
+**クラス** を解決し、ハンドラは `ctx.buildId` と `ctx.model` を読みます。このフックがロード時
+ではなく `world.ready` で武装されるのは、ワールドロードの嵐で既存の建築物ぶんも発火し、そこで
+初期化途中のモデルメモリを読んだ結果ネイティブのアクセス違反が起きたからです。安全な設置フック
+は引き続き `onPlace` で、`onBuild` は追加の 1 つです。まずは捨ててよいワールドで試してください。
+
+`onLeftClick` と `onBreak` はスペックとしては受理されますが呼ばれることはなく、これは省略では
+なく計測の結果です。両者の唯一の候補だった `OnDamage` は劣化タイマーでした。参照記録には 196 回
+の発火があり、すべて設置済みの `WorkBench` に対して、構造物ごとに 12〜13 秒の一定間隔で、プレイ
+ヤーは一切関与せず、構造物が壊れることもありませんでした。さらに、候補となる 4 クラスのどれにも
+Destroy / Dismantle / Break / Click にあたるエントリがありません。破壊はデリゲートの **フィールド**
+としてしか現れず、`RegisterHook` はそれをパスで指定できません。破壊はスキャンの見失いスイープが
+引き続きカバーします（しきい値ぶん遅れ、実行者は分かりません）。そちらには `onRemove` を使って
+ください。
 
 `onRightClick` は SOURCE の側でフィルタとデバウンスがかかります。操作した相手が
 `PalCharacter` のときだけ通り、同じ構造物への 2 回目の操作は 1 秒以内なら捨てられます。
@@ -344,34 +422,60 @@ end)
 | `onCaptured` | LIVE | `SetIsCapturedProcessing` が `true` のとき |
 | `onDamaged` | LIVE | `OnDamageReaction` |
 | `onDeath` | LIVE | `OnDeadCharacter` |
-| `onSpawned` | LIVE、ただしフックは未確認 | `BroadcastOnCompleteInitializeParameter` |
-| `onTick` | 宣言のみ | なし |
+| `onSpawned` | LIVE | `PalNPC:OnCompletedInitParam` と `PalPlayerCharacter:OnCompleteInitializeParameter` |
+| `onTick` | LIVE | パルスイープ。`event.PAL_SCAN_MS` ごと |
 
 <Callout type="warn">
-`onSpawned` は `BroadcastOnCompleteInitializeParameter` に接続されていますが、ソース側でこれは
-未確認の候補と明記されています。ゲーム内イベントプローブを実行した時点でパルはすでに存在して
-いたため、実際のスポーンで発火するところは観測されていません。ベストエフォートとして扱い、
-これを前提に機能を組む前に検証してください。
+`onSpawned` は `PalCharacter:BroadcastOnCompleteInitializeParameter` には接続されていません。
+その理由は覚えておく価値があります。このブロードキャスタは **沈黙を実測** されているからです。
+実際のセーブで `world.ready` の後に武装し、パルを捕獲しては解放しても、10 個のチャンネルが名乗り
+を上げるあいだ、このチャンネルはそこから何も運びませんでした。バインド先のデリゲート **ターゲット**
+ではなくブロードキャスタをフックする、という誤りを記録するための事例です。実際に運ぶのはその
+ターゲット 2 つです。`PalNPC:OnCompletedInitParam` は、`APalMonsterCharacter` が再宣言せずに継承
+しているためすべてのパルを拾い、`PalPlayerCharacter:OnCompleteInitializeParameter` はプレイヤーが
+購読したキャラクター、つまり手持ち側の経路だけを拾います。どちらが発火したかは `ctx.via` が示し
+ます。未解決なのは「動くかどうか」より狭い話です。これまで記録された発火はすべて `world.ready` と
+同じ秒に、つまり周囲のパルが一斉に初期化されるロードの嵐の中で起きているため、「このパルはさっき
+まで存在しなかった」はまだ計測されていません。`onSpawned` は冪等に書いてください（SOURCE 側でも
+アクター単位・1 秒以内の重複は除去されます）。
 </Callout>
 
-<Callout type="warn">
-パルの `onTick` は発火しません。パルには建築物のようなインスタンススキャンがないため、パル単位の
-周期フックを駆動するものが存在しません。パルごとの定期処理が必要なら、自分で `tick` を購読し、
-対象のアクターを走査してください。このページの最後にレシピがあります。
+<Callout type="info">
+パルの `onTick` にネイティブフックはなく、代わりにスイープが駆動します。`event.PAL_SCAN_MS`
+ごと（既定 3000 ms、公開値なのでパックが実行時に変更できます）に `FindAllOf("PalCharacter")` を
+歩き、各アクターを登録済みのパルクラスに解決して、`ctx.actor` / `ctx.count` / `ctx.now` を渡して
+`onTick` を呼びます。インスタンス単位ではなくクラス単位であることから 2 つの帰結があります。
+`self` は定義であり、ポーンは `ctx` に乗るので、パルごとの状態は自分でキーを決めたテーブルに置く
+こと。そして、成功を挟まずに 5 回例外を投げたハンドラは、その ID をログに残してセッション中は
+無効化されること。スイープがハートビートより意図的に遅いのは、`FindAllOf` が全 UObject を歩く
+既知のカクつき要因だからで、パルが 1 つも定義されていない間は列挙自体を丸ごと省きます。
 </Callout>
 
 ### Item
 
 | フック | 状態 | SOURCE |
 | --- | --- | --- |
-| `onObtain` | LIVE | `AddItemGetLog_ToClient` |
+| `onObtain` | LIVE | `AddItemGetLog_ToClient`。隣に `AddItem_ServerInternal` も武装 |
 | `onUse` | LIVE | `UseItemToCharacter_ServerInternal` |
-| `onCraft` | 宣言のみ | なし |
-| `onDiscard` | 宣言のみ | なし |
+| `onCraft` | LIVE | convert / product の作業モデルの `OnFinishWorkInServer` |
+| `onDiscard` | LIVE | `RequestDrop_ToServer` と `RequestDispose_ToServer` |
 
 `onObtain` はゲーム自身の「アイテム入手」ログに乗っているため、拾得・戦利品・報酬で発火します。
-入手ログに現れない内部的な追加はカバーされません。`item.craft` と `item.discard` にはチャンネルと
-ディスパッチの購読者がありますが、emit するものがないので、`onCraft` と `onDiscard` は動きません。
+入手ログに現れない内部的な追加は、インベントリ追加の経路を通る場合だけカバーされます。2 つの
+SOURCE は 1 回の拾得を 2 つの角度から見たものなので、同じ ID が 0.5 秒以内に繰り返された場合は
+捨てられ、届くのは 1 回だけです。どちらが運んだかは `ctx.via` が示します。
+
+`onCraft` は作業台や炉で生産作業が完了したときに発火します（2026-07-26、実機で製作して観測）。
+`ctx.count` は nil で、そのままです。1 回あたりの個数はレシピ行にあり、ネイティブフックの中で
+DataTable を読むことはこの SOURCE はしません。convert 経路では `ctx.itemId` はレシピ ID であり、
+バニラのレシピではそれが生産物のアイテム ID そのものです。パックがそれに頼らずに済むよう、
+両方の名前で渡されます。
+
+`onDiscard` はプレイヤーがスタックを地面に落としたとき、またはインベントリ画面から破棄したときに
+発火し、どちらかは `ctx.reason` が伝えます。アイテム ID は、サーバがスロットを空にする前に、
+リクエストが指すスロットのコンテナ GUID を生きている `PalItemContainer` すべてと突き合わせて読み
+取る必要があります。この探索に失敗した場合、SOURCE は推測した ID でイベントを出したりせず何も
+emit せず、どの段階で失敗したかを理由ごとに 1 度だけログに残します。
 
 LIVE な 2 つのアイテムチャンネルはゲーム側のアイテム ID を運び、ディスパッチはそれを 2 段階で
 定義に突き合わせます。まず ID の完全一致、次に登録済み ID を解決した DataTable 行名との一致です。
@@ -399,11 +503,14 @@ Item{
 ```
 
 <Callout type="warn">
-`item.use` の `ctx.actor` はネイティブ呼び出しの第 1 引数そのもので、ゲーム内で確認されている
-シグネチャではこの引数はキャラクターではなくアイテムデータオブジェクトです。対象は第 2 引数の
-`FPalInstanceID` ですが、こちらは一度もプローブされていません。使うのは `ctx.itemId` です。
-プレイヤーが必要な場合は、`ctx.actor` をポーンとして当てにせず `Player.character()` から取得して
-ください。
+`item.use` の `ctx.actor` は本物のポーンです。中身は `FindFirstOf("PalPlayerCharacter")`、つまり
+ローカルプレイヤーで、同じ値が `ctx.player` にも入っています。ネイティブ呼び出しの第 1 引数、
+`UPalStaticItemDataBase` のアイテムデータオブジェクトは `ctx.itemData` にあり、第 2 引数は
+`ctx.targetId`（`FPalInstanceID`）として未解決のまま渡されます。インスタンス ID からアクターを
+引く方法は、どちらのツリーにも実証されたものがないためです。残っている注意点は型ではなく
+「どのキャラクターか」です。`ctx.actor` はアイテムを **使った** 側であり、それが **使われた対象**
+と一致するのは食料などの自己使用のときだけです。パルに与えた場合、そのパルは `ctx.targetId` の
+側にいます。
 </Callout>
 
 ### Effect
@@ -427,8 +534,35 @@ Item{
 
 ### Skill
 
-ゲームの側からスキルを発火させるものはありません。`skill.*` を emit するチャンネルもありません。
-動作するのは自分で呼び出す方法で、クールダウンは Lua 側で強制されます。
+スキルの 4 チャンネルのうち 3 つは、ゲーム側からイベントを運びます。4 つとも、自分で呼び出せば
+実行され、そのときクールダウンは Lua 側で強制されます。
+
+| フック | 状態 | SOURCE |
+| --- | --- | --- |
+| `onActivate` | LIVE | `PalActionBase:OnBeginAction`。パルの技はアクションオブジェクトそのもので、自分の `EPalWazaID` を持っています |
+| `onEquip` | LIVE | `AddPassiveSkill` と、`SetupSkillFromSelf` のリスト差分 |
+| `onUnequip` | LIVE | `RemovePassiveSkill` と、同じリスト差分 |
+| `onHit` | armed, unseen | `MakeDamageInfoByWazaType` と `PalAnimNotifyState_AttackCollision:OnHit`。どちらも沈黙を実測 |
+
+届かないのは `onHit` だけで、この否定は両側から確定しています。2 つのフックは武装済みのまま、
+`pal.damaged` と `pal.death` がどちらも発火した戦闘のあいだ何も運びませんでした。つまり攻撃は
+確実に当たり、確実にダメージを与えています。そしてダメージ経路のどこにも技を名指しするものが
+ありません。`FPalDamageRactionInfo` は 6 フィールド、`FPalDamageInfo` は 40、`FPalDamageResult`
+は 12 で、そのどれも `EPalWazaID` ではありません。ID がヒットに届く道は、直前の発動を覚えておいて
+後続のダメージに結び付けることだけですが、それは SOURCE ではなく推測であり、意図的に配線して
+いません（外れた技や、同じ時間帯にいるもう 1 体の攻撃まで、最後に発動したものへ結び付いてしまう
+ため）。動く入り口は `:hit(target)` です。
+
+ディスパッチされるのは `Skill{ ... }` で **定義した** スキルだけです。`Skill.get("FireBlast")` が
+返すのは登録されていないハンドルなので、ゲームが FireBlast を撃っても何にも届きません。
+`ctx.skillId` は、戦闘系 2 チャンネルでは `EPalWazaID` の名前、パッシブ系 2 チャンネルではパッシブ
+行の FName です。
+
+パッシブ側の疑問を閉じた発火は、PalForge 自身の書き込みから来ました。`Skill.Handle:teach` が
+生きたパルに対して `AddPassiveSkill` に到達したもので、つまりハンドラは自分のパックが行った変更に
+ついても知らされます。記録されたのは装備方向です。`onEquip` を冪等にしておく理由はもう 1 つあり
+ます。あるキャラクターに対する最初の `SetupSkillFromSelf` 呼び出しは、そのキャラクターがすでに
+持っているパッシブをすべて報告します。
 
 ```lua
 local log = require("palforge.utils.log").scope("fireball")
@@ -450,8 +584,9 @@ Fireball:activate(myPalActor)   -- false while cooling down
 Fireball:hit(targetActor)
 ```
 
-`:activate` / `:hit` / `:equip` / `:unequip` は、自分が制御するコードから駆動してください。パルの
-ハンドラ、建築物の `onRightClick`、キーバインドなどです。
+`:activate` / `:hit` / `:equip` / `:unequip` は、自分が制御するコード（パルのハンドラ、建築物の
+`onRightClick`、キーバインドなど）からいつでもハンドラを実行でき、チャンネルが運ぶかどうかとは
+無関係です。`onHit` にとっては、これが唯一の経路です。
 
 ### Audio、Mesh、UI
 
@@ -592,7 +727,9 @@ sequenceDiagram
 インスタンスのキーはビルド ID と量子化されたワールド座標の組で、`"<buildId>@<qx>,<qy>,<qz>"` の
 形をとります。量子化には定義の `gridCm`、既定 100 cm を使います。正となる座標は常にライブ
 アクターの位置です。スキャンをまたいで既知のインスタンスを束縛するのは、キーではなく **アクター**
-です。設置直後の建築物が報告する位置は、スキャン間で 1 セル以上ぶれるためです。
+です。設置直後の建築物が報告する位置は、スキャン間で 1 セル以上ぶれるためです。その束縛はアクター
+の `GetFullName()` 文字列に対して行われ、ハンドルに対しては行われません。UE4SS は参照のたびに
+新しいラッパーを作り、スキャンごとの `FindAllOf` も毎回新しいものを返すからです。
 </Step>
 
 <Step>
@@ -601,7 +738,9 @@ sequenceDiagram
 インスタンスは `def.cls:new{ ... }` で作られるので、定義に書いたメソッドはすべてその上で解決
 します。state は保存済みレコードがあればそこから、なければ定義の `state` フィールドから取られ
 ます。`state` はテーブルでもファクトリ関数でも構いません。新規インスタンスは Mod フォルダ配下の
-`state/entities_<saveId>.json` に書き込まれます。ワールドの GUID を読めなかった場合、`saveId` は
+`state/entities_<saveId>.json` に書き込まれます。`saveId` は `PalGameInstance` から読みます。
+まずセーブ **ディレクトリ** 名（`GetSelectedWorldSaveDirectoryName`、またはその実体プロパティ）、
+次にワールドの表示名で、記号を除いたうえで `w_` を前置します。どちらも答えない場合は共有の
 `world` にフォールバックします。
 </Step>
 
@@ -1026,7 +1165,7 @@ Pal{
     color = { r = 1.0, g = 0.4, b = 0.2, a = 1.0 },
     events = {
         onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)                 -- pals have no scan, so you attach it
+            pal:renderOn(ctx.actor)                 -- already done for you; the guard makes this free
         end,
         onDamaged = function(pal, ctx)
             Burning:apply(ctx.actor)                -- re-apply stacks and refreshes
@@ -1042,37 +1181,39 @@ Pal{
 }
 ```
 
-### パルの onTick が発火しないので、自前でティッカーを作る
+### クラス単位の onTick の上に、パルごとの状態を載せる
+
+パルの `onTick` は定義 **クラス** に対して、条件に合う生きたアクター 1 体につき 1 回ずつ走ります。
+そのため、特定の 1 体について覚えておきたいことは自分でキーを決めて保持する必要があります。キーは
+`uobject.key(actor)`、つまりアクターの `GetFullName()` 文字列にしてください。アクターの値そのもの
+をキーにしてはいけません。UE4SS は参照のたびに新しいラッパーを作るので、あるスイープで書き込んだ
+ラッパーキーは、同じエンジンオブジェクトであっても次のスイープでは一致しません。
 
 ```lua title="content/patrol.lua"
-local event = require("palforge.core.event")
-local log   = require("palforge.utils.log").scope("patrol")
+local uobject = require("palforge.core.uobject")
+local log     = require("palforge.utils.log").scope("patrol")
 
-local watched = setmetatable({}, { __mode = "k" })   -- weak: never keep a pawn alive
+local seen = {}     -- GetFullName string -> seconds watched
 
 Pal{
     id = "SheepBall",
     events = {
         onSpawned = function(pal, ctx)
-            if ctx.actor then watched[ctx.actor] = 0 end
+            local k = uobject.key(ctx.actor)
+            if k then seen[k] = 0 end
+        end,
+        onTick = function(pal, ctx)
+            local k = uobject.key(ctx.actor)
+            if not k then return end                 -- a pawn that will not answer its name
+            seen[k] = (seen[k] or 0) + 3             -- PAL_SCAN_MS, in seconds
+            log.info("sheepball " .. k .. " watched for " .. tostring(seen[k]) .. " s")
         end,
         onDeath = function(pal, ctx)
-            if ctx.actor then watched[ctx.actor] = nil end
+            local k = uobject.key(ctx.actor)
+            if k then seen[k] = nil end
         end,
     },
 }
-
-event.every(2000, function()
-    for actor, seconds in pairs(watched) do
-        local ok, valid = pcall(function() return actor:IsValid() end)
-        if not (ok and valid) then
-            watched[actor] = nil
-        else
-            watched[actor] = seconds + 2
-            log.info("sheepball alive for " .. tostring(watched[actor]) .. " s")
-        end
-    end
-end)
 ```
 
 ### 操作するとスキルを撃つ建築物
@@ -1141,11 +1282,14 @@ end)
   それ以外はハンドルを受け取ります。
 - 建築物は再ロード後も状態を保てます。`inst.state` を書き換えて `inst:save()` を呼びます。
 - 周期処理はすべて 500 ms のハートビート 1 本で動きます。建築物の `onTick`、エフェクトの
-  タイミング、`event.every(ms, fn)` がこれに乗っています。
-- 受理されるが呼ばれないフックがあります。パルの `onTick`、アイテムの `onCraft` と
-  `onDiscard`、建築物の `onBuild`、`onLeftClick`、`onBreak` です。その処理は `tick` か、
-  実際に発火するフックから動かしてください。
-- スキルはひとりでに発動しません。`:activate` や `:hit` を自分のコードから呼びます。
+  タイミング、`event.every(ms, fn)`、そしてパルの `onTick` を駆動する低速スイープです。
+- チャンネルは 21 個です。13 個は名前の分かるネイティブ関数から届く LIVE、7 個はスキャンや
+  ループから PalForge が導出、残る 1 個 `skill.hit` は武装済みで一度も運んでいません。
+- 受理されるが呼ばれないフックは 3 つです。建築物の `onLeftClick` と `onBreak`（ダンプに
+  供給元がなく、チャンネル自体がありません）、そしてスキルの `onHit`。破壊には `onRemove`、
+  ヒットには `:hit(target)` を使ってください。
+- F9 はモジュールをすべて差し替えますが、武装済みフック・レジストリ・バス・建築物ランタイム
+  の状態は残します。繰り返し実行のコールバックが残っている間は拒否されます。
 
 次は [Building](/docs/api/building) を読むと、このページのランタイムを支える定義フィールドが
 わかります。

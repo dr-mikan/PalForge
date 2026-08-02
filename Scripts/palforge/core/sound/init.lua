@@ -17,8 +17,18 @@
 --
 -- CONTENT KNOWLEDGE STAYS OUT OF HERE. Turning an AkAudioEvent NAME into its asset path is a
 -- catalog lookup, and the catalog lives in native/audio.lua; api/audio.lua does it while
--- lowering, so a spec arriving here already carries whatever path is knowable. This module
+-- lowering, so a spec arriving here already carries whatever path is knowable. The same is true
+-- of NAMESPACE resolution: api/audio applies om.resolve to the id before it is lowered, so an
+-- id arriving here is already in the "packid_name" form the engine can be handed. This module
 -- only ever talks to the engine.
+--
+-- `kind = "file"` IS STILL DISPATCHED AND NOTHING NORMAL PRODUCES IT. Audio.Spec.soundFile is a
+-- hard error at define time now (it silently outranked a working soundId, which made adding it
+-- silence a sound that had been playing), so the only specs that arrive here with kind = "file"
+-- come from a hand-written `source` override or from a direct call to M.resolve. The branch
+-- stays because those two callers are real and are entitled to the same fail-soft `false`
+-- FileSource has always given them; see core/sound/file.lua for the evidence that there is
+-- nothing else to give.
 local NativeSource = require("palforge.core.sound.native")
 local FileSource   = require("palforge.core.sound.file")
 

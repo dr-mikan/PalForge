@@ -14,13 +14,31 @@
 -- ⚠️ THE TWO FRONT DOORS ARE NOT THE SAME DOOR, and picking the wrong one is how a key dies
 -- quietly.
 --
---   claim()    asks first. Esc is refused outright; a key the GAME has an action on is refused
---              unless the caller passed override = true; a key another part of PalForge already
---              holds is refused always. Everything a UI element asks for goes through here.
---   register() does not ask. It is how palforge.test deliberately takes F1 back for the test
---              runner and how a functions/ file installs a behaviour — a documented, intentional
---              replace. It now RECORDS what the game has on the key so the log can say so, but
---              it never refuses, because refusing would break the one caller that means it.
+--   claim()    asks first, and ACTS on the answer. Esc is refused outright; a key the GAME has an
+--              action on is refused unless the caller passed override = true; a key another part
+--              of PalForge already holds is refused always. Everything a UI element asks for goes
+--              through here.
+--   register() asks first and BINDS ANYWAY. It is how palforge.test deliberately takes F1 back
+--              for the test runner and how a functions/ file installs a behaviour — a documented,
+--              intentional replace — so refusing would break the one caller that means it and
+--              leave a dev-only bind with no way in.
+--
+-- ⚠️ register() DID NOT ASK AT ALL UNTIL 2026-08-02, and that is the gap this note records. All
+-- nine PalForge keys go through it; only claim() consulted the keymap, and claim()'s one caller
+-- is the UI seam (native/ui/keys.lua). So the F7 class of failure — the bind returns normally,
+-- the log says the probe is armed, and the key never once arrives — was still fully possible for
+-- a probe key, and M.report() made it VISIBLE after the fact rather than at the moment it
+-- happened. register() now consults M.isFree() before the engine bind and says what it found on
+-- the same line as "bound F4", so a key Palworld already owns is named in the log at bind time by
+-- the game's own action name. It still binds. The one exception is M.FORBIDDEN below, which is
+-- not a measurement and is not overridable by anything.
+--
+-- ⚠️ AND THE WARNING IS HONEST ABOUT WHAT THE KEYMAP CANNOT SEE. A `free` verdict here means "no
+-- action in Palworld's key config uses this key". F7 may well read `free` and still never arrive:
+-- the Steam overlay, the OS, UE's own console keys and hardcoded viewport bindings are all
+-- outside that config. keymap.lua's header sets out the whole of that limit; the point of asking
+-- is that "free and it still never arrived" is now a REPORTABLE finding about something else,
+-- instead of the unreadable `arrived = 0` it used to be.
 --
 -- WHERE THE ANSWER COMES FROM. core/keyboard/base/keymap.lua reads Palworld's own key config out
 -- of the running game — UPalOptionSubsystem.KeyConfigSettings (Pal.hpp:26132), the struct the
@@ -132,6 +150,16 @@ function M.status(keyName)
 end
 
 ---Is this key safe for a NEW binding — i.e. would claim() take it?
+---
+---The composed front door: `true` only for the one state claim() takes without an override, and
+---the status beside it so a caller that wants to bind anyway can say WHY it is binding anyway.
+---M.register() is that caller (it warns and binds); claim() does not use this because it has to
+---separate the four refusal cases and needs the status itself.
+---
+---⚠️ `false` IS NOT "SOMETHING HOLDS IT". It is "claim() would not take it", and that covers
+---`unknown` — no reading, or no Unreal FKey name — as well as `game`, `palforge` and `forbidden`.
+---A caller that treats a false as "the game has it" will misreport the title screen, where the
+---config source cannot be read at all. Branch on `status.state`, never on the boolean alone.
 ---@param keyName string
 ---@return boolean free, table status
 function M.isFree(keyName)
@@ -171,6 +199,12 @@ end
 -- and exactly what a UI panel must never do by accident. It is now logged as a warning naming
 -- BOTH descriptions when they differ, so a replacement anyone did not mean is visible in the log
 -- instead of being discovered by pressing F1 and getting somebody's panel.
+--
+-- ⚠️ AND IT NOW ASKS THE KEYMAP FIRST. See the header: this door bound nine keys without ever
+-- consulting the one thing in the tree that can answer "has Palworld already got this key". It
+-- still binds whatever it is given (bar M.FORBIDDEN) — that is what the door is for — but the
+-- answer is in the log at the moment of the bind, naming the game's own action, rather than only
+-- in M.report() if somebody thinks to run it.
 function M.register(keyName, fn, opts)
     if type(keyName) ~= "string" or #keyName == 0 or type(fn) ~= "function" then
         log.warn("register: expected (keyName:string, fn:function)")
@@ -178,6 +212,24 @@ function M.register(keyName, fn, opts)
     end
     keyName = keyName:upper()
 
+    -- ⚠️ THE ONE THING register() REFUSES, AND IT IS NOT THE KEYMAP'S ANSWER. M.FORBIDDEN is
+    -- PalForge's own mandate rather than a measurement — the player must always be able to close
+    -- the game's menu — and its own doc says "key names NOTHING in PalForge may bind" and "THIS
+    -- IS NOT OVERRIDABLE". Until 2026-08-02 only claim() honoured that, so the raw door could
+    -- bind the single name the list exists to protect, and the list's sentence was false about
+    -- half the module. The refusal names what it refused and why rather than returning a bare
+    -- false; nothing in this tree registers Esc, so this changes no existing call site.
+    local forbidden = M.FORBIDDEN[keyName]
+    if forbidden then
+        log.err(string.format("register REFUSED %s and bound nothing — this name is on "
+            .. "M.FORBIDDEN, which no front door in this module opens: %s", keyName, forbidden))
+        return false
+    end
+
+    -- The rebind path does NOT re-ask the keymap, deliberately: the engine binding is not being
+    -- made again, the game's answer for this key was already logged when it WAS made, and
+    -- palforge.test.bind re-registers on every F9 reload — asking there would repeat the same
+    -- sentence about the same key every reload and bury the one line that is new.
     local existing = M.bound[keyName]
     if existing then
         local was = (existing.opts and existing.opts.desc) or "no description"
@@ -194,11 +246,57 @@ function M.register(keyName, fn, opts)
         return true
     end
 
-    local rec = { key = keyName, fn = fn, opts = opts or {} }
+    -- ASK, THEN BIND. pcall'd end to end because this module is fail-soft by design (see the
+    -- header): a keymap that raises must never be the reason a dev key does not bind. `free` is
+    -- the documented "would claim() take it?" answer and it is what the bound line reports;
+    -- `st` carries which of the five cases held, which is what the warnings need.
+    local askedOk, free, st = pcall(M.isFree, keyName)
+    if not askedOk then free, st = nil, nil end
+
+    if st and st.state == "game" then
+        -- The warning the F7 session did not get. Naming the ACTION is the whole of its value:
+        -- "F7 is Palworld's volume key" is actionable and "F7 did not work" is not.
+        local parts = {}
+        for _, a in ipairs(st.actions or {}) do
+            parts[#parts + 1] = string.format("%s [%s%s]", a.action, a.via,
+                a.mods and ("+" .. a.mods) or "")
+        end
+        log.warn(string.format("%s IS ALREADY PALWORLD'S: %s. register() binds it anyway — that "
+            .. "is what this door is for — but both sit on one key now. A UE4SS keybind OBSERVES "
+            .. "and does not consume, so the game's own action still runs; and if the game claims "
+            .. "the key BELOW UE4SS the press never reaches Lua at all, which is what happened to "
+            .. "F7 (core/autorun.lua:19-22). reg.claim() is the door that refuses instead.",
+            keyName, table.concat(parts, ", ")))
+    end
+    if st and st.otherMod then
+        log.warn(string.format("%s already has a keybind registered by something else in this "
+            .. "process that is not PalForge's registry — another Lua mod, most likely. Both "
+            .. "callbacks will run; UE4SS has no unregister and no way to name the other holder.",
+            keyName))
+    end
+
+    local rec = { key = keyName, fn = fn, opts = opts or {}, game = st }
     M.bound[keyName] = rec
     local ok = install(rec)
     if ok then
-        log.info("bound " .. keyName)
+        -- The verdict rides on the "bound" line, so the log answers "and what does the game have
+        -- on it" in the same place it says the bind went in. `free` is deliberately not left
+        -- bare: it is the strongest thing the key config can say and it is still not a promise.
+        local verdict = "keymap: not asked — the check itself raised, which is a fault in "
+            .. "PalForge and not an answer about the key"
+        if free then
+            verdict = "keymap: free — no action in Palworld's key config uses it, which is NOT "
+                .. "the same as \"the press will arrive\""
+        elseif st and st.state == "game" then
+            verdict = "keymap: the game has it, see the warning above"
+        elseif st and st.state == "unknown" then
+            verdict = "keymap: unknown — " .. (st.fkey
+                and "the game's key config has not been read yet (the config source needs a "
+                    .. "loaded world), so nothing is claimed either way; run pf_keys inside a save"
+                or "PalForge knows no Unreal FKey name for this UE4SS name, so it cannot be "
+                    .. "looked up at all")
+        end
+        log.info(string.format("bound %s [%s]", keyName, verdict))
     else
         log.warn("could not bind " .. keyName .. " (keybinds unavailable this session): "
             .. tostring(rec.bindError))
@@ -363,8 +461,16 @@ end
 -- a file loaded twice self-registers once). Returns the count loaded.
 --
 -- It also arms the keymap's change watch, on world.ready rather than here — a key config that
--- is read once at load is wrong the moment the player opens the options screen, and this is the
--- one place every session passes through.
+-- is read once at load is wrong the moment the player opens the options screen.
+--
+-- ⚠️ AND THIS IS NOT "the one place every session passes through", WHICH IS WHAT THE LINE HERE
+-- USED TO SAY. load() is DEV-ONLY: its one caller is core/registry.lua inside `if env.dev`, so
+-- for the whole of a release build keymap.install() was never called, the change-watch never
+-- armed and no initial reading was ever taken. keymap.refresh() now installs itself on first
+-- demand (keymap.lua's M.install has the full note), which covers the release path — a pack
+-- declaring UI{ keys = ... } reaches native/ui/keys.arm -> M.claim -> keymap.status. The call
+-- below is kept because in a dev session it arms the watch at LOAD instead of at the first
+-- question, and keymap.install() is idempotent, so calling it from both places costs nothing.
 function M.load()
     local seen, order = {}, {}
     local function add(n) if n and not seen[n] then seen[n] = true; order[#order + 1] = n end end

@@ -11,11 +11,29 @@
 --                    naming rule; for this table it is the identity, because every one of the
 --                    2466 ids is already a Lua identifier.
 --   (c) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
---   (d) CURATED    — a few hand-written definitions with live lifecycle hooks.
+--   (d) M.publish(id) — register that handle with object_manager, on request. See below.
+--   (e) CURATED    — a few hand-written definitions with live lifecycle hooks.
 --
 -- Only the CURATED definitions call Item{ ... } at load, so only they self-register into
--- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- object_manager at mod start; a named field and get(id) both build on demand. That is why
 -- requiring this file never registers the thousands of catalog ids.
+--
+-- AND A READ NO LONGER REGISTERS EVEN THE ONE ROW IT TOUCHES (2026-08-02). M.get builds with
+-- `{ register = false }` (contract C2). The rule is the same in all six native catalogs and it
+-- was forced by the building one, where registration is not inert — a registered building def
+-- makes core/event track and PERSIST every matching actor in the world, so reading a field
+-- started writing to the player's save (native/buildings.lua's header has the measurement).
+-- Items persist nothing, but the gate is worth having in one shape rather than five: a catalog
+-- walk to fill a picker used to leave 2466 item classes in the registry that every namespaced
+-- lookup miss then walks, for content nobody declared.
+--
+-- WHAT REGISTRATION IS FOR HERE, so the opt-in is a choice rather than a ritual: a registered
+-- class is what core/event dispatches the item.use / item.obtain channels to (it looks the id
+-- up in object_manager), and what Item.get(id) hands back instead of fabricating a thin
+-- definition. A lazy catalog handle declares no handlers, so registering it changes nothing you
+-- can observe — which is why the CURATED three below, the ones that DO declare handlers, still
+-- register at load and a lazy one does not. Declaring your own Item{ id = "Wood", events = ... }
+-- registers, replaces, and is the documented way to be dispatched to.
 --
 -- WHAT A LAZY NATIVE HANDLE HONESTLY DOES. The three ACTIONS are the real thing and are
 -- measured (api/item.lua's ACTIONS block): :count reads the live inventory through the game's
@@ -25,7 +43,7 @@
 --
 -- The QUERIES are a different matter and must not be read as facts about the game:
 --   * :maxStack() answers 1 and :category() answers "material" for a lazy handle. Those are
---     Item.Spec's DEFAULTS (api/item.lua:136-140), not the row's MaxStackCount column. The real
+--     Item.Spec's DEFAULTS (api/item.lua:162-166), not the row's MaxStackCount column. The real
 --     values are DT_ItemDataTable row VALUES and reading a row value from Lua is still unsolved
 --     on this build — see the item-datatable-row-read marker in api/item.lua. Deliberately NOT
 --     papered over by guessing per-id numbers here: a made-up 9999 would be indistinguishable
@@ -476,22 +494,48 @@ M.ALIASES = aliases
 M.UNNAMED = unnamed
 
 -- get(id): an Item wrapper for ANY real catalog id, built on first use + cached; nil
--- if id is not a known item row. defining sets .id and registers into object_manager.
--- Reading a named field comes through here, so it is just as lazy.
+-- if id is not a known item row. Reading a named field comes through here, so it is just as
+-- lazy — and, since 2026-08-02, just as non-registering: `{ register = false }` is contract
+-- C2's publish gate (see the header). The handle is complete and cached; only object_manager
+-- is left out of it, until M.publish(id).
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Item{ id = id }
+    local h = Item({ id = id }, { register = false, pack = catalog.PACK })
     cache[id] = h
     return h
 end
 
--- ---- CURATED wrappers (real DT_ItemDataTable row ids) ----
+---Register this catalog's handle for `id` with object_manager: the opt-in half of the publish
+---gate. What it buys is named in the header — item.use / item.obtain dispatch resolving to this
+---class, and Item.get(id) finding it — and a lazy handle declares no handlers, so publishing one
+---is mostly of use to something that wants to see the catalog through Item.get_all().
+---
+---Idempotent, and it publishes the SAME handle the named field hands back. Returns nil for an id
+---this catalog does not have.
+---@param id string
+---@return Item.Handle?
+function M.publish(id)
+    local h = M.get(id)
+    if not h then return nil end
+    catalog.publish("item", h, "native.items")
+    return h
+end
 
+-- ---- CURATED wrappers (real DT_ItemDataTable row ids) ----
+--
+-- THESE THREE STILL REGISTER AT LOAD, and unlike native/buildings.lua's two that is defensible
+-- rather than an oversight: they declare real handlers, and core/event dispatches item.use /
+-- item.obtain by looking the id up in object_manager, so an unregistered one would never be
+-- called. Registering an item writes nothing anywhere — the persistence that made the building
+-- pair a release gate is the building runtime's, not the item one's. They register under the
+-- framework's own pack id (contract C3) so a pack that defines "Wood" replaces something whose
+-- previous owner can be named.
+--
 -- Wood — the vanilla wood material. onObtain fires via the CONFIRMED item.obtain dispatch
 -- (PalPlayerState:AddItemGetLog_ToClient, ctx.itemId=="Wood") when the player picks up /
 -- harvests wood; the log proves the obtain 導線 like Berries.onUse does for use.
-M.Wood = Item{
+M.Wood = Item({
     id          = "Wood",
     name        = "Wood",
     category    = "material",
@@ -501,12 +545,93 @@ M.Wood = Item{
             log.info("Wood onObtain: count=" .. tostring(ctx and ctx.count))
         end,
     },
-}
+}, { pack = catalog.PACK })
 
 -- Berries — the vanilla red-berry food (a consumable). onUse fires via the CONFIRMED
 -- item.use dispatch (UseItemToCharacter_ServerInternal, ctx.itemId=="Berries"); the log
 -- proves the item lifecycle 導線 like the ChickenPal demo does for pals.
-M.Berries = Item{
+--
+-- THE HANDLER OBSERVES; IT DOES NOT FEED ANYONE. The berry restores satiety because the GAME's
+-- own consumable route restores it — UseItemToCharacter_ServerInternal is the call PalForge
+-- HOOKS, not one it makes — so this handler runs alongside that and adds a log line. It is a
+-- lifecycle demo, and it is worth being exact about which half is PalForge's.
+--
+-- TODO(item-satiety-write): a pack cannot declare an item that FEEDS or HEALS by its own rules.
+-- This marker used to say no accessor had ever been found. That was wrong and is corrected
+-- here — the accessors are in the dumps this tree already ships, and what is actually missing is
+-- one unread parameter list.
+--
+-- WHAT A PACK AUTHOR SEES. Item.Spec carries nine fields — id, name, description, category,
+-- maxStack, icon, recipe, events, data — and not one of them is a restore amount, so the only
+-- way to react to a use is `events.onUse`, which is handed a ctx and whose return value is
+-- discarded. The berry above restores satiety because the GAME restores it: item.use is
+-- dispatched off UseItemToCharacter_ServerInternal, a call PalForge HOOKS rather than makes. So
+-- an author's own food item logs, and the bar moves only when the row it named was already a
+-- consumable. There is no way to write "restores 40 satiety" and have it mean anything.
+--
+-- THE SINGLE UNKNOWN FACT: what argument `SetFullStomach` takes. The live reflection listing
+-- names it on /Script/Pal.PalIndividualCharacterParameter
+-- (dumps/reflection/02_reflection.txt:1298, inside the class block that opens at :1107), and
+-- that is the SAME object core.character.paramsOf(actor) already hands back — through
+-- PalUtility::GetIndividualCharacterParameterByActor (dumps/cxx/Pal.hpp:32340), a route this
+-- tree proved by reading a real pal's four move lists. But the CXX dump's class body for it
+-- (Pal.hpp:20822-21161) declares only the READERS — GetMaxFullStomach (:21095),
+-- GetFullStomachRate (:21106), GetFullStomach (:21108). The setter is reflected and undeclared,
+-- so its parameter list has never been read and core/signature has nothing to check a call
+-- against. That is the whole of the gap.
+--
+-- HP IS A SEPARATE AND WORSE CASE, kept apart because the two fail for different reasons. The
+-- HP writes ARE declared: UPalCharacterParameterComponent::SetHP (Pal.hpp:15933) and ::AddHP
+-- (:16018), and UPalIndividualCharacterParameter::AddHP (:21156). All three take FFixedPoint64,
+-- which is a STRUCT — `{ int64 Value; }`, Pal.hpp:120-124 — and a struct argument is the shape
+-- that faults inside UE4SS marshalling where pcall cannot see it. That is the same refusal that
+-- gates core/spawn.lua:152's M.actor and that ended ui-menubutton-inner-slot. The one exception
+-- is ::AddHPByRate(float Rate) (Pal.hpp:16016): a single plain float, no struct, callable today,
+-- and never once called.
+--
+-- WHAT MEASURES IT — test/hooks/item_satiety_write.lua, declared as the hook `item-satiety-write`
+-- and written to this paragraph. It needs a loaded world and a player pawn, it declares
+-- writes = true, and it therefore runs only with `env.debugHooks["item-satiety-write"] = true`
+-- set in Scripts/palforge_dev.lua, on a throwaway save. Run it with `pf_hook item-satiety-write`
+-- in the UE4SS console, or by uncommenting `20 pf_hook_item_satiety_write` in autorun.txt.
+-- The order below is the order it runs, and no other:
+--   1. read GetFullStomach (Pal.hpp:21108) / GetMaxFullStomach (:21095) / GetMaxHP (:21094) /
+--      GetHP (:21102) off core.character.paramsOf(pawn) and print all four. Pure reads on a
+--      proved route; if they do not answer, nothing below is worth attempting. Note the return
+--      TYPES differ and the hook must say which it got: the three floats and the int32 come back
+--      as numbers, but GetHP returns FFixedPoint64, so what arrives is the struct and the number
+--      is behind its one `Value` field. A struct RETURN is not the marshalling hazard a struct
+--      ARGUMENT is — nothing is being pushed — but it is the difference between reading an HP
+--      and reading a wrapper, which is the same trap RemoteUnrealParam set for the icon column.
+--   2. ask core/signature to DESCRIBE SetFullStomach on that live object — the parameter walk,
+--      not a call — and print the parameter list the running build reports. That list IS the
+--      finding, and it is the one thing the CXX dump cannot supply.
+--   3. call AddHPByRate(-0.1) and read GetHP back. One float, so it is the safe write, and it
+--      settles whether this surface writes at all independently of the struct question.
+--      ⚠️ ON A DIFFERENT OBJECT FROM STEPS 1-2, and the hook found this out the hard way round:
+--      AddHPByRate is declared on UPalCharacterParameterComponent (Pal.hpp:16016), the component
+--      hanging off the actor (APalCharacter::CharacterParameterComponent, :8960; getter at
+--      :9078), NOT on the individual parameter object. Asking the wrong one of the two is how a
+--      present function reads as absent.
+--   4. ONLY IF step 2 reported a non-struct parameter list, call SetFullStomach and read back.
+--      ⚠️ Nothing taking FFixedPoint64 may be called here. A wrong-typed argument is the single
+--      failure shape pcall cannot see, and it has closed the game in this tree before.
+--      When step 2 could not read the list — the setter is absent, or this UE4SS build will not
+--      walk a UFunction's properties — the hook REFUSES step 4 and says which of the two it was.
+--      That refusal, with the build's own words in it, is a complete answer for this item: it
+--      turns "nobody has tried" into a named limitation.
+--
+-- IS THE CURRENT RETURN HONEST? Yes, and that is why this is a missing capability rather than a
+-- defect. No field and no method on the item surface claims to feed or heal; the handler below
+-- returns nothing and the paragraph above it says exactly which half of the berry's effect is
+-- PalForge's. The honesty risk is entirely in the future: an `Item.Spec.restores` field added
+-- before step 4 answers would be a promise this build has not been shown to keep.
+--
+-- (For the record, since the old text leaned on a grep: Satiety / FullStomach / HP / Health
+-- across core/, api/ and utils/ hits THREE places today, not two, and none of them is a write —
+-- core/status.lua:62's GainHP and :98's HPLock are EPalStatusID enum VALUES, i.e. names for
+-- ailment slots, and api/pal.lua:200 is the doc string of the onDeath event.)
+M.Berries = Item({
     id          = "Berries",
     name        = "Red Berries",
     category    = "consumable",
@@ -514,22 +639,21 @@ M.Berries = Item{
     events = {
         onUse = function(self, ctx)
             log.info("Berries onUse: target=" .. tostring(ctx and ctx.actor))
-            -- TODO: restore satiety/health through the native gameplay layer.
         end,
         onObtain = function(self, ctx)
             log.info("Berries onObtain: count=" .. tostring(ctx and ctx.count))
         end,
     },
-}
+}, { pack = catalog.PACK })
 
 -- Arrow — vanilla bow ammunition (siblings in the table include Arrow_Fire,
 -- Arrow_Poison, both CATALOG members).
-M.Arrow = Item{
+M.Arrow = Item({
     id          = "Arrow",
     name        = "Arrow",
     category    = "ammo",
     maxStack    = 999,
-}
+}, { pack = catalog.PACK })
 
 -- Pre-seed curated so get(id) returns the curated handle (hooks intact). All three are named
 -- exactly as their row is, so the curated field and the named field are the same field — the

@@ -81,10 +81,12 @@ PalForge finishes loading by putting itself on a global called `_G.PalForge`:
 
 ```lua
 _G.PalForge = {
-    env    = env,                       -- { dev, name, version }
+    env    = env,                       -- dev, debug, name, version, gameBuild, multiplayer
     api    = require("palforge.api"),   -- Pal, Item, Building, Skill, Effect, Audio, Mesh, UI, Player
+    pack   = api.pack,                  -- the SCOPED surface: PalForge.pack("beacon").Item{ ... }
     utils  = { log, json, file, items },
-    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons },
+    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons,
+               uobject, assetpath },
     native = require("palforge.native"),
 }
 ```
@@ -92,6 +94,24 @@ _G.PalForge = {
 Your pack reads that table, and it is everything the pack needs from PalForge. `api` is what
 you write content against, `utils.log` prints to the game's console, `core.event` is the event
 bus, and `native` is Palworld's own content listed out as catalogs you can look ids up in.
+
+**Write your pack against `PalForge.pack("beacon")` rather than against `api` directly.** It
+hands back the same nine members, with the eight constructors wrapped so that every definition
+made through them records `beacon` as its owner. That ownership is what turns an id collision
+from a silent overwrite into a log line naming both packs, and it is the only way the framework
+can attribute a definition at all — a define call is a plain Lua call and carries no evidence of
+who made it. A pack that skips it still works; its content simply registers with no owner.
+
+```lua
+local api = _G.PalForge.pack("beacon", { depends = { "otherpack" } })
+local Item = api.Item
+
+Item{ id = "beacon:Potion" }        -- registered with pack = "beacon"
+```
+
+`depends` (and `recommends`) record the namespaces this pack may mention in a value, so an id
+from someone else's namespace is either declared or reported. `Player` is the one member that
+is not wrapped: it defines nothing, so there is nothing to attribute.
 
 ```mermaid
 flowchart TD
@@ -214,7 +234,7 @@ path that actually plays, and `soundId` is the fallback lookup by name.
 
 ```lua title="Scripts/beacon/audio.lua"
 -- beacon.audio — the sounds this pack plays.
-local api   = _G.PalForge.api
+local api   = _G.PalForge.pack("beacon")
 local log   = _G.PalForge.utils.log.scope("beacon.audio")
 local Audio = api.Audio
 
@@ -242,10 +262,12 @@ return M
 music and sound effects both play through the same call.
 
 <Callout type="warn">
-Two things here are not what the name suggests, so plan around them. A `soundFile` — your own
-audio file — is accepted and then does nothing, so use a game `AkAudioEvent` from the catalog
-instead. And neither `Handle:stop` nor `Handle:setVolume` is per sound: both act on everything
-playing on that actor, so to make one sound quieter than another, pick a quieter event.
+`soundFile` — an audio file of your own — is refused at define time, with an error naming the
+open item `audio-custom-file-loader`. Custom audio does not play on this build: the UE-native
+route has no importer that survives shipping, and the Wwise route rebinds media the cook already
+staged rather than reading a file. Name a game sound instead. And neither `Handle:stop` nor
+`Handle:setVolume` is per sound: both act on everything playing on that actor, so to make one
+sound quieter than another, pick a quieter event.
 </Callout>
 
 </Step>
@@ -259,7 +281,7 @@ advances it on a shared 500 ms heartbeat until it runs out or you remove it.
 
 ```lua title="Scripts/beacon/effects.lua"
 -- beacon.effects — the blessing the beacon hands out.
-local api    = _G.PalForge.api
+local api    = _G.PalForge.pack("beacon")
 local log    = _G.PalForge.utils.log.scope("beacon.effects")
 local Effect = api.Effect
 local Item   = api.Item
@@ -323,7 +345,7 @@ only when you want to put a different one on it.
 
 ```lua title="Scripts/beacon/pals.lua"
 -- beacon.pals — the guardian the beacon calls.
-local api = _G.PalForge.api
+local api = _G.PalForge.pack("beacon")
 local log = _G.PalForge.utils.log.scope("beacon.pals")
 local Pal = api.Pal
 
@@ -372,7 +394,7 @@ key anything per-creature by `ctx.actor` yourself. Change the pace with
 
 ```lua title="Scripts/beacon/items.lua"
 -- beacon.items — the reward the beacon pays out.
-local api  = _G.PalForge.api
+local api  = _G.PalForge.pack("beacon")
 local log  = _G.PalForge.utils.log.scope("beacon.items")
 local Item = api.Item
 
@@ -396,7 +418,12 @@ M.Reward = Item{
     },
     events = {
         onObtain = function(item, ctx)
-            log.info("reward obtained x" .. tostring(ctx.count))
+            log.info("reward obtained x" .. tostring(ctx.count) .. " via " .. tostring(ctx.via))
+        end,
+        onCraft = function(item, ctx)
+            -- Fired when a production finishes at a real machine. ctx.count is absent: the
+            -- per-craft count lives in the recipe row, not on the hook.
+            log.info("reward crafted from recipe " .. tostring(ctx.recipeId))
         end,
     },
 }
@@ -404,12 +431,16 @@ M.Reward = Item{
 return M
 ```
 
-<Callout type="warn">
-`onObtain` follows the game's own "you obtained an item" log
-(`PalPlayerState:AddItemGetLog_ToClient`), which fires on pickups, loot and rewards. An
-inventory add that does not show up in that log is not covered, so do not count on your own
-`:give` call coming back to you as an `onObtain` — log it where you call it instead.
-`onCraft` and `onDiscard` can be declared, but nothing sends them yet.
+<Callout type="info">
+All four item handlers are live. `onObtain` has two sources, deduped into one event:
+the game's own "you obtained an item" log (`PalPlayerState:AddItemGetLog_ToClient`,
+`ctx.via = "getlog"`) and the inventory add (`PalPlayerInventoryData:AddItem_ServerInternal`,
+`ctx.via = "additem"`) — both are armed because they fail in opposite directions, and `ctx.via`
+says which one carried this one. `onCraft` fires when a production finishes at a real machine
+(`ctx.itemId`, `ctx.recipeId`, `ctx.via = "convert" | "product"`); `ctx.count` is deliberately
+absent, because the per-craft count lives in the recipe row and a hook is no place for a data
+table read. `onDiscard` fires on a drop or a dispose (`ctx.itemId`, `ctx.count`,
+`ctx.reason = "drop" | "dispose"`).
 </Callout>
 
 </Step>
@@ -425,7 +456,7 @@ exactly the gate the beacon wants.
 ```lua title="Scripts/beacon/skills.lua"
 -- beacon.skills — the signal the beacon fires. :activate runs the handler now and refuses
 -- while the skill is still cooling down, so the beacon gets its rate limit for free.
-local api     = _G.PalForge.api
+local api     = _G.PalForge.pack("beacon")
 local log     = _G.PalForge.utils.log.scope("beacon.skills")
 local Skill   = api.Skill
 local audio   = require("beacon.audio")
@@ -472,7 +503,7 @@ table of your own that gets saved, `self.key` its stable name in the save file, 
 
 ```lua title="Scripts/beacon/buildings.lua"
 -- beacon.buildings — the structure the player interacts with.
-local api      = _G.PalForge.api
+local api      = _G.PalForge.pack("beacon")
 local log      = _G.PalForge.utils.log.scope("beacon.buildings")
 local Building = api.Building
 local items    = require("beacon.items")
@@ -562,8 +593,9 @@ Start the game with both mods enabled, load a world, place an Altar and interact
 UE4SS console tells the whole story:
 
 ```text
-[PalForge.main][info] PalForge v0.3.0 starting (dev=true)
-[PalForge.registry][info] initialized (dev=true, 12 class(es) registered)
+[PalForge.main][info] PalForge v0.3.0 starting | game build: declared v1.0.2.101103, live v1.0.2.101103 (PalGameSetting) | dev=true debug=true | dev overlay: Scripts/palforge_dev.lua
+[PalForge.main][info] PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not supported and are not tested: there is no replication layer, and the item, spawn and event routes are all client-authoritative. A pack may appear to work for the host and do nothing for anyone else.
+[PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
 [PalForge.beacon][info] loading against PalForge v0.3.0
 [PalForge.beacon][info] loaded
 [PalForge.event][info] world ready - building dispatch enabled
@@ -662,15 +694,20 @@ Check this before you design around a handler.
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
 | Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()` (the pal arrives seconds later), `:renderOn(actor)`, `:skillsOf()`, `:teachAll(actor)` |
-| Item | `onObtain`, `onUse` | `:count()`, `:give(n)`, `:take(n)` (consumes; needs the player to have something equipped), `:iconOf()`, `:recipeOf()` |
+| Item | `onObtain`, `onUse`, `onCraft`, `onDiscard` | `:count()`, `:give(n)`, `:take(n)` (consumes; needs the player to have something equipped), `:iconOf()`, `:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`, on PalForge's own schedule | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
 | Skill | nothing | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | nothing | `:play()`, `:stop()` |
 
-Four handlers can be declared but never run yet, because nothing in the game announces them:
-`Building.onLeftClick`, `Building.onBreak`, `Item.onCraft` and `Item.onDiscard`. Use
-`onRightClick` and `onRemove` for a structure, and `onObtain` and `onUse` for an item. They
-stay declarable so your pack does not have to change if a source turns up.
+Two handlers can be declared and never run: `Building.onLeftClick` and `Building.onBreak`.
+That is a settled negative rather than a gap yet to be filled — the complete function lists of
+every class that could own one were read. `PalBuildObject` has 22 functions and no click, hit
+or strike entry; the one damage-shaped entry fires on a 12-13 second deterioration timer with
+no player anywhere near the structure; and destruction exists only as delegate *fields*, which
+`RegisterHook` cannot address by path. Use `onRightClick` for interaction, and `onRemove` with
+`ctx.reason = "missing"` for a structure that disappeared — which cannot tell a dismantle from
+a streamed-out chunk. Both stay declarable so a pack's own emit works and a future source has
+somewhere to arrive.
 
 `Building.onBuild` runs when a structure finishes building, up to one scan before its live
 object exists. It is the one building handler whose `self` is the definition rather than the
@@ -686,9 +723,13 @@ scan misses it. Per-structure startup work belongs in `onLoad`, where `ctx.recon
 tells you the structure came back from the save. You can also subscribe to the channel
 yourself with `event.on("world.ready", fn)`.
 
-`Pal.onSpawned` is wired to `BroadcastOnCompleteInitializeParameter`, a candidate hook rather
-than a confirmed one, and PalForge arms it only after the world has loaded. Treat it as best
-effort and keep the handler safe to run twice.
+`Pal.onSpawned` is armed on three sources, all of them only after the world has loaded — the
+same signal fires in the load storm for every pal already in the world, and arming it at
+startup wedged the shared hook dispatch. `BroadcastOnCompleteInitializeParameter` was measured
+carrying nothing in a real save, so the two that do the work are the delegate targets bound to
+it: `PalPlayerCharacter:OnCompleteInitializeParameter` (which only fires for characters the
+player subscribed to) and `PalNPC:OnCompletedInitParam` (bound on the pal's own side, so it
+does not depend on anyone subscribing). Keep the handler safe to run twice.
 
 ## Variations
 
@@ -699,7 +740,7 @@ wear it. Add a module:
 
 ```lua title="Scripts/beacon/meshes.lua"
 -- beacon.meshes — named visuals, so a model is declared once and reused by id.
-local api  = _G.PalForge.api
+local api  = _G.PalForge.pack("beacon")
 local Mesh = api.Mesh
 
 local M = {}
@@ -757,8 +798,12 @@ build menu:
 _G.PalForge.api.Building.get("beacon:Beacon"):unlock()
 ```
 
-That call needs `PalCheatManager` to already exist in the session, so it wants the
-CheatManagerEnabler mod.
+That call needs a `PalCheatManager` to already exist in the session, so it wants the
+CheatManagerEnabler mod — unlike the spawn route, which builds one on the player controller
+itself when there is none. The unlock goes through the item helper's own lookup, and that one
+asks for a cheat manager rather than constructing one. It also verifies afterwards: a technology
+row of that name has to exist, or the log says the call was issued with nothing to unlock and
+`unlock()` answers `false`.
 
 ### Add a debug module
 
@@ -821,6 +866,14 @@ A missing required field, with that field's own documentation as the explanation
 PalForge: Building: field "id" is required (build id: a game BuildObjectId ("PalBoxV2") or "pack:name")
 ```
 
+And the id's own shape, checked at define time. A namespaced id resolves to the data table row
+name `packid_name`, so both halves have to be letters, digits or `_` — a hyphen would define and
+register and then never resolve to anything:
+
+```text
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
 You can read the same information at runtime instead of guessing:
 
 ```lua
@@ -851,9 +904,12 @@ your own handler raised.
 **The effect ticks but nothing changes.** An effect runs its own schedule, not the game's
 status system. Whatever should happen belongs in `onTick`.
 
-**Two definitions, one id.** Registering the same id twice for the same kind of content
-replaces the earlier one, so the last definition to run wins. Define at load, and reach for
-`X.get(id)` inside handlers rather than redefining on every event.
+**Two definitions, one id.** The last definition to run still wins, but the registry says so
+now instead of overwriting in silence — and if the two came from different packs it names both:
+`item 'mypack:Potion' was defined by pack 'mypack' and is being redefined by pack 'other'; the
+new definition replaces the old one (last-wins)`. That line only exists when a pack said who it
+was, which is what `PalForge.pack("beacon")` is for. Define at load, and reach for `X.get(id)`
+inside handlers rather than redefining on every event.
 
 ## Where to go next
 
@@ -897,8 +953,11 @@ replaces the earlier one, so the last definition to run wins. Define at load, an
 
 - A pack is its own mod folder with a `Scripts/main.lua`. It reads `_G.PalForge`, requires its
   own modules, and each `X{ ... }` call inside them registers that content as the file loads.
-- `id` is the only required field anywhere. An id with a colon (`"beacon:Flare"`) is your own;
-  an id without one (`"Altar"`, `"Ruby"`, `"Kitsunebi"`) is content the game already has.
+- Take the api from `PalForge.pack("beacon")`, not from `PalForge.api`: it is the same nine
+  members, and every definition made through it records which pack owns it.
+- `id` is the only required field anywhere, and its shape is checked when you define. An id
+  with a colon (`"beacon:Flare"`) is your own; an id without one (`"Altar"`, `"Ruby"`,
+  `"Kitsunebi"`) is content the game already has. Both halves are letters, digits or `_`.
 - A placed building is the one thing that gets its own live object. `self.state` is your table
   and `self:save()` writes it to the world file, so it is still there next session.
 - Buildings, pals and items get their handlers called by the game. You fire skills and sounds

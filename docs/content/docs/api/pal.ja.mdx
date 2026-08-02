@@ -88,7 +88,7 @@ pals.SheepBall             -- the curated SheepBall demo definition
       type: 'string[]',
     },
     mesh: {
-      description: 'スポーンしたポーンに付けるメッシュ。インライン、または Mesh ハンドル',
+      description: 'スポーンしたポーンが身にまとうメッシュ。pal.spawned で自動的に装着されます。インライン、または Mesh ハンドル',
       type: 'Mesh.Spec',
     },
     material: {
@@ -100,12 +100,12 @@ pals.SheepBall             -- the curated SheepBall demo definition
       type: 'table',
     },
     texture: {
-      description: 'メッシュに適用する png のパス。material.texture のショートハンド',
+      description: 'メッシュに適用する /Game/... のテクスチャアセットパス、または png の絶対パス。material.texture のショートハンド',
       type: 'string',
     },
     icon: {
-      description: 'DataTable 検索が外れたときに使うフォールバックアイコン',
-      type: 'any',
+      description: 'アイコン DataTable にこの id の行が無いときに使う /Game/... のテクスチャパス',
+      type: 'string',
     },
     events: {
       description: 'ライフサイクルハンドラをまとめたもの',
@@ -167,18 +167,30 @@ Pal{ id = "ChickenPal", mesh = Mesh.get("example:sheep_body") }
 `model`（必須）、`animClass`（skeletal のみ）、`scale`、`offset`、`texture`、`color`、`material`、
 `params` です。`obj` は procedural バックエンドの別名です。
 
-メッシュを書いただけでは、どこにも付きません。装着は `:renderOn(actor)` で自分から行います。
-ふつうは `onSpawned` の中です。`onSpawned` は、パルがワールドに出終わったときに走るハンドラです。
+書いたメッシュは自分で装着されます。`Pal{ ... }` は定義の `onSpawned` を包み、その id のポーン
+1 体ごとに、あなたのハンドラより先に `pal.spawned` チャンネルで `renderOn` を走らせます。
+つまり、メッシュを書くことがそのまま装着です。
 
 ```lua
 Pal{
     id   = "ChickenPal",
-    mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal" },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+    mesh = {
+        kind      = "skeletal",
+        model     = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal",
+        animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C",
     },
 }
 ```
+
+`pal.spawned` は、そのポーンの `.Mesh` コンポーネントが実体になる最も早い瞬間です。装着が
+`onTick` の巡回ではなくこのチャンネルに乗っているのはそのためで、メッシュは一度設定すれば
+足りるのに、巡回では 3 秒ごとにその代金を払い続けることになるからです。装着は `attachOnce`
+を通るので、1 体のポーンに 2 回目のスポーンイベントが来てもメッシュが二重に載ることはなく、
+全体が `pcall` の中にあるので、解決できない `model` のパスはログ 1 行で済み、パルの
+ライフサイクルを止めません。
+
+`:renderOn(actor)` を自分で呼ぶのは、PalForge がスポーンさせていないポーン、`onTick` の巡回で
+見つけたポーン、そして `detach` のあとに付け直すときです。
 
 ### material、color、texture
 
@@ -188,7 +200,7 @@ Pal{
 <TypeTable
   type={{
     color: { description: '色味 r, g, b, a を 0..1 で', type: 'table' },
-    texture: { description: 'メッシュに適用する png の絶対パス', type: 'string' },
+    texture: { description: 'メッシュに適用する /Game/... のテクスチャアセットパス、または png の絶対パス', type: 'string' },
     params: { description: 'そのまま渡される追加マテリアルパラメータ', type: 'table' },
     material: { description: 'インスタンス化のベースになるマテリアルのアセットパス', type: 'string' },
   }}
@@ -213,23 +225,33 @@ Pal{
     mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall" },
     material = {
         color    = { r = 0.2, g = 0.5, b = 1.0, a = 1.0 },
-        texture  = "C:/mods/example/sheep.png",
-        material = "/Game/.../M_YourBaseMaterial",
-        params   = { Roughness = 0.2 },
+        texture  = "/Game/Pal/Model/Other/AttackHelicopter/Material/T_AttackHelicopter_B.T_AttackHelicopter_B",
+        material = "/Game/.../MI_YourBaseMaterial",
+        params   = { scalar = { ["Roughness Add"] = 0.2 } },
     },
 }
 ```
 
 `params` とベースマテリアルのパスには、トップレベルの短い書き方がありません。これらは
-`material` の中にだけあります。
+`material` の中にだけあります。`params` が `vector` / `scalar` / `texture` に分かれているのは、
+その先にあるエンジン側の 3 つのセッターがそう分かれているからです。
+
+パル側の `texture`（どちらの書き方も）は、書いたままレンダラーに届きます。プレイヤーのディスクに
+ファイルを置く必要がない `/Game/...` のテクスチャアセットか、自分で用意した png の絶対パスです。
+パックのディレクトリからの相対パスが解決されるのはメッシュ自身の `texture` フィールドだけで、
+ここではありません。
 
 <Callout type="warn">
-この 4 つのフィールドが実際に色を塗るのは、procedural と `obj` のバックエンドだけです。パルの
-メッシュの既定である `kind = "skeletal"` はクリーチャーのモデルを差し替えるだけで、それ以外は
-読みません。`static` も何も塗りません。skeletal のメッシュに添えて書いた `color` や `texture` は
-`core.mesh` まで運ばれますが、そこでは何も起きません。このバックエンドで `:renderOn` が `true` を
-返しても、それはモデルが差し替わったという意味で、塗られたという意味ではありません。
-バックエンドの一覧は [Mesh](/docs/api/mesh) にあります。
+この 4 つのフィールドは skeletal を含むすべてのバックエンドに届きます。マテリアルの処理は
+`core/mesh/base/renderer.lua` にあり、どのバックエンドもそれを呼ぶので、`kind = "skeletal"` の
+メッシュに添えて書いた `color` も、ダイナミックマテリアルインスタンスを通じてそのポーン自身の
+マテリアルスロットに書き込まれます。
+
+`:renderOn` の `true` が言わないのは、見た目が変わったかどうかです。書き込むパラメータ名は
+動いているゲームから読み取った実在の名前ですが（`BaseColor`、`Base Texture`、`Normal Map` など。
+一覧は [Mesh](/docs/api/mesh) にあります）、マテリアルが持っていない名前への書き込みは黙って
+何もしません。そして、パルの色が実際に変わるところはまだ誰も見ていません。`true` は
+「メッシュが差し替わり、マテリアルの書き込みが走った」と読んでください。
 </Callout>
 
 ### skills
@@ -257,14 +279,25 @@ end
 ### icon
 
 `:iconOf()` はゲーム自身のパルアイコンのテーブル（`DT_PalCharacterIconDataTable`、次に
-`DT_PalCharacterIconDataTable_Common`）を id で引き、`SoftIcon`、`IconName`、`IconTexture`、
-`Icon`、`Texture` の順に列を見て、最初に中身があったものを返します。テーブルが無い・行が無い・
-読める列が無いなど、どこで外れても、書いておいた `icon` が返ります。検索には生の id を使うので、
-名前空間付きの `"example:Boss"` は行に一致せず、必ずフォールバックします。
+`DT_PalCharacterIconDataTable_Common`）を id で引き、`Icon` 列を読みます。この列名は推測では
+なく実測です。ロード済みのセーブで 4 つのアイコンテーブルをまとめて読んだところ、パルは
+674 行中 674 行、アイテムは 1207 行中 1183 行、ビルディングは 571 行中 567 行、パートナー
+スキルは 311 行中 311 行が答えました。パルとアイテムは `Icon`、ビルディングは `SoftIcon`、
+パートナースキルは `TextureID_8_2B2F889C43EB586246BDB981B6462ACA` がその列です。返ってくるのは
+常に `/Game/...` のアセットパスという 1 種類の文字列で、エンジンのオブジェクトではありません。
+
+id は検索の前に解決されるので、`"example:Boss"` は行の綴りである `example_Boss` として引かれ、
+その行が存在すれば生きたテーブルに届きます。解決できない id はリテラルのまま引かれます。
+テーブルが無い・行が無い・値が無い、いずれで外れても、書いておいた `icon` が返り、書いて
+いなければ `nil` が返ります。
+
+行の照合は大文字小文字を区別します。しかもこのビルドでは 1 体のクリーチャーに 2 つの綴りが
+実在します。ディスパッチがキーにするブループリント id は `SheepBall`、この検索が答える
+DataTable の行は `Sheepball` です。
 
 ```lua
 local pal = Pal{ id = "example:Boss", icon = "/Game/.../T_icon_example_boss" }
-pal:iconOf()   -- the declared icon, since the DataTable has no "example:Boss" row
+pal:iconOf()   -- the row "example_Boss" if PalSchema wrote one, else the declared icon
 ```
 
 ### data
@@ -302,7 +335,7 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 
 | フック | チャンネル | ネイティブソース | ctx | 状態 |
 | --- | --- | --- | --- | --- |
-| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE。未確認のフックで、ワールドのロード後に有効化 |
+| `onSpawned` | `pal.spawned` | `PalNPC:OnCompletedInitParam` と `PalPlayerCharacter:OnCompleteInitializeParameter` | `ctx.actor` | LIVE。発火を確認済み。ロード時ではなく `world.ready` で有効化 |
 | `onDamaged` | `pal.damaged` | `PalCharacter:OnDamageReaction` | `ctx.actor` | LIVE |
 | `onDeath` | `pal.death` | `PalCharacter:OnDeadCharacter` | `ctx.actor` | LIVE |
 | `onCaptured` | `pal.captured` | `PalCharacterParameterComponent:SetIsCapturedProcessing`（`started == true` のとき） | `ctx.actor`、`ctx.comp` | LIVE |
@@ -312,6 +345,17 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 パラメータコンポーネント側で発火するため、アクターはそのコンポーネントの持ち主、`ctx.comp` は
 コンポーネント自身になります。`onDamaged` はダメージを**受けた**パルで発火し、攻撃した側では
 発火しません。ゲーム側のフックが誰の攻撃かを持っていないためです。
+
+`pal.spawned` のソースが 2 つあるのは、いちばん素直なソースが何も運ばないからです。
+`PalCharacter:BroadcastOnCompleteInitializeParameter` は「キャラクターがパラメータ初期化を
+終えた」ことを知らせる関数で、フックの登録自体は問題なく通ります。それでも、他の 10 本の
+チャンネルが報告している実セーブの中で、この 1 本は**沈黙**したまま計測されました。フックが
+見られるのは `ProcessEvent` が実行するものだけで、ブロードキャストする側はそこに現れません。
+そこで PalForge が待ち受けるのは、そのブロードキャストが呼び出すデリゲートの**ターゲット**
+2 つです。パル自身の側で必ず通る `PalNPC:OnCompletedInitParam` と、プレイヤーが購読した
+キャラクターについて発火する `PalPlayerCharacter:OnCompleteInitializeParameter` です。どちらも
+2026-07-26 に発火が観測されています。2 つはアクターごとに 1 秒の窓で重複が除かれるので、
+1 体のポーンが両方に届いてもイベントは 1 回です。
 
 捕獲に反応してプレイヤーに何かを返すハンドラです。
 
@@ -556,15 +600,20 @@ pal:renderOn(actor)
 同じアクターにもう一度呼んでも害はありません。アクターが有効でないとき、定義にメッシュが無いとき、
 そのメッシュに `model` が無いときは、何もせず `false` を返します。
 
+**通常このメソッドを呼ぶ必要はありません。** `mesh` を書いた定義は、自分で `pal.spawned` の
+タイミングで装着します。こちらは手動の経路です。PalForge がスポーンさせていないポーン、
+`onTick` の巡回で見つけたポーン、`detach` のあとに付け直す場合に使います。`onSpawned` から
+重ねて呼んでも害はありません。ガードのおかげで、2 回目の呼び出しは既に付いているメッシュを
+見つけるだけです。
+
 ```lua
+-- reach the sheepballs that were already standing there when the pack loaded
 Pal{
     id   = "SheepBall",
     mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall" },
     events = {
-        onSpawned = function(pal, ctx)
-            if not pal:renderOn(ctx.actor) then
-                require("palforge.utils.log").scope("example").warn("no mesh attached")
-            end
+        onTick = function(pal, ctx)
+            pal:renderOn(ctx.actor)   -- one-shot per pawn: the dressed ones cost nothing
         end,
     },
 }
@@ -587,15 +636,13 @@ Pal{
         model     = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall",
         animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/SheepBall/ABP_SheepBall.ABP_SheepBall_C",
     },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
-    },
 }
 ```
 
 `true` は、バックエンドのセッターが走ったという意味です。skeletal バックエンドなら、クリーチャー
-自身のコンポーネントにモデルが設定された、ということです。その結果何が描画されるかまでは、この
-呼び出しでは分かりません。
+自身のコンポーネントにモデルが設定され、そこから読み戻せた、ということです。その結果何が描画
+されるかまでは、この呼び出しでは分かりません。マテリアルへの書き込みが、そのマテリアルが実際に
+持っているパラメータに当たったかどうかも同じです。
 
 ### teachAll
 
@@ -633,7 +680,7 @@ local taught, asked = Blaze:teachAll(somePalActor)
 pal:skillsOf()      --> string[]   the declared skill ids, an empty table when none
 pal:teachAll(actor) --> integer, integer   how many landed, how many were asked for
 pal:mesh()          --> table?     the validated mesh declaration, nil when none
-pal:iconOf()        --> any?       DataTable texture ref, else the declared icon, else nil
+pal:iconOf()        --> string?    the DataTable row's /Game/... path, else the declared icon, else nil
 pal:name()          --> string     the declared name, else the id
 pal:description()   --> string?    the declared description, or nil
 ```
@@ -685,9 +732,8 @@ local Chicken = Pal{
     color = { r = 1.0, g = 0.4, b = 0.1, a = 1.0 },
     events = {
         onSpawned = function(pal, ctx)
-            if not pal:renderOn(ctx.actor) then
-                log.warn("mesh not attached for " .. pal:name())
-            end
+            -- the mesh is already on ctx.actor by the time this runs
+            log.info("party chicken arrived: " .. tostring(ctx.actor))
             Fanfare:play(ctx.actor)
         end,
     },
@@ -695,6 +741,10 @@ local Chicken = Pal{
 
 Chicken:spawn(Player.coordinateOffset(300, 0, 0))
 ```
+
+書いておいたメッシュはこのハンドラより先に付くので、ポーンを動かす・名前を変える・塗り直す
+ハンドラは、体が既に付いている状態から始められます。装着そのものが成功したかどうかは、
+このハンドラからは読めません。メッシュのログにあります。
 
 サウンドはファイルの先頭で一度だけ定義し、ハンドラからは再生するだけにします。ハンドラの中で
 定義すると、スポーンのたびにサウンドを登録し直すことになります。手元にローカル変数が無い場面では、
@@ -787,9 +837,6 @@ local Squad = Pal{
     material = {
         color = { r = 0.2, g = 0.5, b = 1.0, a = 1.0 },
     },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
-    },
 }
 
 -- spread `n` of them in a line to the player's north-east
@@ -811,9 +858,9 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-1 体ずつ別々のスポーン呼び出しを使い、それぞれの `onSpawned` が到着した自分のクリーチャーにメッシュを
-付けます。分隊は一斉にも即座にも現れません。どの個体も自分の呼び出しから数秒遅れるので、そのあとの
-数秒のあいだに順に現れます。
+1 体ずつ別々のスポーン呼び出しを使い、到着した個体はそれぞれ書いておいたメッシュを身にまといます。
+装着が `pal.spawned` に乗っているので、定義側にハンドラは要りません。分隊は一斉にも即座にも
+現れません。どの個体も自分の呼び出しから数秒遅れるので、そのあとの数秒のあいだに順に現れます。
 
 ## Limits
 
@@ -839,12 +886,16 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 - **壊れた `onTick` は止められます。** 5 回続けて失敗すると、PalForge はそれをログに書き、その
   セッションの間その定義の `onTick` を呼ばなくなります。失敗した 1 体だけでなく、その id の
   すべてのクリーチャーが対象です。
-- **`onSpawned` は未確認のフックに乗っています。**
-  `PalCharacter:BroadcastOnCompleteInitializeParameter` は、捕獲・ダメージ・死亡と違ってゲーム内で
-  確認できていません。また、ワールドのロード後にだけ有効化されます。それより早く有効にすると、
-  ロード時の大量発火で共有のフック処理が詰まってしまうためです。ベストエフォートとして扱い、
-  何度呼ばれても問題ないハンドラを書いてください。`:renderOn` は一度きりの装着なので、再度
-  呼んでも安全です。
+- **`onSpawned` は発火しますが、「本当に新しい」パルでの発火はまだ誰も見ていません。** これまで
+  観測された発火はすべて `world.ready` と同じ秒に起きています。つまり、周囲のパルが一斉に初期化
+  されるロード時の大量発火です。それはチャンネルが動いていることの証明ではありますが、パックが
+  本当に気にする場面——さっきまで存在しなかったパル——については何も言いません。決着を付けるのは
+  `pf_hook pal-spawned-fresh` です。それまでは、1 体のポーンに 2 回呼ばれても問題ないハンドラを
+  書いてください。また、現れたパルの数を数える用途には使わないでください。
+- **`onSpawned` のソースはロード時ではなく `world.ready` で有効化されます。** 初期化の
+  ブロードキャストはワールドロード時のパル初期化の大量発火の中で起こり、そこでの発火が一度、
+  共有の UE4SS フック処理を詰まらせ、確認済みの 3 本のフックまで巻き添えにしました。遅らせて
+  有効化するのは、このチャンネルだけでなく捕獲・ダメージ・死亡を守るためでもあります。
 - **ワールドの準備が整うまで何も走りません。** 4 つのゲーム側フックはいずれも、有効な
   `PalPlayerCharacter` を 1 秒間隔で 5 回連続して見つけるまで即座に return します。`onTick` の
   巡回も同じゲートを待ちます。
@@ -861,12 +912,15 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
   位置を無視するため、PalForge はクリーチャーを待ち、新しい 1 体を選び、指定の点へテレポート
   させます。着地はぴったりです。この処理の結果はログにしか出ず、その行にはパルから読み戻した位置が
   入ります。
-- **メッシュが自動で付くことはありません。** ハンドラから `:renderOn(actor)` を呼んでください。
-  `core.mesh.ENABLED` はグローバルのキルスイッチで、これを切るとすべての装着が no-op になります。
-  また、マテリアル関連のフィールドが実際に塗られるのは `kind` が `procedural` か `obj` のときだけです。
+- **書いておいたメッシュは `pal.spawned` で自動的に付きます。** `:renderOn(actor)` は、そのチャンネル
+  から来ていないポーンに対する手動の経路です。`core.mesh.ENABLED` はグローバルのキルスイッチで、
+  これを切るとすべての装着が no-op になります。マテリアル関連のフィールドはすべてのバックエンドに
+  届きますが、マテリアルが持っていないパラメータ名への書き込みは黙って何もしないので、装着は
+  色が見えることの保証ではありません。
 - **`Pal.get` は登録しません。** レジストリに定義を入れるのは `Pal{ ... }` だけなので、`Pal.get` で
   得たハンドルは操作はできてもイベントを受け取れません。同じ id を 2 回定義すると、後の定義が
-  前の定義を置き換えます。
+  前の定義を置き換え、レジストリがそれをログに書きます。定義元のパックが違う場合は、両方の名前も
+  出ます。
 
 </Callout>
 
@@ -879,8 +933,8 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 - `pal:spawn()` はパルをワールドに出します。パルが現れるのは 4〜8 秒後です。座標を渡せばその位置に
   ぴったり置かれ、`{ toPlayer = true, num = 3 }` を渡せばプレイヤーに届きます。戻り値は呼び出しに
   ついてのものなので、反応は `onSpawned` に書いてください。
-- `mesh` で見た目を変えられますが、装着は `onSpawned` から `pal:renderOn(ctx.actor)` を呼んで
-  自分で行います。
+- `mesh` で見た目を変えられます。書いておいたメッシュは `pal.spawned` で自動的に付き、
+  `pal:renderOn(actor)` は手動の経路です。
 - ハンドラが呼ばれるのは `Pal{ ... }` で定義した id だけです。`Pal.get` はアクションだけを返し、
   イベントは付きません。
 - `onTick` は生きたパル 1 体につき約 3 秒ごとに走り、記憶を持ちません。覚えておきたいものは

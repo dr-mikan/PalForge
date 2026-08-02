@@ -28,6 +28,11 @@
 --   schema.all()             -- every spec ever declared, in declaration order
 --   schema.derive(...)       -- the same shape with different per-field policy
 --
+-- Two rules that every domain shares live at the bottom of this file rather than in eight
+-- api modules: schema.validId (the `check` an `id` field carries — the resolve shape, so an
+-- id that could never reach the game is refused while it is being written) and
+-- schema.defineOpts (the optional second argument to every X(spec, opts) constructor).
+--
 -- That is what tools/gen-types.lua walks to generate the editor type definitions, so the
 -- annotations still cannot drift from what a define call actually accepts.
 --
@@ -412,10 +417,111 @@ function M.help(name)
     return spec:help()
 end
 
--- A non-empty string — the check every id field shares.
+-- A non-empty string — the weakest check an id field can carry. Kept because non-id string
+-- fields use it too; every `id` field now carries M.validId below instead.
 function M.nonEmpty(v)
     if type(v) == "string" and #v > 0 then return true end
     return false, "must be a non-empty string"
+end
+
+--=============================================================================
+-- the id rules, written once
+--
+-- These two live here rather than in each api module for the same reason the specs do:
+-- eight domains were enforcing eight slightly different things (in practice: `nonEmpty`
+-- and nothing else, in all eight), and a rule that is restated per domain is a rule that
+-- drifts per domain. core.object_manager owns the id MODEL; this file owns the moment a
+-- definition is checked, so the check is spelled here and delegated there.
+--=============================================================================
+
+-- core.object_manager, required lazily and once. Lazily because schema.lua is the bottom
+-- of the api stack and must stay loadable on its own (the type generator and the headless
+-- tests both load it with no registry in sight); once because a define-heavy startup calls
+-- validId per definition and require's package.loaded lookup is not free at that rate.
+-- `false` records a failed require so it is not retried per call.
+local objectManager
+local function manager()
+    if objectManager == nil then
+        local ok, mod = pcall(require, "palforge.core.object_manager")
+        objectManager = ok and mod or false
+    end
+    return objectManager or nil
+end
+
+-- THE ID SHAPE CHECK — what `{ "id", check = schema.validId }` means, and why it is not
+-- `nonEmpty` any more (F-4/C4).
+--
+-- An id with NO colon is a literal game id ("Wood", "ChickenPal") and only has to be a
+-- non-empty string. An id WITH a colon is namespaced, and object_manager resolves
+-- "packid:name" to the row spelling PalSchema actually writes into the game's tables,
+-- "packid_name" — which is only defined when both halves are letters, digits and
+-- underscores.
+--
+-- Before this check existed, `Building{ id = "my-pack:Bench" }` validated (nonEmpty is
+-- happy with a hyphen), registered, and was DEAD: resolution failed at the engine boundary,
+-- the build id never entered Registry.byBuildId, the actor scan never matched, and none of
+-- onPlace/onLoad/onTick/onRemove could ever fire — with no log line anywhere. Refusing it
+-- at define time costs one comparison and turns a silent dead definition into a sentence the
+-- author reads while writing it.
+--
+-- The RULE belongs to object_manager, not here: om.validId is its declared home, and
+-- om.resolve is the same rule executed — it already answers nil plus the reason for exactly
+-- the ids that cannot be resolved. So this delegates, in that order, and deliberately holds
+-- no second copy of the pattern, which is the copy that would drift from the resolver.
+function M.validId(v)
+    if type(v) ~= "string" or #v == 0 then return false, "must be a non-empty string" end
+    local om = manager()
+    if not om then return true end   -- no registry loaded: there is no id model to enforce
+    if type(om.validId) == "function" then
+        local ok, why = om.validId(v)
+        if ok then return true end
+        return false, why or "is not an id object_manager can resolve"
+    end
+    local resolved, why = om.resolve(v)
+    if resolved then return true end
+    return false, (why or "cannot be resolved to a DataTable row spelling")
+        .. ". A namespaced id is \"packid:name\", and both halves may hold letters, digits "
+        .. "and _ only, because the row PalSchema writes for it is packid_name"
+end
+
+-- THE OPTIONAL SECOND ARGUMENT every domain constructor takes: X(spec, opts) (C2/F-8).
+--
+--   opts.register == false   build and return the handle, register NOTHING
+--   opts.pack     == "id"    register attributed to that pack (see object_manager.register)
+--
+-- `register = false` exists because a READ was starting to write world state: the native
+-- catalogs fabricate a definition on demand with `X{ id = id }`, and for buildings
+-- registering is not inert — core/event's 500 ms scan picks the new def up and every matching
+-- actor in the world becomes a tracked, PERSISTED instance. So reading native.buildings.
+-- Foundation in a tooltip made PalForge start writing a record for every foundation in the
+-- base. A non-registering define is the shape that makes a catalog read a read again.
+--
+-- Returns `register, pack` — two values rather than a table, because that is exactly what a
+-- constructor needs and it keeps the call site one line. Anything wrong here is a hard error
+-- in the same voice as the spec errors: an option a caller misspells is an option that was
+-- silently ignored, which is the failure this whole layer exists to prevent.
+---@return boolean register, string? pack
+function M.defineOpts(opts, where)
+    if opts == nil then return true, nil end
+    if type(opts) ~= "table" then
+        fail(string.format("%s: the second argument is the options table "
+            .. "{ register = false, pack = \"packid\" }, got %s", where, type(opts)))
+    end
+    for key in pairs(opts) do
+        if key ~= "register" and key ~= "pack" then
+            fail(string.format("%s: unknown define option %q. Valid options: register, pack",
+                where, tostring(key)))
+        end
+    end
+    if opts.register ~= nil and type(opts.register) ~= "boolean" then
+        fail(string.format("%s: define option \"register\" expects boolean, got %s",
+            where, type(opts.register)))
+    end
+    if opts.pack ~= nil and (type(opts.pack) ~= "string" or #opts.pack == 0) then
+        fail(string.format("%s: define option \"pack\" expects a non-empty pack id string, got %s",
+            where, type(opts.pack)))
+    end
+    return opts.register ~= false, opts.pack
 end
 
 return M

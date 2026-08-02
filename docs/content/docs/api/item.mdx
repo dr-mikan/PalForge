@@ -9,6 +9,7 @@ description: Put items into the player inventory, take them back out, and run yo
 - Put items into the player inventory from your own code, and take them back out
 - Run your own code the moment the player picks something up
 - Run your own code the moment the player eats or uses something
+- Run your own code when a machine finishes crafting it, or the player throws it away
 - Give a game item your own name, description and recipe numbers
 
 An item is anything that sits in the inventory: materials, food, equipment, ammo. Write
@@ -57,14 +58,17 @@ local items = require("palforge.native.items")
 
 items.CATALOG            -- every DT_ItemDataTable_Common row id, as a list of strings
 items.get("Arrow_Fire")  -- a lazily built, cached handle for any catalog id; nil if unknown
+items.publish("Arrow_Fire")  -- opt in: register that handle so events can reach it
 items.Wood               -- curated handles, defined at load; Wood and Berries carry hooks
 items.Berries
 items.Arrow
 ```
 
-Three items are described up front: `Wood`, `Berries` and `Arrow`. Every other catalog id
-becomes a handle the first time you ask `items.get(id)` for it, and the handle is kept for
-next time.
+Three items are described up front: `Wood`, `Berries` and `Arrow`. Those three are registered at
+load, because they declare handlers and an unregistered definition is never dispatched to. Every
+other catalog id becomes a handle the first time you ask `items.get(id)` for it, and that handle
+registers nothing — a catalog read is a read. `items.publish(id)` is the opt-in that files one in
+the registry.
 
 ## Fields
 
@@ -75,7 +79,7 @@ closest valid field.
 <TypeTable
   type={{
     id: {
-      description: 'Item id. A literal game ItemId such as "Wood", or "pack:name" for pack content. Must be a non-empty string.',
+      description: 'Item id. A literal game ItemId such as "Wood", or "pack:name" for pack content. Both halves of a namespaced id may hold letters, digits and _ only, and an id that cannot be resolved is refused at define time.',
       type: 'string',
       required: true,
     },
@@ -99,8 +103,8 @@ closest valid field.
       default: '1',
     },
     icon: {
-      description: 'Fallback icon, used when the icon DataTable lookup misses. Any value; it is handed back as-is.',
-      type: 'any',
+      description: '/Game/... texture path, used when the icon DataTable has no row for this id. A string, because that is the one kind of value the live lookup can produce.',
+      type: 'string',
     },
     recipe: {
       description: 'The recipe that produces THIS item. Shape: Item.Spec.Recipe.',
@@ -192,17 +196,55 @@ print(r.materials.Wood)       -- 2
 <Callout type="warn">
 A recipe is a note, not a craft. PalForge does not register it with the game's crafting
 system, and `Handle:recipeOf()` is the only thing that reads it back. Writing a recipe does
-not make the item craftable in game; it gives your own code somewhere to keep the numbers.
+not make the item craftable in game; it gives your own code somewhere to keep the numbers. A
+recipe the game will actually run is a `DT_ItemRecipeDataTable` row, and Lua cannot write one —
+declare it as PalSchema JSON and use this to describe the same thing to your own code.
 </Callout>
+
+`recipeOf()` reads back only what you declared. It does **not** read the game's table, so a
+vanilla id answers `nil` even though a real recipe for it exists: `DT_ItemRecipeDataTable_Common`
+is loaded under `/Game/Pal/DataTable/Item/` with 1414 rows, keyed by item id, carrying
+`Product_Count`, `Material1_Id` through `Material5_Id`, `WorkAmount` and nine more columns. What
+is not known is whether a scalar or FName column can be indexed straight off the struct
+`FindRow` hands back — the only row value ever read here was a `TSoftObjectPtr`, which cannot be
+opened from Lua, and that is what forced the column-as-text detour the icon lookup uses. Reading
+the recipe column by column would work today at thirteen calls per table, once, cached. The
+question is measured by `pf_hook item-datatable-row-read`, which needs `env.debug` and a loaded
+world.
+
+### The second argument
+
+`Item{ ... }` takes an optional options table after the spec. Leaving it out behaves exactly as it
+always has.
+
+```lua
+-- build the handle, register nothing: a read that must not write to the registry
+local probe = Item({ id = "Wood" }, { register = false })
+
+-- register attributed to a pack, which is what gives a collision a "who"
+Item({ id = "example:Potion" }, { pack = "mypack" })
+
+-- the same attribution without passing it per call
+local api = PalForge.pack("mypack")
+api.Item{ id = "example:Potion" }
+```
+
+Only `register` and `pack` are accepted; a misspelled option is an error rather than an option
+that was quietly ignored. When two packs register the same id, the replacement is logged with
+both pack names, and so are two different ids that resolve to one game row.
 
 ### Validation
 
 Every problem with your table is an error, so a call never half-succeeds. The message starts
-with `PalForge: ` and names the field it stopped on.
+with `PalForge: ` and names the field it stopped on. That includes the id itself: both halves of
+a namespaced id may hold letters, digits and `_` only, because the row PalSchema writes for
+`"pack:Potion"` is `pack_Potion` — an id that cannot be resolved is refused here instead of
+registering and never matching anything.
 
 ```text
 PalForge: Item: unknown field "maxStackSize" (did you mean "maxStack"?). Valid fields: id, name, description, category, maxStack, icon, recipe, events, data
 PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
+PalForge: Item: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Potion' (letters/digits/_ only)
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
 PalForge: Item: field "maxStack" expects number, got string
 PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials" is required ({ <itemId> = <count> } consumed by one craft)
@@ -236,47 +278,50 @@ first, and a table of details called `ctx` second.
       type: 'fun(self: Item.Handle, ctx: table)',
     },
     onCraft: {
-      description: 'You can declare it, but nothing emits item.craft yet, so it never runs.',
+      description: 'LIVE. A crafting machine finished this item. ctx.recipeId and ctx.via; ctx.count is nil.',
       type: 'fun(self: Item.Handle, ctx: table)',
     },
     onDiscard: {
-      description: 'You can declare it, but nothing emits item.discard yet, so it never runs.',
+      description: 'LIVE. The item was dropped or trashed. ctx.count and ctx.reason, which is "drop" or "dispose".',
       type: 'fun(self: Item.Handle, ctx: table)',
     },
   }}
 />
 
-Three of the game's own calls feed these handlers. Two of them report a pickup, one reports
-a use:
+Seven of the game's own calls feed these four handlers, and all four channels have been seen
+carrying events in a real save:
 
 ```mermaid
 flowchart LR
   A["AddItemGetLog_ToClient"] --> B["item.obtain"]
   G["AddItem_ServerInternal"] --> B
   C["UseItemToCharacter_ServerInternal"] --> D["item.use"]
+  H["OnFinishWorkInServer x2"] --> I["item.craft"]
+  J["RequestDrop / RequestDispose"] --> K["item.discard"]
   B --> E["resolve by ctx.itemId"]
   D --> E
+  I --> E
+  K --> E
   E --> F[your handler]
 ```
 
 PalForge does not track each copy of an item in the world. It takes the game item id off the
-event and looks up the definition filed under that id. If nothing is filed there, it walks
-the items you have described and takes the one whose resolved name matches. A vanilla item
-you never described matches nothing, and no handler runs.
+event and looks up the definition filed under that id, then the one filed under a namespaced id
+that resolves to it. A vanilla item you never described matches nothing, and no handler runs.
 
 ### Namespaced ids
 
 An item you describe as `"example:Potion"` is filed under that exact spelling, while the game
-reports the data row name `example_Potion`. PalForge closes the gap for you: when the exact
-lookup misses, it resolves each id you registered and returns the one that matches. Your pack
+reports the data row name `example_Potion`. PalForge closes the gap for you: every registration
+is also indexed under its resolved form, so the miss costs one more table lookup and your pack
 content still gets its events.
 
 ```mermaid
 flowchart LR
   A["ctx.itemId is example_Potion"] --> B[exact lookup]
   B -->|hit| C[call the hook]
-  B -->|miss| D[resolve every registered id]
-  D --> E["example:Potion resolves to example_Potion"]
+  B -->|miss| D["the resolved-id index"]
+  D --> E["example:Potion is indexed under example_Potion"]
   E --> C
 ```
 
@@ -302,9 +347,10 @@ The handle keeps the colon spelling, so your own calls stay in the id you wrote:
 Item.get("example:Potion"):give(1)   -- resolves to example_Potion for the engine
 ```
 
-The search runs over a snapshot of the registered items in no particular order and returns
-the first match, so two ids that resolve to the same row name are ambiguous. Keep your pack
-ids unique. Pals are matched the same way, by their blueprint class name.
+Two ids that resolve to the same row name still collide — the index holds one entry per resolved
+form and the newest registration owns it — but that is now a warning at define time naming both
+ids rather than a coin toss at dispatch time. Keep your pack ids unique. Pals are matched the
+same way, by their blueprint class name.
 
 ### onObtain
 
@@ -356,8 +402,10 @@ so it is skipped instead of being reported as an obtain.
 `ctx.actor` is the character who USED the item, which is the same as the character it was
 used ON only for food, potions and anything else the player uses on themselves. Feed a pal
 and the pal is in `ctx.targetId`, as a raw instance id that nothing here turns into an actor.
-On a dedicated server `ctx.actor` is whichever player pawn is found first, which need not be
-the one who acted. Treat it as a player pawn to act on, not as proof of who acted.
+It is found by looking for the local player pawn, so it is whichever pawn is found first rather
+than proof of who acted. Treat it as a player pawn to act on. PalForge targets single-player
+Palworld and there is no replication layer, so anywhere more than one player exists this is not
+a question it can answer.
 </Callout>
 
 ```lua
@@ -379,14 +427,48 @@ To find the item id, PalForge reads the `ID` field off the first parameter — t
 ever seen in game — and falls back to `Id`, `StaticId` and the three later parameters, so a
 shifted signature still resolves. If no id is found, nothing is reported and no handler runs.
 
-### onCraft and onDiscard
+### onCraft
+
+`onCraft` runs when a machine finishes producing the item. Two of the game's work models carry an
+item id and both are hooked at `OnFinishWorkInServer`: `PalMapObjectConvertItemModel`, which is
+the recipe benches and furnaces, and `PalMapObjectProductItemModel`, the fixed-output producers.
+Crafting at a real machine was seen carrying this channel's first event.
+
+| ctx key | Type | Notes |
+| --- | --- | --- |
+| `ctx.itemId` | string | The item the machine produced. |
+| `ctx.recipeId` | string | The same value under the name the convert route uses. Palworld's recipe table is keyed by product item id, so for a vanilla recipe the two really are one string. |
+| `ctx.count` | nil | Always `nil`, by design. |
+| `ctx.via` | string | `"convert"` or `"product"`. |
+| `ctx.model`, `ctx.work` | any | The work model and the work object, for a handler that wants more. |
+
+<Callout type="info">
+`ctx.count` is `nil` and stays `nil`. The per-craft count lives in the recipe row's
+`Product_Count`, and a hook is no place for a DataTable read — a `1` nobody measured would be
+worse than an honest `nil`. Read `:count()` before and after if you need the number.
+</Callout>
+
+### onDiscard
+
+`onDiscard` runs when the player throws the item away. Both sources are RPCs on
+`UPalNetworkItemComponent`: `RequestDrop_ToServer` for dropping on the ground and
+`RequestDispose_ToServer` for trashing a stack from the inventory menu. Dropping does **not** go
+through `AddItem_ServerInternal` with a negative count — that hook was armed and fired zero times
+across two sessions, because removal lives on the network component, one class over.
+
+| ctx key | Type | Notes |
+| --- | --- | --- |
+| `ctx.itemId` | string | The item id sitting in the slot the request points at. |
+| `ctx.count` | number \| nil | How many are leaving the bag — the entry's own number, not the slot's whole stack. |
+| `ctx.reason` | string | `"drop"` or `"dispose"`. |
 
 <Callout type="warn">
-`onCraft` and `onDiscard` never run. The `item.craft` and `item.discard` channels exist and
-your handler is wired to them, but nothing in the game reports either yet: crafting finishes
-through a work process rather than the obtained-items log, and no discard call has been
-found. You can declare them without an error, so keep the code if you want — but put
-anything you need today in `onObtain`, in `onUse`, or in your own code.
+The RPCs carry **slot ids**, not item ids, so the id has to be read off the slot before the
+server empties it. That means finding the container: the player's own inventory helper is not
+enough — the first live drop reported "no container of the player's 6 matched" — so the container
+set is a world sweep matched on an exact GUID. When a slot cannot be resolved, nothing is emitted
+rather than an event with a guessed id, and the log says which step failed, once per distinct
+reason. A drop of that shape is silent; the channel is otherwise live.
 </Callout>
 
 ### What else to know about handlers
@@ -438,8 +520,8 @@ vanilla item can be given, taken and queried without being described first.
 | `:count()` | number \| nil | How many of this item the local player is carrying right now. `nil` means the count could not be read, never that the player has none. |
 | `:give(count)` | boolean | Adds `count` (default 1) to the local player's inventory. `true` only when the inventory count was seen to rise. |
 | `:take(count)` | boolean | Consumes `count` (default 1) out of the local player's inventory. `count` is treated as a magnitude. `true` only when the count was seen to fall. |
-| `:recipeOf()` | table \| nil | The declared recipe, or `nil` when the item has none. |
-| `:iconOf()` | any \| nil | Texture ref from the item icon DataTable, else the declared `icon`. |
+| `:recipeOf()` | table \| nil | The recipe you declared, or `nil`. It never reads the game's recipe table. |
+| `:iconOf()` | string \| nil | A `/Game/...` path from the item icon DataTable, else the declared `icon`. |
 | `:name()` | string | The declared name, else the id. |
 | `:description()` | string \| nil | The declared description. |
 | `:category()` | string | The declared category, else `"material"`. |
@@ -478,10 +560,13 @@ that could not be read afterwards. The inventory answers with a reason of its ow
 carries it, so the log separates the cases the boolean cannot:
 
 ```text
-[PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
+[PalForge.items][info] give Wood x3: 140 -> 143 [evidence declared]
 [PalForge.items][warn] give Wood x10: AddItem_ServerInternal answered Success but the count did not rise (135 -> 135). Weight is now 300.0 of 300.0
 [PalForge.items][err] give Wood x10 failed: the player's inventory could not be reached
 ```
+
+The first of those three is a real line out of a real save: `give Wood x3: 140 -> 143`, with the
+game's own pickup event firing beside it.
 
 The `[evidence ...]` tag at the end records how PalForge checked the call against the running
 game before making it. You do not have to act on it; it is there to make a surprising `false`
@@ -504,10 +589,14 @@ itself off; anywhere else, expect your own give to come back around.
 feet to be picked back up — so a pack can charge a real price for something.
 
 <Callout type="warn" title="Taking needs the player to have something equipped">
-The consume runs through a weapon the player is carrying. A player with nothing equipped at all
-has nothing to route it through, so `:take` answers `false` and says exactly that in the log. It
-is the one thing to design around: if your building charges a price, a player standing there
-bare-handed cannot pay it.
+The route is the game's own consume, `APalWeaponBase:RequestConsumeItem`, reached through the
+player's loadout component — and it is a method **on a weapon actor**, so a player carrying
+nothing has no route at all and `:take` answers `false` saying exactly that. Equipping anything
+is enough: the weapon only has to be spawned, not in hand, and it spends the id it is handed
+rather than its own ammunition. It is the one thing to design around: if your building charges a
+price, a player standing there bare-handed cannot pay it. The inventory itself has no removal —
+its whole class chain declares nothing that subtracts, and a negative count through the add was
+measured accepted and inert.
 </Callout>
 
 ```mermaid
@@ -528,14 +617,16 @@ end
 ```
 
 Asking for more than the player is carrying is not an error: the request is clamped to what the
-inventory holds. Asking when they hold none skips the call altogether. Both outcomes are logged,
-so the log separates the cases the boolean cannot:
+inventory holds. Asking when they hold none skips the call altogether and answers `false`. Both
+outcomes are logged, so the log separates the cases the boolean cannot:
 
 ```text
 [PalForge.items][info] take Wood x3: 164 -> 161 [evidence declared]
-[PalForge.items][warn] take Wood x5: the inventory holds only 2, taking that many
-[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is taken
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, removing that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is removed
 ```
+
+The first line is a real one too, out of the same press that proved `:give`.
 
 <Callout type="warn">
 A clamped removal still returns `true` — the second line above takes 2 of the 5 asked for and
@@ -558,15 +649,19 @@ print(wood:maxStack())    -- 9999 for the curated definition, 1 for a bare handl
 local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 ```
 
-`count` is the one inventory action that works. It asks the game how many of that id the local
-player is carrying and hands back a plain number. `nil` means the count could not be read at
-all — no world loaded, no player found — and never that the player has none, so test for `nil`
-before you compare.
+`count` asks the game how many of that id the local player is carrying, through the game's own
+`CountItemNum`, and hands back a plain number — observed in a loaded save answering 135 for Wood.
+`nil` means the count could not be read at all — no world loaded, no player found — and never
+that the player has none, so test for `nil` before you compare. It is also what `:give` and
+`:take` rest on: their verdicts are this read, taken twice.
 
-`iconOf` looks the id up in `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` and reads the
-texture off the row, so a vanilla id hands you the game's own artwork for that item. Every step
-is fail-soft: a missing table, row or column gives you the `icon` you declared instead, which is
-`nil` unless you set one. A namespaced id of your own has no row, so it always falls back.
+`iconOf` looks the id up in `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` and hands back the
+row's texture as a `/Game/...` path string, so a vanilla id gives you the game's own artwork for
+that item. That read works: 1183 of the table's 1207 rows answered with a path in a live save,
+and the other 24 are rows that genuinely carry none. Every step is fail-soft, and any miss gives
+you the `icon` you declared, which is `nil` unless you set one. A namespaced id is resolved
+first, so `Item{ id = "example:Potion" }:iconOf()` asks the table for `example_Potion` — the row
+spelling PalSchema writes — and reaches a real row when your pack created one.
 
 ### Enumerating
 
@@ -758,14 +853,18 @@ Know the rough edges before you build on them.
 `Item{ ... }` attaches behaviour and details to an id; PalSchema creates the row. An id
 nobody has created is an id the game will not show.
 
-**`onCraft` and `onDiscard` never run.** The channels and the wiring are there, nothing in
-the game reports either event.
+**`onCraft` never carries a count**, and `onDiscard` is silent for a drop whose slot it cannot
+resolve to an item id. Both channels are live and both were seen firing; those two gaps are the
+honest edges rather than an outage.
 
-**A namespaced id is matched by a fallback search.** The event carries the game's data row
-name, so an item registered as `"example:Potion"` is not found by the exact lookup and the
-search over your registered ids is what finds it. The search reads a snapshot in no
-particular order and returns the first id that matches, so two pack ids resolving to the same
-row name are ambiguous.
+**`recipeOf` does not read the game's recipe table.** It answers the recipe you declared and
+`nil` for a vanilla id, even though the game has a real row for that item.
+
+**A namespaced id is matched through the resolved-id index.** The event carries the game's data
+row name, so an item registered as `"example:Potion"` is not found by the exact lookup and the
+second lookup, on the resolved form, is what finds it. One resolved form holds one entry, so two
+pack ids that resolve to the same row name still collide — but registering the second one warns
+and names both.
 
 **Taking an item needs something equipped.** The consume runs through a weapon the player is
 carrying, so a player holding nothing at all has no route for it and `:take` answers `false`.
@@ -776,9 +875,10 @@ who used the item. The character it was used on is in `ctx.targetId` as a raw in
 and nothing here turns that into an actor. For food and potions the two are the same; for
 feeding a pal they are not.
 
-**`category`, `maxStack`, `icon` and `recipe` are PalForge's own notes.** You read them back
-through the handle and from your own code. Nothing writes them into the game's item table, so
-`maxStack = 9999` does not change how the game stacks that item.
+**`category`, `maxStack` and `recipe` are PalForge's own notes.** You read them back through the
+handle and from your own code. Nothing writes them into the game's item table, so
+`maxStack = 9999` does not change how the game stacks that item. `icon` is the exception in one
+direction only: the live table is read first, and your declared path is the fallback.
 
 **An item cannot save data.** Saved `state` and `:save()` belong to buildings, so whatever a
 handler counts up lives for this session only. Write it to a file yourself if you want it
@@ -788,9 +888,10 @@ back.
 channel and the hook, for example `item.use -> onUse handler failed: ...`. Your handler still
 cannot stop the event.
 
-**`give`, `take` and `count` work on the local player only.** They find `PalPlayerCharacter`
-and act on that inventory, so on a shared server they answer for whichever player pawn is found
-first. `count` answering `nil` means the read failed, not that the bag is empty.
+**`give`, `take` and `count` work on the local player only.** They find `PalPlayerCharacter` and
+act on that inventory, and they are client-authoritative with no replication behind them —
+PalForge targets single-player Palworld. `count` answering `nil` means the read failed, not that
+the bag is empty.
 
 **`give` goes through the inventory's own write.** It reports what the inventory answered as
 well as what the count did, so the log names the reason behind a `false`.
@@ -805,17 +906,18 @@ runs once. A genuine second pickup of the same item that fast is lost.
 
 ## Summary
 
-- Write `Item{ ... }` to describe an item. Only `id` is required, and the id must be one the
-  game already has.
+- Write `Item{ ... }` to describe an item. Only `id` is required, the id must be one the game
+  already has, and an id that cannot be resolved to a row spelling is refused right there.
 - `Item.get("Wood")` gives you a handle for any item. `:count()` reads how many the player is
   carrying, `:give` adds and `:take` consumes — and each of the three tells you what it measured,
   not what it attempted. `:take` needs the player to have something equipped.
-- Put your code in `events`. `onObtain` runs on pickup, `onUse` runs when the item is used.
-  `onCraft` and `onDiscard` do not run yet.
+- Put your code in `events`. All four handlers run: `onObtain` on pickup, `onUse` on use,
+  `onCraft` when a machine finishes one, `onDiscard` on a drop or a trash.
 - In `onUse`, `ctx.actor` is the player who used the item — the right target for food and
   potions.
-- `category`, `maxStack`, `icon` and `recipe` are notes for your own code. The game does not
-  read them.
+- `category`, `maxStack` and `recipe` are notes for your own code; the game does not read them,
+  and `recipeOf` does not read the game's recipe table either. `icon` is only the fallback for a
+  lookup that really does reach the game's icon rows.
 - An item cannot save data. Keep totals in a Lua variable, or write them yourself with
   `palforge.utils.file`.
 

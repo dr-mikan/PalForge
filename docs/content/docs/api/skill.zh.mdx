@@ -6,14 +6,16 @@ description: 可以给帕鲁的攻击和特性，以及在你自己的代码里�
 ## 读完本页你可以做到
 
 - 添加自己的攻击，给它名字、属性、威力和图标
-- 在自己的代码里发动它：帕鲁受伤时、有人使用建筑物时，或者你按下某个键时
+- 在游戏放出自己的技能、或者把被动挂到角色身上时，运行你自己的代码
+- 也可以在自己的代码里发动它：帕鲁受伤时、有人使用建筑物时，或者你按下某个键时
 - 用秒数设置冷却，避免连发
 - 添加一个特性，只要帕鲁带着它就一直生效
 - 读出一只帕鲁身上的技能列表
 - 把技能装到活着的帕鲁或玩家身上，让游戏自己带着它
 
-技能就是攻击或特性。用 `Skill{ ... }` 描述一次，你会拿到一个带着各种动作的对象。游戏本身不会自己
-发动技能，所以发动它的那一行要写在你自己的代码里 —— 下面这段的最后一行就是：
+技能就是攻击或特性。用 `Skill{ ... }` 描述一次，你会拿到一个带着各种动作的对象。四个处理函数里有
+三个会在游戏做出对应的事情时替你调用；四个都能从你自己的代码里发动，而自制技能只有这一条路 ——
+下面这段的最后一行就是：
 
 ```lua title="content/skills.lua"
 local Ember = Skill{
@@ -33,20 +35,29 @@ local Ember = Skill{
 Ember:activate(Player.character())   -- runs onActivate unless it is still cooling down
 ```
 
-## 技能由你自己发动
+## 处理函数从哪里被运行起来
 
-PalForge 的其他部分是反过来的：游戏里发生了某件事，PalForge 就调用你为它写的函数。处理函数就是
-这个函数 —— 你写的代码，由框架替你调用。
+入口有两个，而且它们通向同一批处理函数。
+
+四个频道里有三个由游戏驱动。PalForge 钩住 Palworld 自己的调用，从中读出技能或被动的 id，再去调用
+以那个 id 注册的技能上的处理函数：
 
 ```mermaid
 flowchart LR
-  A["游戏里发生了某件事"] --> B["PalForge 注意到"]
-  B --> C["pal.damaged 这样的频道"]
-  C --> D["你的帕鲁处理函数运行"]
+  A["PalActionBase:OnBeginAction"] --> B["skill.activate"]
+  C["AddPassiveSkill"] --> D["skill.equip"]
+  E["RemovePassiveSkill"] --> F["skill.unequip"]
+  B --> G["你的处理函数"]
+  D --> G
+  F --> G
 ```
 
-PalForge 为世界、建筑物、帕鲁和道具都准备了频道。技能没有频道，因为游戏从不报告"这只帕鲁用了
-技能 X"。所以技能只在你要求它的那一刻运行，不会更早：
+其中两个已在真实存档里被看到触发：实战中的 `skill.activate`，以及来自 `AddPassiveSkill` 的
+`skill.equip`。`RemovePassiveSkill` 在同一个类上、接线方式完全相同，所以 `onUnequip` 应当同样能运送，
+但还没有哪一次运行记录到它真的运送过。第四个是 `onHit`，它是唯一没有任何来源供给的一个；下面有一节
+写清楚测到了什么、以及为什么它会保持这样。
+
+另一个入口是你自己的代码，四个都能在你要求的那一刻运行 —— 这也是自制技能唯一的一条路：
 
 ```mermaid
 flowchart LR
@@ -56,12 +67,14 @@ flowchart LR
 ```
 
 <Callout type="warn">
-只要你的内容包从不调用 `:activate`、`:hit`、`:equip` 或 `:unequip`，技能的处理函数就一次也不会运行。
-把技能写进 `Pal{ skills = { ... } }` 同样不会让它运行。把调用写在你希望技能发动的地方：帕鲁的
-处理函数里、建筑物的 `onRightClick` 里、按键绑定里、效果的 tick 里。本页靠下的示例把这几种都写了一遍。
+游戏发来的事件是按**游戏报出的 id** 匹配的，所以只有以那个 id 注册的技能才收得到。
+`Skill{ id = "FireBlast" }` 会在帕鲁放出 FireBlast 时被调用；`Skill{ id = "example:Ember" }` 永远不会，
+因为 Palworld 里没有叫这个名字的技能。自制技能由你的代码运行：写在帕鲁的处理函数里、建筑物的
+`onRightClick` 里、按键绑定里、效果的 tick 里。本页靠下的示例把这几种都写了一遍。只把技能写进
+`Pal{ skills = { ... } }` 不会发动任何东西。
 </Callout>
 
-这条路径是完整的，不是临时替代品。冷却由 Lua 计数，处理函数会拿到技能自己的对象以及你传给它的
+手动这条路径是完整的，不是临时替代品。冷却由 Lua 计数，处理函数会拿到技能自己的对象以及你传给它的
 上下文表，返回值告诉你它有没有运行。
 
 ## 定义技能
@@ -101,7 +114,7 @@ local Ember = Skill{
     element     = "fire",
     cooldown    = 5.0,
     power       = 30,
-    icon        = "palforge/example/textures/ember.png",
+    icon        = "/Game/YourPack/Textures/T_Ember.T_Ember",
     data        = { tier = 1, projectiles = 3 },
     events      = {
         onActivate = function(skill, owner, ctx)
@@ -118,21 +131,23 @@ local Ember = Skill{
 
 <TypeTable
   type={{
-    id: { description: '技能 id：游戏里的行 id，或者自制内容用的 "pack:name"。原样注册', type: 'string', required: true },
+    id: { description: '技能 id：游戏里的行 id，或者自制内容用的 "pack:name"。原样注册；解析不出行名时会在定义时被拒绝', type: 'string', required: true },
     name: { description: '在技能列表里显示的名字', type: 'string', default: '与 id 相同' },
     description: { description: '一行说明，供界面和工具使用', type: 'string' },
     kind: { description: 'active 是发动的技能，passive 是装备的技能', type: '"active" | "passive"', default: '"active"' },
-    element: { description: '属性，例如 fire 或 water。自由文本，不做校验', type: 'string' },
+    element: { description: '属性，例如 fire 或 water。作者元数据：只保存并原样返回，没有任何地方读它', type: 'string' },
     cooldown: { description: '两次发动之间的秒数，由 :activate 强制', type: 'number' },
-    power: { description: '基础威力／强度。只是元数据，没有任何地方使用它', type: 'number' },
-    icon: { description: 'DataTable 查不到时使用的备用图标', type: 'any' },
+    power: { description: '基础威力／强度。作者元数据：只保存并原样返回，没有任何地方读它', type: 'number' },
+    icon: { description: '图标 DataTable 里没有这个 id 的行时使用的 /Game/... 贴图路径', type: 'string' },
     events: { description: '四个行为处理函数，放在一起', type: 'Skill.Spec.Events' },
     data: { description: '你自己的任意数据，原样保存在定义上', type: 'table' },
   }}
 />
 
-`element` 和 `power` 保存在定义里，可以用 `:element()` 和 `:power()` 取回。`data` 也会保存，只是句柄上
-没有读它的方法。PalForge 自己这三个都不看：它们是留给你的处理函数和界面存放自己数值的地方。
+`element` 和 `power` 是作者元数据：它们保存在定义里，可以用 `:element()` 和 `:power()` 取回，而 PalForge
+里没有任何地方会读它们。`data` 同样只是保存下来，句柄上也没有读它的方法。技能真正的属性和威力在游戏
+自己的技能 DataTable 行里，而 Lua 写不了那一行。所以这三个是留给你的处理函数和界面存放自己数值的
+地方，旁边的 `cooldown` 才是框架真正会强制的那一个数值。
 
 字段列表也可以从 Lua 打印出来，不用背：
 
@@ -147,12 +162,24 @@ Skill.Spec {
   name          string     shown in skill lists (defaults to id)
   description   string     one-line description, for UI and tooling
   kind          string     (default=active, one of { "active", "passive" }) an active skill is fired; a passive one is equipped
-  element       string     attribute / element (fire, water, ...)
+  element       string     attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing
   cooldown      number     seconds between activations (enforced by :activate)
-  power         number     base power / magnitude
-  icon          any        fallback icon used when the DataTable lookup misses
+  power         number     base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Skill.Spec.Events) behaviour handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
+}
+```
+
+`schema.help("Skill.Spec.Events")` 会为四个处理函数打印同样的东西，每一行都说明那个频道自己会不会
+运送事件：
+
+```text
+Skill.Spec.Events {
+  onActivate    function   LIVE - an active skill fired (self, owner, ctx); via = "PalActionBase:OnBeginAction"
+  onHit         function   NOT LIVE - both sources measured silent (skill-hit-source); only :hit() runs it
+  onEquip       function   LIVE - a passive was attached (self, owner, ctx); via names the source
+  onUnequip     function   LIVE - a passive was removed (self, owner, ctx); via names the source
 }
 ```
 
@@ -169,6 +196,35 @@ Skill.get_all()                 -- every PalForge-registered skill, as handles
 一个空的处理函数并返回 true。
 
 同一个 id 定义两次，注册会被替换。最后一次调用生效，而你从上一次调用拿到的东西仍然指向上一个定义。
+如果这两次调用来自不同的内容包，这次替换会连同两个包名一起写进日志，于是冲突有了可以指认的人。
+
+### 第二个参数
+
+`Skill{ ... }` 在 spec 之后还接受一个可选的选项表。不写它时的行为和以前完全一样。
+
+```lua
+-- 只构造句柄，不做任何注册：给那种不该写进注册表的“读取”用
+local probe = Skill({ id = "example:Ember" }, { register = false })
+
+-- 归属到某个内容包再注册，这就是让冲突有“谁”的那一步
+Skill({ id = "example:Ember" }, { pack = "mypack" })
+
+-- 不用每次调用都传，也能得到同样的归属
+local api = PalForge.pack("mypack")
+api.Skill{ id = "example:Ember" }
+```
+
+只接受 `register` 和 `pack`；写错的选项会报错，而不是被悄悄忽略。
+
+### id 在定义时就会被检查
+
+带冒号的 id 是带命名空间的，PalForge 会把 `"pack:Ember"` 解析成 PalSchema 实际写入的行名 `pack_Ember`。
+冒号两边都只能是字母、数字和 `_`，解析不出来的 id 会在定义调用处被拒绝，而不是先注册下来、再永远
+匹配不到任何一行：
+
+```text
+PalForge: Skill: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Ember' (letters/digits/_ only)
+```
 
 ## 主动与被动
 
@@ -204,15 +260,15 @@ Ironhide:activate(owner)   --> false, nothing ran
 
 ## 处理函数
 
-处理函数就是这些动作被调用时 PalForge 替你运行的函数。一共四个，都是可选的。每个的第一个参数都是
+处理函数就是 PalForge 替你运行的函数。一共四个，都是可选的。每个的第一个参数都是
 技能自己的句柄；写了不在这个列表里的名字，定义调用会直接报错，而不是被悄悄忽略。
 
 | 处理函数 | 签名 | 运行时机 |
 | --- | --- | --- |
-| `onActivate` | `fun(skill, owner, ctx)` | 你调用 `:activate(owner, ctx)`，且冷却允许时 |
-| `onHit` | `fun(skill, target, ctx)` | 你调用 `:hit(target, ctx)` 时 |
-| `onEquip` | `fun(skill, owner, ctx)` | 你调用 `:equip(owner, ctx)` 时 |
-| `onUnequip` | `fun(skill, owner, ctx)` | 你调用 `:unequip(owner, ctx)` 时 |
+| `onActivate` | `fun(skill, owner, ctx)` | 游戏放出那个技能时，或者你调用 `:activate(owner, ctx)` 且冷却允许时 |
+| `onHit` | `fun(skill, target, ctx)` | 只有你调用 `:hit(target, ctx)` 时 |
+| `onEquip` | `fun(skill, owner, ctx)` | 游戏挂上那个被动时，或者你调用 `:equip(owner, ctx)` 时 |
+| `onUnequip` | `fun(skill, owner, ctx)` | 游戏摘掉那个被动时，或者你调用 `:unequip(owner, ctx)` 时 |
 
 句柄就是定义调用返回的那个对象，所以在处理函数里，所有动作和查询都能直接用：
 
@@ -235,8 +291,61 @@ local Ember = Skill{
 
 <Callout type="warn">
 这些动作都用 `pcall` 包住处理函数，并把错误信息丢掉。处理函数崩溃时，你只会看到返回 `false`，日志里
-什么都没有。请在自己的处理函数里打日志，或者自己把有风险的部分包起来。
+什么都没有。请在自己的处理函数里打日志，或者自己把有风险的部分包起来。从游戏那边被调用的处理函数
+同样是 `pcall` 的，但那里的错误会连同频道名和出错的处理函数名一起写进日志。
 </Callout>
+
+### 游戏交给处理函数的东西
+
+只要用游戏自己的 id 定义，那三个活着的频道就会用你已经在写的同一套签名找上你：
+
+```lua title="content/fireblast.lua"
+local log = require("palforge.utils.log").scope("example")
+
+Skill{
+    id     = "FireBlast",       -- 游戏自己的技能，所以游戏的事件找得到它
+    events = {
+        onActivate = function(skill, owner, ctx)
+            log.info(string.format("%s played by %s, via %s",
+                ctx.skillId, tostring(ctx.owner), tostring(ctx.via)))
+        end,
+    },
+}
+```
+
+`ctx` 由运送这次事件的来源填好：
+
+| ctx 键 | 说明 |
+| --- | --- |
+| `ctx.skillId` | 游戏写法的 id：`onActivate` 是 `EPalWazaID` 的名字，`onEquip` 和 `onUnequip` 是被动行的 FName。 |
+| `ctx.wazaId` | 原始的 `EPalWazaID` 整数。只有 `onActivate` 有。 |
+| `ctx.owner`、`ctx.actor` | 放出这个技能、或者带着这个被动的角色。同一个值挂在两个名字下。 |
+| `ctx.target` | 技能瞄准的对象；没有目标的技能是 `nil`。只有 `onActivate` 有。 |
+| `ctx.action` | 技能实际运行成的那个 `UPalActionWazaBase`，来自动作端来源时才有。 |
+| `ctx.params` | 被动那两个频道上，该角色的 `PalIndividualCharacterParameter`。 |
+| `ctx.overrides` | `AddPassiveSkill` 的第二个参数，原样传过来。它**不会**被当成一次卸下：这个调用本身没说被顶掉的是两个 id 里的哪一个。 |
+| `ctx.via` | 这一次是哪个来源运来的。每个来源第一次运来东西时，日志会写出它的名字。 |
+
+有两个细节会改变处理函数该怎么写：
+
+- 同一个瞬间可能被好几个来源描述，所以同一频道同一 id 在四分之一秒内的重复会被丢掉。两只帕鲁在这么
+  近的间隔里用同一个技能，只会被报告一次。
+- `skill.equip` 不只抓游戏的写入，也抓 PalForge 自己的写入 —— 对被动调用 `:teach` 会以 `onEquip` 回到
+  你这里。另外还有第二个来源 `PalPassiveSkillComponent:SetupSkillFromSelf` 与 `AddPassiveSkill` 一起
+  待命，目前它还没运来过任何东西。一旦它开始运送，一个刚进入世界的角色会把它本来就有的被动一次性
+  报出来。请把 `onEquip` 写成可以重复调用的形式。
+
+### onHit 是唯一不会触发的那个
+
+Palworld 的伤害路径里根本没有技能这个信息。`FPalDamageInfo` 有 40 个字段，`FPalDamageRactionInfo` 有 6 个，
+`FPalDamageResult` 有 12 个，没有一个是 `EPalWazaID`。两个有可能带上 id 的钩子 ——
+`PalUtility:MakeDamageInfoByWazaType` 和 `PalAnimNotifyState_AttackCollision:OnHit` —— 都已挂上并被测为
+静默，而同一批会话里 `pal.damaged` 和 `pal.death` 都运来了事件，也就是说攻击确实打中了。
+
+剩下的只有推断：记住刚刚发动的是哪个技能，再把随后的伤害算到它头上。PalForge 不这么做，也不会把
+`onHit` 接到这上面 —— 一个打空的技能、同一时间窗里出手的第二只帕鲁、来自别处的伤害，都会被算成
+“最后发动的那个”，而 `onHit` 承诺的是“游戏告诉了我们”。这个未决项目叫 `skill-hit-source`。能用的入口是
+`:hit(target, ctx)`，在自己的 `onActivate` 里调用它，就是内容包按自己的规则报告命中的做法。
 
 ## 动作
 
@@ -250,8 +359,9 @@ skill:unequip(owner, ctx)     --> boolean
 skill:cooldownLeft(owner)     --> number, seconds until ready, 0 when ready
 ```
 
-这五个都是你自己的记账，不会告诉游戏任何事。另外三个 —— `:teach`、`:forget` 和 `:skillsOn` ——
-正好相反：它们往真正的角色上写，也从角色上读回来。下面有专门的一节。
+这五个都是你自己的记账，不会告诉游戏任何事 —— 它们运行你的处理函数就到此为止，检查的冷却也是
+Lua 自己数出来的。另外三个 —— `:teach`、`:forget` 和 `:skillsOn` —— 正好相反：它们往真正的角色上写，
+也从角色上读回来。下面有专门的一节。
 
 - `owner` 和 `target` 是你传什么就是什么 —— 帕鲁的 pawn、玩家角色，或者一个普通的表。只有冷却的
   记账会看 `owner`，而且只把它当身份标识用。
@@ -312,8 +422,11 @@ Ember:cooldownLeft(two)   --> counts down from 5.0, independently
 
 - `owner` 可以不传。这时时间记进一个共享的槽位，所以不带 owner 的 `:activate()` 是整个技能共用
   一个冷却。
-- owner 是弱引用保存的，冷却不会让一个已经消失的 pawn 继续留着。
-- 时间取自 `os.clock()`。
+- 引擎侧的 owner 用它的 `GetFullName()` 做键，而不是你手上那个句柄。UE4SS 每次查找都会新造一个包装
+  对象，所以同一个 pawn 查两次仍能命中同一份冷却，靠的就是这一点。如果 owner 是一个普通的 Lua 表，
+  那就用这个表自己做键。
+- 时间取自 `os.clock()`；某个 owner 的最新记录超过十分钟后，会在下一次记录时被丢掉，所以消失的帕鲁
+  也会把自己那份带走。
 - 没有写 `cooldown`，或者 cooldown 小于等于零，就完全没有门槛：`:activate` 总是运行，`:cooldownLeft`
   总是返回 `0`。
 - 时刻是在处理函数运行**之前**记下的。处理函数崩溃了，冷却照样已经用掉。
@@ -342,22 +455,28 @@ s:description()  --> string | nil
 s:kind()         --> "active" | "passive"
 s:element()      --> string | nil
 s:power()        --> number | nil
-s:iconOf()       --> texture ref | the declared icon | nil
+s:iconOf()       --> "/Game/..." 路径 | 你声明的 icon | nil
 ```
 
 `:iconOf()` 会通过 `core/icons`，拿这个 id 去查游戏自己的一张数据表 —— 伙伴技能的图标表
-`/Game/Pal/DataTable/PartnerSkill/DT_partnerSkillIconDataTable`。每一步都不会硬失败：表不在、行不在、
-列不在，结果都是 nil，任何一次查不到都会改用你声明的 `icon`。那张表是按帕鲁做键的，所以大多数技能 id
-都查不到，`"pack:name"` 形式的 id 必定查不到。想让图标显示出来，就自己声明 `icon`。
+`/Game/Pal/DataTable/PartnerSkill/DT_partnerSkillIconDataTable`，并把结果作为一个 `/Game/...` 资源路径
+字符串返回，绝不会是引擎对象。读取本身是可用的：`core/icons` 在真实存档里读了这张表，311 行全部
+返回了图标路径。
+
+真正的限制在**键**上，不在读取上。那 311 行是以**帕鲁** id 为键的 —— Alpaca、Anubis、Bastet —— 所以只有
+源自帕鲁的伙伴技能才可能命中，被动技能按结构就没有对应行。带命名空间的 id 会先被解析，所以
+`"pack:Ember"` 是以 PalSchema 写入的行名 `pack_Ember` 去问的；它在这张表里依然查不到，但查不到的理由
+变成了正当的那个，而不是“冒号写法本来就不可能匹配任何东西”。每一步都不会硬失败，任何一次查不到都会
+改用你声明的 `icon`。
 
 ```lua
 local Ember = Skill{
     id   = "example:Ember",
-    icon = "palforge/example/textures/ember.png",
+    icon = "/Game/YourPack/Textures/T_Ember.T_Ember",
 }
-Ember:iconOf()   --> the declared icon, since "example:Ember" has no row in that table
+Ember:iconOf()   --> 你声明的 icon：没有哪只帕鲁叫 example_Ember，那张表里没有这一行
 
-Skill.get("Legend"):iconOf()   --> nil: no row, and no icon was declared to fall back to
+Skill.get("Legend"):iconOf()   --> nil：被动在那张表里没有行，也没有声明 icon 可退回
 ```
 
 ## 装到活着的角色身上
@@ -415,18 +534,21 @@ Palworld 把主动技能和被动技能分开存放，所以 `:teach` 必须二�
 | `mastered` | 它已经掌握的技能 |
 
 空列表表示读成功了、一个都没有，这是一个真实的答案：`active` 为空的帕鲁，也可能只是什么都没装备。
-整张表是 `nil` 则表示这个角色根本读不出来 —— 是“未知”，不是“没有” —— 所以取下标之前先判断 `nil`。
+`equipable` 和 `mastered` 在这个版本没有声明对应取值函数时会是 `nil` —— 是“未知”，不是“没有” —— 所以
+请按 `#(s.equipable or {})` 的写法读。整张表是 `nil` 则表示这个角色根本读不出来，所以取下标之前先
+判断 `nil`。在活着的 `BP_SheepBall_C` 上确认过的一组数字是：3 主动、1 被动、3 可装备、0 已掌握。
 
 ```lua
 local carried = Skill.get("FireBlast"):skillsOn(pawn)
 if carried then
-    print(#carried.active .. " equipped, " .. #carried.equipable .. " available")
+    print(#carried.active .. " equipped, " .. #(carried.equipable or {}) .. " available")
 end
 ```
 
-<Callout type="info">
-要问就问**帕鲁**，别问村民或商人。它们也是角色，游戏自己的角色列表里也有它们，但它们身上没有技能 ——
-所以问它们得到的是空列表，和一次失败的读取长得一模一样。
+<Callout type="warn" title="要问 PalMonsterCharacter，不是 PalCharacter">
+类的继承链是 `APalMonsterCharacter : APalNPC : APalCharacter`，所以 `FindAllOf("PalCharacter")` 会把村民、
+商人和其他所有 NPC 一起返回 —— 而一个 NPC 的四个空列表，和一次坏掉的读取长得一模一样。这个错误已经
+浪费过好几次运行。只问帕鲁的检索是 `FindAllOf("PalMonsterCharacter")`。
 </Callout>
 
 ### 写入会告诉你什么
@@ -434,10 +556,19 @@ end
 `:teach` 和 `:forget` 每次写完都会把角色读回来核对，所以 `true` 表示这个技能**在角色身上被看到了**，
 绝不是“调用没报错”。`false` 表示它没有装上：目标不是角色、游戏不接受这个 id，或者写入被拒绝了。
 
+这两半并不处在同一个状态，动手之前值得先知道差别：
+
+- **被动的写入是测过的。** `AddPassiveSkill` 把一个被动装到了活着的 `BP_ChickenPal_C` 上，读回来也看到了；
+  `skill.equip` 的第一个事件也正是这么来的。
+- **主动技能的写入没有测过。** `AddEquipWaza` / `RemoveEquipWaza` / `ClearEquipWaza` 从来没有被看到成功
+  装到一只帕鲁身上。唯一一次真的写入之后 1.4 秒，Palworld 就关闭了；而那次用的是过宽的 `PalCharacter`
+  检索，目标很可能是个 NPC —— 所以“写错了对象”是目前最有力的解释，但那不是可以拿来发布的事实。
+
 <Callout type="warn">
-别假定，去看那个布尔值。读配置这件事已经定下来了，写配置还没有到可以拿来搭整合包的程度；`:teach`
-返回 `false` 是框架在如实告诉你，而不是你的代码有 bug。在真正依赖它之前，先在一个可以重来的存档里
-试一次。
+装上**主动技能**是这里唯一还没被测量的能力，对应未决项目 `pal-skills-equip`。别假定，去看那个布尔值，
+并且在一个丢了也不心疼的存档里试。这个测量不是框架自己会做的事，而是一个声明好的测试钩子：在 UE4SS
+控制台里运行 `pf_hook pal-skills-equip`，它需要 `env.debug`，而且因为它会写进真实存档，还需要
+`env.debugHooks["pal-skills-equip"]`。读配置和写被动都已定下来，没定下来的只有这一件。
 </Callout>
 
 <Callout type="info">
@@ -467,8 +598,9 @@ PalForge: Pal: field "skills[2]" expects string, got number
 ```
 
 <Callout type="warn">
-这个数组就只是一个列表。光是声明它，不会往任何生物身上装上什么，游戏也不会替你发动那些主动技能。
-它只是被存下来，通过 `pal:skillsOf()` 交还给你。
+这个数组就只是一个列表。光是声明它，不会往任何生物身上装上什么；它只是被存下来，通过
+`pal:skillsOf()` 交还给你。真正写到活着的生物身上的是 `pal:teachAll(actor)`，而自制技能仍然由你自己的
+代码发动 —— 游戏只会放出它认识的技能。
 </Callout>
 
 它有两种用法。一种是自己写循环，做你自己的记账：
@@ -505,9 +637,11 @@ local skills = require("palforge.native.skills")
 skills.CATALOG              -- every row id from those two tables, as a list
 skills.get("Legend")        -- a cached handle for a catalog id, nil for anything else
 skills.get("not_a_row")     -- nil
+skills.publish("Legend")    -- 可选：把这个句柄注册进去，好让分发能找到它
 ```
 
-`get(id)` 在你第一次要它的时候才定义这个技能，并记住结果，所以启动时不会去注册这几千个 id。目录本身
+`get(id)` 在你第一次要它的时候构造句柄并缓存起来，但它不做任何注册：读目录就只是读。注册是另外一件
+需要你主动做的事 —— `publish(id)`，它才让 `Skill.get(id)` 和游戏那边的分发找得到这个类。目录本身
 只是普通数据。这个文件还附带了一个现成的定义：
 
 ```lua
@@ -518,8 +652,10 @@ skills.Fireball:activate(owner)
 
 <Callout type="info">
 `skills.CATALOG` 里没有 `"FlameThrower"` —— 这个名字来自 `DT_PartnerSkillParameter` 的 `DevName` 列，
-不是某一行的行名 —— 但 `skills.get("FlameThrower")` 仍然返回上面那个句柄。它的 `onActivate` 目前什么都
-不做：还没有确认可以从 Lua 生成弹体的办法，想让它做点什么，就自己在处理函数里写。它的 `element`、
+不是某一行的行名 —— 但 `skills.get("FlameThrower")` 仍然返回上面那个句柄，而且因为它声明了处理函数，
+这一个在加载时就注册了。它的 `onActivate` 什么都不会生成：在这个版本上还没有找到从 Lua 生成弹体或
+效果 actor 的路径，所以它每个会话只打一行日志，说明自己什么都没生成；`:activate` 依然返回 `true`，
+因为那本来就只表示“处理函数跑过了”。想让它做点什么，就自己在处理函数里写。它的 `element`、
 `cooldown` 和 `power` 是 PalForge 自己定的数值，不是从游戏里读出来的。
 </Callout>
 
@@ -720,9 +856,10 @@ Pal{
 ```
 
 帕鲁进入世界之后，`onSpawned` 和 `onDeath` 都会自己运行，所以装备和卸下不用你操心。`onDeath` 挂在一个
-已确认的游戏钩子上；`onSpawned` 挂在 `BroadcastOnCompleteInitializeParameter` 上，那还是一个未经确认的
-猜测，所以把装备当作尽力而为，需要确定就在别处再装备一次。两个处理函数由技能提供，时机由 `Effect`
-提供。
+已确认的游戏钩子上。较弱的是 `onSpawned`：它最初挂的那个广播函数已被测为静默，现在运送它的是两个
+委托目标 —— `PalNPC:OnCompletedInitParam` 和 `PalPlayerCharacter:OnCompleteInitializeParameter` ——
+所以把装备当作尽力而为，需要确定就在别处再装备一次。顺带一提，请把 `onEquip` 写成可以重复调用的形式：
+只要有这个 id 的被动被挂到什么东西上，游戏那边也会调到它。
 
 ## 校验错误
 
@@ -750,12 +887,16 @@ PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated"
 
 ## 小结
 
-- 用 `Skill{ ... }` 创建技能。`id` 是唯一必须给的字段。
-- 没有任何东西替你发动它：由你的代码调用 `:activate`、`:hit`、`:equip` 或 `:unequip`。
-- `cooldown` 以秒为单位，按 owner 分别计数，只有 `:activate` 会检查它。
+- 用 `Skill{ ... }` 创建技能。`id` 是唯一必须给的字段，解析不出行名的 id 会当场被拒绝。
+- 用游戏自己的 id 定义，`onActivate`、`onEquip` 和 `onUnequip` 就由游戏替你调用；用 `"pack:name"` 定义，
+  就由你的代码通过 `:activate`、`:hit`、`:equip`、`:unequip` 发动。
+- `onHit` 是例外：伤害路径里没有技能这个信息，所以只有 `:hit` 能运行它。
+- `cooldown` 以秒为单位，按 owner 分别计数，只有 `:activate` 会检查它。`element` 和 `power` 是给你自己
+  读的，没有别的地方读它们。
 - `kind = "passive"` 会让 `:activate` 返回 `false`；这类技能请用 `:equip` 和 `:unequip`。
 - 处理函数崩溃只会得到 `false`，日志里什么都没有，所以要在里面自己打日志。
-- `pal:skillsOf()` 给出的是一只帕鲁*声明*的 id。`skill:teach(actor)` 把一个技能装到活着的角色身上，
-  `skill:skillsOn(actor)` 读回那个角色真正带着什么，`pal:teachAll(actor)` 一次装上整份声明列表。
+- `pal:skillsOf()` 给出的是一只帕鲁*声明*的 id。`skill:skillsOn(actor)` 读回活着的角色真正带着的那四个
+  列表，`skill:teach(actor)` 装上一个（被动已定下来，主动技能仍未测量），`pal:teachAll(actor)` 一次装上
+  整份声明列表。
 
 接下来读 [Effect](/docs/api/effect) —— 被动技能要持续做事，需要的计时器就在那里。

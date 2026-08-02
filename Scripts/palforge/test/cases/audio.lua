@@ -4,24 +4,40 @@
 -- bgm/se PIN `kind` rather than quietly overwriting a caller's, and — the part that decides
 -- whether anything can ever make noise — how a declaration is LOWERED into the core.sound
 -- spec: the id fallback, a path-only definition (which used to resolve to nothing and now
--- resolves), and an empty sound id, which still resolves to nil. One test still asserts a stub
--- rather than a promise — a soundFile definition plays nothing — and it is a tripwire that goes
--- red the day someone implements it, which is the point. :setVolume is no longer one of those:
--- it is wired to the actor-scoped output-bus call and is asserted the way :play and :stop are,
--- false with no actor and true once the native call has been issued.
--- Only :play, :stop and :setVolume on a real actor need a world, so those three SKIP at the
--- title screen.
+-- resolves), and an empty sound id, which still resolves to nil. :setVolume is asserted the way
+-- :play and :stop are: false with no actor, true once the native call has been issued — and
+-- "issued" is the whole claim, because nobody has heard it (test/hooks/audio-setvolume-audible).
+--
+-- TWO THINGS THIS FILE USED TO ASSERT ARE GONE, and they were both about soundFile. It used to
+-- prove that a soundFile OUTRANKS a soundId in the lowering, and that the resulting source plays
+-- nothing — an accurate description of a field that silenced working audio. soundFile is a hard
+-- error at define time now, so the tests are the refusal itself: the error fires, it names the
+-- open item, and neither of the two working fields is reachable past it.
+--
+-- Only :play, :stop, :setVolume on a real actor and the wrong-class refusal need a world, so
+-- those SKIP at the title screen. ONE test here skips the other way round — ":setVolume reports
+-- false ... when there is no actor" skips when a world IS loaded, because a loaded world is
+-- exactly what makes its premise false. That inversion is easy to add by accident and hard to
+-- read later, so it is spelled out in the case name; nothing new here does it.
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Audio   = require("palforge.api.audio")
 local sound   = require("palforge.core.sound")
+local om      = require("palforge.core.object_manager")
 
 local s = T.suite("audio")
 
--- A stand-in for an actor. The routes it is passed to (an unresolvable spec, the file seam)
+-- A stand-in for an actor. The routes it is passed to (an unresolvable spec, a refused value)
 -- return before anything dereferences it, so those claims hold identically with and without
 -- a world — which is what keeps them out of the world-gated tests below.
 local STUB_ACTOR = {}
+
+-- A real /Game asset that is NOT an AkAudioEvent: the static mesh the live sweep read off a
+-- rendering BP_BuildObject_ItemChest_C (core/mesh/assets.lua M.SM.ChestWood). It is here because
+-- `soundPath = Mesh.assets.SM.ChestWood` is the mistake the sound loader had no defence against
+-- — it resolves to a perfectly live UStaticMesh, and marshalling one into a UAkAudioEvent*
+-- parameter is the shape that closed the game once.
+local WRONG_CLASS_PATH = "/Game/Pal/Model/Prop/Architecture/ChestWood/SM_ChestWood.SM_ChestWood"
 
 -- The AkAudioEvent this suite plays live: a short one-shot UI blip rather than the title
 -- BGM, because someone will press F1 inside their actual save.
@@ -82,7 +98,11 @@ s:test("Audio.get on an id nobody defined returns a native handle without regist
 
     t:truthy(src, "an unknown id is still playable: it keys a thin native definition")
     t:eq(src.kind, "native", "the fallback definition is a native source")
-    t:eq(src.id, id, "...keyed on the id you asked for")
+    -- support.id() is NAMESPACED ("palforge_test:audio_7"), and lowering resolves an id on its
+    -- way to the engine — so the spec carries the resolved form, not the colon form. That is the
+    -- point of the resolution test below, and it is asserted here too because this is the route
+    -- an undefined id takes.
+    t:eq(src.id, om.resolve(id), "...keyed on the RESOLVED form of the id you asked for")
     t:eq(h:kind(), "se", "an undeclared kind reads as the class default, se")
 
     -- get must not have REGISTERED anything, or looking a sound up would create content.
@@ -138,8 +158,59 @@ s:test("a definition that names no sound falls back to its own id as the event n
 
     t:truthy(src, "the short form Audio.bgm{ id = ... } still lowers to a source")
     t:eq(src.kind, "native", "the fallback route is native")
-    t:eq(src.id, id, "the definition's own id becomes the AkAudioEvent name")
+    t:eq(src.id, om.resolve(id), "the definition's own id becomes the AkAudioEvent name")
     t:truthy(sound.resolve(src), "and core.sound resolves it")
+end)
+
+s:test("a NAMESPACED sound id is resolved before it is handed to the engine", function(t)
+    -- F-3/C5. An id may be namespaced, and a namespaced id is useless at both engine boundaries
+    -- this spec feeds: the AkAudioEvent catalog is keyed on event names, and the SoundID fallback
+    -- puts the id straight into FName(). "mypack:Theme" matched neither, so a namespaced sound
+    -- missed the catalog and then posted a name nothing answers to — silence, reported as true.
+    local src = Audio.se{ id = support.id("audio"), soundId = "mypack:Theme" }:source()
+    t:eq(src.id, "mypack_Theme", "the colon form is resolved to the underscore form")
+    t:eq(src.path, nil, "an id the catalog does not know still lowers to the id alone")
+
+    -- The literal fallback (C4): resolve REFUSES a shape it cannot turn into a row name, and the
+    -- boundary keeps the literal rather than dropping it. A hyphen is a perfectly natural thing
+    -- to type, and "nothing at all" is the one answer that helps nobody.
+    local bad = Audio.se{ id = support.id("audio"), soundId = "my-pack:Theme" }:source()
+    t:eq(bad.id, "my-pack:Theme", "an unresolvable id falls back to the LITERAL, never to nil")
+
+    -- A literal game id is untouched: this is what every catalog entry is.
+    local plain = Audio.se{ id = support.id("audio"), soundId = "AKE_Test_Blip" }:source()
+    t:eq(plain.id, "AKE_Test_Blip", "an id with no colon is passed through unchanged")
+end)
+
+s:test("an id that could never resolve is refused at DEFINE time, not at play time", function(t)
+    -- C4. "my-pack:Blip" would register fine and then be dead at every boundary it reaches,
+    -- because om.resolve requires letters/digits/underscore in both halves — and for AUDIO it is
+    -- worse than for other domains, since a definition that names no sound uses its own id as
+    -- the event name. Audio.Spec's `id` carries schema.validId, so it is refused where it was
+    -- typed. The wording belongs to core/schema.lua; what this asserts is that audio enforces it.
+    t:errors(function() Audio{ id = "my-pack:Blip", soundId = "AKE_Test_Blip" } end,
+        "letters/digits/_ only")
+    t:errors(function() Audio.bgm{ id = "pack:has space", soundId = "AKE_Test_Blip" } end,
+        "letters/digits/_ only")
+end)
+
+s:test("opts.register = false builds the handle and publishes nothing", function(t)
+    -- C2. Registering is what makes an id public and permanent (object_manager has no expiry),
+    -- so a caller that only wants the handle has to be able to say so.
+    local id = support.id("audio")
+    local h  = Audio.se({ id = id, soundId = "AKE_Test_Blip" }, { register = false })
+
+    t:eq(h.id, id, "the handle is built and returned exactly as usual")
+    t:eq(h:source().id, "AKE_Test_Blip", "...and lowers exactly as usual")
+    t:eq(om.get("audio", id), nil, "but nothing was registered under that id")
+
+    -- and the default is unchanged: no opts still registers.
+    local id2 = support.id("audio")
+    Audio.se{ id = id2, soundId = "AKE_Test_Blip" }
+    t:truthy(om.get("audio", id2), "omitting opts registers, exactly as before")
+
+    t:errors(function() Audio.se({ id = support.id("audio"), soundId = "x" }, "mypack") end,
+        "the second argument is the options table")
 end)
 
 s:test("a soundPath-only definition resolves: the path alone is a complete definition", function(t)
@@ -162,19 +233,58 @@ s:test("an empty sound id lowers to no source at all", function(t)
     t:eq(sound.resolve(nil), nil, "and a nil spec resolves to nil rather than throwing")
 end)
 
-s:test(":source is the core.sound spec, and a custom file outranks a native id", function(t)
+s:test(":source is the core.sound spec: soundId and soundPath both land on it", function(t)
     local both = Audio.se{ id = support.id("audio"),
                            soundId = "AKE_Test_Blip", soundPath = "/Game/x.x" }:source()
     t:type(both, "table", ":source returns a spec table")
     t:eq(both.kind, "native", "soundId/soundPath lower to the native route")
     t:eq(both.id, "AKE_Test_Blip", "the spec carries the event name")
     t:eq(both.path, "/Game/x.x", "...and the asset path")
+end)
 
-    local file = Audio.se{ id = support.id("audio"),
-                           soundFile = "audio/theme.wav", soundId = "AKE_Test_Blip" }:source()
-    t:eq(file.kind, "file", "a soundFile takes precedence over a native id")
-    t:eq(file.path, "audio/theme.wav", "the file route carries the file path")
-    t:eq(file.id, nil, "the file spec does not carry a native id")
+s:test("soundFile is a HARD ERROR at define time, on every constructor", function(t)
+    -- THE PUBLISH GATE. soundFile was accepted, validated, documented — and it took precedence
+    -- over soundId/soundPath, so adding one beside a working soundId silenced a sound that had
+    -- been playing, and :play handed back the false that came out of the file seam. Nothing else
+    -- in this framework degrades that way. It refuses at the point the author can still see it.
+    --
+    -- This test is the tripwire for audio-custom-file-loader: the day a runtime loader is found,
+    -- this is what says "and now unrefuse the field".
+    local msg = t:errors(function()
+        Audio{ id = support.id("audio"), soundFile = "audio/theme.wav" }
+    end, "soundFile is not accepted")
+    t:truthy(msg:find("audio-custom-file-loader", 1, true),
+        "the refusal names the open item, so it reads as a boundary rather than a bug")
+    t:truthy(msg:find("soundId", 1, true),
+        "...and names what to use instead, so the fix is one line")
+
+    t:errors(function() Audio.bgm{ id = support.id("audio"), soundFile = "a.wav" } end,
+        "soundFile is not accepted")
+    t:errors(function() Audio.se{ id = support.id("audio"), soundFile = "a.wav" } end,
+        "soundFile is not accepted")
+
+    -- The dangerous shape specifically: soundFile NEXT TO a working sound. It must not be
+    -- accepted-and-ignored either, because "it plays" and "it errors" are both fine answers
+    -- while "it silently stopped playing" is not.
+    t:errors(function()
+        Audio.se{ id = support.id("audio"), soundId = "AKE_Test_Blip", soundFile = "a.wav" }
+    end, "soundFile is not accepted")
+
+    -- An empty string is still a soundFile: the old code tested `#self.soundFile > 0` when
+    -- lowering, so "" fell through to the native route and looked harmless. The gate is on the
+    -- FIELD BEING PRESENT, not on it being non-empty.
+    t:errors(function() Audio.se{ id = support.id("audio"), soundFile = "" } end,
+        "soundFile is not accepted")
+
+    -- The field stays DECLARED so the error can name it and so tooling still lists it — which is
+    -- also what keeps the did-you-mean suggestion working for someone typing "soundfile".
+    local schema = require("palforge.core.schema")
+    local spec   = schema.get("Audio.Spec")
+    local found  = false
+    for _, f in ipairs((spec and spec.fields) or {}) do
+        if f.name == "soundFile" then found = true end
+    end
+    t:truthy(found, "soundFile is still a declared field, so the refusal can name it")
 end)
 
 --=============================================================================
@@ -188,19 +298,37 @@ s:test("a definition that names no sound never claims to have played", function(
     t:eq(sound.play(nil, STUB_ACTOR), false, "core.sound.play agrees")
 end)
 
-s:test("a custom audio FILE does not play yet: :play is a no-op that returns false", function(t)
-    -- Palworld exposes no confirmed USoundWave loader, so core.sound.file is a seam. When
-    -- someone wires it, this test fails and that is the signal to update it.
-    local h = Audio.se{ id = support.id("audio"), soundFile = "audio/theme.wav" }
-    t:eq(h:play(STUB_ACTOR), false, "the file route resolves and then plays nothing")
+s:test("the file route still exists below the api, and still plays nothing", function(t)
+    -- Audio{ soundFile = ... } cannot reach this any more (it is refused at define time), but
+    -- core.sound still DISPATCHES kind = "file", because two callers can still produce one: a
+    -- definition's own `source` override, and a direct core.sound call. Both are code someone
+    -- wrote on purpose, and both must get the same honest false rather than a silent true.
+    -- Palworld exposes no confirmed loader for a file on disk; when one is found, this test
+    -- fails and that is the signal that audio-custom-file-loader can close.
+    t:truthy(sound.resolve({ kind = "file", path = "audio/theme.wav" }),
+        "core.sound still resolves a file spec to a FileSource")
+    t:eq(sound.play({ kind = "file", path = "audio/theme.wav" }, STUB_ACTOR), false,
+        "...and that source plays nothing, without throwing")
+
+    -- The same thing through the only api route left to it: a source override.
+    local h = Audio.se{ id = support.id("audio"),
+                        source = function() return { kind = "file", path = "audio/theme.wav" } end }
+    t:eq(h:source().kind, "file", "a source override may still return a file spec")
+    t:eq(h:play(STUB_ACTOR), false, "and :play reports false rather than a reassuring true")
 end)
 
-s:test(":setVolume reports false rather than true when there is no actor to scale", function(t)
+s:test(":setVolume reports false with no actor (SKIPS when a world IS loaded)", function(t)
     -- setVolume is wired now (UAkGameplayStatics::SetOutputBusVolume, AkAudio.hpp:748) but it
     -- is ACTOR-scoped, so with no world there is no default actor and nothing is issued. This
     -- is the same fail-soft claim :play and :stop make, asserted on the same terms.
     local h = Audio.se{ id = support.id("audio"), soundId = "AKE_Test_Blip" }
-    if support.player() then t:skip("a world is loaded — there IS an actor to scale") end
+    -- INVERSE-GATED, and typed as such: skipNeedsNoWorld rather than the bare t:skip, so this
+    -- lands in the summary's "need no world" bucket with the other nine instead of in the
+    -- "did not say which" one. The audible half is test/hooks/audio-setvolume-audible.
+    if support.player() then
+        t:skipNeedsNoWorld("a world is loaded — there IS an actor to scale, so the no-actor "
+            .. "refusal this asserts cannot happen")
+    end
     t:eq(h:setVolume(0.5), false, "no actor, so no native call was issued")
     t:eq(h:setVolume(0.0), false, "...for every value, including the edges")
     t:eq(h:setVolume(1.0), false, "...including a full-volume request")
@@ -230,6 +358,35 @@ s:test(":play issues a native call for a resolvable sound on the player pawn", f
     local h = Audio.se{ id = support.id("audio"), soundPath = path }
     t:eq(h:play(pawn), true, ":play returns true once the native call has been ISSUED")
     t:eq(h:play(), true, "the default actor is the local player pawn")
+end)
+
+s:test("a soundPath that names the WRONG CLASS is refused before it is marshalled", function(t)
+    local pawn = support.needWorld(t)
+
+    -- A-3. This is the test that has to run in a world, because the whole claim is about what
+    -- happens to an object that RESOLVES: SM_ChestWood is a real, live UStaticMesh (the live
+    -- sweep read it off a rendering item chest), and the parameter it would be handed is
+    -- declared UAkAudioEvent* (dumps/cxx/Pal.hpp:29170). Handing a wrong-typed object to a typed
+    -- native parameter faults inside UE4SS's marshalling where pcall cannot see it — that is the
+    -- shape that closed the game once, and it is why the mesh loader has had a class check for
+    -- as long as it has existed while this one had none.
+    --
+    -- If this test ever CRASHES the session rather than failing, the check is gone.
+    local h = Audio.se{ id = support.id("audio"), soundPath = WRONG_CLASS_PATH }
+    t:eq(h:play(pawn), false,
+        "a static mesh in soundPath is refused, and :play says false instead of dying")
+
+    -- The refusal is per PATH, not per definition: a second sound naming the same asset is
+    -- refused just as firmly (and the log line is said once, not once per play).
+    local h2 = Audio.se{ id = support.id("audio"), soundPath = WRONG_CLASS_PATH }
+    t:eq(h2:play(pawn), false, "...and again for any other definition naming the same asset")
+
+    -- With an id ALSO declared, the refusal falls through to the SoundID route exactly as an
+    -- unresolvable path does — issued, and silent, which is the documented behaviour of that
+    -- branch. What matters is that the AkAudioEvent parameter never saw the mesh.
+    local h3 = Audio.se{ id = support.id("audio"), soundId = "AKE_Test_Blip",
+                         soundPath = WRONG_CLASS_PATH }
+    t:type(h3:play(pawn), "boolean", "the fallback route decides the return, and it never throws")
 end)
 
 s:test(":setVolume issues the actor-scoped output-bus call on the player pawn", function(t)

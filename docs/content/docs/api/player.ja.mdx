@@ -245,8 +245,15 @@ end)
 ここまで全体で 4〜8 秒かかるので、見た目には「自分の隣に現れてから移動していく」形になります。
 
 `:spawn` はそのどれも起きないうちに返るので、戻り値は「呼び出しが発行された」だけを意味します。
-[Pal](/docs/api/pal) を参照してください。また `CheatManagerEnabler` mod が必要です。無い場合は管理用
-オブジェクトがそもそも存在せず、ワールドへのスポーンはゲームに届く前に `false` を返します。
+[Pal](/docs/api/pal) を参照してください。
+
+`CheatManagerEnabler` mod は**不要**です。`core/spawn` はまず生きている `PalCheatManager` を探し、
+次にプレイヤーコントローラー上のものを探し、どちらも無ければ自分で作ります。
+`PalPlayerController` 自身の `CheatClass` に対する `StaticConstructObject`（それが null なら
+`/Script/Pal.PalCheatManager`、さらに `/Script/Engine.CheatManager` へフォールバック）で、作った
+オブジェクトはコントローラーに取り付けられるので、これはスポーンごとではなくセッションごとに
+1 回だけ起きます。ワールドへのスポーンが本当に必要とするのはプレイヤーコントローラーです。ワールド
+未読み込みや未接続の間は、ゲームに届く前に `false` を返し、作ることもできなかったと警告します。
 </Callout>
 
 ### プレイヤーの正面にスポーンさせる
@@ -303,6 +310,39 @@ end
 ループの途中でプレイヤーがワールドを抜けた場合、残りの反復は古い座標ではなく `nil` を
 受け取ります。
 
+### プレイヤーが何を持っているか
+
+ローカルプレイヤーのインベントリは読み取れます。しかもこの読み取りは、このビルドで唯一、端から端
+まで計測されているアイテム経路です。`Item.Handle:count()` は `PalUtility` の CDO からプレイヤー、
+プレイヤーステート、`InventoryData` とたどり、ゲーム自身の `CountItemNum` に尋ねます。ロード済みの
+セーブで `Wood` に対して素の Lua の数値として `135` が返り、その連鎖の各段で実在のオブジェクトが
+表示されました。
+
+```lua title="content/inventory_report.lua"
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("example")
+
+event.on("world.ready", function()
+    for _, id in ipairs({ "Wood", "Stone", "Berries" }) do
+        local n = Item.get(id):count()
+        log.info(string.format("%-8s %s", id, n and tostring(n) or "unknown"))
+    end
+end)
+```
+
+`nil` は**不明**という意味で、0 ではありません。ワールドが無い、プレイヤーが居ない、あるいは読み
+取りが答えなかった、のいずれかです。`Player.coordinate()` とまったく同じようにガードしてください。
+
+<Callout type="warn">
+API を飛び越えて自分で `CountItemNum` を呼ぶこと自体は構いませんが、id は必ず包んでください。
+`inv:CountItemNum(FName("Wood"))` は答えますが、`FName` が宣言されているところに素の Lua 文字列を
+渡す `inv:CountItemNum("Wood")` は UE4SS の引数マーシャリングの内部でフォルトし、Palworld を落とし
+ます。`pcall` はそれを見られません。これは実際に、成功した読み取りの次の行で起きました。64 ビットの
+兄弟 `CountItemNum64` が PalForge のどこでも呼ばれていないのも同じ理由です。クラスの関数一覧には
+ありますが、そのパラメーターリストは読まれたことがなく、宣言を当て推量することの代償はすでに払って
+います。
+</Callout>
+
 ### ワールド上の何かとの距離を測る
 
 ライブな建築は `pos` を持ち、これも `x, y, z` をセンチメートルで表す同じ形です。したがって
@@ -339,6 +379,7 @@ end
 - `Player.coordinateOffset(dx, dy, dz)` はその位置をワールド軸方向にずらした地点です。「自分のとなり」を短く書けます。
 - `Player.character()` はプレイヤー自身のアクターです。プレイヤーに直接何かを適用したいときに使います。
 - 3 つともワールドがないときは `nil` を返すので、使う前に必ず確認してください。
+- プレイヤーが持っているものも読み取れます。`Item.get(id):count()` で、`nil` は不明の意味です。
 - 値は毎回取り直してください。どれもスナップショットで、ポーンはワールドをロードするたびに作り直されます。
 
 次は [Pal](/docs/api/pal) を読むと、いま求めた座標を `:spawn` がどう使うのかがわかります。

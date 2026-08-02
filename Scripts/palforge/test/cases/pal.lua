@@ -9,6 +9,11 @@
 -- its engine route from the SHAPE of its argument, and that dispatch is proved WITHOUT a
 -- world by swapping core/spawn's three entry points for recorders and putting them back.
 --
+-- :teachAll is covered the same way: its `taught, asked` partial-result contract is proved
+-- with core/character's write recorded, and the write itself — which needs a live pal and
+-- changes a real save — is named as the test/hooks/pal-skills-equip hook rather than left
+-- as an untested public function or a silent in-body return.
+--
 -- Only the last five tests need a game: three accepted spawns (ONE harmless chicken each
 -- — nothing in-tree can despawn one, so the count stays at one per test) and :renderOn
 -- against the player pawn. renderOn is deliberately exercised only on paths that CANNOT
@@ -20,8 +25,14 @@ local Pal     = require("palforge.api.pal")
 local Mesh    = require("palforge.api.mesh")
 local om      = require("palforge.core.object_manager")
 local spawn   = require("palforge.core.spawn")
+local character = require("palforge.core.character")
 
 local s = T.suite("pal")
+
+-- Every id this file defines is namespaced throwaway content, and defining is permanent:
+-- hand it all back the moment this suite finishes rather than letting a run's worth of pals
+-- sit in the registry while the remaining suites execute.
+support.sweepAfter(s)
 
 -- A model path that is guaranteed not to resolve: renderOn's live test must reach the
 -- backend and fail there, never actually dress the player.
@@ -146,7 +157,13 @@ s:test("a native catalog id resolves to its registered definition, mesh and all"
     t:eq(pal.id, support.GAME.pal, "the handle carries the game CharacterID")
 
     local m = pal:mesh()
-    if not m then t:skip("native pal catalog not loaded; nothing registered under " .. support.GAME.pal) end
+    if not m then
+        -- Directed as "this session could not answer": the catalog is a plain require, so a
+        -- miss here is not something a world load or a title screen would change — it means
+        -- native/pals.lua failed to load, and that is the finding.
+        t:skipUnanswerable("native pal catalog not loaded; nothing registered under "
+            .. support.GAME.pal .. " (require of palforge.native.pals failed)")
+    end
     t:type(m.model, "string", "the curated definition declares a model")
     t:eq(m.kind, "skeletal", "a pal mesh defaults to the skeletal backend")
     t:neq(pal:name(), support.GAME.pal, "a registered definition carries its own display name")
@@ -391,6 +408,88 @@ s:test(":spawn hands core/spawn the definition id verbatim, unresolved", functio
 end)
 
 --=============================================================================
+-- :teachAll — the partial-result contract (pure: core/character's write is recorded)
+--
+-- Until now this was one of the five public api functions with no coverage at all
+-- (api/pal.lua:493). Its WRITE half cannot be measured here — it ends in
+-- character.addSkill, which needs a live pal and mutates the tester's save — but the
+-- contract that makes it worth calling is pure: `taught, asked` are reported SEPARATELY so
+-- a partial result is visible, and a failure does not stop the ids after it. That half is
+-- provable by swapping core/character's addSkill for a recorder, the same way the spawn
+-- routes are recorded above; api/pal indexes the module at CALL time, so replacing the
+-- field is enough. The write itself is named as a hook below rather than left untested.
+--=============================================================================
+
+-- Run `body(asked)` with core.character.addSkill replaced by a recorder whose verdict comes
+-- from `verdictFor(id)`. The real function is always put back, including when an assertion
+-- raises mid-body (level 0 keeps the fail/skip sentinel intact for the runner).
+local function withAddSkillRecorder(verdictFor, body)
+    local real = character.addSkill
+    local asked = {}
+    character.addSkill = function(actor, id)
+        asked[#asked + 1] = { actor = actor, id = id }
+        return verdictFor(id)
+    end
+    local ok, err = pcall(body, asked)
+    character.addSkill = real
+    if not ok then error(err, 0) end
+end
+
+s:test("teachAll on a pal that declares nothing asks for nothing and reports 0, 0", function(t)
+    -- No stub: with an empty skill list the loop body never runs, so nothing engine-facing
+    -- is reached even with a world loaded. Both zero is the documented "nothing declared".
+    local pal = Pal{ id = support.id("pal") }
+    local taught, asked = pal:teachAll({ IsValid = function() return true end })
+    t:eq(taught, 0, "nothing was declared, so nothing was taught")
+    t:eq(asked, 0, "and nothing was asked for either")
+end)
+
+s:test("teachAll reports taught and asked separately, so a partial result is visible", function(t)
+    local pal = Pal{ id = support.id("pal"),
+                     skills = { "skill_first", "skill_missing", "skill_last" } }
+    local actor = { IsValid = function() return true end }
+
+    withAddSkillRecorder(function(id) return id ~= "skill_missing" end, function(asked)
+        local taught, count = pal:teachAll(actor)
+        t:eq(count, 3, "asked is every id the pal DECLARES, landed or not")
+        t:eq(taught, 2, "taught counts only the writes core/character verified")
+        t:neq(taught, count, "a partial result stays visible instead of collapsing to a boolean")
+
+        -- One unknown id must not cost a pal its other moves: the id AFTER the failure was
+        -- still asked for. That sentence is in api/pal.lua's doc string; this is it measured.
+        t:eq(#asked, 3, "the failure did not stop the loop")
+        t:eq(asked[1].id, "skill_first", "ids are applied in declared order")
+        t:eq(asked[2].id, "skill_missing", "including the one that refuses")
+        t:eq(asked[3].id, "skill_last", "and the one after it is still attempted")
+        t:eq(asked[1].actor, actor, "the actor is handed to core/character untouched")
+    end)
+end)
+
+s:test("teachAll counts nothing when every write refuses, and still reports what it asked", function(t)
+    -- The shape a title-screen call really has: core/character.addSkill logs and returns
+    -- false when the target has no character parameters, so teachAll must answer 0 of N
+    -- rather than raising or claiming success.
+    local pal = Pal{ id = support.id("pal"), skills = { "a", "b" } }
+    withAddSkillRecorder(function() return false end, function(asked)
+        local taught, count = pal:teachAll(nil)
+        t:eq(taught, 0, "no write landed")
+        t:eq(count, 2, "but both declared ids were asked for")
+        t:eq(#asked, 2, "and both really reached core/character")
+    end)
+end)
+
+s:test("teachAll's WRITE half is measured by a hook, not by F1", function(t)
+    -- Everything above is the pure contract. What is left — does addSkill really put a
+    -- declared move onto a live pal — cannot be asserted from here: it needs a pal standing
+    -- in the world and it writes into the tester's save. It is a DECLARED hook so it is
+    -- traceable and runnable on demand, instead of a silent in-body return that leaves a
+    -- green run looking like coverage.
+    t:skipNeedsHook("pal-skills-equip",
+        "teachAll's write half needs a live pal and mutates a real save; the same hook "
+        .. "measures Skill.Handle:teach / :forget, which is the call underneath it")
+end)
+
+--=============================================================================
 -- :renderOn — fail-soft everywhere (pure)
 --=============================================================================
 
@@ -455,7 +554,11 @@ end)
 s:test("a coordinate spawn issues the native call and reports it", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
-    if not coord then t:skip("no player location to spawn in front of") end
+    if not coord then
+        t:skipUnanswerable("the player pawn's location could not be read, so there is no point "
+            .. "to spawn in front of — a pawn exists (needWorld passed) and K2_GetActorLocation "
+            .. "did not answer")
+    end
 
     local pal = Pal.get(support.GAME.pal)   -- one chicken; nothing in-tree can despawn it
     local ok  = pal:spawn(coord)
@@ -468,8 +571,12 @@ s:test("a coordinate spawn issues the native call and reports it", function(t)
     -- deferred placement pass identifies the pal it has to move, and how it measures the
     -- read-back. It is the one piece of that pass reachable from a synchronous test, so prove
     -- it works even though the pal it will find is not here yet.
+    support.needGlobal(t, "FindAllOf")   -- no enumeration global, no placement pass to prove
     local near = support.nearestPal(coord)
-    if not near then t:skip("FindAllOf('PalCharacter') returned nothing enumerable") end
+    if not near then
+        t:skipUnanswerable("FindAllOf('PalCharacter') returned nothing enumerable, so the "
+            .. "deferred placement pass has nothing to measure against in this session")
+    end
     t:type(near.count, "number", "the world is enumerable, which is what the placement pass runs on")
     t:type(near.dist, "number", "and a distance to the requested point is measurable")
     t:type(near.pos.x, "number", "the nearest pal reports a world position")
@@ -478,7 +585,10 @@ end)
 s:test("the opts form issues the call the same way", function(t)
     support.needWorld(t)
     local coord = support.inFront(700.0, 50.0)
-    if not coord then t:skip("no player location to spawn in front of") end
+    if not coord then
+        t:skipUnanswerable("the player pawn's location could not be read, so there is no point "
+            .. "to spawn in front of")
+    end
 
     local ok = Pal.get(support.GAME.pal):spawn{ at = coord, level = 3 }
     t:type(ok, "boolean", "the opts form reports a boolean verdict too")

@@ -207,7 +207,29 @@ end)
 s:test("the ready gate is shut while there is no player pawn", function(t)
     -- The gate only opens after five consecutive polls that found a pawn, so its being open
     -- with no pawn at all would mean the ready-watch failed open (LoopAsync unavailable).
-    if support.player() then t:skip("a world is loaded") end
+    --
+    -- INVERSE-GATED: this needs NO world, where almost everything else in the suite needs one.
+    -- The skip reason says which DIRECTION it skipped in, because the summary line counts
+    -- skips without saying so and "N skipped" reads as "N things are broken" when it actually
+    -- means "run this suite once at the title screen as well". This is one of TEN such checks
+    -- (it read "nine" until the tenth was counted), and it goes through skipNeedsNoWorld rather
+    -- than the bare t:skip so the summary's bucket agrees with the sentence above.
+    if support.player() then
+        t:skipNeedsNoWorld("a world IS loaded, so a SHUT ready gate cannot be observed — run "
+            .. "the suite once at the title screen to cover this direction")
+    end
+    -- AND it needs a ready-watch that could arm. core/event's installWorldSource fails OPEN
+    -- when LoopAsync is absent — it says so in a log line and sets gate.ready = true, so
+    -- dispatch keeps working at the cost of the load-storm guard (core/event.lua, "fail OPEN
+    -- but loudly"). test/support.lua records the measurement: in a plain lua5.4 process
+    -- event.start() reports isWorldReady() == true with no pawn anywhere. test/cases/item.lua
+    -- calls event.start() to get the item dispatch it needs, so in a headless run of the whole
+    -- suite this assertion was reading the fail-open flag rather than the gate, and failing —
+    -- for a reason that says nothing about the gate. With no LoopAsync there is no ready-watch
+    -- and therefore no shut gate to observe, which is UNANSWERABLE this session rather than a
+    -- direction another keypress could cover. In game LoopAsync exists, the watch really polls,
+    -- and this runs for real at the title screen.
+    support.needGlobal(t, "LoopAsync")
     t:eq(event.isWorldReady(), false, "no pawn, no dispatch")
 end)
 

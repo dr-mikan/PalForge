@@ -39,12 +39,29 @@
 --                                 FName("Wood"), 5)
 --
 -- "present" is a real judgement, not a shrug, and it is only defensible for the shape these
--- calls actually have. Every current caller passes an FName first and plain integers after —
--- the same marshalling PalForge already performs successfully on this build every time
--- utils.items unlocks a technology through cm:UnlockOneTechnology(FName(...)). What is NOT
--- acceptable under "present" is a struct, an out-param, a delegate or an enum argument: those
--- are where marshalling actually breaks. Callers keep to scalars, and this module refuses a
--- shape it was not designed to be confident about (see UNVERIFIABLE_KINDS).
+-- calls actually have. Every current caller passes SCALARS — an FName, an integer, a bool, a
+-- float, an enum — which is the same marshalling PalForge already performs successfully on this
+-- build every time utils.items unlocks a technology through cm:UnlockOneTechnology(FName(...)).
+-- What is NOT acceptable under "present" is a struct, an array, a map, a delegate or a text: those
+-- marshal BY LAYOUT, and that is where marshalling actually breaks. This module refuses a shape it
+-- was not designed to be confident about (see UNVERIFIABLE_KINDS) and waves the scalars through.
+-- (This paragraph used to list an enum argument among the refusals. It never was one —
+-- UNVERIFIABLE_KINDS has no enum in it and never did — and the two facts below are why.)
+--
+-- THE TWO THINGS THE FIRST LIVE F1 RUN SETTLED ABOUT ARGUMENT SPELLING. Both are here rather than
+-- only beside the code that implements them, because both cost a run to learn:
+--
+--   ENUM ARGUMENTS ARE EnumProperty ON THIS BUILD, NOT ByteProperty. Three CORRECT calls were
+--   refused over the spelling alone — AddEquipWaza, RemoveEquipWaza and GetExecutionStatus all
+--   declare WazaID:EnumProperty / statusID:EnumProperty, where a C++ dump's `enum class` reads to
+--   a caller as a byte. A legacy `enum` and an `enum class` marshal identically at this boundary,
+--   so refusing over the difference is a false alarm rather than safety. EQUIVALENT (below) is
+--   that fix, and every EPal* argument in this tree is an enum class.
+--
+--   FString AND FName ARE NOT EQUIVALENT AND NEVER WILL BE. That confusion is the one that faults
+--   NATIVELY — inv:CountItemNum("Wood"), a bare Lua string where an FName was declared, closed
+--   Palworld mid-probe — so it is the exact pair EQUIVALENT must never grow. An equivalence is
+--   only ever added for two spellings of ONE machine representation.
 local log = require("palforge.utils.log").scope("signature")
 
 local M = {}

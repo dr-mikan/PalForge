@@ -7,11 +7,19 @@
 -- at all. The heartbeat is driven by emitting "tick" on core/event rather than waiting for
 -- one, so the polling cases are deterministic too.
 --
--- Only three cases need anything real, and none of them draws: _widget.owner() must not
--- throw with a world loaded, and _widget.screen() / the native Button are exercised ONLY
--- when there is no owner to build with — mounting a real widget on someone's screen from a
--- test is exactly the thing this file refuses to do. TitleMenu is mounted with an EMPTY
--- entry list, which can never inject anything even standing on the title screen.
+-- Only one case needs anything real and it draws nothing: _widget.owner() must not throw with a
+-- world loaded. Every other engine-shaped case is INVERSE-gated — _widget.screen(), the native
+-- Button, a declared tree that cannot build, a "screen" host, an input grab and :autoMount's
+-- lastError are exercised ONLY when there is no owner to build with, because mounting a real
+-- widget on someone's screen from a test is exactly the thing this file refuses to do. TitleMenu
+-- is mounted with an EMPTY entry list, which can never inject anything even standing on the
+-- title screen.
+--
+-- ⚠️ SO TWO RUNS ARE NEEDED AND NEITHER ONE ALONE COVERS THIS FILE: the refusal paths only run in
+-- a session with no world, the success paths only in a world, and the summary line reports "N
+-- skipped" without saying which direction. Every gated skip below therefore names its own
+-- direction in its reason — see skipNeedsNoGame — so the skips list reads as "these need the
+-- other session" rather than as an unexplained shortfall.
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local UI      = require("palforge.api.ui")
@@ -19,12 +27,39 @@ local schema  = require("palforge.core.schema")
 local event   = require("palforge.core.event")
 local widget  = require("palforge.native.ui._widget")
 local native  = require("palforge.native.ui")
+-- The registry itself, for the three cases that are about REGISTRATION rather than about the
+-- element: whether a definition went in at all (`register = false`), and who owns the id it went
+-- in under. Everything else here reaches the registry through UI.get / UI.get_all.
+local om      = require("palforge.core.object_manager")
 
 local s = T.suite("ui")
 
 -- A stand-in for a host panel. mount() only stores the root and hands it to render(), so a
 -- table is as good as a VerticalBox everywhere the lifecycle itself is under test.
 local function fakeRoot(name) return { __root = name or "root" } end
+
+-- ⚠️ WHICH DIRECTION A SKIP WENT, SAID IN THE SKIP ITSELF.
+--
+-- No single F1 press can run every check in this tree. Most gated cases are WORLD-GATED — they
+-- need a save loaded and skip at the title screen — but a handful are INVERSE-gated: they prove a
+-- REFUSAL path (no controller, no owner, no viewport), so they can only run where there is
+-- nothing to succeed with, and they skip when a world IS up. There are TEN inverse-gated checks
+-- in the whole API suite and six of them are below; the other four are cases/player.lua:151,
+-- cases/building.lua:473, cases/events.lua:215 and cases/audio.lua:325. (This said "nine" for
+-- as long as there were nine; it is counted from the call sites, not remembered.)
+--
+-- The summary line counts skips per DIRECTION, and this helper is what puts these six in the
+-- right bucket. It used to call the bare t:skip, which meant a reason that spelled the direction
+-- out in prose still landed in the summary's "did not say which" bucket — so a run inside a save
+-- reported "1 need no world, 9 did not say which" while all ten were the same kind of skip.
+-- It goes through skipNeedsNoWorld now, so the count and the prose agree. TWO RUNS ARE NEEDED —
+-- one at the title screen, one inside a save — and that is what both halves say.
+local function skipNeedsNoGame(t, what)
+    t:skipNeedsNoWorld("SKIPPED THE NO-GAME DIRECTION — " .. what .. ". This is an INVERSE-gated check: it "
+        .. "proves a REFUSAL path, so it only runs in a session with NO world loaded, and it "
+        .. "skips here because one IS. The world-gated checks skip the other way. Run F1 once at "
+        .. "the title screen as well as inside a save; neither run alone covers this file.")
+end
 
 --=============================================================================
 -- define / get / get_all
@@ -92,6 +127,63 @@ s:test("the native Button and TitleMenu are registered under their own ids", fun
     t:eq(UI.get("palforge:Button"):name(), "Button", "and it is reachable through UI.get")
     t:eq(native.TitleMenu.id, "palforge:TitleMenu", "title_menu.lua defines palforge:TitleMenu")
     t:eq(UI.get("palforge:TitleMenu"):name(), "Title Menu", "with its display name")
+end)
+
+s:test("the framework's own two elements declare the pack that owns them", function(t)
+    -- ⚠️ WHY THIS MATTERS AT ALL: there is ONE registry bucket per object type, and a pack's
+    -- UI{ id = ... } writes into the same ("ui", id) map native/ui/button.lua does, under the
+    -- same last-wins rule. A pack that defines "palforge:Button" REPLACES the framework's, and
+    -- until the owner was recorded the replacement was silent. Last-wins stays; what the pack id
+    -- buys is that object_manager's warning can name who held the id before and who has it now.
+    if type(om.owner) ~= "function" then
+        t:skip("core/object_manager has no owner() yet — the pack-ownership half of contract C3 "
+            .. "is not in this tree, so what button.lua and title_menu.lua now pass as "
+            .. "{ pack = \"palforge\" } cannot be read back. The definitions carry it either way; "
+            .. "an older register() simply ignores the fourth argument.")
+    end
+    t:eq(om.owner("ui", "palforge:Button"), "palforge",
+        "palforge:Button is owned by the framework, by name")
+    t:eq(om.owner("ui", "palforge:TitleMenu"), "palforge",
+        "and so is palforge:TitleMenu")
+end)
+
+s:test("a definition may decline to register, and may name the pack it registers under",
+function(t)
+    -- Contract C2: the optional second argument every domain constructor takes. `register =
+    -- false` is what a catalog accessor needs — a READ that fabricates a handle must not take the
+    -- id away from a pack that has not defined it yet, which is the whole defect that shape
+    -- exists to fix.
+    local id = support.id("ui_noregister")
+    local El = UI({ id = id, name = "Unregistered" }, { register = false })
+    t:eq(El.id, id, "the handle is built and returned as usual")
+    t:eq(El:name(), "Unregistered", "with everything the spec declared")
+    t:eq(om.get("ui", id), nil, "and NOTHING went into the registry")
+    -- UI.get still answers, because it fabricates an inert element for an unknown id — the point
+    -- is that the id is still FREE, not that it is unreachable.
+    t:eq(UI.get(id):name(), id, "so UI.get falls back to an inert element named after the id")
+
+    -- And the pack half: it is passed through to om.register, which is where a collision becomes
+    -- attributable. Whether it can be read back depends on C3 landing; the call is the same
+    -- either way, and an older three-argument register() ignores the extra table.
+    local packed = support.id("ui_packed")
+    t:truthy(UI({ id = packed }, { pack = "palforge_test" }), "a pack-scoped definition is built")
+    t:truthy(om.get("ui", packed), "and it IS registered — only the owner differs")
+    if type(om.owner) == "function" then
+        t:eq(om.owner("ui", packed), "palforge_test", "under the pack id it was given")
+    end
+end)
+
+s:test("an id that om.resolve could never resolve is refused at DEFINE time", function(t)
+    -- Contract C4. An id with a colon whose halves are not [%w_]+ resolves to nothing at every
+    -- engine boundary, so before this it registered, looked completely healthy in UI.get_all(),
+    -- and was silently dead. The shape rule has exactly ONE owner — om.validId — and api/ui
+    -- deliberately keeps no second copy of it, so this asserts the seam is wired rather than
+    -- re-asserting the rule itself (core/keyboard's own suite owns that).
+    t:errors(function() UI{ id = "my-pack:Panel" } end, "my-pack:Panel")
+    t:errors(function() UI{ id = "pack:has space" } end, "pack:has space")
+    -- A literal game id — no colon at all — stays legal: that is the "this is a vanilla id"
+    -- case, and rejecting it would break every native catalog definition in the tree.
+    t:truthy(UI{ id = support.id("ui_literal_ok") }, "a well-shaped namespaced id is accepted")
 end)
 
 --=============================================================================
@@ -410,6 +502,145 @@ s:test("a slower poll skips heartbeats instead of firing on every one", function
 end)
 
 --=============================================================================
+-- autoMount — the retry loop, and the mount path every live PalForge UI takes
+--
+-- ⚠️ THIS SECTION DID NOT EXIST AND THAT WAS THE LARGEST HOLE IN THIS FILE. :autoMount is what
+-- native/ui/title_menu.lua's own header tells a pack to call, what test/init.lua's pf_uiz mounts
+-- all three of its panels with, and what every element whose host is not up at load has to use —
+-- and not one check anywhere touched it. autoRefresh was covered four ways over; the thing that
+-- actually gets a panel on screen was covered zero.
+--
+-- It is decidable headlessly for the same reason autoRefresh is: the whole of it is one
+-- event.every subscription whose body branches on `_mounted`, so a render that counts its own
+-- calls and a hand-driven heartbeat prove the branch, the retry, the latch and the cancel.
+--=============================================================================
+
+s:test(":autoMount installs the poll and RETRIES mount while the element is down", function(t)
+    -- The shape a title-screen element is in at load: the host is not there, render says so, and
+    -- the element must keep trying rather than giving up on the first answer.
+    local attempts, host = 0, nil
+    local El = UI{ id = support.id("ui_automount"),
+                   render = function(_, root) attempts = attempts + 1; host = root
+                       return attempts >= 3 end }
+    local el = El:new{}
+    local root = fakeRoot("late-host")
+
+    t:eq(el:autoMount(root, event.TICK_MS), true, "the subscription went in")
+    t:truthy(el:state()._refreshSub, "and lives on the instance, exactly as autoRefresh's does")
+    t:eq(attempts, 0, "installing it does not mount — the first attempt is the first beat")
+
+    beat(1)
+    t:eq(attempts, 1, "one beat is one mount attempt")
+    t:eq(el:isMounted(), false, "the render reported it could not build, so nothing latched")
+    beat(2)
+    t:eq(attempts, 2, "and the next beat tries again rather than giving up")
+    t:eq(el:isMounted(), false, "still down")
+
+    beat(3)
+    t:eq(attempts, 3, "the third attempt is the one that builds")
+    t:eq(el:isMounted(), true, "and THAT is what latches the mount")
+    t:eq(host, root, "every attempt was handed the root autoMount was given")
+
+    -- Once it is up the same subscription stops mounting and starts refreshing: render must never
+    -- run a second time for one mount, which is the guarantee the whole lifecycle rests on.
+    beat(4)
+    beat(5)
+    t:eq(attempts, 3, "a mounted element is refreshed by the beat, never re-rendered")
+    el:unmount()
+end)
+
+s:test(":autoMount drives update() once the element is up, like autoRefresh does", function(t)
+    local updated = 0
+    local El = UI{ id = support.id("ui_automount_up"),
+                   render = function() end,
+                   update = function() updated = updated + 1 end }
+    local el = El:new{}
+    t:eq(el:autoMount(fakeRoot(), event.TICK_MS), true, "installed")
+    beat(1)
+    t:eq(el:isMounted(), true, "the first beat mounted it (this render always succeeds)")
+    t:eq(updated, 0, "the beat that mounts does not also refresh")
+    beat(2)
+    t:eq(updated, 1, "the next one refreshes")
+    beat(3)
+    t:eq(updated, 2, "and keeps refreshing")
+    el:unmount()
+end)
+
+s:test(":unmount is the only cancel :autoMount has, and it stops the retrying too", function(t)
+    -- Worth asserting separately from the mounted case: an element that is DOWN is exactly the
+    -- state autoMount exists for, so "unmount stops it" has to hold for a loop that has never
+    -- succeeded — otherwise a pack could never stop an element that cannot find its host.
+    local attempts = 0
+    local El = UI{ id = support.id("ui_automount_cancel"),
+                   render = function() attempts = attempts + 1; return false end }
+    local el = El:new{}
+    el:autoMount(fakeRoot(), event.TICK_MS)
+    beat(1)
+    beat(2)
+    t:eq(attempts, 2, "two beats, two failed attempts")
+    t:eq(el:isMounted(), false, "and it never got up")
+
+    el:unmount()
+    t:eq(el:state()._refreshSub, nil, "unmount dropped the subscription")
+    beat(3)
+    beat(4)
+    t:eq(attempts, 2, "so the retrying stopped, on an element that was never mounted")
+end)
+
+s:test(":autoMount and :autoRefresh share the one subscription slot, either way round",
+function(t)
+    -- They are two policies over one timer, not two timers. A second call of either kind must
+    -- reuse the slot: two subscriptions would double every refresh and, worse, leave one behind
+    -- that :unmount could not cancel.
+    local El = UI{ id = support.id("ui_automount_share"), render = function() end }
+    local el = El:new{}
+    t:eq(el:autoMount(fakeRoot(), event.TICK_MS), true, "autoMount first")
+    local sub = el:state()._refreshSub
+    t:eq(el:autoRefresh(event.TICK_MS), true, "then autoRefresh reports success")
+    t:eq(el:state()._refreshSub, sub, "and reuses the subscription that is already there")
+    el:unmount()
+
+    local other = El:new{}
+    t:eq(other:autoRefresh(event.TICK_MS), true, "and the other way round: autoRefresh first")
+    local sub2 = other:state()._refreshSub
+    t:eq(other:autoMount(fakeRoot(), event.TICK_MS), true, "then autoMount")
+    t:eq(other:state()._refreshSub, sub2, "same slot")
+    -- ⚠️ AND THE POLICY IS WHICHEVER ONE INSTALLED THE SLOT. The second call does not upgrade a
+    -- refresh-only poll into a retrying one, because poll() returns early on the existing
+    -- subscription. Asserted rather than left as a surprise: an element that called autoRefresh
+    -- first does NOT start mounting itself.
+    beat(1)
+    t:eq(other:isMounted(), false,
+        "an autoRefresh-installed poll stays refresh-only; the later autoMount did not take over")
+    other:unmount()
+end)
+
+s:test(":autoMount keeps the reason the last attempt gave up, for a loop that never gets in",
+function(t)
+    -- The half that makes a silent retry loop debuggable: :lastError() is what tells an author
+    -- why the panel is not up, and it has to survive every beat rather than being reset by the
+    -- next attempt.
+    local El = UI{ id = support.id("ui_automount_why"), host = "screen" }
+    local el = El:new{}
+    t:eq(el:lastError(), nil, "nothing has failed yet")
+    el:autoMount(nil, event.TICK_MS)
+    beat(1)
+    -- With an owner this resolves and really draws, which is the one thing this file will not do.
+    if widget.owner() then
+        el:unmount()
+        skipNeedsNoGame(t, "an owner exists, so host = \"screen\" would resolve and put a real "
+            .. "viewport layer on the player's screen instead of failing to")
+    end
+    t:type(el:lastError(), "string", "a failed attempt records why: " .. tostring(el:lastError()))
+    local first = el:lastError()
+    beat(2)
+    beat(3)
+    t:eq(el:lastError(), first, "and the reason survives the beats that follow it")
+    t:eq(el:isMounted(), false, "with the element still down, still retrying")
+    el:unmount()
+end)
+
+--=============================================================================
 -- the native elements + the widget toolkit — fail-soft, and never drawing
 --=============================================================================
 
@@ -425,7 +656,8 @@ end)
 
 s:test("Button's render reports false rather than throwing when there is no controller", function(t)
     if widget.findFirst("PalPlayerController") then
-        t:skip("a PalPlayerController exists — this would build a real widget")
+        skipNeedsNoGame(t, "a PalPlayerController exists, so Button's render would build a real "
+            .. "widget instead of reporting that it could not")
     end
     local btn = native.Button:new{ label = "test", onClick = function() end }
     t:eq(btn:mount(fakeRoot()), false, "no controller means nothing was built")
@@ -468,7 +700,10 @@ end)
 s:test("_widget.screen returns nil and a reason when there is no owner to build under", function(t)
     -- Only run this where screen() cannot succeed: with a real owner it would construct a
     -- UserWidget and put it on the player's viewport, which no test may do.
-    if widget.owner() then t:skip("an owner exists — screen() would really draw") end
+    if widget.owner() then
+        skipNeedsNoGame(t, "an owner exists, so screen() would really construct a UserWidget and "
+            .. "put it on the player's viewport")
+    end
     local screen, why = widget.screen()
     t:eq(screen, nil, "no screen without an owner")
     t:type(why, "string", "and a reason rather than a raised error")
@@ -635,7 +870,8 @@ end)
 
 s:test("a declared element that cannot build reports false and says why", function(t)
     if widget.owner() then
-        t:skip("an owner exists — building a real tree from a test is what this file refuses to do")
+        skipNeedsNoGame(t, "an owner exists, and building a real tree from a test is what this "
+            .. "file refuses to do")
     end
     local El = UI{ id = support.id("ui_nobuild"), root = VBox{ Label{ text = "hi" } } }
     local el = El:new{}
@@ -649,7 +885,10 @@ s:test("a declared element that cannot build reports false and says why", functi
 end)
 
 s:test("`host` is resolved by mount, and a host that is not up leaves render unreached", function(t)
-    if widget.owner() then t:skip("an owner exists — host \"screen\" would really draw") end
+    if widget.owner() then
+        skipNeedsNoGame(t, "an owner exists, so host = \"screen\" would resolve and really draw "
+            .. "a viewport layer instead of leaving render unreached")
+    end
     local rendered = 0
     local El = UI{ id = support.id("ui_host"), host = "screen",
                    render = function() rendered = rendered + 1 end }
@@ -742,6 +981,34 @@ s:test("native/ui/tree can build both new kinds, and api/ui publishes both", fun
     t:eq(UI.Frame.kind, "frame", "so does UI.Frame")
 end)
 
+s:test("a Button may ask for a LEFT-aligned label, which is a second construction", function(t)
+    -- ⚠️ READ THE CLOSED ITEM BEFORE READING THIS AS A REOPENING. `ui-menubutton-inner-slot`
+    -- established, by reading WBP_Title_MenuButton's own template tree, that the game button's
+    -- inner HorizontalBox_0 sits in a CanvasPanelSlot — the one slot class of the six that
+    -- declares no SetHorizontalAlignment (UMG.hpp:350-374) — so the label cannot be moved through
+    -- the button's own slot, ever. That is still true and that item stays closed.
+    --
+    -- `labelAlign = "left"` does not touch the button's inside at all: native/ui/tree builds
+    -- _widget.clickableRow instead, which is an Overlay holding the same game button stretched to
+    -- FILL with a TextBlock of ours over the top at ESlateVisibility HitTestInvisible, so the
+    -- clicks pass through and the alignment happens on an OverlaySlot — a slot class that DOES
+    -- declare it. That row is not new code; it is what the shipped two-pane Mod Manager was built
+    -- out of. What is new is that a DECLARED tree can reach it, which is what gave clickableRow
+    -- its first live caller.
+    t:eq(UI.Button{ text = "x" }.labelAlign, "center",
+        "the default is the game button alone, which is what every existing tree gets")
+    local left = UI.Button{ text = "Refresh", labelAlign = "left" }
+    t:eq(left.labelAlign, "left", "and an author may ask for the overlay row instead")
+    t:errors(function() UI.Button{ text = "x", labelAlign = "right" } end, "must be one of")
+    -- The doc string is what the generated types and the docs site reproduce, so the cost of the
+    -- opt-in has to be IN it rather than only in this file's prose.
+    local doc = schema.get("UI.Node.Button"):field("labelAlign").doc
+    t:truthy(doc:find("CanvasPanelSlot", 1, true),
+        "the doc names why the button's own slot cannot do it")
+    t:truthy(doc:find("hit-test-invisible", 1, true) or doc:find("Overlay", 1, true),
+        "and what the alternative actually builds")
+end)
+
 --=============================================================================
 -- `input` — how much of the player's mouse an element takes
 --
@@ -804,6 +1071,44 @@ s:test("\"layer\" is a host name, and an unknown one names it in the complaint",
     t:errors(function() UI{ id = support.id("ui_host_bad"), host = "canvas" } end, "\"layer\"")
 end)
 
+s:test("host = \"layer\" needs a Frame root, and is refused at define time without one",
+function(t)
+    -- ⚠️ THE RULE WAS DOCUMENTED IN TWO PLACES AND ENFORCED IN NEITHER. Both UI.Spec's `host`
+    -- doc and native/ui/tree.host's own comment said a layer requires a Frame root "and says so
+    -- rather than half-working"; until 2026-08-02 nothing said so. A VBox-rooted host = "layer"
+    -- passed define, resolved a host with no panel, and failed at MOUNT with a message about the
+    -- host not accepting the tree's root — which names the symptom and not the rule, and only
+    -- ever in a session with the in-game layout up. It now joins `input` and `backHandler` in the
+    -- one define-time check, because all three want the same thing for the same reason: only a
+    -- UI.Frame builds a Palworld activatable, and a CommonUI layer takes nothing else.
+    for _, bad in ipairs({ UI.VBox{ UI.Label{ text = "x" } }, UI.Border{ UI.Label{ text = "x" } } }) do
+        t:errors(function()
+            UI{ id = support.id("ui_layer_noframe"), host = "layer", root = bad }
+        end, "ACTIVATABLE WIDGET")
+    end
+    -- And the refusal tells the author the rest of it: satisfying the rule is not yet known to
+    -- buy anything, and it names the runs that would settle that.
+    local _, err = pcall(function()
+        UI{ id = support.id("ui_layer_noframe2"), host = "layer",
+            root = UI.VBox{ UI.Label{ text = "x" } } }
+    end)
+    err = tostring(err)
+    t:truthy(err:find("NEVER ONCE BEEN OBSERVED WORKING", 1, true),
+        "the refusal says the capability is unmeasured, not merely mis-declared")
+    t:truthy(err:find("pf_uiz", 1, true) and err:find("pf_uiroute", 1, true),
+        "and names the two runs that would settle it")
+    t:truthy(err:find("test/hooks/ui-host-layer", 1, true)
+             and err:find("test/hooks/ui-backhandler", 1, true),
+        "and the hook ids that record the answer, so a grep finds the pair")
+
+    -- An element with NO declared root is not refused: the check is about what a DECLARED tree
+    -- builds, and an imperative render is responsible for its own widgets. Same shape as the
+    -- `input` check beside it, and asserted so the asymmetry is deliberate rather than a hole.
+    t:truthy(UI{ id = support.id("ui_layer_imperative"), host = "layer",
+                 render = function() end },
+        "an imperative element may declare a layer host; nothing here can vet what it builds")
+end)
+
 s:test("an input mode outside the list is refused at define time", function(t)
     t:errors(function() UI{ id = support.id("ui_input_bad"), input = "mouse" } end, "must be one of")
     t:errors(function() UI{ id = support.id("ui_input_bad2"), input = true } end,
@@ -823,7 +1128,10 @@ end)
 
 s:test("an element that asks for the mouse and cannot get it says so and stays clean",
 function(t)
-    if widget.owner() then t:skip("an owner exists — this would really move the player's cursor") end
+    if widget.owner() then
+        skipNeedsNoGame(t, "an owner exists, so the grab would succeed and really move the "
+            .. "player's cursor rather than reporting that it could not be taken")
+    end
     local El = UI{ id = support.id("ui_input_nogame"), input = "clicks",
                    render = function() end }
     local el = El:new{}
@@ -864,7 +1172,11 @@ end)
 -- and a skip is the honest answer rather than a failure about somebody else's element.
 local function ownStack(t)
     if #UI.stack() > 0 then
-        t:skip("another UI element is already mounted, and this asserts against a stack it owns")
+        t:skip("SKIPPED THE EMPTY-STACK DIRECTION — " .. #UI.stack() .. " UI element(s) are "
+            .. "already mounted and this case asserts against a stack it owns. It is INVERSE-"
+            .. "gated on state rather than on a world: headless the stack is always empty, and in "
+            .. "a live session with a panel up (pf_uiz leaves three) it is not. Unmount them, or "
+            .. "run F1 in a session where nothing has mounted, to cover this half.")
     end
 end
 
@@ -1047,13 +1359,24 @@ s:test("a handler that raises is reported and does not break the next press", fu
     good:unmount()
 end)
 
-s:test("UI.report prints the stack and what the key binds are doing", function(t)
+s:test("UI.report prints the stack, the key binds, the grabs AND the keymap it read", function(t)
     ownStack(t)
     local el = mountAt{ what = "z_report", z = 9070, keys = { "INS" }, onKey = function() end }
     local lines = table.concat(UI.report(), "\n")
     t:truthy(lines:find(tostring(el:state().id), 1, true), "the mounted element is listed")
     t:truthy(lines:find("z=9070", 1, true), "with its z")
     t:truthy(lines:find("keys=INS", 1, true), "and the keys it asked for")
+
+    -- ⚠️ THE FOURTH BLOCK, WHICH WAS MISSING. native/ui/tree.keymapReport was written alongside
+    -- keyReport and grabReport and left out of api/ui's list of sources, so the one report an
+    -- operator is told to paste stated a conclusion ("never arrived AND THE GAME HAS AN ACTION ON
+    -- IT") with no sign of the reading it came from. Asserted by its own prefix rather than by a
+    -- key name, because headless there is nothing to read and the keymap's honest answer is the
+    -- source lines plus "NOTHING HAS BEEN READ" — which is exactly the block that has to be there.
+    t:truthy(lines:find("keys: ", 1, true), "the key-bind block is in the report")
+    t:truthy(lines:find("keymap: ", 1, true),
+        "and so is the keymap block the attribution is drawn from")
+
     el:unmount()
     t:truthy(table.concat(UI.report(), "\n"):find("no element is mounted", 1, true),
         "and an empty stack says so rather than printing nothing")
@@ -1180,14 +1503,89 @@ s:test("every UE4SS key name translates to an Unreal FKey name, or says it canno
     t:eq(select(2, keymap.translate("NOT_A_KEY_AT_ALL")), "none", "with 'none' as the confidence")
 end)
 
-s:test("the name map covers every key UE4SS can actually bind", function(t)
-    -- The live check, and the only one that can catch UE4SS growing its table underneath us: a
-    -- name UE4SS will bind and this map has never heard of is a name PalForge would answer
-    -- "unknown" for forever. Headless there is no Key table, so this skips rather than passing
-    -- vacuously.
+s:test("the name map is internally consistent, and covers every key UE4SS can bind", function(t)
+    -- ⚠️ THIS CASE HAD TWO HALVES AND ONLY ONE OF THEM EXISTED. The coverage assertion below
+    -- needs UE4SS's `Key` table, so headless the whole case skipped — and this is the ONLY guard
+    -- against keymap.FKEY drifting from that table (keymap.lookup iterates FKEY while its own doc
+    -- at keymap.lua:1191 says "one row per entry in UE4SS's Key table", so a Key name absent from
+    -- FKEY is missing from the operator's report entirely rather than shown as unknown). An
+    -- invariant asserted only in-game is an invariant nobody runs.
+    --
+    -- So the SHAPE half now runs everywhere. It cannot know what UE4SS ships — nothing headless
+    -- can — but every one of these is a way FKEY has actually been wrong or could silently become
+    -- wrong, and each is decidable from the table alone.
+    local names, blank, dupeTarget = {}, 0, {}
+    local byFKey = {}
+    for name, fkey in pairs(keymap.FKEY) do
+        names[#names + 1] = name
+        if type(name) ~= "string" or #name == 0 then blank = blank + 1 end
+        -- A value may be `false` — that is the DELIBERATE "UE4SS binds this name and Unreal has
+        -- no FKey for it" row (VOLUME_UP), which is a different answer from a missing row and
+        -- must stay expressible. Anything that is neither a non-empty string nor false is a typo.
+        if fkey ~= false and (type(fkey) ~= "string" or #fkey == 0) then
+            blank = blank + 1
+        end
+        if type(fkey) == "string" then
+            byFKey[fkey] = byFKey[fkey] or {}
+            table.insert(byFKey[fkey], name)
+        end
+    end
+    t:truthy(#names > 100, "the map is populated at all: " .. #names .. " row(s)")
+    t:eq(blank, 0, "every row is a non-empty name mapped to an FKey name or an explicit false")
+
+    -- TWO UE4SS NAMES POINTING AT ONE FKEY is the shape of a copy-paste slip, and it is not
+    -- harmless: keymap.status builds its index by FKey, so the second name would answer with the
+    -- first one's action and report a free key as taken (or the reverse). Collected rather than
+    -- counted, so the failure names the pair.
+    for fkey, owners in pairs(byFKey) do
+        if #owners > 1 then
+            table.sort(owners)
+            dupeTarget[#dupeTarget + 1] = fkey .. " <- " .. table.concat(owners, " and ")
+        end
+    end
+    t:eq(#dupeTarget, 0, "no two UE4SS names claim the same Unreal FKey: "
+        .. table.concat(dupeTarget, "; "))
+
+    -- Every row has to be ANSWERABLE through the public route, not merely present in the table:
+    -- translate() is what status() calls, and a row it disagrees with is a row that reads fine
+    -- here and does nothing in the report.
+    local disagree = {}
+    for name, fkey in pairs(keymap.FKEY) do
+        local got = keymap.translate(name)
+        if got ~= (fkey or nil) then
+            disagree[#disagree + 1] = string.format("%s: FKEY says %s, translate says %s",
+                name, tostring(fkey), tostring(got))
+        end
+    end
+    t:eq(#disagree, 0, "translate() agrees with the table for every row: "
+        .. table.concat(disagree, "; "))
+
+    -- The names this tree binds by hand must each be a row, or the check "is this key free"
+    -- answers "unknown" for a key PalForge itself is using. Esc is here because it is refused BY
+    -- NAME and the refusal has to have a name to match.
+    for _, name in ipairs({ "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
+                            "ESCAPE", "INS", "DEL", "END", "LEFT_MOUSE_BUTTON",
+                            "RIGHT_MOUSE_BUTTON", "MIDDLE_MOUSE_BUTTON" }) do
+        t:truthy(keymap.FKEY[name] ~= nil, name .. " has a row in the name map")
+    end
+
+    -- The COVERAGE half, which is the one that needs the engine: only UE4SS knows what UE4SS will
+    -- bind, and a name it grows that this map has never heard of is a name PalForge answers
+    -- "unknown" for forever. It stays gated, and now it says which direction it went.
     local n = 0
     if type(Key) == "table" then for _ in pairs(Key) do n = n + 1 end end
-    if n == 0 then t:skip("no UE4SS Key table in this session") end
+    if n == 0 then
+        -- skipUnanswerable, not a bare t:skip: the missing thing is UE4SS's own `Key` table, a
+        -- native global, so no state the tester can put the GAME in would open this — which is
+        -- what M.NEEDS.SESSION means and what separates it from the world/no-world pair. A bare
+        -- skip lands in the "did not say which" bucket and the comment above would have been
+        -- claiming a direction the summary could not print.
+        t:skipUnanswerable("SKIPPED THE IN-GAME DIRECTION — the shape and self-consistency of keymap.FKEY "
+            .. "were just asserted, which is everything decidable with no engine. What is left is "
+            .. "COVERAGE against UE4SS's own Key table, and there is no Key table in this "
+            .. "session, so it can only be checked from inside the game. Run F1 in a session with "
+            .. "UE4SS loaded to close the other half.")
+    end
     local missing = {}
     for name in pairs(Key) do
         if keymap.FKEY[name] == nil then missing[#missing + 1] = name end
@@ -1538,12 +1936,43 @@ function(t)
     withKeymap({
         insert = { key = "Insert", actions = { { action = "OpenInventory", via = "config/main" } } },
     }, function()
-        local lines = keymap.lookup({ F1 = "tests: all suites" }, reg.FORBIDDEN)
-        -- One header, one row per UE4SS key name, one summary.
+        -- ⚠️ THE ROWS ARE A UNION NOW, AND THIS CASE USED TO ASSERT #M.FKEY + 2. keymap.lookup
+        -- was rewritten to walk the union of four sources — M.FKEY, UE4SS's live `Key` table,
+        -- the binds PalForge holds and the names it refuses — precisely so that a name UE4SS will
+        -- bind and M.FKEY has never heard of appears as `unknown` instead of being absent from
+        -- the report. Counting M.FKEY here would re-assert the old shape and would fail the
+        -- moment the drift it exists to catch actually happened. So the union is rebuilt from the
+        -- same four inputs and THAT is what the row count is checked against.
+        local owned = {
+            F1 = "tests: all suites",
+            -- A name PalForge holds that M.FKEY cannot translate: the drift row, included on
+            -- purpose so the union is doing something in a headless run too (there is no live
+            -- `Key` table here, so that source contributes nothing).
+            PALFORGE_TEST_UNTRANSLATED = "a bind this table has never heard of",
+        }
+        local lines = keymap.lookup(owned, reg.FORBIDDEN)
+
+        local union = {}
+        local function addAll(src)
+            for name in pairs(src or {}) do
+                if type(name) == "string" and #name > 0 then union[name:upper()] = true end
+            end
+        end
+        addAll(keymap.FKEY)
+        if type(Key) == "table" then pcall(function() addAll(Key) end) end
+        addAll(owned)
+        addAll(reg.FORBIDDEN)
         local rows = 0
-        for name in pairs(keymap.FKEY) do rows = rows + 1; local _ = name end
-        t:eq(#lines, rows + 2, "a header, a row per bindable name, and the counts")
+        for _ in pairs(union) do rows = rows + 1 end
+        -- One header, one row per name in the union, then TWO summary lines: the four-case counts
+        -- and the union/drift line.
+        t:eq(#lines, rows + 3,
+            "a header, a row per bindable name, and the two summary lines")
         local text = table.concat(lines, "\n")
+        t:truthy(text:find("PALFORGE_TEST_UNTRANSLATED", 1, true),
+            "a name PalForge holds is a row even when M.FKEY cannot translate it")
+        t:truthy(text:find("M.FKEY HAS NO ROW FOR IT", 1, true),
+            "and that row SAYS the answer is missing because of this table, not because of the game")
         t:truthy(text:find("INS  ", 1, true) and text:find("OpenInventory", 1, true),
             "a taken key names what has it")
         t:truthy(text:find("F1  ", 1, true) and text:find("tests: all suites", 1, true),

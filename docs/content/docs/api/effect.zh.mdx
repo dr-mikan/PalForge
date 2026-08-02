@@ -131,9 +131,37 @@ Venom:apply(Player.character())
 它是**镜像，不是替代**。状态异常按游戏的规则运行，它有多强不由 PalForge 决定。PalForge 决定的是
 *什么时候*：把它摘掉的，是你写的 `duration`。
 
-名字用的是游戏自己的拼写，不区分大小写。整合包最常用的是 `Poison`、`Stun`、`Sleep`、`Burn`、
+<Callout type="info">
+**这件事是观测到能用的**，在一个加载好的存档里，而且值得说清楚「能用」覆盖了什么。路径是
+`PalCharacter.StatusComponent`——每个角色都带的一个属性——到
+`UPalStatusComponent:AddStatus(EPalStatusID)`，一个整数参数，没有结构体也没有 `FName`。
+`status.add` 把 `AttackUp`（`EPalStatusID` 26）加到一个角色身上，游戏通过 `GetExecutionStatus`
+把这个状态异常读回来是「有」，`status.remove` 摘掉之后再读回来是「没有」。这些签名来自一份比已安装
+二进制早一个补丁的转储，而实机的类三处全都对得上；每次调用现在仍然要过 `core/signature`，实机的类
+没有声明就不会发出去。所以 `false` 的意思是*这次调用没有发出去*，绝不是*目标免疫*。
+</Callout>
+
+名字用的是游戏自己的拼写。整合包最常用的是 `Poison`、`Stun`、`Sleep`、`Burn`、
 `Freeze`、`Electrical`、`Darkness`、`Wetness`、`AttackUp` 和 `DefenseUp`。一共有 38 个，
 `require("palforge.core.status").names()` 会返回排好序的完整清单。
+
+### 大小写，以及你此刻在哪一层
+
+`nativeStatus` **不区分大小写**：`"poison"` 和 `"Poison"` 一样能找到 `EPalStatusID` 5，因为
+`core/status` 在真表旁边还留了一张全小写的映射。这在这里是安全的，理由却不能推广——这套词汇是固定
+的、封闭的，而且整份都随代码发出，所以折叠大小写的代价只是一张表，省下的是记住游戏自己怎么大写。
+
+另一层则**区分大小写**，而且没有任何办法把它变软。指向 DataTable 行或 `object_manager` 注册键的
+id——`"pack_Potion"`、`Item.get`、图标行查询——必须一字不差，因为那套名字属于游戏，PalForge 手上没有
+可以拿来折叠的对照表。
+
+| 这个名字指的是什么 | 例子 | 大小写 |
+| --- | --- | --- |
+| 引擎枚举 | `nativeStatus = "poison"`、技能的 `EPalWazaID` | 不区分 |
+| DataTable 行或注册 id | `Item.get("Wood")`、`"mypack:Potion"` | 区分 |
+
+状态异常的名字永远不会是行 id，所以 `Effect` 内部不会跨过这条边界——但你的内容包会，就在你把一个
+`Item` id 写在 `nativeStatus` 旁边的那一刻。
 
 游戏里没有的名字，会**在你写定义的那一刻**就被拒绝，而不是过后悄悄被忽略，而且消息里会列出你可能
 想写的每一个名字：
@@ -225,11 +253,16 @@ stateDiagram-v2
 
 ### 目标，以及怎样算还活着
 
-一个目标上，每个效果 id 只能带一次施加。存放它们的表用的是**弱引用键**：一次施加不会让
-pawn（游戏里的角色实体）继续留在内存里，被 Lua 回收掉的目标会把自己身上的施加一起带走。
+一个目标上，每个效果 id 只能带一次施加。存放它们的表，键是目标的 `GetFullName()`，而不是你传进来
+的那个句柄。UE4SS 每次查询都会新造一个 userdata 包装，所以指向同一个 pawn（游戏里的角色实体）的两个
+引用并不是同一个 Lua 值；用句柄索引的表，会把你的施加记在调用方碰巧拿着的那个包装底下。普通的 Lua
+表目标本身身份稳定，就用它自己当键；而一个答不出自己名字的对象则退回用句柄。
 
 目标算活着，有两种情况：它是一张普通的 Lua 表，或者它是引擎数据而 `IsValid()` 仍然返回
-true。pawn 一旦变成无效，下一次心跳就用 `reason = "target_gone"` 结束它身上的施加。
+true。每次心跳都会检查所有还在跑的施加，所以 pawn 一旦变成无效，下一拍就用
+`reason = "target_gone"` 结束它身上的施加，并把空掉的桶丢掉。键变成字符串之后，正是这趟清扫在给
+这张表兜底：字符串键不会被回收，没有垃圾回收器可以指望——而且这趟清扫本身是更强的保证，它在 pawn
+消失的那一拍就跑，而不是等 Lua 下一次回收。
 
 不带目标调用 `:apply()` 也可以。目标为 `nil` 的施加会进到一个全局的桶里，它们的处理函数
 拿到的 `target` 是 `nil`。
@@ -606,7 +639,7 @@ id 注册好的，所以 `Burn` 只有一个，就是带着那五秒的那个。
 `data` 不是放它的地方。它存在**定义**上，所以这个效果碰到的每个目标共用同一张表，而且
 `Effect.Handle` 没有任何方法能把它读回来。
 
-改成自己维护一张表，用目标做键，用弱引用键，并在 `onExpire` 里把这一条清掉：
+改成自己维护一张表，用目标做键，并在 `onExpire` 里把这一条清掉：
 
 ```lua
 local state = setmetatable({}, { __mode = "k" })   -- target -> your table
@@ -633,9 +666,20 @@ local Bleed = Effect{
 }
 ```
 
-这里弱引用键之所以重要，和运行时用它的理由一样：从你的表里普通地引用一下，就会让已经消失的
-pawn 一直留在内存里。全局的施加以 `nil` 为键，而 Lua 的表不能用 `nil` 当键，所以那种情况下
-如果需要状态，请自己用一个标记对象。
+弱引用键能防止这张表把一个已经消失的 pawn 一直留在内存里。它给不了你的是一个稳定的键：用 UE4SS
+句柄索引的表是按 userdata 身份索引的，而 `onApply` 里的句柄不一定和之后某次 `onTick` 里的句柄是同
+一个 Lua 值——`:apply` 每次重新施加时，都会用调用方的句柄刷新这次施加保存的那个。如果你的记账需要
+挺过一次重新施加，就照运行时的做法，用名字做键：
+
+```lua
+local uo = require("palforge.core.uobject")
+
+local key = uo.key(target) or target   -- GetFullName, or the value itself for a plain table
+state[key] = { total = 0 }
+```
+
+全局的施加以 `nil` 为键，而 Lua 的表不能用 `nil` 当键，所以那种情况下如果需要状态，请自己用一个
+标记对象。
 
 ## 做法示例
 
@@ -899,9 +943,11 @@ return Frostbite
 - `duration` 是持续多久，`interval` 是 `onTick` 多久跑一次。都是秒，都会被对齐到 0.5 秒的心跳上。
 - `:apply(target)` 开始，`:remove(target)` 提前结束。`:isActive`、`:timeLeft` 和 `:stacksOn` 告诉你它现在到哪一步了。
 - 再施加一次会刷新计时；`stackable` 和 `maxStacks` 都写了的话，还会加一层。
-- `nativeStatus` 会在效果运行期间点亮游戏自己的状态异常；除此之外效果对角色做了什么，是你写在
-  `onApply`、`onTick` 和 `onExpire` 里的代码。
-- 想为每个目标记住的东西，放进你自己的弱引用键表，在 `onExpire` 里清掉。
+- `nativeStatus` 会在效果运行期间点亮游戏自己的状态异常——通过 `PalCharacter.StatusComponent`，
+  已观测到能用——而且它那 38 个名字不区分大小写，这一点和道具 id 或注册键不同。除此之外效果对角色
+  做了什么，是你写在 `onApply`、`onTick` 和 `onExpire` 里的代码。
+- 想为每个目标记住的东西，放进你自己的表，在 `onExpire` 里清掉。需要挺过重新施加的话，用
+  `uo.key(target)` 做键。
 
 接下来读 [Skill](/docs/api/skill)，你就能自己发动一个技能，并给它命中的对象附上效果。
 

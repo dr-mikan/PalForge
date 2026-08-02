@@ -31,6 +31,8 @@ jobs:
         working-directory: docs
         run: npm ci
 
+      # `prebuild` lints the content first, so a page that would fail the docs deploy fails
+      # here too rather than being served to the browser tests.
       - name: Build static site
         working-directory: docs
         run: npm run build
@@ -39,7 +41,7 @@ jobs:
         run: npx playwright install --with-deps
 
       - name: Run tests
-        run: npx playwright test
+        run: npm run test:e2e
 
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}

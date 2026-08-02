@@ -22,10 +22,23 @@
 -- The delay matters more than it looks: a pal takes four to eight seconds to arrive, so an
 -- action that needs one nearby cannot run in the same breath as the spawn that makes it.
 --
+-- THIS FILE HOLDS NO TABLE OF ITS OWN. Every name is looked up in require("palforge.test").ACTIONS
+-- and a name that is not there is reported and skipped — so a command registered anywhere in the
+-- test surface is runnable from here the moment it exists, with NO change in this file. The
+-- game-required test hooks (C7) arrive exactly that way: `pf_hooks`, `pf_hooks_all` and one
+-- generated `pf_hook_<id_with_underscores>` per declared hook are ordinary ACTIONS entries and
+-- resolve through the same lookup `pf_tests` does.
+--
+-- ⚠️ A LINE IS `[delay] name` AND CARRIES NO ARGUMENT. That is deliberate and it is what the hook
+-- runner is built against: the console spelling `pf_hook <id>` takes an id, so test/hooks/init.lua
+-- generates a separate ACTIONS name per hook for this file (M.actionName) rather than this parser
+-- learning to pass words through. One less thing a text file on disk can say to the game.
+--
 -- SAFETY. Only names already in palforge.test's ACTIONS table can be run — this reads a list of
 -- names, never code, so a stray file cannot execute anything the mod does not already do on a
--- keypress. Each entry runs at most once per world load. A missing file is the normal case and
--- says nothing.
+-- keypress. A hook that WRITES to a save carries its own second gate on top of that
+-- (env.debugHooks[id]), which this file neither knows about nor can bypass. Each entry runs at
+-- most once per world load. A missing file is the normal case and says nothing.
 local log  = require("palforge.utils.log").scope("autorun")
 local poll = require("palforge.core.poll")
 
@@ -59,6 +72,9 @@ local function readQueue()
     for line in fh:lines() do
         line = line:match("^%s*(.-)%s*$")
         if line ~= "" and not line:match("^#") and not line:match("^%-%-") then
+            -- A leading integer is a DELAY, not a command name — "12 pf_teach". Anything after
+            -- the name is ignored: a line is a name, never a call with arguments (see the header
+            -- for why the hook runner generates one name per hook instead).
             local delay, name = line:match("^(%d+)%s+(%S+)$")
             if name then
                 out[#out + 1] = { delay = tonumber(delay), name = name }

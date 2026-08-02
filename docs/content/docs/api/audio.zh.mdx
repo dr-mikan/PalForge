@@ -90,8 +90,8 @@ Audio.bgm{ id = "example:Theme", kind = "se" }
 
 ## 可以设置的字段
 
-大多数声音只需要两个字段：用来起名字的 `id`，和指向音频资源的 `soundPath`。其余都是可选的。
-同一份列表随时可以在游戏里打印出来：
+大多数声音只需要一个字段：`id`。想指定游戏自带的事件名就再加 `soundId`，而 `soundPath` 只在
+那个名称不在目录里、或者你想覆盖目录时才需要。同一份列表随时可以在游戏里打印出来：
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -120,15 +120,15 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
       default: 'se',
     },
     soundId: {
-      description: '原生 AkAudioEvent 名称。这是 SoundID 回退路径，只有在没有资源路径能加载时才会走。只带这个字段的定义也能解析成功。',
+      description: '原生 AkAudioEvent 名称。没有传 soundPath 时，资源路径会从 native/audio.lua 的目录里补上，所以目录里有的名称只写这一个字段也能发声。',
       type: 'string',
     },
     soundPath: {
-      description: '原生 AkAudioEvent 资源路径。真正发出声音的就是这条路径，只带这个字段的定义能解析成功并且能播放。',
+      description: '原生 AkAudioEvent 资源路径，写成 package.object 形式。它会覆盖目录查询；只写了 package 一半的路径会自动补全。',
       type: 'string',
     },
     soundFile: {
-      description: '自定义音频文件路径。可以接受，但不会有声音 - 见下面的“还不能用的功能”。',
+      description: '定义时直接拒绝 - 是硬错误。这个版本上自定义音频文件不会播放（待解决项 audio-custom-file-loader）。请改用 soundId 或 soundPath。',
       type: 'string',
     },
     source: {
@@ -153,20 +153,21 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
 
 ```mermaid
 flowchart TD
-  A["Audio declaration"] --> B["Class:source"]
-  B -->|soundFile set| C["kind: file"]
-  B -->|soundId or soundPath set| D["kind: native"]
-  B -->|nothing named| E["nil"]
-  C --> F["core.sound.file"]
-  D --> G["core.sound.native"]
-  F --> H["no-op, returns false"]
-  G --> I["the native play route"]
+  A["Audio declaration"] --> B{"soundFile set"}
+  B -->|yes| C["hard error at define time"]
+  B -->|no| D["Class:source"]
+  D -->|nothing named| E["the id becomes the soundId"]
+  E --> F["kind: native"]
+  D -->|soundId or soundPath set| F
+  F --> G["core.sound.native"]
+  G --> H["the native play route"]
 ```
 
-`soundFile` 的优先级高于另外两个。完全没有指定声音的定义会停在 `nil`，不过很少有声明能走到
-那里，因为 `Audio{ ... }` 会先用 id 把 `soundId` 填上——见下面的“省略声音字段”。
+`soundFile` 根本走不到这张图里：写上它，定义调用当场停下，消息里会点名两个真的能发声的字段。
+完全没有指定声音的定义也不会走进死胡同，因为 `Audio{ ... }` 会先用 id 把 `soundId` 填上——见
+下面的“省略声音字段”。
 
-名称和路径都有时，游戏会被要求先加载资源，再在你的 actor 上播放：
+只有名称、只有路径、或者两个都有，游戏都会被要求先加载资源，再在你的 actor 上播放：
 
 ```mermaid
 flowchart LR
@@ -177,75 +178,82 @@ flowchart LR
   E --> F["PlayAkEventSoundByActor"]
 ```
 
-`PlayAkEventSoundByActor` 是正式版游戏里真实存在的函数，所以调用确实到得了引擎。但这棵代码
-树里没有任何运行日志记录到它真的发出了声音，所以把这条路径当作可信，把结果当作未验证。
-`:play()` 只报告有没有发出调用、别的什么都不报告，原因就在这里。
+`PlayAkEventSoundByActor` 不是猜出来的。它是 `UPalSoundUtility` 上被反射出来的函数之一，已安装
+二进制的 CXX 转储把它声明为 `bool PlayAkEventSoundByActor(AActor*, UAkAudioEvent*)`，而且一次录制
+到的会话里，游戏自己就用这两个参数、按这个顺序调用了它六次。这棵代码树里缺的是*你这边*这次调用
+是否真的响了，所以 `:play()` 只报告有没有发出调用、别的什么都不报告。
 
-已加载的资源按路径保存下来，所以第一次播放要付加载的代价，之后每次都复用。如果加载器拿不到
-资源，会用 `StaticFindObject(path)` 再试一次。
+加载资源之前，路径会先被补全。UE 的对象路径是 `<package>.<object>`，所以只写了 package 一半的
+`soundPath`（`/Game/.../AKE_BGM_Title`）会被 `core/assetpath` 补成
+`/Game/.../AKE_BGM_Title.AKE_BGM_Title`，而已经带了 object 一半的路径原样通过。已加载的资源按补全
+后的路径保存下来，所以第一次播放要付加载的代价，之后每次都复用。如果 `LoadAsset` 拿不到资源，
+会用 `StaticFindObject(path)` 再试一次；拿回来的东西在传出去之前还要做类型检查——不是
+`AkAudioEvent` 的对象会被拒绝，并在日志里写明它到底是什么类，而不是被塞进
+`UAkAudioEvent*` 参数里。
 
-### 为什么要同时传 soundId 和 soundPath
+### soundId 和 soundPath 各自做什么
 
 这两个字段不是二选一。它们服务于同一次调用的两个阶段，而且**任何一个单独存在都是完整的
 定义**：只要有非空的 `soundId` 或非空的 `soundPath`，声音就能解析成功。
 
 ```mermaid
 flowchart TD
-  A["NativeSource:play"] --> B["asset loaded from soundPath"]
-  B -->|yes| C["PlayAkEventSoundByActor"]
-  B -->|no| D["PlaySoundByActor with FName soundId"]
-  C --> E["the route that plays"]
-  D --> F["silent for AkAudioEvent names"]
+  A["Class:source"] --> B{"soundPath declared"}
+  B -->|yes| C["use it verbatim"]
+  B -->|no| D["catalog lookup on soundId"]
+  D -->|hit| C
+  D -->|miss| E["no path"]
+  C --> F["PlayAkEventSoundByActor"]
+  E --> G["PlaySoundByActor with FName soundId"]
+  G --> H["silent for AkAudioEvent names"]
 ```
 
 - 发出声音的是 `soundPath`。播放时优先用它：加载资源，送出声音，到此为止。只带 `soundPath`
   的定义走的就是这个分支。
-- `soundId` 是回退方案。没有能加载的资源时，代码会落到
-  `PlaySoundByActor(actor, { Key = FName(id) }, ...)`，它在另一张声音表里查这个名称——那张表
-  里没有 AkAudioEvent 名称，所以对这类名称来说是无声的。只带 `soundId` 的定义能用，但它落到
-  的就是这个分支。
-- 两个都传，你就同时拿到了会发声的路径，和资源加载不了时可以回退的名称。`native/audio.lua`
-  里的目录对每一条都同时传了两个。
+- `soundId` 是 AkAudioEvent 名称，转换时会替你去查。`Class:source()` 先解析带命名空间的 id
+  （`"pack:Theme"` 变成 `"pack_Theme"`），然后在你没有传 `soundPath` 时，把这个名称拿到
+  `native/audio.lua` 的目录里去查——1957 个 AkAudioEvent 名称与资源路径的对应表——并把真正的路径
+  补上。所以目录里有的名称，只写它就走会发声的那一支。
+- 目录里没有的名称拿不到路径，调用会落到
+  `PlaySoundByActor(actor, { Key = FName(id) }, ...)`，它查的是 SoundID 表——另一个命名空间，对
+  AkAudioEvent 名称来说是无声的。
+- 你自己写的 `soundPath` 永远不会被目录覆盖。
 
 <Callout type="warn">
-`:play()` 返回 `true` 只表示**发出了**一次原生调用，绝不表示你听到了什么。到现在还会骗到人
-的组合是：有名称、没有路径。它能解析成功，能走到 `PlaySoundByActor`，返回 `true`，却什么都
-没播。声音不响的时候，先检查 `:source().path`。
+`:play()` 返回 `true` 只表示**发出了**一次原生调用，绝不表示你听到了什么。到现在还会返回 `true`
+却什么都不播的情况，是目录里没有的 `soundId`：补不上路径，于是落到无声的 `PlaySoundByActor`
+分支。声音不响的时候，把 `:source().path` 打出来——那里是 `nil`，诊断就到此为止。
 </Callout>
 
 ```lua
 -- plays: the asset path is a complete definition on its own
 Audio.se{ id = "example:Quiet", soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem" }
 
--- resolves, reaches the engine, stays silent -- a name with no path
+-- plays too: AKE_GrabItem is in the catalog, so lowering attaches its path
 Audio.se{ id = "example:NameOnly", soundId = "AKE_GrabItem" }
 
--- preferred: the path plays, the id is there if the asset cannot be loaded
-Audio.se{
-    id        = "example:Loud",
-    soundId   = "AKE_GrabItem",
-    soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem",
-}
+-- silent: no AkAudioEvent of that name, so there is no path to attach
+Audio.se{ id = "example:Missing", soundId = "AKE_NotAnEvent" }
 ```
 
 ## 省略声音字段
 
-**完全**没有指定声音的定义——没有 `soundId`、没有 `soundPath`、没有 `soundFile`、也没有
-`source`——会拿自己的 `id` 当作声音名称。一行写法能用，就是因为这个：
+**完全**没有指定声音的定义——没有 `soundId`、没有 `soundPath`、也没有 `source`——会拿自己的
+`id` 当作 AkAudioEvent 名称。一行写法能用，就是因为这个：
 
 ```lua
 local Theme = Audio.bgm{ id = "AKE_BGM_Title" }
-Theme:source()   --> { kind = "native", id = "AKE_BGM_Title", path = nil }
+Theme:source()
+--> { kind = "native", id = "AKE_BGM_Title",
+-->   path = "/Game/Pal/Sound/Events/SE/UI/BGM_Title/AKE_BGM_Title.AKE_BGM_Title" }
 ```
 
-这样得到的定义能解析成功，所以 `:play()` 到得了游戏，只要有有效的 actor 就返回 `true`。但它
-给不了你资源路径，于是调用走的是 `PlaySoundByActor` 回退分支——对这类名称来说无声的那一支，
-那个 `true` 只说明调用发出去了。一行写法用来*登记*一个名称；想真的听到声音，就加上
-`soundPath`。
+这份声明里没有任何地方写了路径，是目录查询把它放进去的。所以一行写法对 1957 个事件名里的任何
+一个都走会发声的那一支，只有目录从没听说过的 id 才会落到无声的 `PlaySoundByActor` 分支。
 
 <Callout type="info">
-只有在四个指定声音的字段全都不存在时，id 才会被当作声音名称。其中任何一个（包括 `source`）
-只要设置了，这个行为就关掉。
+只有在三个指定声音的字段全都不存在时，id 才会被当作声音名称。其中任何一个（包括 `source`）
+只要设置了，这个行为就关掉。`soundFile` 不参与这个判断——它在判断之前就被拒绝了。
 </Callout>
 
 ## bgm 和 se
@@ -317,8 +325,9 @@ end
 省略时和 `:play`、`:stop` 一样用玩家自己的角色。
 
 `volume` 就是一个倍数：`1.0` 保持原样，`0.5` 是一半，`0.0` 是静音。调用发出去了它就返回 `true`，
-游戏让 Lua 看到的也就到此为止 —— 还没有人用耳朵确认过某个数值听起来是什么样，所以把这个数字当成
-可以调的旋钮，而不是一个承诺。
+而“发出去了”就是它的全部含义：还没有人听到过它真的改变音量。这个测量需要加载好的世界和一双耳朵，
+所以它作为一个声明好的钩子留着——`pf_hook audio-setvolume-audible` 会播一个目录里的事件、设成
+`0.2`、再播一次，由你来判断第二次是不是更轻。
 
 想让同一个 actor 上的**某一个**声音更轻，就从目录里挑一个更轻的事件。把它们放到不同的 actor 上播
 则是另一条路：那样音量就只作用于其中一个。
@@ -350,11 +359,12 @@ Audio.get_all()   --> Audio.Handle[]
 ```
 
 `Audio.get` 会返回你之前定义过的声音，前提是有。没有的话，它会当场造一个很薄的定义——
-`{ id = id, soundId = id }`——这样任何声音名称至少都能拿到手。这个临时定义**没有资源路径**，
-于是它走的是无声的回退路径，和上面那种一行写法完全一样。
+`{ id = id, soundId = id }`——这样任何声音名称至少都能拿到手。这个临时定义本身不带资源路径，
+但转换时会跑同一套目录查询，所以 `Audio.get("AKE_General_Explosion"):play()` 对目录里的任何事件
+名称都走会发声的那一支，哪怕这个声音从没被定义过。
 
-启动时 PalForge 会加载 `palforge.native.audio`，它定义了六个现成的声音。`Audio.get` 能连
-路径一起找到的，就是这些 id：
+启动时 PalForge 会加载 `palforge.native.audio`，它把六个现成的声音登记在框架自己的包名下。
+`Audio.get` 会用真正的定义（而不是临时的薄定义）回答的，就是这些 id：
 
 | 辅助函数 | Id |
 | --- | --- |
@@ -390,9 +400,11 @@ audio.CATALOG["AKE_CampLevelUp"]
 ```
 
 <Callout type="info">
-对于自己没有定义过的游戏原有声音，优先用 `native.audio.se(name)` /
-`native.audio.bgm(name)`，而不是 `Audio.get(name)`。`Audio.get` 不可能知道资源路径；
-`native.audio` 会去目录里查。
+`native.audio.se(name)` / `native.audio.bgm(name)` 和 `Audio.get(name)` 都能查到目录，所以游戏
+原有的声音用哪一个都能播。但 `native.audio` 这一对能告诉你一件 `Audio.get` 做不到的事：这个版本上
+不存在的 AkAudioEvent 名称，它们返回 `nil`；而 `Audio.get` 永远不返回 `nil`，交给你的是一个
+`:play()` 无声的句柄。另外它们造出来的东西并不登记，要登记请显式调用
+`native.audio.publish(name)`。
 </Callout>
 
 ## 定义一次，播放多次
@@ -444,14 +456,17 @@ end
 
 ## 还不能用的功能
 
-这里有三样东西做的事比你预期的少：一样没做完，两样管到的范围比你要求的大。三样都不会报错，
-只是安静地过去，所以在为一个不出声的声音耗掉一晚上之前，先读这一节。
+这里有三样东西做的事比你预期的少：一样被直接拒绝，两样管到的范围比你要求的大。
 
 <Callout type="warn">
-**自定义音频文件不会播放。** `soundFile` 声明可以被接受，会解析成一个文件源，然后这个源什么
-都不做就返回 `false`——`:play()` 把这个 `false` 原样交给你。Palworld 没有暴露出可以确认的
-自定义音频加载器，所以这里是写明的空实现，而不是假装实现。今天你自己的音频资源没办法通过
-PalForge 播放：请从目录里挑一个最接近的声音。
+**自定义音频文件不会播放，而且 `soundFile` 是硬错误。** 写上它，定义调用就会停下，消息里会点名
+待解决项 `audio-custom-file-loader`，以及两个真的能发声的字段。报错而不是忽略正是重点：
+`soundFile` 的转换排在 `soundId` / `soundPath` 之前，所以在一个能正常发声的 `soundId` 旁边加上它，
+会把本来在响的声音弄哑；而且在这棵代码树量过的任何版本上，它从来没有真的播放过。引擎两边的路都是
+封死的——`USoundWave` 没有声明导入器，`USoundWaveProcedural` 更是什么都没声明，正式版里没有任何
+东西能读一个 `.wav`；Wwise 那边的 `UWwiseExternalSourceStatics::SetExternalSourceMediaBy*` 是把
+Wwise 打包时已经准备好的媒体重新绑定，而不是读内容包磁盘上的文件。请从目录里挑一个最接近的
+声音。
 </Callout>
 
 <Callout type="warn">
@@ -460,8 +475,17 @@ PalForge 播放：请从目录里挑一个最接近的声音。
 响，就把它放到另一个 actor 上播——比如音乐放在放置好的建筑物上，音效放在玩家身上。
 </Callout>
 
-第三样是上面说过的 `:setVolume`，它和 `:stop` 的作用范围一样：调整的是那个 actor 正在发出的一切，
-而不是你调用它的那一个声音。真要做按声音的音量滑块，还是得靠分开的 actor 或分开的事件。
+第三样是上面说过的 `:setVolume`，它和 `:stop` 的作用范围一样，而且这是**结构决定的**，不是选择的
+结果。它调用的原生函数是
+`UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)`，里面根本没有总线名称——
+第二个参数是 actor，也就是 Wwise 的游戏对象——所以它缩放的是「一个发声体送往它的输出总线的量」。
+这正是 `:play` 送出、`:stop` 清空的那个范围。
+
+这个版本上没有更细的控制，而且这是查清楚的结论，不是没试过。真正可能做到按声音的是 RTPC 这条路，
+它被一组数字堵死了：整个版本一共声明了**三个** `AkRtpc` 资源——`Supply_Altitude`、`OverHeatRifle`
+和 `ChargeLaserRifle_01`——`AkAuxBus` 是**零个**，`AkAudioBank` 也是**零个**。这三个没有一个是音量，
+所以根本不存在可以调的 RTPC 音量参数，也没有名字可以喂给那个按总线名的重载。真要做按声音的音量
+滑块，还是得靠分开的 actor 或分开的事件。
 
 ## 实用示例
 
@@ -596,6 +620,17 @@ PalForge: Audio: field "kind" must be one of { "se", "bgm" }, got "music"
 PalForge: Audio.bgm: kind is fixed to "bgm" here, but got "se" - use Audio{ ... } to set it
 ```
 
+`soundFile` 有自己专属的消息。因为它要说清楚一个已声明的字段为什么会被拒绝，所以它是这个模块里最长
+的一条。以下是节选：
+
+```text
+PalForge: Audio: soundFile is not accepted (id "example:Blast", soundFile "C:/mods/example/blast.wav").
+Custom audio files do not play on this build: [...] This is the open item audio-custom-file-loader.
+It is an ERROR rather than a no-op because soundFile used to OUTRANK soundId/soundPath, so setting it
+beside a working soundId silenced a sound that was playing. Name a game sound instead:
+soundId = "AKE_UI_Common_Menu_Close", or soundPath = the asset path from PalForge.native.audio.CATALOG.
+```
+
 `Audio.get` 接受的是一个裸字符串，所以它报的消息不一样：
 
 ```text
@@ -616,7 +651,9 @@ Audio.get: id (string) is required
 ## 小结
 
 - 用 `Audio{ ... }`、`Audio.bgm{ ... }` 或 `Audio.se{ ... }` 定义声音。只有 `id` 是必填的。
-- 除了 `soundId`，也要传 `soundPath`。听得到的是路径；只有名称是无声的。
+- 目录里有的 `soundId` 只写它就够了：转换时会从 `native/audio.lua` 把资源路径补上。目录里没有
+  那个名称、或者想覆盖时，才传 `soundPath`。
+- `soundFile` 是定义时的硬错误。这个版本上自定义音频文件不会播放。
 - 用 `handle:play(actor)` 播放。省略 `actor` 就在玩家角色上播放。
 - `:play()` 返回 `true` 表示调用发出去了，不表示你听到了。声音不响时检查 `:source().path`。
 - `:stop(actor)` 会停掉那个 actor 上的一切，`:setVolume(volume, actor)` 会调整那个 actor 上的一切。

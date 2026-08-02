@@ -236,8 +236,14 @@ end)
 然后再移动过去。
 
 `:spawn` 在这一切发生之前就返回了，所以那个布尔值只表示调用发出去了，没有别的含义。见
-[Pal](/docs/api/pal)。它还需要 `CheatManagerEnabler` 模组：没有它就根本没有管理对象，放进世界的生成
-在够到游戏之前就返回 `false`。
+[Pal](/docs/api/pal)。
+
+它**不需要** `CheatManagerEnabler` 模组。`core/spawn` 会先找活着的 `PalCheatManager`，再找玩家
+控制器上的那个，两者都没有时就自己造一个：对 `PalPlayerController` 自己的 `CheatClass` 调
+`StaticConstructObject`（那个类为空时退回 `/Script/Pal.PalCheatManager`，再退回
+`/Script/Engine.CheatManager`），造出来的对象挂在控制器上，所以这件事每个会话只发生一次，而不是
+每次生成都来一遍。放进世界的生成真正需要的是一个玩家控制器：没有加载世界、或者还没连上的时候，
+它会在够到游戏之前返回 `false`，并警告说也造不出一个来。
 </Callout>
 
 ### 在玩家正前方生成
@@ -292,6 +298,36 @@ end
 每次调用都要单独检查，因为 `coordinateOffset` 每次都会重新读一遍 pawn：如果玩家在循环跑到
 一半时离开了世界，剩下的几轮拿到的是 `nil`，而不是一个过期的位置。
 
+### 玩家身上带着什么
+
+本地玩家的背包是读得到的，而且这次读取是这个版本上唯一被端到端量过的道具路径。
+`Item.Handle:count()` 从 `PalUtility` 的 CDO 一路走到玩家、玩家状态、`InventoryData`，再去问游戏
+自己的 `CountItemNum`：一个加载好的存档对 `Wood` 返回了普通 Lua 数值 `135`，而且这条链上每一步都
+打印出了真实的对象。
+
+```lua title="content/inventory_report.lua"
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("example")
+
+event.on("world.ready", function()
+    for _, id in ipairs({ "Wood", "Stone", "Berries" }) do
+        local n = Item.get(id):count()
+        log.info(string.format("%-8s %s", id, n and tostring(n) or "unknown"))
+    end
+end)
+```
+
+`nil`的意思是**未知**，从来不是零——没有世界、没有玩家，或者这次读取答不上来。请像守 `Player.coordinate()`
+一样守着它。
+
+<Callout type="warn">
+绕过 API 自己调 `CountItemNum` 没问题，但 id 必须包起来：`inv:CountItemNum(FName("Wood"))` 能答，
+而在声明了 `FName` 的位置传一个裸 Lua 字符串的 `inv:CountItemNum("Wood")` 会在 UE4SS 自己的参数
+编组里出错并把 Palworld 带崩，`pcall` 根本看不到。这件事真的发生过，就在那次成功读取的下一行。
+64 位的兄弟 `CountItemNum64` 在 PalForge 里哪儿都没被调用，也是同一个原因：它在类的函数清单里，
+但它的参数列表从来没被读过，而猜一个声明的代价已经付过一次了。
+</Callout>
+
 ### 测量到世界里某个东西的距离
 
 世界里已经放好的建筑物带着 `pos`，和 `x, y, z`（厘米）是同一个形状，所以做一次普通的距离
@@ -328,6 +364,7 @@ end
 - `Player.coordinateOffset(dx, dy, dz)` 是那个位置沿世界坐标轴挪开之后的点 —— 「我旁边」的简写。
 - `Player.character()` 是玩家自己的 actor，想直接对玩家做点什么就用它。
 - 三个函数在没有世界的时候都返回 `nil`，用之前先检查。
+- 玩家身上有什么也读得到：`Item.get(id):count()`，`nil` 表示未知。
 - 每次都重新取一遍。它们都是快照，而且每次加载世界 pawn 都会被重建。
 
 接下来读 [Pal](/docs/api/pal)，看看 `:spawn` 拿你刚求出来的坐标做了什么。

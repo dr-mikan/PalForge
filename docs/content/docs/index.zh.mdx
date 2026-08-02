@@ -14,6 +14,35 @@ PalForge 是 Palworld 的基础模组。你可以用它添加自己的建筑物�
 - 让放下的每个建筑物记住自己的数据，下次进游戏时还在。
 - 找到你想做的东西对应的页面。
 
+## 它面向的是什么
+
+<Callout type="warn">
+PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not
+supported and are not tested: there is no replication layer, and the item, spawn and event
+routes are all client-authoritative. A pack may appear to work for the host and do nothing
+for anyone else.
+
+（PalForge 面向的是**单人游戏的 Palworld**。专用服务器和联机客人不受支持，也没有经过测试：这里没有
+任何同步层，道具、生成和事件这几条通路全都是客户端权威的。一个内容包可能在房主那边看起来是好的，
+在别人那边什么都不发生。）
+</Callout>
+
+这是一个有意划定的范围，不是疏忽，而且原因是结构性的，不是偶然的。`core/spawn` 是从**本地**玩家
+控制器上造出 `PalCheatManager` 的。花掉一个道具走的是本地生成的
+`APalWeaponBase::RequestConsumeItem`。`core/event` 里每一个事件来源都是本地的 `RegisterHook`。这些
+东西从来没有对着专用服务器或联机客人跑过，也没有理由指望它们能正常工作。真要支持服务器，那是一个
+新的子系统 —— 每次写入都要做权限检查、要有一层 RPC 接缝、要决定内容包的状态归谁所有 —— 而不是对
+其中某一项的修补。同样这句话每次启动都会打印在日志里，所以没人必须先在这里找到它。
+
+PalForge 声称能用的每一项能力，都是对着 **Palworld v1.0.2.101103** 测出来的：要么在真实存档里看到
+过，要么是从安装好的二进制自己的声明里读出来的。这个版本号写在 `Scripts/palforge/env.lua` 的
+`gameBuild` 里，也出现在启动那一行，因为一个不说明自己是在哪个版本上测的框架，等于没给用户任何办法
+去区分 *“PalForge 坏了”* 和 *“游戏动了”*。这棵树已经在这个缝隙上吃过一次亏：`AddItem` 实际声明的是
+五个参数，而头文件导出里只有四个，因为那份导出比装着的二进制早了整整一个补丁。启动时 PalForge 也会
+问正在运行的游戏它是什么版本，把答案记进 `env.gameBuildLive`。两者对不上时它会点名两边，说一次，
+就一行。游戏答不上来时 —— 在模组加载那一刻这很正常，所以这次读取会在第一次世界加载时重试一次 ——
+启动那一行写的是 `unknown`，不是一个猜测。
+
 ## 第一个建筑物
 
 这就是一个完整的内容文件。它给游戏自带的篝火加上新行为：右键点一下，你会得到 5 个木材。
@@ -205,6 +234,10 @@ om.resolve("Wood")             --> "Wood"        (literal game id, passed throug
 om.resolve("bad pack:Potion")  --> nil, "invalid pack id 'bad pack' (letters/digits/_ only)"
 ```
 
+同一条规则在**定义**的那一刻就会执行，而不是等到有人来要解析后的名字。
+`Building{ id = "my-pack:Bench" }`（带连字符）会在你写下它的那一行直接报错并点明规则，而不会注册
+一个永远够不到游戏里任何一行的 id。
+
 <Callout type="warn">
 你可以给游戏已有的 id 加上新行为和新的元数据。但要往游戏自己的表里加一行全新的数据 —— 一个新
 道具、一个新生物、一个新建筑物 —— 就需要别的工具，因为 Lua 写不了新的行。所以
@@ -250,41 +283,67 @@ flowchart LR
   FIND --> RUN["你的 onPlace 代码运行"]
 ```
 
-自动到什么程度，取决于领域：
+自动到什么程度，各个领域不一样，证据的强度也不一样。每个 api 模块的文件头都写明了它的哪些事件是
+活的、以及是什么把它们测出来的：
 
 - **Building** —— 最完整的一个。`onPlace`、`onLoad`、`onRightClick`、`onRemove`、`onTick`、
-  `onWorldReady` 和 `onWorldLeft` 都会在活着的建筑物上运行。`onBuild` 也会运行，就在建造完成的
-  那一刻；它到达时建筑物还不存在，所以传给它的是定义，而不是活着的建筑物。晚一轮才加载进来的
-  建筑物会错过 `onWorldReady`，所以每个建筑物自己的启动处理要写在 `onLoad` 里。
+  `onWorldReady` 和 `onWorldLeft` 都会在活着的建筑物上运行，每一个建筑物都是一个真正的实例，带着
+  自己持久化的状态。`onBuild` 也会运行，就在建造完成的那一刻；它到达时建筑物还不存在，所以传给它
+  的是定义，而不是活着的建筑物。晚一轮才加载进来的建筑物会错过 `onWorldReady`，所以每个建筑物自己
+  的启动处理要写在 `onLoad` 里。永远不触发的是 `onLeftClick` 和 `onBreak` 这两个，而且那是已经定
+  下来的结论，不是待办 —— 见下面的提示框。
+- **Item** —— 四个都会运行。`onObtain` 和 `onUse` 来自背包与使用路径；`onCraft` 来自两个地图对象
+  模型的 `OnFinishWorkInServer`；`onDiscard` 来自 `RequestDrop_ToServer` /
+  `RequestDispose_ToServer`。后两个是在真实的制作台上制作、从真实的格子里丢弃时实地看到的。
+  `:give`、`:take` 和 `:count` 事后都会把背包再读一遍，所以它们返回的是实测，不是期望。现在还会
+  返回 nil 的只有 `:recipeOf`。
 - **Pal** —— 五个都会运行。`onCaptured`、`onDamaged` 和 `onDeath` 来自已经确认的游戏调用。
-  `onSpawned` 挂在一个候选钩子上，还没有证实它表示的是新出现而不是重新初始化，所以这个处理函数
-  要写成运行两次也没问题。`onTick` 由一个遍历世界里所有帕鲁的扫描驱动，大约每三秒一次。
-- **Item** —— `onObtain` 和 `onUse` 会运行，带着 `ctx.itemId`、`ctx.count` 和 `ctx.actor`。
+  `onSpawned` 挂在 `PalNPC:OnCompletedInitParam` 和
+  `PalPlayerCharacter:OnCompleteInitializeParameter` 上，两者都看到过触发 —— 但迄今为止每一次触发
+  都落在世界加载的同一秒里，所以“它代表的是一只刚刚才出现的帕鲁”这一点仍未被证明。请把这个处理函数
+  写成跑两次也没问题。`onTick` 由一个遍历世界里所有帕鲁的扫描驱动，大约每三秒一次。声明的 `mesh`
+  会在同一个生成通道上自动装上去：你不需要自己调用 `renderOn`。
+- **Skill** —— 四个里有三个会运行。`onActivate` 由 `PalActionBase:OnBeginAction` 运来，是在真实
+  战斗里看到的；`onEquip` 和 `onUnequip` 来自 `AddPassiveSkill` / `RemovePassiveSkill`。不运行的是
+  `onHit`，通往它的唯一路子是手动调用 `:hit(target)`。`:activate` 的冷却由 Lua 计时，冷却期间返回
+  `false`。
 - **Effect** —— `onApply`、`onTick`、`onStack` 和 `onExpire` 都会运行。时间由 PalForge 自己按
-  半秒一次的心跳来数。定义里写上 `nativeStatus`，效果运行期间就会点亮游戏自带的状态异常；除此
-  之外目标身上发生了什么，全由你的处理函数决定。
-- **Audio、Mesh 和 UI** —— 完全没有生命周期事件。声音要你自己播放，网格要你自己指定给谁穿，界面
-  元素也要你自己挂载、刷新和卸载。`Audio.Handle:stop(actor)` 不是按单个声音来的：它会把那个
-  actor 上正在播放的一切都停掉。
+  半秒一次的心跳来数。定义里写上 `nativeStatus`，效果运行期间就会给目标点亮游戏自带的状态异常；
+  这条路子在加载好的存档里被看着跑通过，游戏那边把状态异常读回来是“有”，随后又读回来是“没有”。
+  状态异常按游戏自己的规则运行，PalForge 不控制它的强度。
+- **Audio** —— 没有生命周期事件；声音由你自己播放。只给一个名字就够了：1957 条的 AkAudioEvent
+  目录会把它解析成真正能播出声的资源路径。`Audio.Handle:stop(actor)` 不是按单个声音来的 —— 它会把
+  那个 actor 上正在播放的一切都停掉 —— `:setVolume` 出于同样的原因也是按 actor 来的。
+- **Mesh** —— 没有生命周期事件。原版 `/Game/...` 的静态和骨骼网格能用，交给引擎之前会先做类检查；
+  `.obj` 几何体能从磁盘读进来。自定义贴图的导入按正确的声明签名接好了线，但一次都没被调用过，也还
+  没有人在游戏里亲眼看到过一次改色。
+- **UI** —— 没有生命周期事件，而且没有任何一个原生的“界面变了”信号被确认会触发，所以没有东西会替
+  你刷新元素。用 Palworld 自带的 UMG 组件搭出控件、并挂进游戏本体的游戏内 UI 根节点，这条路是实地
+  确认过的。
+- **Player** —— `Player.character()`、`Player.coordinate()` 和
+  `Player.coordinateOffset(dx, dy, dz)`。没有事件；它回答玩家在哪里。
 
-<Callout type="error" title="这个版本做不到的一件事">
-**没法播放你自己的声音。** 把 `Audio` 定义指向你自己做的音频文件是可以接受的，然后什么都不会发生。
-能播放的只有游戏里本来就有的声音，而那有好几千个 —— 目录见 [Audio](/docs/api/audio)。
+<Callout type="error" title="这个版本会直接拒绝的一件事">
+**你自己的声音文件没法播放，而且 `Audio.Spec.soundFile` 现在是定义时的硬错误。** 引擎原生的那一半
+是关死的 —— `USoundWave` 没有声明任何导入器 —— 而 Wwise 那一半做的是把一个烘焙好的媒体 cookie 重新
+绑定，而不是读你磁盘上的 `.wav`。这个字段仍然保留在声明里，好让错误消息能点它的名，并点出未决项
+`audio-custom-file-loader`。能播放的只有游戏里本来就有的声音，一共 1957 个 —— 目录见
+[Audio](/docs/api/audio)。
 
 本页其余内容今天都能用，只有一个习惯值得养成：碰到游戏的调用返回的是它实测到的结果，所以别假定，
 去看那个布尔值。
 </Callout>
 
 <Callout type="warn">
-下面这些可以写在定义里，你的代码不会因此出错，但今天没有任何东西会运行它们。把逻辑放到真正会
-运行的地方：
+有三样东西可以写在定义里，你的代码不会因此出错，但没有任何东西会运行它们。把逻辑放到真正会运行的
+地方：
 
-- Building 的 `onLeftClick` 和 `onBreak` —— 改用 `onRightClick` 和 `onRemove`。
-- Item 的 `onCraft` 和 `onDiscard` —— 改用 `onObtain` 或 `onUse`。
-- 技能的处理函数 —— 游戏里没有任何东西会触发技能。请从你自己的代码里调用 `:activate(owner)`、
-  `:hit(target)`、`:equip(owner)` 或 `:unequip(owner)`，比如在帕鲁的处理函数里、建筑物的
-  `onRightClick` 里，或者一个按键绑定里。冷却由 Lua 计时，冷却期间 `:activate` 返回 `false`。
-- 你自己准备的 `soundFile` 能被解析，但不会发出声音。请改用游戏内的声音 id。
+- Building 的 `onLeftClick` 和 `onBreak` —— 这是以否定的方式定下来的，不是还没做。所有可能拥有这类
+  钩子的类的完整函数列表都被读过了，并不存在：`PalBuildObject` 上没有任何点击项，而“摧毁”只以委托
+  字段的形式存在，`RegisterHook` 没法按路径去挂它。请改用 `onRightClick`，消失则用 `onRemove`，它会
+  带着 `reason = "missing"`。
+- Skill 的 `onHit` —— 它的两个候选来源从两侧测下来都是沉默的。请从你自己的代码里调用
+  `:hit(target)`，比如在帕鲁的处理函数里、建筑物的 `onRightClick` 里，或者一个按键绑定里。
 - 没有东西会替你刷新界面元素。状态变了就自己调用 `:refresh()`，或者用 `:autoRefresh(ms)` 定时
   轮询。
 </Callout>
@@ -323,8 +382,8 @@ local WellFed = Effect{
     },
 }
 
--- 3. A skill. Nothing in the game fires one, so it is invoked below by hand;
---    the cooldown is enforced in Lua by :activate.
+-- 3. A skill. onActivate has a live source in real combat; this one is fired by hand
+--    from the building below, and the cooldown is enforced in Lua by :activate.
 local Whistle = Skill{
     id       = "example:Whistle",
     name     = "Whistle",
@@ -424,8 +483,10 @@ PalForge 自带的 id，会替换掉原来的注册。
 - 想运行的代码写在 `events` 里。第一个参数是事件发生在谁身上：建筑物是活着的那一个，其他都是
   那个定义的句柄。
 - 只要你调用 `self:save()`，建筑物就会记住你放进 `state` 的东西。
-- 字段名写错会中止调用，并给出一条以 `PalForge: ` 开头的消息，告诉你正确的名字。
-- 技能不会自己触发；Item 的 `onCraft` / `onDiscard` 和 Building 的 `onLeftClick` / `onBreak` 也
-  不会运行 —— 把这些逻辑放进真正会运行的处理函数里。
+- 字段名写错会中止调用，并给出一条以 `PalForge: ` 开头的消息，告诉你正确的名字；id 的形状不对，
+  也会在你写下它的那一行停住。
+- 不会触发的处理函数只有三个：以否定方式定下来的 Building `onLeftClick` 和 `onBreak`，以及
+  Skill 的 `onHit`。本页能声明的其余每一个都有活的来源。
+- PalForge 只面向单人游戏，而且它声称的每一项能力都是对着 Palworld v1.0.2.101103 测出来的。
 
 接下来读 [快速开始](/docs/getting-started)，安装 PalForge，让你写的文件被加载进来。

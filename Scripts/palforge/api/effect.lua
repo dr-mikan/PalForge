@@ -26,8 +26,13 @@
 -- damage / heal / buff through whatever call you have (e.g. utils.items, an actor method) — and
 -- an effect with no `nativeStatus` at all is completely normal.
 --
--- Not yet observed in a running game: see core/status.lua. A native ailment that does not fire
--- is logged and never fails the effect — your handlers run either way.
+-- OBSERVED WORKING, 2026-07-26, in a loaded save — this line used to say "not yet observed in a
+-- running game" while the file it pointed at, core/status.lua, already recorded the measurement.
+-- What was measured: `status.add AttackUp (EPalStatusID 26) [declared]`, the game reading the
+-- ailment back as PRESENT through GetExecutionStatus, then `status.remove` and the game reading
+-- it back as GONE. See core/status.lua's header for the evidence and for what a false means.
+-- A native ailment that does not fire is logged and never fails the effect — your handlers run
+-- either way.
 --
 --   local Regen = Effect{
 --       id = "example:Regen", name = "Regeneration",
@@ -44,6 +49,7 @@
 local om     = require("palforge.core.object_manager")
 local schema = require("palforge.core.schema")
 local status = require("palforge.core.status")
+local uo     = require("palforge.core.uobject")
 
 --=============================================================================
 -- SPEC — the shape of Effect{ ... }, declared as data so it is enforced on every call and
@@ -71,8 +77,14 @@ local Events = schema.define("Effect.Spec.Events", {
 })
 
 ---What you pass to Effect{ ... }. `id` is the only required field.
+-- `id` carries schema.validId, not schema.nonEmpty. An effect id names nothing in the game —
+-- the runtime below is entirely PalForge's — so this is the one domain where an unresolvable
+-- id would not be silently dead. It is still refused, for one reason: the id model is either a
+-- rule or it is a suggestion, and an author who learns that "my-pack:Regen" is fine here will
+-- write "my-pack:Bench" tomorrow and lose a building's whole lifecycle with no log line
+-- (F-4). The rule is written once, in core/schema.lua.
 local Spec = schema.define("Effect.Spec", {
-    { "id",           type = "string", required = true, check = schema.nonEmpty,
+    { "id",           type = "string", required = true, check = schema.validId,
                       doc = "effect id: a name or \"pack:name\"" },
     { "name",         type = "string",  doc = "shown on the status bar (defaults to id)" },
     { "description",  type = "string",  doc = "one-line description, for UI and tooling" },
@@ -80,7 +92,13 @@ local Spec = schema.define("Effect.Spec", {
     { "interval",     type = "number",  doc = "seconds between onTick calls (omit = no periodic tick)" },
     { "stackable",    type = "boolean", default = false, doc = "may several copies coexist on one target?" },
     { "maxStacks",    type = "number",  default = 1, doc = "stack ceiling when stackable" },
-    { "icon",         doc = "status-bar icon" },
+    -- ONE KIND OF THING, declared — the same decision as Item / Pal / Skill's `icon`, and here
+    -- there is not even a DataTable to disagree with: an effect is PalForge's own concept, so
+    -- :iconOf hands back exactly what was declared. A /Game/... texture path is what every
+    -- consumer of an icon in this tree wants (core/mesh/assets.load takes a path), so that is
+    -- what the field accepts.
+    { "icon",         type = "string",
+                      doc = "/Game/... texture path for your own status UI (nothing in the game reads it)" },
     -- Checked against the game's own EPalStatusID list at DEFINITION time, not at apply time.
     -- A typo in an ailment name is a mistake a pack author makes once, while writing the
     -- definition, and the useful moment to hear about it is right then — with the real
@@ -115,29 +133,72 @@ function Class:onTick(target, ctx) end
 function Class:onStack(target, ctx) end
 function Class:onExpire(target, ctx) end
 
+-- The declared icon, and nothing else. Unlike item / pal / skill there is no icon DataTable to
+-- consult: an effect is PalForge's own concept, the game has no row for one, and the ailment
+-- an effect may MIRROR (nativeStatus) draws the game's own status icon through the game's own
+-- UI, which this value has nothing to do with.
 function Class:iconOf() return self.icon end
 
 --=============================================================================
 -- RUNTIME — the live applications, advanced by core/event's "tick" channel and released
 -- wholesale on its "world.left" channel.
--- apps: target -> { [effectId] = app }. Weak-keyed: an application must never keep a
--- pawn alive, and a target that is garbage-collected takes its applications with it.
+-- apps: targetKey -> { [effectId] = app }, and the target HANDLE rides in app.target.
+--
+-- THE KEY IS core.uobject.key (the target's GetFullName), NOT the target handle — contract
+-- C1. UE4SS mints a fresh userdata wrapper per lookup, so two references to one pawn are
+-- not the same Lua value and Lua indexes a table by userdata IDENTITY. This table used to
+-- be keyed on the handle, and every consequence was silent in exactly the way A-1 describes:
+-- :apply(pawn) filed the application under the wrapper the caller happened to hold, so
+-- :isActive / :stacksOn / :timeLeft called with a pawn from a later FindAllOf — or from a
+-- subsequent event's ctx.actor, which is a different wrapper again — answered false / 0 / 0,
+-- :remove returned false and removed nothing, and a second :apply on the SAME pawn made a
+-- SECOND independent application: onApply fired again instead of onStack, the stack count
+-- restarted at 1, and core.status.add ran a second time on a target that already carried the
+-- ailment. Nothing raised and nothing was logged; the effect simply did not behave like one
+-- effect. Only a plain Lua table target (which IS identity-stable) ever worked.
+--
+-- Anything that answers GetFullName is keyed on that name; anything that does not keys on
+-- itself. That covers all three cases without asking what type a target is: a UObject is
+-- named, a plain Lua table target (which a pack is free to pass, and which IS
+-- identity-stable) is not and keys on itself, and an object that will not answer its own
+-- name — dead, or mid-teardown — falls back to the handle, which is the OLD behaviour for
+-- that one object and the honest floor, since it is still what the caller can reach and
+-- `t[nil]` would raise.
+--
+-- WEAK KEYS ARE GONE WITH THE HANDLE KEY, and the property they bought is now bought
+-- differently. `__mode = "k"` existed so an application could never keep a pawn alive past
+-- its lifetime; a string key is not collectable, so it would have made the table immortal.
+-- What replaces it: step() calls targetAlive on every live application every heartbeat and
+-- expires the ones whose target has gone with reason "target_gone", and prune() then drops
+-- the emptied bucket. That is a stronger guarantee than GC gave — it fires on the beat the
+-- pawn despawns rather than whenever Lua next collects — and it is the C1 rule that a record
+-- whose object is no longer live is dropped rather than kept.
 --=============================================================================
 
 local GLOBAL = {}   -- sentinel target key for :apply() with no target
-local apps   = setmetatable({}, { __mode = "k" })
+local apps   = {}
 local DT     = 0.5  -- seconds advanced per heartbeat (overwritten from event.TICK_MS)
 local driverInstalled = false
 
+-- The bucket key for `target`. See the C1 note above for the three cases.
+local function targetKey(target)
+    if target == nil then return GLOBAL end
+    return uo.key(target) or target
+end
+
 -- Is `target` still usable? Engine objects go invalid when despawned; plain tables and
 -- the GLOBAL sentinel are always fine.
+--
+-- Liveness for a userdata is core.uobject.live, not a hand-rolled `x and x:IsValid()`: a
+-- stale handle can throw on the IsValid call itself and no caller may let that escape. The
+-- "plain tables are always fine" half is deliberate and is asserted by test/cases/effect.lua
+-- ("a plain-table target is never treated as gone, even one whose IsValid says false") —
+-- a pack may hand :apply any value it likes as a target and PalForge's own timing must not
+-- start expiring applications because a table happens to carry a field called IsValid.
 local function targetAlive(target)
     if target == nil or target == GLOBAL then return true end
-    local ok, valid = pcall(function()
-        if type(target) == "userdata" and target.IsValid then return target:IsValid() end
-        return true
-    end)
-    return ok and valid ~= false
+    if type(target) ~= "userdata" then return true end
+    return uo.live(target)
 end
 
 -- End one application: fire onExpire and drop it from the table. `reason` is one of
@@ -171,8 +232,11 @@ local function snapshot()
     return list
 end
 
--- Drop the buckets a pass emptied. An emptied bucket would otherwise sit in `apps` until
--- its target is collected — and for ever, for GLOBAL and plain-table keys. Only the empty
+-- Drop the buckets a pass emptied. An emptied bucket would otherwise sit in `apps` for ever:
+-- the keys are names now (contract C1), so nothing about them is collectable and this is the
+-- only reclaimer there is. It runs on every heartbeat, right after the pass that emptied
+-- them, and step() has already expired every application whose target has gone — so the pair
+-- bounds `apps` at "one bucket per target that currently carries an effect". Only the empty
 -- ones go, so a handler that re-applied during teardown does not lose what it just added.
 -- (Clearing an EXISTING key while `pairs` walks the same table is well-defined; adding one
 -- is what snapshot() exists to avoid.)
@@ -256,16 +320,26 @@ end
 
 ---The effect domain. CALL it to define one; the two named functions look existing ones up.
 ---@class palforge.effect
----@overload fun(spec: Effect.Spec): Effect.Handle
+---@overload fun(spec: Effect.Spec, opts: table?): Effect.Handle
 local Effect = {}
 
 local wrap  -- forward decl; the Effect.Handle wrapper is defined in the BOTTOM section
 
 ---Define an effect and register it.
 ---`spec` is validated against Effect.Spec: `id` is required, unknown fields are an error.
+---
+---`opts` is optional and omitting it behaves exactly as it always has:
+---  { register = false }   build and return the handle, register NOTHING. The handle is fully
+---                         usable — :apply / :remove drive the runtime below, which does not
+---                         consult the registry at all — so this is how a caller builds a
+---                         one-off effect without taking an id from anyone.
+---  { pack = "mypack" }    register attributed to that pack, which is what gives a collision
+---                         a "who". PalForge.pack("mypack").Effect passes it for you.
 ---@param spec Effect.Spec
+---@param opts table?
 ---@return Effect.Handle
-local function define(spec)
+local function define(spec, opts)
+    local register, pack = schema.defineOpts(opts, "Effect")
     spec = Spec:validate(spec, "Effect")
     local cls = setmetatable({
         id           = spec.id,
@@ -287,12 +361,16 @@ local function define(spec)
     for name, handler in pairs(spec.events or {}) do           -- onApply, ...
         cls[name] = function(_, ...) return handler(handle, ...) end
     end
-    pcall(function() om.register("effect", spec.id, cls) end)
+    -- so Effect.get / Effect.get_all find it — unless the caller asked for a definition that
+    -- stays out of the registry, which is a build, not a define.
+    if register then
+        pcall(function() om.register("effect", spec.id, cls, { pack = pack }) end)
+    end
     return handle
 end
 
 -- Calling the module IS defining:  Effect{ id = "example:Regen", ... }
-setmetatable(Effect, { __call = function(_, spec) return define(spec) end })
+setmetatable(Effect, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get an EXISTING effect by id: a previously-defined one, else a thin definition. Never nil.
 ---@param id string
@@ -315,7 +393,7 @@ end
 ---@param target any?
 ---@return string[]
 function Effect.activeOn(target)
-    local byId = apps[target or GLOBAL]
+    local byId = apps[targetKey(target)]
     local out = {}
     if byId then for id in pairs(byId) do out[#out + 1] = id end end
     table.sort(out)
@@ -345,7 +423,7 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 function Handle:apply(target, ctx)
     if not ensureDriver() then return false end
     local cls = self._cls
-    local key = target or GLOBAL
+    local key = targetKey(target)
     apps[key] = apps[key] or {}
     local byId = apps[key]
     local app  = byId[cls.id]
@@ -355,6 +433,11 @@ function Handle:apply(target, ctx)
         local max = tonumber(cls.maxStacks) or 1
         if cls.stackable and app.stacks < max then app.stacks = app.stacks + 1 end
         app.remaining = tonumber(cls.duration) or nil
+        -- Refresh the stored handle from the caller's (C1): the record was filed under a
+        -- name, and the wrapper it is holding may be the one from the FIRST apply, which
+        -- can be older than anything the caller has. onExpire and the "target_gone" sweep
+        -- both act through app.target, so it must be the freshest handle available.
+        if target ~= nil then app.target = target end
         pcall(function()
             cls:onStack(target, setmetatable({ effect = cls.id, stacks = app.stacks },
                 { __index = ctx }))
@@ -390,7 +473,7 @@ end
 ---@param target any?
 ---@return boolean removed
 function Handle:remove(target)
-    local key  = target or GLOBAL
+    local key  = targetKey(target)
     local byId = apps[key]
     local app = byId and byId[self.id]
     if not app then return false end
@@ -404,7 +487,7 @@ end
 ---@param target any?
 ---@return boolean
 function Handle:isActive(target)
-    local byId = apps[target or GLOBAL]
+    local byId = apps[targetKey(target)]
     return (byId and byId[self.id]) ~= nil
 end
 
@@ -412,7 +495,7 @@ end
 ---@param target any?
 ---@return integer
 function Handle:stacksOn(target)
-    local byId = apps[target or GLOBAL]
+    local byId = apps[targetKey(target)]
     local app = byId and byId[self.id]
     return app and app.stacks or 0
 end
@@ -421,7 +504,7 @@ end
 ---@param target any?
 ---@return number?
 function Handle:timeLeft(target)
-    local byId = apps[target or GLOBAL]
+    local byId = apps[targetKey(target)]
     local app = byId and byId[self.id]
     if not app then return 0 end
     return app.remaining
@@ -444,7 +527,8 @@ function Handle:onExpire(target, ctx) if self._cls.onExpire then return self._cl
 
 -- ---- queries ----
 
----@return any?
+---The declared icon path, or nil. There is no DataTable behind this one — see Class:iconOf.
+---@return string?
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
 function Handle:name() return self._cls.name or self.id end

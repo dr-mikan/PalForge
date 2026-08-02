@@ -104,11 +104,13 @@ _G.Pal = Pal
 ```
 
 波かっこの中身が補完されるのは、各モジュールに付いた `---@overload` の行のおかげです。
-`Pal{ ... }` が `Pal.Spec` を受け取り `Pal.Handle` を返す、とエディタに伝えています。
+`Pal{ ... }` が `Pal.Spec` と、省略可能な第 2 引数 `opts`
+（`{ register = false, pack = "mypack" }`）を受け取り、`Pal.Handle` を返す、とエディタに
+伝えています。
 
 ```lua title="Scripts/palforge/api/pal.lua"
 ---@class palforge.pal
----@overload fun(spec: Pal.Spec): Pal.Handle
+---@overload fun(spec: Pal.Spec, opts: table?): Pal.Handle
 local Pal = {}
 ```
 
@@ -131,11 +133,11 @@ Pal{
     name         string?                 shown in UI (defaults to id)
     description  string?                 one-line description, for UI and tooling
     skills       string[]?               skill ids this pal owns (see Skill)
-    mesh         Mesh.Spec|Mesh.Handle?  the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+    mesh         Mesh.Spec|Mesh.Handle?  the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
     material     Pal.Spec.Material?      material override applied to that mesh
     color        table?                  base tint { r, g, b, a } (shorthand for material.color)
     texture      string?                 png path applied to the mesh (shorthand for material.texture)
-    icon         any?                    fallback icon used when the DataTable lookup misses
+    icon         string?                 /Game/... texture path used when the icon DataTable has no row for this id
     events       Pal.Spec.Events?        lifecycle handlers (grouped)
     data         table?                  free-form payload of your own, carried onto the definition
 }
@@ -144,12 +146,14 @@ Pal{
 ここで一度に 4 つのことが手に入ります。
 
 - **各フィールドとその説明。** `---@field` 行の `#` の後ろは、スペック宣言の `doc =` の文字列
-  そのものです。`maxStack` にホバーすれば *inventory stack ceiling (default 1)* と出て、既定値
-  まで含まれます。
-- **決まった値しか取らない項目の、短い選択肢。** `values` を持つフィールドは専用の型になります。
-  全部で 5 つ、`Mesh.Spec.Kind`、`Item.Spec.Category`、`Building.Spec.Mesh.Kind`、
-  `Skill.Spec.Kind`、`Audio.Spec.Kind` です。
-  `kind =` の後で引用符を打つと、
+  そのものです。`maxStack` にホバーすれば *stack ceiling you declare; the GAME's ceiling is a
+  DataTable column (default 1)* と出て、既定値まで含まれます。
+- **決まった値しか取らない項目の、短い選択肢。** `values` を持つフィールドは専用の型になり、
+  それが **30 個**あります。ドメインのスペック由来が 5 つ（`Mesh.Spec.Kind`、
+  `Item.Spec.Category`、`Building.Spec.Mesh.Kind`、`Skill.Spec.Kind`、`Audio.Spec.Kind`）、
+  残る 25 個は `api/ui.lua` 由来です。`UI.Spec.Input`、`UI.Node.Button.LabelAlign`、
+  `UI.Node.Sprite.From`、そして 11 個のノードコンストラクタそれぞれに付く `HAlign` と
+  `VAlign` の対。メッシュで `kind =` の後に引用符を打つと、
   `"procedural"`、`"static"`、`"skeletal"`、`"obj"` だけが出て、それ以外は出ません。
 - **ネストした形は、どちらの書き方でも。** `mesh` の型は `Mesh.Spec|Mesh.Handle` です。メッシュ
   をその場に直接書いても、`Mesh{ ... }` が返したものを渡しても、どちらでも通ります。
@@ -207,20 +211,33 @@ Building{
 --
 -- Regenerate with:  lua5.4 tools/gen-types.lua
 -- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
+--
+-- Annotations only: nothing requires this file at runtime. It exists so an editor
+-- (LuaLS / lua-language-server) can complete the fields of every X{ ... } call,
+-- show each field's meaning, and jump from a spec name to its field list.
 ---@meta
 
 ---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
 ---@class Mesh.Spec
 ---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
 ---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # USkeletalMesh / UStaticMesh asset path
+---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ```
 
-このファイルには、宣言済みの形ごとに 1 つずつ、18 個のクラスが入っています。`Pal.Spec`、
-`Pal.Spec.Events`、`Pal.Spec.Material`、`Item.Spec`、`Item.Spec.Recipe`、`Item.Spec.Events`、
-`Building.Spec`、`Building.Spec.Mesh`、`Building.Spec.Material`、`Building.Spec.Events`、
-`Skill.Spec`、`Skill.Spec.Events`、`Effect.Spec`、`Effect.Spec.Events`、`Audio.Spec`、
-`UI.Spec`、`Mesh.Spec`、`Coord` です。
+このファイルには **37 個のクラスと 30 個のエイリアス**が入っていて、長さもあります。
+ジェネレータの申告で 8752 行です。クラスのうち 30 個は宣言済みの形で、`schema.all()` が返す
+名前と 1 対 1 に対応します。`Mesh.Spec`、`Pal.Spec` とその `Events`・`Material`、`Item.Spec`
+とその `Recipe`・`Events`、4 つの `Building.Spec.*`、`Skill.Spec` とその `Events`、
+`Effect.Spec` とその `Events`、`Audio.Spec`、11 個の `UI.Node.*`、`UI.Spec` と
+`UI.Spec.Host`、そして `Coord` です。
+
+残る 7 個、そして行数のほとんどは**ネイティブコンテンツのカタログ**です。
+`palforge.native.buildings`・`.items`・`.pals`・`.skills`・`.effects`・`.audio` と、それらを
+まとめる `palforge.native`。`native.items.Arrow_Fire` は実行時にはメタテーブルの `__index`
+（`native/_catalog.lua`）が返しており、エディタはメタテーブルの向こう側を見られません。そこで
+ジェネレータがカタログ自身から名前を列挙します。このビルドでは 8293 個です。ネイティブの id
+が「知っていないと書けないもの」ではなく「打てば見つかるもの」になっているのは、これのおかげ
+です。
 
 <Callout type="info">
 `types.lua` を削除して壊れるのは補完だけです。ゲームはこのファイルを読みませんし、
@@ -232,27 +249,39 @@ Building{
 ## types.lua を再生成する
 
 スペックを変えたらジェネレータを実行します。開発用のツールで、ゲームを閉じたまま素の Lua
-インタプリタで動きます。
+インタプリタで動き、リポジトリ以外には何も要りません。
 
 ```bash
 cd /path/to/PalForge
 lua5.4 tools/gen-types.lua
 ```
 
+出力は 1 行だけで、それが結果のすべてです。
+
 ```text
-wrote ./Scripts/palforge/types.lua (18 classes, 223 lines)
+wrote ./Scripts/palforge/types.lua (37 classes, 8752 lines, 8293 native catalog names)
 ```
 
-書き出し先は、渡したルート（既定は今いるフォルダ）の下の `Scripts/palforge/types.lua` です。
-別の場所から実行することもできます。
+`classes` は書き出した `---@class` 行の数、`lines` は書き出したファイルの行数、
+`native catalog names` はカタログから列挙した `native.*` フィールドの数です。ファイルは毎回
+まるごと上書きされます。
+
+引数は出力先ではなくリポジトリの**ルート**です。渡さなければ今いるフォルダを使い、常に
+`<root>/Scripts/palforge/types.lua` に書き出します。
 
 ```bash
 lua5.4 tools/gen-types.lua /path/to/PalForge
 ```
 
+スペックには `palforge.api` を `require` して到達します。これがすべての形をスキーマレジストリ
+に入れ、そのあと `schema.all()` を辿ります。読み込めなかったカタログは実行を止めず、標準
+エラーに `gen-types: skipping <module>` を出して飛ばされるので、`native catalog names` の数が
+少ないときは何かの読み込みに失敗しています。
+
 `schema.define` や `schema.derive` の呼び出しが変わったら、そのつど実行し直してください。
-フィールドの追加、使える値の追加、既定値の変更、説明の書き換え、いずれもです。`types.lua` は
-リポジトリにコミットされているので、再生成したファイルはスペック変更と同じコミットに入れます。
+フィールドの追加、使える値の追加、既定値の変更、説明の書き換え、そしてネイティブカタログを
+再生成したときも同じです。`types.lua` はリポジトリにコミットされているので、再生成した
+ファイルは変更と同じコミットに入れます。
 
 <Callout type="warn">
 `types.lua` を手で編集しないでください。次にジェネレータを実行した時点でファイル全体が
@@ -289,7 +318,7 @@ flowchart LR
 | `mapOf = "number"` | `table<string, number>` |
 | `sig = "fun(self: Pal.Handle, ctx: table)"` | そのシグネチャをそのまま |
 | `doc = "..."` | `#` の後ろのテキスト |
-| `check = schema.nonEmpty` | 何も出ません。check は定義時にだけ走ります |
+| `check = schema.validId` | 何も出ません。check は定義時にだけ走ります |
 | `type` なし | `any` |
 
 知っておくとよいことが 2 つあります。
@@ -300,6 +329,7 @@ flowchart LR
   そのため `Building.Spec.Mesh.Kind` が、同じ 4 つの値と別の既定値の記述で生成されます。
 - クラスは宣言順に出力され、形の名前の最初の部分でまとめられます。だから `Mesh.Spec` は
   `Mesh` の見出しの下に並び、ドメイン接頭辞を持たない `Coord` は `Common` に入ります。
+  ネイティブカタログのクラスは、宣言済みの形をすべて出し切ったあと、最後に来ます。
 
 ## UE4SS がゲーム実行中に足す名前
 
@@ -350,11 +380,11 @@ Pal.Spec {
   name          string     shown in UI (defaults to id)
   description   string     one-line description, for UI and tooling
   skills        table      (string[]) skill ids this pal owns (see Skill)
-  mesh          table      (Mesh.Spec) the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+  mesh          table      (Mesh.Spec) the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
   material      table      (Pal.Spec.Material) material override applied to that mesh
   color         table      base tint { r, g, b, a } (shorthand for material.color)
   texture       string     png path applied to the mesh (shorthand for material.texture)
-  icon          any        fallback icon used when the DataTable lookup misses
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Pal.Spec.Events) lifecycle handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
 }
@@ -363,7 +393,7 @@ Pal.Spec {
 宣言されていない名前を渡すと、宣言済みの名前の一覧が返ってきます。
 
 ```text
-PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
+PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Node.Border, UI.Node.Button, UI.Node.Frame, UI.Node.GameWidget, UI.Node.HBox, UI.Node.Label, UI.Node.Overlay, UI.Node.ScrollBox, UI.Node.SizeBox, UI.Node.Sprite, UI.Node.VBox, UI.Spec, UI.Spec.Host
 ```
 
 同じ情報が出てくる 3 つ目の場所は、エラーそのものです。問題が見つかると読み込みは止まり、
@@ -374,7 +404,8 @@ PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Build
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 PalForge: Pal: field "id" is required (pal id: a game CharacterID ("ChickenPal") or "pack:name")
 PalForge: Pal: field "mesh" (Mesh.Spec): field "kind" must be one of { "procedural", "static", "skeletal", "obj" }, got "voxel"
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
+PalForge: Pal: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Boss' (letters/digits/_ only)
 ```
 
 ## レシピ
@@ -447,7 +478,7 @@ return pal
 
 ```lua title="Scripts/palforge/api/skill.lua"
 local Spec = schema.define("Skill.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "skill id: a game row id or \"pack:name\"" },
     { "name",        type = "string", doc = "shown in skill lists (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
@@ -475,10 +506,10 @@ git add Scripts/palforge/api/skill.lua Scripts/palforge/types.lua
 ---@field name? string # shown in skill lists (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field kind? Skill.Spec.Kind # an active skill is fired; a passive one is equipped (default active)
----@field element? string # attribute / element (fire, water, ...)
+---@field element? string # attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing
 ---@field cooldown? number # seconds between activations (enforced by :activate)
----@field power? number # base power / magnitude
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field power? number # base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Skill.Spec.Events # behaviour handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 ---@field range? number # metres the skill reaches

@@ -140,10 +140,19 @@
 --
 -- THE TWO NAMESPACES, which is the part nobody warns you about. UE4SS binds by MICROSOFT
 -- VIRTUAL-KEY NAME ("INS", "SPACE", "NUM_ZERO", "OEM_COMMA" — ue4ss/Docs/lua-api/table-
--- definitions/key.md lists all 156). Unreal names the same keys quite differently ("Insert",
+-- definitions/key.md lists them all). Unreal names the same keys quite differently ("Insert",
 -- "SpaceBar", "NumPadZero", "Comma"). A lookup that forgets this finds nothing and reports
 -- every key free, which is worse than reporting nothing at all. M.FKEY is that translation,
 -- written out in full, and every entry it cannot justify is `false` rather than a guess.
+--
+-- ⚠️ THE COUNT IS 165, NOT 156, AND THE OLD NUMBER WAS WRONG IN THIS FILE'S OWN COMMENTS.
+-- Counted on 2026-08-02 out of RE-UE4SS's shipped key.md (the code block under "Key-code
+-- strings"): 165 names. M.FKEY has 165 rows and the two sets are IDENTICAL — zero names in the
+-- Key table that M.FKEY lacks, zero rows in M.FKEY that the Key table does not have. The live run
+-- recorded at the top of this file agrees and always did: 64 + 24 + 9 + 1 + 67 = 165 rows. So
+-- M.lookup's union over M.FKEY and the live Key table adds no row on this build, and it exists
+-- for the build where that stops being true — a name UE4SS will bind and this table has never
+-- heard of used to be missing from the report entirely instead of showing as `unknown`.
 --
 --   local keymap = require("palforge.core.keyboard.base.keymap")
 --   local st = keymap.status("INS")     -- { state = "game", actions = {...}, why = "..." }
@@ -890,6 +899,14 @@ end
 ---rule: never a tick count), nothing polls, and the change hooks below only set a flag.
 ---@return integer mappings, string note
 function M.refresh()
+    -- ⚠️ THE LAZY INSTALL, AND IT IS THE RELEASE BUILD'S ONLY ROUTE TO THE CHANGE-WATCH.
+    -- M.install()'s only caller used to be registory.load(), which runs inside `if env.dev`
+    -- (core/registry.lua) — so a shipped build never armed the two change hooks and never took an
+    -- initial reading. It is called from HERE rather than from snapshot() because a caller that
+    -- asks for a re-read explicitly (test/init.lua's pf_keys does) never goes through snapshot's
+    -- staleness gate and would otherwise never arm it. Idempotent, pcall'd, and free after the
+    -- first success. M.install's own doc has the whole of what this closes.
+    if not M.INSTALL.done then pcall(M.install) end
     local t0 = os.clock()
     state.lookups = 0
     local index, actions_ = {}, {}
@@ -927,10 +944,12 @@ end
 ---rather than a nicety. The old test was `not state.read or ... state.at == nil`, and `at` is only
 ---set by a refresh that READ something — so in a session where nothing is readable (the title
 ---screen, or the first live run of this module) every single question re-read the whole game.
----M.lookup() asks 156 of them in a row, so that one run performed 156 full refreshes and the log
----never said so. With the look-up route now in the path that would have been tens of thousands of
----engine calls to answer a question that had already failed. `tried` is stamped by every refresh,
----successful or not, so a failure is cached for M.MAX_AGE exactly like a success.
+---M.lookup() asks 165 of them in a row (the count was written as 156 here and in test/cases/ui.lua
+---and is wrong: RE-UE4SS's key.md lists 165 names and the live run at the top of this file adds up
+---to the same 165), so that one run performed 165 full refreshes and the log never said so. With
+---the look-up route now in the path that would have been tens of thousands of engine calls to
+---answer a question that had already failed. `tried` is stamped by every refresh, successful or
+---not, so a failure is cached for M.MAX_AGE exactly like a success.
 ---@return table index
 function M.snapshot()
     local stale = state.dirty
@@ -986,7 +1005,7 @@ local watching = false
 
 ---Arm the change hooks. Idempotent, safe to call with no UE4SS at all, and never raises.
 ---
----Call it from a world.ready subscription rather than at load: core/event.lua:769-776 records a
+---Call it from a world.ready subscription rather than at load: core/event.lua:46-53 records a
 ---native access violation and a wedged UE4SS hook dispatch from hooks armed into the world-load
 ---storm. Neither of these two fires during that storm — they fire when a human presses apply —
 ---but the rule is the rule and arming late costs nothing.
@@ -1015,14 +1034,43 @@ function M.watch()
     return armed
 end
 
+---The install record. Printed by M.lines(), because "the change-watch never armed" and "the
+---player never rebound anything" produce exactly the same silent log and are not the same fact.
+M.INSTALL = { done = false, attempts = 0, armedNow = false,
+    why = "M.install() has not been called yet" }
+
 ---Subscribe M.watch to world.ready and take a first reading there.
 ---
 ---core/event is required LAZILY and inside a pcall for the reason api/ui.lua:513-522 gives for
 ---native/ui/tree: this module must stay loadable, and testable, with no event system and no
----UE4SS at all. Called by core/keyboard's registry at load; harmless to call twice.
+---UE4SS at all. Idempotent: the subscription is made once and every later call is a boolean read.
+---
+---⚠️ IT IS NO LONGER DEV-ONLY, AND THAT WAS A SHIPPED GAP RATHER THAN A TIDINESS ONE. Until
+---2026-08-02 the only caller was registory.load() (core/keyboard/base/registory.lua), whose one
+---caller is core/registry.lua inside `if env.dev`. So in a RELEASE build the world.ready
+---change-watch never armed and no initial reading was ever taken. Nothing was ever WRONG —
+---M.snapshot() re-reads on demand and M.MAX_AGE bounds how old an answer can be — but a key the
+---player rebound mid-session went unnoticed for up to 30 s, and the two hooks that make it
+---instant were never registered at all. That stopped being hypothetical the moment a pack could
+---declare UI{ keys = ... }: api/ui -> native/ui/keys.arm -> registory.claim -> M.status ->
+---M.snapshot is a RELEASE path into this module, and it is a shipped capability. M.refresh() now
+---calls this on first demand, so a release build arms itself the first time anything asks a key
+---question; registory.load() still calls it directly in dev, which only moves the arming earlier.
+---
+---⚠️ AND IT ARMS THE WATCH AT ONCE WHEN THE WORLD IS ALREADY UP. A lazy install that only
+---subscribed would wait for the NEXT world load, and in a session where the player loads one save
+---and stays in it that is never — the release build would have the subscription and none of the
+---benefit. The immediate arm is gated on core/event's own isWorldReady() (core/event.lua:2774)
+---rather than on anything this module can see for itself, and that gate is precisely the one the
+---world-load-storm rule wants: core/event.lua:1314 (tryHookAfterWorldReady) arms native hooks after world.ready BECAUSE
+---the ready-watch opens that gate only once the storm is over. Arming here is therefore the same
+---moment the dev path has always used, reached from a different direction.
 ---@return boolean subscribed
 function M.install()
-    local ok = pcall(function()
+    if M.INSTALL.done then return true end
+    M.INSTALL.attempts = M.INSTALL.attempts + 1
+    local armedNow = false
+    local ok, err = pcall(function()
         local event = require("palforge.core.event")
         event.on("world.ready", function()
             M.watch()
@@ -1033,7 +1081,24 @@ function M.install()
                     .. "session — every status will say \"unknown\" and say why")
             end
         end)
+        if type(event.isWorldReady) == "function" and event.isWorldReady() == true then
+            M.watch()
+            armedNow = true
+        end
     end)
+    M.INSTALL.done, M.INSTALL.armedNow = ok, armedNow
+    if ok then
+        M.INSTALL.why = string.format("subscribed to world.ready on attempt %d%s",
+            M.INSTALL.attempts,
+            armedNow and "; the world was ALREADY up when the first question arrived, so the "
+                .. "change-watch was armed there and then rather than waiting for a world load "
+                .. "that may never come" or "")
+    else
+        M.INSTALL.why = string.format("attempt %d failed: %s. There is no change-watch and no "
+            .. "initial reading this session; answers stay correct because snapshot() re-reads on "
+            .. "demand, and they are up to %d s stale after a rebind",
+            M.INSTALL.attempts, tostring(err), M.MAX_AGE)
+    end
     return ok
 end
 
@@ -1110,11 +1175,14 @@ function M.status(name)
     return out
 end
 
----Every action the game has on this key, as { action, via, mods } — empty for a free or an
----unanswerable key.
----@param name string
----@return table[]
-function M.actionsOn(name) return M.status(name).actions end
+-- M.actionsOn(name) STOOD HERE AND WAS REMOVED ON 2026-08-02. It was `M.status(name).actions`
+-- and it never acquired a caller anywhere in the tree (plan/TODO.md §6 lists it as dead surface).
+-- It is deleted rather than wired because its SHAPE is wrong for this module, which is the more
+-- useful half of the finding: it hands back a list and drops the `why` sentence, and an empty
+-- list from it is indistinguishable between "the game has nothing on this key" and "nothing could
+-- be read, so nothing is claimed". Collapsing those two is the exact failure every other answer
+-- in this file is written to prevent — see M.status's header on why "free" and "unknown" are
+-- different states. A caller that wants the actions wants the status: `M.status(name).actions`.
 
 --=============================================================================
 -- REPORTING — the probe that turns every future key question into a lookup
@@ -1151,6 +1219,11 @@ function M.lines()
             r.id, r.state, r.fired, r.what,
             r.why and ("  [" .. tostring(r.why) .. "]") or "")
     end
+    -- The install line. Without it "watch set pending" reads as a mystery; with it, "the
+    -- subscription was never made" and "it was made and the hook refused" are two sentences.
+    out[#out + 1] = string.format("keymap: install %-8s attempts=%d | the world.ready "
+        .. "subscription that arms the change-watch and takes the first reading  [%s]",
+        M.INSTALL.done and "done" or "none", M.INSTALL.attempts, tostring(M.INSTALL.why))
     local names = (actions.state.source == "unread")
         and "no action-name source was needed — every container either walked cleanly or said it "
             .. "was empty, so not one FName was built"
@@ -1186,23 +1259,82 @@ function M.lines()
     return out
 end
 
----THE LOOKUP TABLE: every name UE4SS can bind, and what PalForge knows about it.
+-- THE ROWS OF THE LOOKUP TABLE — the UNION of every source that can name a bindable key,
+-- upper-cased, de-duplicated, and each row remembering WHICH sources named it.
+--
+-- ⚠️ THE UNION IS THE WHOLE POINT AND IT USED TO BE M.FKEY ALONE. The old M.lookup iterated
+-- M.FKEY while its own doc said "one row per entry in UE4SS's Key table" (plan/TODO.md §7 filed
+-- exactly this), so a name UE4SS will happily bind and M.FKEY has never heard of was MISSING FROM
+-- THE REPORT ENTIRELY instead of appearing as `unknown` — and `unknown` is the one status this
+-- report exists to produce. The guard against that drift is test/cases/ui.lua's "the name map
+-- covers every key UE4SS can actually bind" case, which SKIPS headlessly (there is no Key table
+-- outside the game), so the invariant was asserted only in a live run that somebody had to
+-- remember to make. Reading the live table here means the drift shows up in the log, in the
+-- report that is already being read for this exact question, without the suite.
+--
+-- ⚠️ AND ON THIS BUILD THE UNION ADDS NOTHING, WHICH IS THE RESULT AND NOT A REASON TO DROP IT.
+-- Measured 2026-08-02 against RE-UE4SS's shipped key.md: 165 Key names, 165 M.FKEY rows, and the
+-- two sets are identical in both directions. So the two drift counters on the summary line should
+-- both read 0 in a live run today; the day one of them does not is the day this was worth
+-- writing, and until then it is the report stating the invariant rather than a skipped test
+-- claiming it.
+--
+-- The four sources, kept apart in `from` so a reader can tell why a row is here:
+--   fkey      M.FKEY — every name PalForge has a translation for, including the ones it has
+--             deliberately marked `false` ("Unreal has no FKey for this, so nothing is claimed")
+--   ue4ss     the live `Key` table — the names THIS PROCESS can actually bind. A row that is
+--             here and not in `fkey` is the drift above, and it is flagged in its own line.
+--   owned     what PalForge itself currently holds, passed in by core/keyboard's registry
+--   refused   what PalForge refuses outright (Esc), from the same place
+local function bindableNames(owned, refused)
+    local seen, rows = {}, {}
+    local function add(name, from)
+        if type(name) ~= "string" or #name == 0 then return end
+        local up = name:upper()
+        local row = seen[up]
+        if not row then row = { name = up, from = {} }; seen[up] = row; rows[#rows + 1] = row end
+        row.from[from] = true
+    end
+    local known = 0
+    for name in pairs(M.FKEY) do add(name, "fkey"); known = known + 1 end
+    -- ⚠️ A TYPE TEST AND A pcall, BOTH. registory's install() already accepts a `Key` that is
+    -- userdata rather than a table on some build, and pairs() over a userdata with no __pairs
+    -- raises — a report that raises is a report nobody gets, which is worse than a short one.
+    local live = 0
+    if type(Key) == "table" then
+        pcall(function() for name in pairs(Key) do add(name, "ue4ss"); live = live + 1 end end)
+    end
+    for name in pairs(owned) do add(name, "owned") end
+    for name in pairs(refused) do add(name, "refused") end
+    table.sort(rows, function(a, b) return a.name < b.name end)
+    return rows, live, known
+end
+
+---THE LOOKUP TABLE: every name that can be bound in this session, and what PalForge knows about
+---each one.
 ---
----One row per entry in UE4SS's Key table, so a question that used to cost a live run ("can I
----have F6?") costs a glance at a log. `owned` is an optional map of keyName -> description for
----the binds PalForge itself holds, which is how the third case — already taken by us — appears
----here as well; core/keyboard's registry passes its own.
+---One row per name in the UNION of M.FKEY, UE4SS's live `Key` table, the binds PalForge holds and
+---the names it refuses (bindableNames above says why the union rather than M.FKEY alone). So a
+---question that used to cost a live run ("can I have F6?") costs a glance at a log, and a name
+---UE4SS can bind that this module cannot translate appears as `unknown` — which is a real answer
+---— instead of not appearing at all.
+---
+---`owned` is an optional map of keyName -> description for the binds PalForge itself holds, which
+---is how the third case — already taken by us — appears here as well; core/keyboard's registry
+---passes its own (registory.owned()).
 ---@param owned table<string,string>?     # keyName -> description, for the binds PalForge holds
 ---@param refused table<string,string>?   # keyName -> reason, for the names PalForge never binds
 ---@return string[]
 function M.lookup(owned, refused)
     M.snapshot()
     owned, refused = owned or {}, refused or {}
-    local names = sortedKeys(M.FKEY)
+    local rows, live, known = bindableNames(owned, refused)
     local out = { string.format("keymap: %-20s %-18s %-8s %s", "UE4SS NAME", "UNREAL FKEY",
         "STATUS", "WHAT HAS IT") }
     local n = { free = 0, game = 0, unknown = 0, palforge = 0, refused = 0 }
-    for _, name in ipairs(names) do
+    local untranslated, unbindable = 0, 0
+    for _, row in ipairs(rows) do
+        local name = row.name
         local st = M.status(name)
         local status, what = st.state, "-"
         -- The refusal outranks everything, because it is the one row where the game's answer is
@@ -1221,6 +1353,18 @@ function M.lookup(owned, refused)
         elseif st.state == "unknown" then
             what = st.fkey and "the config has not been read" or "no Unreal FKey name is known"
         end
+        -- THE TWO DRIFTS, marked on the row rather than left to be re-derived. Neither is fatal
+        -- and both are facts about PalForge's own table, so they are appended to whatever the
+        -- game's answer was rather than replacing it.
+        if not row.from.fkey then
+            untranslated = untranslated + 1
+            what = what .. "  ⚠️ UE4SS WILL BIND THIS NAME AND M.FKEY HAS NO ROW FOR IT — nothing "
+                .. "can be said about the key until keymap.lua's table gains one"
+        elseif live > 0 and not row.from.ue4ss then
+            unbindable = unbindable + 1
+            what = what .. "  [M.FKEY has a row and this UE4SS's Key table does not — the name "
+                .. "cannot be bound in this session whatever the game has on it]"
+        end
         n[status] = (n[status] or 0) + 1
         out[#out + 1] = string.format("keymap: %-20s %-18s %-8s %s",
             name, st.fkey or "-", status, what)
@@ -1229,6 +1373,13 @@ function M.lookup(owned, refused)
         .. "%d refused outright, %d unanswerable — \"free\" means no action in the game's key "
         .. "config uses it, which is not the same as \"the press will arrive\"",
         n.free or 0, n.game or 0, n.palforge or 0, n.refused or 0, n.unknown or 0)
+    out[#out + 1] = string.format("keymap: %d row(s) over the union of M.FKEY (%d), UE4SS's live "
+        .. "Key table (%d%s), and what PalForge holds or refuses. %d name(s) UE4SS can bind have "
+        .. "no M.FKEY row and are unanswerable BECAUSE OF THIS TABLE rather than because of the "
+        .. "game; %d name(s) in M.FKEY are not in this session's Key table at all.",
+        #rows, known,
+        live, (live == 0) and " — absent, so this run proves nothing about drift" or "",
+        untranslated, unbindable)
     return out
 end
 

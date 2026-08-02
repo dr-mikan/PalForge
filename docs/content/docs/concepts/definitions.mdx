@@ -8,7 +8,7 @@ description: How to make a piece of content, what you get back, and how to find 
 - Add your own pal, item, building, sound or mesh to the game
 - Give something already in Palworld new behaviour, without declaring a thing
 - Find anything you made earlier from anywhere else in your pack
-- Pick names that will not clash with another player's mods
+- Pick names that will not clash with another player's mods, and hear about it when they do
 - Read the message PalForge prints when a field is wrong, and fix it
 
 ## Making something
@@ -181,28 +181,46 @@ argument is the live placed building, not the definition:
 for name, handler in pairs(spec.events) do cls[name] = handler end
 ```
 
-Then the class is registered:
+Then the class is registered, together with whichever pack is defining right now:
 
 ```lua
-pcall(function() om.register("pal", spec.id, cls) end)
+om.register("pal", spec.id, cls, { pack = pack })
 ```
 
-Two things follow. Registration runs inside a `pcall`, so a registry problem can never
-break your definition call. And the key is the id **exactly as you wrote it**, colon
-included — `"example:Boss"` is stored under `"example:Boss"`, not under `"example_Boss"`.
+`register` answers the class, or `nil` plus a reason. It never throws. Six of the eight
+domains call it best effort and drop the answer, so a registry problem cannot break your
+definition call. Two say something instead, because a definition that did not register is
+one nothing will ever find: `api/pal.lua` reads the answer, and `api/ui.lua` catches a
+raise and names what stops working.
 
-You can read the registry directly:
+```text
+[PalForge.pal][err] Pal 'example:Boss' could NOT be registered (...) — it will receive no lifecycle events and Pal.get will not find it
+```
+
+The key is the id **exactly as you wrote it**, colon included: `"example:Boss"` is stored
+under `"example:Boss"`. The resolved spelling `example_Boss` goes into a second index
+beside it, which is what dispatch matches a game row name against.
+
+You can read the registry directly, and ask it who owns what:
 
 ```lua
 local om = require("palforge.core.object_manager")
 
-om.get("pal", "ChickenPal")   -- the definition class, or nil
-om.all("pal")                 -- { id -> cls }, a shallow copy you may not mutate into
-om.TYPES                      -- audio, building, effect, item, mesh, pal, skill, ui
+om.get("pal", "ChickenPal")          -- the definition class, or nil
+om.all("pal")                        -- { id -> cls }, a shallow copy you may not mutate into
+om.TYPES                             -- audio, building, effect, item, mesh, pal, skill, ui
+
+om.isRegistered("pal", "ChickenPal") -- always a boolean: is this id taken
+om.owner("pal", "example:Boss")      -- the pack id that registered it, or nil
+om.entry("pal", "example:Boss")      -- a copy of { cls = , pack = , resolved = }
+om.byResolved("pal", "example_Boss") -- cls, sourceId - one table read, not a scan
+om.unregister("pal", "example:Boss") -- true when something was there to forget
+om.validId("my-pack:Bench")          -- false, plus the reason
 ```
 
-`om.all` hands back a copy, so writing into it changes nothing. Once an id is registered
-it stays registered; to change it, define it again.
+`om.isRegistered` is the only public answer to "is this id taken", because `X.get` cannot
+give one: seven domains fabricate a thin handle on a miss and `Mesh.get` raises. `om.all`
+and `om.entry` hand back copies, so writing into one changes nothing.
 
 ## One call, end to end
 
@@ -344,7 +362,9 @@ registry entry every single time the pal dies.
 ## Ids: your own, and the game's
 
 An id with a colon is a pack id: `"packid:name"`. In the game's DataTables the matching
-row FName is `packid_name`. PalSchema rows are shared across every mod, so that prefix is
+row FName is `packid_name` — the two injected rows in the dumped `DT_ItemDataTable` are
+spelled exactly `PalSmith_TestPotion` and `example_Potion`, which is where that rule is
+checked rather than assumed. PalSchema rows are shared across every mod, so that prefix is
 what keeps two packs from colliding.
 
 An id without a colon is a literal game id: `"Wood"`, `"ChickenPal"`, `"PalBoxV2"`,
@@ -358,14 +378,28 @@ om.resolve("PalBoxV2")        -- "PalBoxV2"
 om.resolve("my pack:Bench")   -- nil, "invalid pack id 'my pack' (letters/digits/_ only)"
 ```
 
-Both halves of a namespaced id must be letters, digits or underscores. That check runs
-when the id is **resolved**, not when you define it — at define time `id` is only checked
-for being a non-empty string.
+Both halves of a namespaced id must be letters, digits or underscores, and that shape is
+checked at **define** time as well as at resolve time. A hyphen is the shape that costs
+most, so it is worth writing out: `Building{ id = "my-pack:Bench" }` cannot resolve, so no
+build id would ever enter the scan's index, so `onPlace` / `onLoad` / `onTick` / `onRemove`
+could never fire — for a definition that returned a live-looking handle. It is a hard error
+now, naming the rule:
+
+```text
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
+Ids are scoped per DOMAIN. The registry is keyed on the pair `(type, id)`, so
+`Pal{ id = "Ash" }` and `Item{ id = "Ash" }` are two separate entries and cannot collide.
+What CAN collide is two ids in one domain that resolve to the same row name, and that is
+warned about at define time.
 
 Resolving happens where a game row name is needed, not in the registry:
 
 - `Building.Handle:unlock()` resolves the id before unlocking the technology row.
 - `core/event` resolves a building's `buildIds` before matching placed actors against them.
+- `:iconOf()`, the passive-skill writes and the audio catalog lookup all resolve first, so
+  `Item{ id = "pack:Potion" }:iconOf()` reaches the real row.
 
 The registry key stays the id as written, which matters when you look one up:
 
@@ -375,6 +409,31 @@ Building{ id = "example:Bench" }
 Building.get("example:Bench")   -- the definition
 Building.get("example_Bench")   -- a thin fallback: nothing is registered under that key
 ```
+
+### Saying which pack is defining
+
+A definition call is a plain Lua call and carries no evidence of which mod made it, so
+nothing can attribute a registration — or tell a pack overwriting its own id from a pack
+overwriting someone else's — unless the pack says so. `PalForge.pack(packId)` is where it
+says so:
+
+```lua
+local mine = PalForge.pack("mypack", { depends = { "otherpack" } })
+local Item = mine.Item
+
+Item{ id = "mypack:Potion" }     -- registered with pack = "mypack"
+```
+
+It hands back the same nine members. The eight constructors are wrapped so the define runs
+with the pack recorded, and so are the extra define routes a domain adds as named functions
+(`Audio.bgm`, `Audio.se`), because those register too. Everything else — `X.get`,
+`X.get_all`, `Player` — passes through untouched, and the scoped table is a read-only view:
+assigning onto it is an error rather than a silent divergence from the module every other
+caller sees.
+
+Using it is optional. A pack that does not gets `pack = nil` on its entries, which is a
+perfectly good record meaning "declared by no pack in particular" — it only means a
+collision with it cannot name an owner.
 
 <Callout type="warn">
 Defining a namespaced id gives that id behaviour and metadata. It does not add a new
@@ -476,8 +535,9 @@ Building{ id = "WorkBench", name = "Workbench", gridCm = 100, mesh = BenchBody }
 
 ## Defining the same id twice
 
-`om.register` writes straight into the bucket, so defining the same `(type, id)` twice
-replaces the entry. Nothing warns you, and a registration cannot be taken back.
+Defining the same `(type, id)` twice replaces the entry. Last-wins is the policy and it
+stays the policy; what the registry adds is that the replacement is visible and, when the
+packs said who they are, attributable.
 
 ```lua
 local first  = Item{ id = "Wood", name = "Wood" }
@@ -488,7 +548,30 @@ second:name()             -- "Seasoned Wood"
 Item.get("Wood"):name()   -- "Seasoned Wood" (the registry holds the second)
 ```
 
-What follows from that:
+Three cases, and they are logged differently on purpose:
+
+- **Two packs, one id.** A warning naming the type, the id, the pack that held it, the pack
+  taking it, and the outcome.
+- **One pack redefining its own id.** Silent at warning level. It is the ordinary case — an
+  F9 reload, the test suites, a native catalog materialising a row again — so it is an info
+  line gated on `env.debug`, not a warning an author has to read hundreds of.
+- **Two ids, one game row.** `"my:pack_Thing"` and `"my_pack:Thing"` both resolve to
+  `my_pack_Thing`, so one row would carry two definitions. A warning names both source ids
+  and says which one now owns the resolved lookup. Rename one of them.
+
+```text
+[PalForge.objects][warn] item 'Wood' was defined by pack 'first' and is being redefined by pack 'second'; the new definition replaces the old one (last-wins)
+[PalForge.objects][warn] item ids 'my:pack_Thing' and 'my_pack:Thing' both resolve to the single game row 'my_pack_Thing' — one row, two definitions. 'my_pack:Thing' now owns the resolved lookup; rename one of them
+```
+
+Attribution needs a name to print: without `PalForge.pack("mypack")` both sides register
+with `pack = nil`, which reads as the same owner, and the collision is logged as a quiet
+redefinition instead of a warning.
+
+A registration can also be taken back, with `om.unregister(type, id)` — it answers whether
+anything was there.
+
+What follows from a replacement:
 
 - `X.get`, `X.get_all` and event dispatch all go through the registry, so they see the
   newest definition.
@@ -727,8 +810,12 @@ other `get` returns a handle no matter what.
 - `X.get(id)` finds one again. Seven domains give you a thin, id-only handle on a miss,
   so vanilla content works without being declared; `Mesh.get` raises instead.
 - An id with a colon is yours (`"mypack:Bench"`); an id without one is the game's
-  (`"Wood"`). Defining attaches behaviour to an id that already exists.
+  (`"Wood"`). Both halves of a namespaced id are letters, digits and `_`, checked at define
+  time, and ids are scoped per domain.
 - A wrong or misspelled field is a hard error naming the field, and nothing is registered.
+- Defining an id twice replaces it, and the registry says so: a cross-pack collision names
+  both owners, and two ids resolving to one game row name both. Declare a pack with
+  `PalForge.pack("mypack")` so those messages can name yours.
 - Define each id once at load, and use `X.get` inside handlers.
 
 Next, read [Lifecycle](/docs/concepts/lifecycle) to see which events actually reach your

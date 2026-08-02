@@ -8,11 +8,21 @@
 -- attach a PROCEDURAL mesh whose OBJ file does not exist, so the honest answer is false
 -- and nothing is ever put on the player. A skeletal attach would swap the player's own
 -- mesh, which is exactly the kind of thing a test must never do to someone's save.
+--
+-- WHAT THIS SUITE USED TO BE STRUCTURALLY BLIND TO. Its stub actor was a plain Lua table,
+-- and a plain Lua table IS identity-stable — so every per-actor table in the mesh layer
+-- looked up correctly here while missing on every second lookup in a world, where UE4SS
+-- mints a fresh userdata wrapper per lookup. The suite was green on the one property that
+-- does not hold in a game. The stub answers GetFullName now, and the "A-1" section below
+-- proves the records survive a DIFFERENT handle onto the same object, against a real store.
 local T        = require("palforge.core.unittests")
 local support  = require("palforge.test.support")
 local Mesh     = require("palforge.api.mesh")
 local mesh     = require("palforge.core.mesh")
 local assets   = require("palforge.core.mesh.assets")
+local Renderer = require("palforge.core.mesh.base.renderer")
+local file     = require("palforge.utils.file")
+local logmod   = require("palforge.utils.log")
 local Pal      = require("palforge.api.pal")
 local Building = require("palforge.api.building")
 
@@ -31,8 +41,52 @@ local MISSING_OBJ = "C:/palforge_test/no_such_mesh.obj"
 
 -- A minimal stand-in for a live actor: valid enough to get past the handle's guard, so
 -- the call reaches core.mesh and we see the BACKEND's answer rather than the guard's.
-local function stubActor()
-    return { IsValid = function() return true end }
+--
+-- IT ANSWERS GetFullName, AND THAT IS THE POINT OF THIS FILE'S ONE REAL BLIND SPOT BEING
+-- CLOSED. The stub used to be `{ IsValid = ... }` and nothing else — a plain Lua table,
+-- which IS identity-stable, so every per-actor table in the mesh layer looked up correctly
+-- in this suite while missing on every second lookup in a world, where UE4SS mints a fresh
+-- userdata wrapper per lookup. The suite was green on the one property that does not hold.
+--
+-- `name` is what makes two stubs stand for ONE object: two handles, one full name, exactly
+-- as two `FindAllOf` results onto one pawn behave. Callers that do not care pass nothing and
+-- get a unique name, so unrelated tests cannot collide in a shared store.
+local stubSeq = 0
+local function stubActor(name)
+    if not name then
+        stubSeq = stubSeq + 1
+        name = string.format("StubActor /Game/Test/Level:PersistentLevel.StubActor_%d", stubSeq)
+    end
+    return {
+        IsValid     = function() return true end,
+        GetFullName = function() return name end,
+    }
+end
+
+-- A stand-in for a mesh COMPONENT, complete enough for base/renderer's material layer to
+-- run against it with no engine under it: it answers its slot count, hands back an authored
+-- material per slot, and mints a "MID" when asked. That is every call createMids makes on
+-- the happy path, which is what lets the MID store — one of the five tables A-1 named — be
+-- tested for real rather than by inspection.
+local function stubComponent(name, slots)
+    local self
+    self = {
+        slots     = slots or 1,
+        setCalls  = {},                       -- element -> the material forgetMaterial put back
+        IsValid     = function() return true end,
+        GetFullName = function() return name end,
+        GetNumMaterials = function() return self.slots end,
+        GetMaterial = function(_, elem)
+            return { IsValid = function() return true end,
+                     GetFullName = function() return name .. ".authored" .. tostring(elem) end }
+        end,
+        CreateAndSetMaterialInstanceDynamic = function(_, elem)
+            return { IsValid = function() return true end,
+                     GetFullName = function() return name .. ".MID" .. tostring(elem) end }
+        end,
+        SetMaterial = function(_, elem, mat) self.setCalls[elem] = mat end,
+    }
+    return self
 end
 
 --=============================================================================
@@ -229,6 +283,122 @@ s:test("detach on an actor this session never dressed is false", function(t)
     t:eq(m:detach(stubActor()), false, "nothing of PalForge's is on it to remove")
 end)
 
+s:test("a failed action returns the REASON beside the false, not just the false", function(t)
+    -- The three actions used to return a bare boolean while the backends produced a
+    -- genuinely good English sentence and dropped it into UE4SS.log. An author who got
+    -- `false` back could not tell a wrong path from a wrong kind from an actor that is not
+    -- a character without going and reading a log file.
+    local m = Mesh{ id = support.id("mesh"), model = MISSING_OBJ, kind = "static" }
+    local ok, why = m:attachTo(stubActor())
+    t:eq(ok, false)
+    t:type(why, "string", "and it says which step refused")
+    t:truthy(why:find("procedural", 1, true),
+        "the static backend passed the resolver's own reason up: " .. tostring(why))
+
+    local dok, dwhy = m:detach(stubActor())
+    t:eq(dok, false)
+    t:type(dwhy, "string", "detach says why too")
+
+    local gok, gwhy = m:attachTo(nil)
+    t:eq(gok, false)
+    t:type(gwhy, "string", "and so does the handle's own actor guard")
+end)
+
+--=============================================================================
+-- A-1 — the per-actor tables key on a NAME, not on a handle
+--
+-- THE REGRESSION TEST THIS SUITE NEVER HAD. UE4SS mints a fresh userdata wrapper per
+-- lookup, so two references to one UObject are not the same Lua value, and Lua indexes a
+-- table by userdata identity. Five tables in the mesh layer were keyed on an actor handle,
+-- and every consequence was silent: detach did nothing, attachOnce stacked a component that
+-- could never be destroyed, the skeletal undo restored PalForge's own mesh, and setColor
+-- re-created MIDs or returned false.
+--
+-- The reason no test caught it is in this very file: the stub actor was a plain Lua table,
+-- which IS identity-stable. So the property under test here is precisely the one a plain
+-- table hides — that a record survives being looked up through a DIFFERENT handle onto the
+-- SAME object — and it is tested against a real store (base/renderer's MID store, one of
+-- the five), not against a re-implementation of the idea.
+--=============================================================================
+
+s:test("two handles onto one object reach one record: the MID store keys on the full name", function(t)
+    local NAME = "PawnA /Game/Test/Level:PersistentLevel.PawnA_7"
+    local a1   = stubActor(NAME)          -- as if from the attach
+    local a2   = stubActor(NAME)          -- as if from a later FindAllOf: same object, new handle
+    t:neq(a1, a2, "two DIFFERENT Lua values, which is what UE4SS really hands out")
+
+    local comp = stubComponent("CompA /Game/Test/Level:PersistentLevel.PawnA_7.Comp", 2)
+    local mids = Renderer:createMids(comp, a1, {})
+    t:eq(#mids, 2, "one dynamic material instance per slot was created for the first handle")
+
+    -- THE ASSERTION THE OLD KEY COULD NOT PASS. Keyed on the handle, this was nil.
+    local found = Renderer:midsFor(a2)
+    t:truthy(found, "the record is reachable through a different handle onto the same object")
+    t:eq(#found, 2, "and it is the same list, not a second set made on the spot")
+    t:eq(found[1], mids[1], "the very same MID objects")
+
+    -- and the undo half: forgetMaterial must find the record through the second handle too,
+    -- or a skeletal detach would leave PalForge's material on a pawn it does not own.
+    t:eq(Renderer:forgetMaterial(a2), true, "the restore ran, reached through the second handle")
+    t:eq(comp.setCalls[0] ~= nil, true, "slot 0's authored material was put back")
+    t:eq(Renderer:midsFor(a1), nil, "and the record is gone afterwards, for BOTH handles")
+end)
+
+s:test("the FIRST originals are kept across a second attach, which needs uo.same not ==", function(t)
+    -- createMids captures the component's authored materials so detach can restore them, and
+    -- deliberately keeps the FIRST capture: a second attach reads back the MID the first one
+    -- installed, so overwriting would make the "restore" put OUR dynamic material on the
+    -- pawn. That discipline was compared with `prev.comp == comp`, which is false for two
+    -- handles onto one component — i.e. it failed in exactly the case it exists for.
+    local NAME = "PawnB /Game/Test/Level:PersistentLevel.PawnB_3"
+    local comp1 = stubComponent("CompB /Game/Test/Level:PersistentLevel.PawnB_3.Comp", 1)
+    local comp2 = stubComponent("CompB /Game/Test/Level:PersistentLevel.PawnB_3.Comp", 1)
+    t:neq(comp1, comp2, "one component, two handles")
+
+    Renderer:createMids(comp1, stubActor(NAME), {})
+    local _, rec1 = Renderer:midsFor(stubActor(NAME))
+    local firstOriginal = rec1.originals[0]
+    t:truthy(firstOriginal, "the authored material of slot 0 was captured")
+
+    Renderer:createMids(comp2, stubActor(NAME), {})
+    local _, rec2 = Renderer:midsFor(stubActor(NAME))
+    t:eq(rec2.originals[0], firstOriginal,
+        "the second attach kept the FIRST original, rather than capturing the MID it had "
+        .. "just installed")
+    Renderer:forgetMaterial(stubActor(NAME))
+end)
+
+s:test("an object that will not answer its own name gets no record, and nothing raises", function(t)
+    -- A nil key is a real answer (dead, or mid-teardown) and every caller has to treat it as
+    -- "no record" rather than as a key — `t[nil]` raises in Lua, which is what this would be
+    -- if the guard were missing. The paint still lands; only the filing is skipped.
+    local nameless = { IsValid = function() return true end }
+    local namelessComp = { IsValid = function() return true end,
+                           GetNumMaterials = function() return 1 end,
+                           GetMaterial = function() return { IsValid = function() return true end } end,
+                           CreateAndSetMaterialInstanceDynamic =
+                               function() return { IsValid = function() return true end } end }
+    local mids = Renderer:createMids(namelessComp, nameless, {})
+    t:eq(#mids, 1, "the MIDs are still made and returned")
+    t:eq(Renderer:midsFor(nameless), nil, "there is simply nothing to file them under")
+    t:eq(Renderer:forgetMaterial(nameless), false, "and nothing to forget")
+end)
+
+s:test("with no actor the MID store falls back to the COMPONENT's own name", function(t)
+    -- The store has always tolerated a nil actor; what it filed under was `actor or comp`,
+    -- so the fallback is the component. Keyed on a name that rule still holds, and it holds
+    -- for the same reason: a component names itself exactly as well as an actor does.
+    local comp1 = stubComponent("CompD /Game/Test/Level:PersistentLevel.PawnD.Comp", 1)
+    local comp2 = stubComponent("CompD /Game/Test/Level:PersistentLevel.PawnD.Comp", 1)
+    local mids = Renderer:createMids(comp1, nil, {})
+    t:eq(#mids, 1)
+    -- midsFor takes an actor, so the read-back here is the same lookup createMids does:
+    -- a second handle onto the component finds the record the first one filed.
+    local _, rec = Renderer:midsFor(comp2)
+    t:truthy(rec, "the record was filed under the component and found through a new handle")
+    Renderer:forgetMaterial(comp2)
+end)
+
 --=============================================================================
 -- assets — the /Game/... catalog and the resolver behind it
 --
@@ -308,6 +478,44 @@ s:test("loadClass refuses the same way, before it can reach LoadAsset", function
     t:truthy(type(err) == "string" and #err > 0, "and says why")
 end)
 
+s:test("loadClass splits a path the way normalize does, so two old parse bugs cannot return", function(t)
+    -- loadClass used to parse a path by its OWN rules and both diverged from normalize in a
+    -- way that produced a plausible-looking string rather than an error. Neither can be seen
+    -- without a world, but the refusal names the two strings it built, which is exactly what
+    -- these assert on.
+    --
+    -- 1. It tested find(".", 1, true) over the WHOLE path, so a DIRECTORY containing a dot
+    --    read as "already has an object half" and the class path came out package-only.
+    local _, e1 = assets.loadClass("/Game/My.Pack/ABP_X")
+    t:truthy(e1:find("/Game/My.Pack/ABP_X.ABP_X_C", 1, true),
+        "only the LAST segment decides whether an object half is present: " .. tostring(e1))
+
+    -- 2. It ran gsub("_C$", "") over the whole path, so a PACKAGE whose own name legitimately
+    --    ends in _C had its asset path mangled ("/Game/A/Thing_C" -> ".../Thing_C.Thing").
+    local _, e2 = assets.loadClass("/Game/A/Thing_C")
+    t:truthy(e2:find("/Game/A/Thing_C.Thing_C", 1, true),
+        "the _C is stripped from the OBJECT half only: " .. tostring(e2))
+
+    -- and the two spellings a pack really writes still reach the same pair
+    local _, e3 = assets.loadClass("/Game/D/ABP_Y.ABP_Y_C")
+    t:truthy(e3:find("/Game/D/ABP_Y.ABP_Y_C", 1, true), "explicit _C form: " .. tostring(e3))
+    t:truthy(e3:find("LoadAsset(/Game/D/ABP_Y.ABP_Y)", 1, true),
+        "and it loads the ASSET, not the generated class: " .. tostring(e3))
+end)
+
+s:test("load says WHICH of the situations it can tell apart it is in", function(t)
+    -- One string used to be returned for three different situations ("check the tail"), which
+    -- sent an author looking for a typo when the likeliest cause was that the package had not
+    -- streamed in. Only some of them are distinguishable from inside the process, and the
+    -- message now says which one it is or says plainly that it cannot tell. Headless, the
+    -- distinguishable one is "there is no LoadAsset here at all".
+    local obj, err = assets.load("/Game/Nothing/Here.Here")
+    t:eq(obj, nil)
+    t:type(err, "string")
+    t:truthy(err:find("LoadAsset", 1, true),
+        "the reason names the mechanism it could not use: " .. tostring(err))
+end)
+
 s:test("a texture reference dispatches on its SHAPE, so only one route can ever apply", function(t)
     -- The missing half of "reusable by pointing at an asset": a mesh could point at a game
     -- asset while its textures could only come off the author's disk. resolveTexture takes
@@ -364,6 +572,87 @@ s:test("a skeletal attach on an actor with no .Mesh component is a false, not a 
     -- component rather than the path.
     local m = Mesh{ id = support.id("mesh"), model = MISSING_OBJ, kind = "skeletal" }
     t:eq(m:attachTo(stubActor()), false)
+end)
+
+--=============================================================================
+-- define-time policy: non-registering definitions, id shape, pack-relative paths,
+-- and the kind/prefix warning
+--=============================================================================
+
+s:test("opts.register = false builds the handle and registers nothing", function(t)
+    -- A catalog accessor reading a definition used to REGISTER it as a side effect, which
+    -- turns a read into a write against the shared registry. The handle is fully usable;
+    -- it is simply not in the registry.
+    local id = support.id("mesh")
+    local h  = Mesh({ id = id, model = MODEL }, { register = false })
+    t:eq(h.id, id, "the handle is real")
+    t:eq(h:model(), MODEL)
+    t:errors(function() Mesh.get(id) end, "no mesh is defined under that id")
+
+    -- and omitting opts is exactly the old behaviour
+    local id2 = support.id("mesh")
+    Mesh{ id = id2, model = MODEL }
+    t:eq(Mesh.get(id2).id, id2, "no opts still registers")
+end)
+
+s:test("a relative model path resolves against the file that declared it, absolutes do not move", function(t)
+    -- The one asset route a pack can genuinely ship on is a file off disk, and it went to
+    -- io.open verbatim - so the documented example was C:/mods/example/marker.obj, correct on
+    -- exactly one machine. utils.file is what a pack uses directly; the resolution inside
+    -- Mesh.Spec is the same call.
+    t:eq(file.isAbsolute("/Game/A/SK_X.SK_X"), true, "a UE object path is absolute")
+    t:eq(file.isAbsolute("C:/mods/x.obj"), true, "and so is a Windows path")
+    t:eq(file.isAbsolute("art/x.obj"), false)
+    t:eq(file.resolvePackPath("C:/mods/x.obj"), "C:/mods/x.obj", "an absolute path is untouched")
+    t:eq(file.resolvePackPath(assets.SK.PinkCat), assets.SK.PinkCat,
+        "and a /Game/... path is never joined to a directory")
+
+    -- A declaration made from INSIDE PalForge has no pack directory - packDir walks out of
+    -- the framework's own tree and finds no frame beyond it - so the path is left exactly as
+    -- written rather than joined to a guessed one. That is what this suite is, which is why
+    -- the assertion here is "unchanged" and not a path.
+    local m = Mesh{ id = support.id("mesh"), model = "art/marker.obj", kind = "obj" }
+    t:eq(m:model(), "art/marker.obj",
+        "no pack directory to resolve against, so the author's own string survives")
+    t:eq(Mesh{ id = support.id("mesh"), model = MISSING_OBJ, kind = "obj" }:model(), MISSING_OBJ)
+end)
+
+s:test("declaring an SM_ model as skeletal warns at define time, and still defines", function(t)
+    -- Mesh.Spec defaults kind to "skeletal", so declaring an SM_ model is the natural thing
+    -- to type, and core/mesh/skeletal.lua names it as the mistake ordinary pack code makes:
+    -- a UStaticMesh is not a USkinnedAsset (sibling classes), so the attach would be refused
+    -- by the class check and nothing would render. It WARNS rather than raising, because the
+    -- prefix is a convention this build follows and not a guarantee.
+    -- utils.log has addSink and no removeSink, so the sink installed here lives for the rest
+    -- of the session. It is made harmless rather than removed: it stops recording as soon as
+    -- this test is over, and it never grows past a handful of lines even if an assertion
+    -- above the reset raises.
+    local seen, recording = {}, true
+    logmod.addSink(function(level, scope, msg)
+        if recording and level == "warn" and scope == "mesh" and #seen < 32 then
+            seen[#seen + 1] = msg
+        end
+    end)
+
+    local id = support.id("mesh")
+    local m  = Mesh{ id = id, model = assets.SM.ChestWood }   -- kind defaults to "skeletal"
+    t:eq(m:kind(), "skeletal", "it is still defined, exactly as declared")
+
+    local hit
+    for _, msg in ipairs(seen) do
+        if msg:find(id, 1, true) and msg:find("SM_", 1, true) then hit = msg end
+    end
+    t:truthy(hit, "a warning naming the id and the prefix was logged")
+    t:truthy(hit and hit:find("kind = \"static\"", 1, true),
+        "and it says which kind was meant: " .. tostring(hit))
+
+    -- the matching declaration is silent
+    local before = #seen
+    Mesh{ id = support.id("mesh"), model = assets.SM.ChestWood, kind = "static" }
+    Mesh{ id = support.id("mesh"), model = assets.SK.PinkCat }
+    local after = #seen
+    recording = false
+    t:eq(after, before, "a correct declaration warns about nothing")
 end)
 
 --=============================================================================

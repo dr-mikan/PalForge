@@ -20,11 +20,11 @@
 ---@class Mesh.Spec
 ---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
 ---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an absolute .obj file path
+---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ---@field animClass? string # a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only
 ---@field scale? number # uniform scale applied to the attached mesh
 ---@field offset? table # { x, y, z } offset from the mesh's normal position, in cm
----@field texture? string # a /Game/... UTexture2D path (see Mesh.assets.T), or an absolute path to a png of your own
+---@field texture? string # a /Game/... UTexture2D path (see Mesh.assets.T), or a png of your own - absolute, or relative to the .lua file that declares it
 ---@field color? table # tint { r, g, b, a } in 0..1
 ---@field material? string # base material asset path to instance from
 ---@field params? table # extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = "/Game/... or <abs png>" } }
@@ -35,12 +35,12 @@
 
 ---@class Pal.Spec.Material
 ---@field color? table # tint { r, g, b, a } in 0..1
----@field texture? string # absolute path to a png applied to the mesh
+---@field texture? string # a "/Game/..." UTexture2D to load, or an ABSOLUTE path to a png to import; not pack-relative — only Mesh.Spec resolves those
 ---@field params? table # extra material parameters passed through
 ---@field material? string # base material asset path to instance from
 
 ---@class Pal.Spec.Events
----@field onSpawned? fun(self: Pal.Handle, ctx: table) # fires when a pal finishes initialising; observed at world load, not yet on a fresh spawn
+---@field onSpawned? fun(self: Pal.Handle, ctx: table) # LIVE - a pal finished initialising (ctx.actor); may repeat per pawn, keep it idempotent
 ---@field onDamaged? fun(self: Pal.Handle, ctx: table) # LIVE - took damage
 ---@field onDeath? fun(self: Pal.Handle, ctx: table) # LIVE - HP reached zero
 ---@field onCaptured? fun(self: Pal.Handle, ctx: table) # LIVE - caught in a sphere
@@ -55,7 +55,7 @@
 ---@field material? Pal.Spec.Material # material override applied to that mesh
 ---@field color? table # base tint { r, g, b, a } (shorthand for material.color)
 ---@field texture? string # png path applied to the mesh (shorthand for material.texture)
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Pal.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 
@@ -72,8 +72,8 @@
 ---@class Item.Spec.Events
 ---@field onObtain? fun(self: Item.Handle, ctx: table) # LIVE - entered the inventory (ctx.count, ctx.via)
 ---@field onUse? fun(self: Item.Handle, ctx: table) # LIVE - used / consumed (ctx.actor = the local player pawn)
----@field onCraft? fun(self: Item.Handle, ctx: table) # fires when a crafting machine finishes an item (unverified in game)
----@field onDiscard? fun(self: Item.Handle, ctx: table) # declarable; NO native source exists — fires only on a manual emit
+---@field onCraft? fun(self: Item.Handle, ctx: table) # LIVE - a crafting machine finished it (ctx.recipeId, ctx.via; ctx.count is nil)
+---@field onDiscard? fun(self: Item.Handle, ctx: table) # LIVE - dropped or trashed (ctx.count, ctx.reason = "drop" | "dispose")
 
 ---@alias Item.Spec.Category "material"|"consumable"|"equipment"|"ammo"|"ingredient"|"other"
 ---@class Item.Spec
@@ -82,7 +82,7 @@
 ---@field description? string # one-line description, for UI and tooling
 ---@field category? Item.Spec.Category # what kind of inventory content this is (PalForge's own classification) (default material)
 ---@field maxStack? number # stack ceiling you declare; the GAME's ceiling is a DataTable column (default 1)
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field recipe? Item.Spec.Recipe # the recipe that produces THIS item (metadata; see Item.Spec.Recipe)
 ---@field events? Item.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
@@ -99,7 +99,7 @@
 ---@field animClass? string # a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only
 ---@field scale? number # uniform scale applied to the attached mesh
 ---@field offset? table # { x, y, z } offset from the actor's origin
----@field texture? string # a /Game/... UTexture2D path (see Mesh.assets.T), or an absolute path to a png of your own
+---@field texture? string # a /Game/... UTexture2D path (see Mesh.assets.T), or a png of your own - absolute, or relative to the .lua file that declares it
 ---@field color? table # tint { r, g, b, a } in 0..1
 ---@field material? string # base material asset path to instance from
 ---@field params? table # extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = "/Game/... or <abs png>" } }
@@ -119,8 +119,8 @@
 ---@field onWorldReady? fun(self: Building.Instance, ctx: table) # LIVE - world loaded; emitted after the first scan, so only structures already tracked get it
 ---@field onWorldLeft? fun(self: Building.Instance, ctx: table) # LIVE - the world was unloaded (emitted while instances are still live)
 ---@field onBuild? fun(self: Building.Definition, ctx: table) # LIVE - build completed; nothing is placed yet, so `self` is the DEFINITION (ctx.buildId, ctx.model)
----@field onLeftClick? fun(self: Building.Instance, ctx: table) # declarable; no native source exists yet
----@field onBreak? fun(self: Building.Instance, ctx: table) # declarable; no native source exists yet
+---@field onLeftClick? fun(self: Building.Instance, ctx: table) # declarable, never fires - measured: PalBuildObject has no click/hit function, and its OnDamage is the deterioration timer
+---@field onBreak? fun(self: Building.Instance, ctx: table) # declarable, never fires - measured: destruction exists only as delegate FIELDS; a dismantle arrives as onRemove(reason="missing")
 
 ---@class Building.Spec
 ---@field id string # build id: a game BuildObjectId ("PalBoxV2") or "pack:name"
@@ -143,10 +143,10 @@
 --=============================================================================
 
 ---@class Skill.Spec.Events
----@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # an active skill fired (self, owner, ctx) - three sources armed, none seen firing
----@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # one of its hits landed (self, target, ctx) - two sources armed, melee only, may repeat
----@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was attached (self, owner, ctx) - two sources armed, none seen firing
----@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # a passive was removed (self, owner, ctx) - two sources armed, none seen firing
+---@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # LIVE - an active skill fired (self, owner, ctx); via = "PalActionBase:OnBeginAction"
+---@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # NOT LIVE - both sources measured silent (skill-hit-source); only :hit() runs it
+---@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # LIVE - a passive was attached (self, owner, ctx); via names the source
+---@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # LIVE - a passive was removed (self, owner, ctx); via names the source
 
 ---@alias Skill.Spec.Kind "active"|"passive"
 ---@class Skill.Spec
@@ -154,10 +154,10 @@
 ---@field name? string # shown in skill lists (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field kind? Skill.Spec.Kind # an active skill is fired; a passive one is equipped (default active)
----@field element? string # attribute / element (fire, water, ...)
+---@field element? string # attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing
 ---@field cooldown? number # seconds between activations (enforced by :activate)
----@field power? number # base power / magnitude
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field power? number # base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Skill.Spec.Events # behaviour handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 
@@ -179,7 +179,7 @@
 ---@field interval? number # seconds between onTick calls (omit = no periodic tick)
 ---@field stackable? boolean # may several copies coexist on one target? (default false)
 ---@field maxStacks? number # stack ceiling when stackable (default 1)
----@field icon? any # status-bar icon
+---@field icon? string # /Game/... texture path for your own status UI (nothing in the game reads it)
 ---@field nativeStatus? string # the game's own ailment this mirrors, e.g. "Poison" (core.status.names())
 ---@field events? Effect.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
@@ -196,7 +196,7 @@
 ---@field kind? Audio.Spec.Kind # descriptive only - the native play route is the same for both (default se)
 ---@field soundId? string # native AkAudioEvent name - its asset path is filled in from the native catalog when you do not pass one
 ---@field soundPath? string # native AkAudioEvent asset path (the route that actually plays); overrides the catalog lookup
----@field soundFile? string # custom audio file path (seam - not playable yet)
+---@field soundFile? string # REFUSED at define time: custom audio files do not play on this build (open item audio-custom-file-loader) - use soundId or soundPath
 ---@field source? fun(self: Audio.Definition): table|nil # override that returns the core.sound spec yourself; `self` is the DEFINITION, not the handle
 ---@field data? table # free-form payload of your own, carried onto the definition
 
@@ -207,7 +207,7 @@
 ---@alias UI.Node.VBox.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.VBox.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.VBox
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
+---@field children? UI.Node[] # the nodes inside this one, any number; normally written positionally — VBox{ Label{...}, Button{...} }
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.VBox.HAlign # horizontal alignment in the parent's slot
@@ -217,7 +217,7 @@
 ---@alias UI.Node.HBox.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.HBox.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.HBox
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
+---@field children? UI.Node[] # the nodes inside this one, any number; normally written positionally — VBox{ Label{...}, Button{...} }
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.HBox.HAlign # horizontal alignment in the parent's slot
@@ -227,7 +227,7 @@
 ---@alias UI.Node.Overlay.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.Overlay.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.Overlay
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
+---@field children? UI.Node[] # the nodes inside this one, any number; normally written positionally — VBox{ Label{...}, Button{...} }
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.Overlay.HAlign # horizontal alignment in the parent's slot
@@ -237,7 +237,7 @@
 ---@alias UI.Node.ScrollBox.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.ScrollBox.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.ScrollBox
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
+---@field children? UI.Node[] # the nodes inside this one, any number; normally written positionally — VBox{ Label{...}, Button{...} }
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.ScrollBox.HAlign # horizontal alignment in the parent's slot
@@ -247,8 +247,8 @@
 ---@alias UI.Node.Border.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.Border.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.Border
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
----@field color? table # background tint { r, g, b, a } in 0..1
+---@field children? UI.Node[] # the ONE node inside this one; normally written positionally — Border{ Label{...} }. Two or more is a hard error at the call site, naming VBox/HBox as the fix
+---@field color? number[] # background tint { r, g, b, a } in 0..1 (a defaults to 1). Omitted: PalForge's own dark panel colour. For the GAME's window art instead of a flat colour, use UI.Frame
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.Border.HAlign # horizontal alignment in the parent's slot
@@ -258,8 +258,8 @@
 ---@alias UI.Node.SizeBox.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.SizeBox.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.SizeBox
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
----@field width? number # fixed width in slate units
+---@field children? UI.Node[] # the ONE node inside this one; normally written positionally — Border{ Label{...} }. Two or more is a hard error at the call site, naming VBox/HBox as the fix
+---@field width? number # fixed width in slate units. This is how a Sprite is sized — the UImage in this build has no size call that is not a struct write
 ---@field height? number # fixed height in slate units
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
@@ -270,9 +270,9 @@
 ---@alias UI.Node.Label.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.Label.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.Label
----@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says
----@field size? number # font size (default 16)
----@field color? table # text colour { r, g, b, a } in 0..1
+---@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says. A function is re-evaluated on every :refresh() with the element instance as its argument and written back only when the value CHANGED
+---@field size? number # font size (default 16). With `native = true` the size goes through the game's own UpdateFontSize instead, which also applies the player's UI scale setting
+---@field color? number[] # text colour { r, g, b, a } in 0..1 (a defaults to 1). IGNORED when `native = true` — BP_PalTextBlock_C takes its colour from the game's own text style
 ---@field native? boolean # build the GAME's own label (BP_PalTextBlock_C) instead of a plain TextBlock; `color` is then ignored
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
@@ -283,7 +283,7 @@
 ---@alias UI.Node.Frame.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.Frame.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.Frame
----@field children? UI.Node[] # the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }
+---@field children? UI.Node[] # the ONE node inside this one; normally written positionally — Border{ Label{...} }. Two or more is a hard error at the call site, naming VBox/HBox as the fix
 ---@field color? table # ⚠️ REFUSED — a Frame takes no colour: it wears the GAME's own window art (WBP_PalCommonWindow_C) and nothing here can tint it — the only call that would, UUserWidget::SetColorAndOpacity (UMG.hpp:1709), is a struct call and would tint the CONTENT too. For a coloured panel write Border{ color = { r, g, b, a } }; for the game's chrome AROUND a colour of your own, put the Border inside it — Frame{ Border{ color = {...}, ... } }
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
@@ -291,11 +291,13 @@
 ---@field vAlign? UI.Node.Frame.VAlign # vertical alignment in the parent's slot
 ---@field padding? number|table # slot padding: one number for all four sides, or { left =, top =, right =, bottom = }
 
+---@alias UI.Node.Button.LabelAlign "center"|"left"
 ---@alias UI.Node.Button.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.Button.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.Button
----@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says
----@field onClick? fun(self: UI.Handle, ctx: table) # clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget)
+---@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says. A function is re-evaluated on every :refresh() with the element instance as its argument and written back only when the value CHANGED
+---@field onClick? fun(self: UI.Handle, ctx: table) # clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget). Routed through the game's own CommonButtonBase, so unlike UI.Spec.onMousePressed it really does know which widget was hit
+---@field labelAlign? UI.Node.Button.LabelAlign # where the button's own text sits. "center" (default) is the game button's own label and its own font — the only alignment a game menu button's inner slot can do (a CanvasPanelSlot declares no SetHorizontalAlignment, UMG.hpp:350-374). "left" builds the button inside an Overlay with a hit-test-invisible TextBlock laid over it left-aligned: clicks pass straight through, but the text is ours and inherits none of the button's font or hover styling (default center)
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.Button.HAlign # horizontal alignment in the parent's slot
@@ -310,8 +312,8 @@
 ---@field icon? string # a vanilla content id whose icon the game already draws ("Wood", "Sheepball"); ignored when `path` is given
 ---@field from? UI.Node.Sprite.From # which of the game's icon tables `icon` is looked up in (default item)
 ---@field matchSize? boolean # take the texture's own pixel size (SetBrushFromTexture's bMatchSize). false: let the layout decide (default true)
----@field color? table # tint { r, g, b, a } in 0..1, multiplied over the texture
----@field opacity? number # 0..1
+---@field color? number[] # tint { r, g, b, a } in 0..1, MULTIPLIED over the texture — it cannot lighten one
+---@field opacity? number # 0..1, the whole image's alpha (SetOpacity, UMG.hpp:759). Separate from `color`'s fourth component, which tints the brush
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.Sprite.HAlign # horizontal alignment in the parent's slot
@@ -321,11 +323,11 @@
 ---@alias UI.Node.GameWidget.HAlign "fill"|"left"|"center"|"right"
 ---@alias UI.Node.GameWidget.VAlign "fill"|"top"|"center"|"bottom"
 ---@class UI.Node.GameWidget
----@field class string # Blueprint widget class path, e.g. "/Game/Pal/Blueprint/UI/.../WBP_Foo.WBP_Foo_C"
----@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says
----@field textChild? string # name of the child widget that carries the text
----@field clickChild? string # name of the child widget that receives clicks
----@field onClick? fun(self: UI.Handle, ctx: table) # clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget)
+---@field class string # Blueprint widget class path, e.g. "/Game/Pal/Blueprint/UI/.../WBP_Foo.WBP_Foo_C". Must already be LOADED — a class the world has not pulled in is a mount failure naming the path, not a load
+---@field text? string|number|fun(self: UI.Handle): any # BINDABLE - what it says. ⚠️ DOES NOTHING WITHOUT `textChild`: this node clones a widget whose internals it cannot guess, so the text goes to the child you name and nowhere otherwise
+---@field textChild? string # name of the child widget that carries the text — required for `text` to do anything. WBP_Title_MenuButton's is "Test_Content" (WBP_Title_MenuButton.hpp:14)
+---@field clickChild? string # name of the child widget that receives clicks — required for `onClick` to do anything. WBP_Title_MenuButton's is "WBP_PalInvisibleButton" (:15)
+---@field onClick? fun(self: UI.Handle, ctx: table) # clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget). ⚠️ DOES NOTHING WITHOUT `clickChild`, and the child named must be a CommonButtonBase — that is the class the shared click hook reports
 ---@field name? string # look the built widget up later with UI.Handle:find("<name>")
 ---@field visible? boolean|fun(self: UI.Handle): boolean # BINDABLE - false COLLAPSES it, so it stops taking layout space too
 ---@field hAlign? UI.Node.GameWidget.HAlign # horizontal alignment in the parent's slot
@@ -341,14 +343,14 @@
 ---@field id string # element id, e.g. "pack:Panel"
 ---@field name? string # human label (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
----@field root? UI.Node # the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question
----@field host? UI.Spec.Host|"screen"|"game"|"layer" # where to mount when mount() is given no root: "screen" (a viewport layer of our own), "game" (the game's own in-game UI root canvas), "layer" (⚠️ the GAME's own route — pushed onto a CommonUI layer through BP_AddWidget so the action router owns its activation, focus and input mode; needs a Frame root and is unmeasured), or { widget = <class>, panel = <member> } for a panel the game already draws
+---@field root? UI.Node # the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question. Any node that declared `name = "..."` is reachable afterwards as UI.Handle:find("<name>"), which is the imperative escape hatch out of a declared tree. It also decides what `input`, `backHandler` and host = "layer" may declare: all three need the root to be a UI.Frame, because that is the one node here that builds a Palworld activatable
+---@field host? UI.Spec.Host|"screen"|"game"|"layer" # where to mount when mount() is given no root: "screen" (a viewport layer of our own, stacked by AddToViewport), "game" (the game's own in-game UI root canvas, CanvasPanel_Root in WBP_PalOverallUILayout — the one host with a real ZOrder), "layer" (⚠️ the GAME's own route — pushed onto a CommonUI layer through BP_AddWidget so the action router owns its activation, focus and input mode; REQUIRES a UI.Frame root and is refused at define time without one, and it has NEVER BEEN OBSERVED WORKING — pf_uiz's LAYER panel is the run that would settle it, test/hooks/ui-host-layer), or { widget = <class>, panel = <member> } for a panel the game already draws. mount(root) with an explicit root wins over this field. A host that is not up yet is not a failure — it is what :autoMount retries
 ---@field render? fun(self: UI.Handle, root: any): boolean? # build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted
 ---@field update? fun(self: UI.Handle) # refresh the already-built widgets (self); runs on each :refresh()
 ---@field destroy? fun(self: UI.Handle) # remove the widgets render() built (self); runs on :unmount()
----@field input? UI.Spec.Input # how much of the player's input this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor and nothing else. "clicks" and "exclusive" are the GAME's own GameAndMenu and Menu modes, declared on the element's activatable widget the way every Palworld screen declares them (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and put back by the CommonUI action router on unmount — so both REQUIRE a UI.Frame root. PalForge never calls SetInputMode itself; doing that broke Esc twice (default none)
----@field backHandler? boolean # ⚠️ claim the CommonUI BACK action (that is Esc) on this element's window: sets bIsBackHandler (CommonUI.hpp:149) before the widget is activated, which is how a Palworld screen says "Esc closes ME". Needs a UI.Frame root. UNMEASURED — whether the action router registers a widget of ours at all is the open question pf_uiroute exists to answer — so a panel that declares it must still have another way down
----@field z? number # stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down (default 0)
+---@field input? UI.Spec.Input # how much of the player's input this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor and nothing else, by writing bShowMouseCursor (Engine.hpp:9035) and restoring exactly what it found. "clicks" and "exclusive" are the GAME's own GameAndMenu and Menu modes, declared on the element's activatable widget the way every Palworld screen declares them (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and put back by the CommonUI action router on unmount — so both REQUIRE a UI.Frame root and are refused at define time without one. PalForge never calls SetInputMode itself; doing that broke Esc twice. ⚠️ NEITHER MODE HAS BEEN OBSERVED WORKING: no run has watched the router read a declaration off a widget of ours (pf_uiroute, test/hooks/ui-backhandler) (default none)
+---@field backHandler? boolean # ⚠️ claim the CommonUI BACK action (that is Esc) on this element's window: sets bIsBackHandler (CommonUI.hpp:149) before the widget is activated, which is how a Palworld screen says "Esc closes ME", and answers BP_OnHandleBackAction (:172). REQUIRES a UI.Frame root and is refused at define time without one. DECLARED, SHIPPED AND NEVER ONCE OBSERVED WORKING — whether the action router registers a widget of ours at all is the open question, pf_uiroute is the instrument, test/hooks/ui-backhandler is the hook that records the answer — so a panel that declares it must still have another way down
+---@field z? number # stacking order, higher on top (default 0). Decides DRAWING only where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder, UMG.hpp:356), a VerticalBox does not and says so once rather than per mount, and a "screen" host takes it through AddToViewport instead. It decides EVENT ROUTING always, host or no host: keys and mouse presses walk the mounted elements from the highest z down, and among equal z the most recently mounted goes first (default 0)
 ---@field keys? string[] # the key names onKeyPressed wants, spelled as UE4SS's Key table spells them ("INS", "END", "F4", "NUM_ZERO"). Required alongside onKeyPressed (or `overrideKeys`): a press is read through RegisterKeyBind, which binds ONE named key. A key Palworld's live key config already uses is REFUSED with the action named — use `overrideKeys` to take it anyway. "ESCAPE" is refused by name
 ---@field overrideKeys? string[] # ⚠️ keys to take DELIBERATELY even though Palworld's key config uses them. Same names, same routing, same onKeyPressed — the only difference is that PalForge stops refusing. It does NOT stop the game's own action firing (a UE4SS keybind observes, it does not consume), does NOT rewrite the player's key config, and cannot make a press arrive that the game takes below UE4SS. "ESCAPE" is still refused
 ---@field onKeyPressed? fun(self: UI.Handle, ctx: table) # one of `keys` went down: (self = the element INSTANCE, ctx.key / ctx.z / ctx.id). Reaches ONLY the topmost mounted element — a panel gets no key while anything is above it
@@ -378,10 +380,13 @@
 ---@field ALIASES table<string, string>
 ---@field CATALOG string[]
 ---@field PalBox Building.Handle
+---@field ROW_ID table<string, string>
 ---@field TABLE string
 ---@field UNNAMED table<string, string>
 ---@field WorkBench Building.Handle
 ---@field get fun(id: string): Building.Handle?
+---@field iconOf function
+---@field publish function
 ---@field Altar Building.Handle
 ---@field AncientBlastFurnace Building.Handle
 ---@field AncientCookingStove Building.Handle
@@ -890,6 +895,7 @@
 ---@field UNNAMED table<string, string>
 ---@field Wood Item.Handle
 ---@field get fun(id: string): Item.Handle?
+---@field publish function
 ---@field AIcore Item.Handle
 ---@field Accessory_AT_1 Item.Handle
 ---@field Accessory_AT_2 Item.Handle
@@ -3358,10 +3364,13 @@
 ---@field ALIASES table<string, string>
 ---@field CATALOG string[]
 ---@field Chicken Pal.Handle
+---@field ROW_ID table<string, string>
 ---@field SheepBall Pal.Handle
 ---@field TABLE string
 ---@field UNNAMED table<string, string>
 ---@field get fun(id: string): Pal.Handle?
+---@field iconOf function
+---@field publish function
 ---@field Alpaca Pal.Handle
 ---@field AmaterasuWolf Pal.Handle
 ---@field AmaterasuWolf_Dark Pal.Handle
@@ -4125,6 +4134,7 @@
 ---@field TABLES table<string, string>
 ---@field UNNAMED table<string, string>
 ---@field get fun(id: string): Skill.Handle?
+---@field publish function
 ---@field tableOf fun(id: string): string?
 ---@field ATK_up_PartnerSkill_1 Skill.Handle
 ---@field ATK_up_PartnerSkill_2 Skill.Handle
@@ -6722,6 +6732,7 @@
 ---@field Poison Effect.Handle
 ---@field UNNAMED table<string, string>
 ---@field get fun(id: string): Effect.Handle?
+---@field publish function
 ---@field AttackUp Effect.Handle
 ---@field CollectItem Effect.Handle
 ---@field Coma Effect.Handle
@@ -6770,6 +6781,7 @@
 ---@field VictoryTheme Audio.Handle
 ---@field bgm fun(id: string): Audio.Handle?
 ---@field get fun(id: string): Audio.Handle?
+---@field publish function
 ---@field se fun(id: string): Audio.Handle?
 ---@field AKEIceWall_Break Audio.Handle
 ---@field AKEIceWall_Shot Audio.Handle

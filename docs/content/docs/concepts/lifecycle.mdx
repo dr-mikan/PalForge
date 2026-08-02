@@ -71,9 +71,11 @@ flowchart LR
     C --> U["your own event.on subscriber"]
 ```
 
-A few channels have the last two steps but nothing pushing to them yet. `item.craft` is
-one: an `onCraft` handler is accepted and never runs. Put that work somewhere that does
-run — `onObtain` fires when the crafted item lands in the inventory.
+Every channel in `event.CHANNELS` has a SOURCE armed for it. One of them, `skill.hit`, has
+never carried an event: both of its native candidates registered successfully and stayed
+silent through fights that certainly landed damage, which is the open item
+`skill-hit-source`. Two building hooks have no channel at all, `onLeftClick` and `onBreak`,
+because nothing in the dumps can feed one. The channel table below says which is which.
 
 ### Wiring order at startup
 
@@ -85,15 +87,48 @@ flowchart TD
     A["registry.initialize"] --> B["require palforge.api"]
     B --> C["load the native catalogs"]
     C --> D["event.start"]
-    D --> E["install SOURCES - tick / world / building / pal / item"]
+    D --> E["install SOURCES - tick / world / building / pal / item / skill"]
     D --> F["install DISPATCH - one subscriber per channel"]
     E --> G["emit gameStart"]
     F --> G
 ```
 
-`event.start()` only ever runs once; calling it again does nothing. Every channel in
-`event.CHANNELS` exists before the first game event arrives, so you can subscribe while
-your pack is still loading and miss nothing.
+`event.start()` arms the engine-facing layer once per session. UE4SS can take back neither
+a `RegisterHook` nor a `LoopAsync`, so re-arming would run every handler twice, then three
+times. A second call takes the other branch instead: it re-runs `installDispatch()`, which
+drops the previous run's channel subscriptions and rebinds every channel to the freshly
+loaded definition classes. That branch is the F9 reload.
+
+Every channel in `event.CHANNELS` exists before the first game event arrives, so you can
+subscribe while your pack is still loading and miss nothing.
+
+### What an F9 reload replaces
+
+F9 drops every `palforge.*` module from `package.loaded` and runs `registry.initialize()`
+again, so definitions, specs, handlers, the api surface, the test suite and your own pack
+code are genuinely replaced. Four things deliberately survive the wipe, and each one is a
+failure that was paid for once.
+
+| Survives | Where it lives | Why |
+| --- | --- | --- |
+| The engine-facing hooks and loops | armed once; `_G.__PalForgeArmed` records that it happened | A hook armed on the first load keeps running the callback it was created with, so editing the body of an event SOURCE needs a game restart. Everything above that line reloads. |
+| Every registered definition | `core.object_manager`, named in `reload.KEEP` | A content pack is its own UE4SS mod in its own require namespace, so a wipe never re-runs its define calls. Keeping the registry is what keeps a pack's content across the press. |
+| The channels themselves | `_G.__PalForgeBus` | The hooks from the first load push into the subjects table they closed over. A fresh one would leave the old emitters talking to nobody while the new dispatch listened to an empty bus. |
+| The building runtime registry | `_G.__PalForgeBuildingRegistry`, with the spatial index on `_G.__PalForgeSpatialIndex` | The reconstruction scan is armed once and holds the tables it was created with. One table on `_G` is what stops the scan and the dispatch from looking at two different registries. |
+
+The press is also REFUSED while a repeating callback is outstanding. Every `core/poll`
+poller and both long chains in `pf_watch` declare themselves to the reload guard, and a
+press with one outstanding logs which chain it is waiting for and how long it has been
+armed. Clearing `package.loaded` under a scheduled UE4SS callback can leave its registry
+reference pointing at something that is not a function, and UE4SS answers that by removing
+the engine tick hook — which is what drains `ExecuteInGameThread`, so every keybind in the
+mod stops responding while the game carries on, until a restart. A claim expires by itself
+after 180 s, and the refusal prints the console line that clears it,
+`require('palforge.core.reload').asyncReset()`.
+
+Two things a reload does not undo. A building instance placed before the press keeps the
+handler table it was created with until the scan rediscovers it, and a poller registered
+before the press keeps running the closure it was registered with.
 
 ### Which object the event happened to
 
@@ -110,59 +145,89 @@ flowchart TD
     B2 -->|hit| BI
     B3 -->|hit| BI
     P["pal ctx"] --> P1["actor BP class name to a pal id"]
-    P1 --> PX["exact id or a walk for a namespaced match"]
+    P1 --> PX["exact id, else the resolved-form index"]
     PX --> PC["the registered Pal class"]
-    I["item ctx"] --> I1["ctx.itemId"]
-    I1 --> IX["exact id or a walk for a namespaced match"]
-    IX --> IC["the registered Item class"]
+    I["item or skill ctx"] --> I1["ctx.itemId or ctx.skillId"]
+    I1 --> IX["exact id, else the resolved-form index"]
+    IX --> IC["the registered Item or Skill class"]
+    V["building.build ctx"] --> V1["ctx.buildId against the definition index"]
+    V1 --> VC["the registered Building class"]
 ```
 
 A building resolves to a **live instance**: the one structure standing in the world that
-the event happened to. Pals and items are not tracked one by one, so they resolve to the
-registered **class** instead, and your handler reads the actor off `ctx`. A vanilla pal or
-item you never defined resolves to nothing, and the hook is skipped.
+the event happened to. Pals, items and skills are not tracked one by one, so they resolve
+to the registered **class** instead, and your handler reads the actor off `ctx`. A vanilla
+pal or item you never defined resolves to nothing, and the hook is skipped. `building.build`
+is the one building channel that also resolves to a class, because it fires before the
+actor exists.
 
-Pals and items are matched in two steps: the exact id first, in one table lookup, and on a
-miss a walk over that domain's registered ids, comparing each id's resolved DataTable row
-name against the id the game reported. That is why a namespaced id still gets its events:
-the game spawns `BP_example_Boss_C` and reports the item row `example_Ration`, never the
-colon form.
+The class lookups are two table reads and nothing else: the id exactly as the game reported
+it, then `object_manager.byResolved`, an index the registry maintains at register time that
+maps a resolved row spelling back to the id it was defined under. That is why a namespaced
+id still gets its events — the game spawns `BP_example_Boss_C` and reports the item row
+`example_Ration`, never the colon form — and it is also why two ids that resolve to one row
+are a warning at define time rather than a coin flip per event.
 
 ## Channels
 
-A channel is one named moment. `event.CHANNELS` is the full list, in declaration order:
+A channel is one named moment. `event.CHANNELS` holds 21 of them, in declaration order:
 
 ```lua
 event.CHANNELS   --> {
 --   "gameStart",
 --   "world.ready", "world.left",
 --   "building.place", "building.load", "building.interact", "building.remove",
+--   "building.build",
 --   "pal.spawned", "pal.damaged", "pal.death", "pal.captured",
 --   "item.obtain", "item.use", "item.craft", "item.discard",
+--   "skill.activate", "skill.hit", "skill.equip", "skill.unequip",
 --   "tick",
 -- }
 ```
 
+Three words describe where a channel's events come from, and the difference decides whether
+you can build on it:
+
+- **LIVE** — a named native game function emits it, and it has been seen carrying an event
+  in a real save.
+- **synthetic** — PalForge derives it, from the reconstruction scan or from a loop. There
+  is no native call behind it, and it fires on this build because nothing outside PalForge
+  has to cooperate.
+- **armed, unseen** — a native hook is registered for it and has never carried anything.
+
 What sends each one, what it puts in `ctx`, and which hook it ends up calling:
 
-| Channel | Emitted by | `ctx` carries | Dispatches to |
-| --- | --- | --- | --- |
-| `gameStart` | `registry.initialize`, after `event.start()` | no payload | nothing; direct subscribers only |
-| `world.ready` | the first reconstruction scan that completes after the gate opens; the gate itself is the ready watch, `LoopAsync(1000)` polling `PalPlayerCharacter`, after 5 consecutive valid polls | no payload | `onWorldReady` on every live building instance, and that first scan has already tracked them |
-| `world.left` | the same watch, when the pawn goes invalid | no payload | `onWorldLeft` on every live building instance, then live instances are dropped |
-| `building.place` | the reconstruction scan, when a new instance is created and matches a pending build intent | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
-| `building.load` | the reconstruction scan, on every newly tracked instance | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
-| `building.interact` | `/Script/Pal.PalBuildObject:OnBeginInteractBuilding` | `actor`, `player`, `buildId` | `onRightClick` |
-| `building.remove` | the scan removal sweep, after 6 consecutive misses | `key`, `buildId`, `actor`, `reason` | `onRemove` |
-| `pal.spawned` | `/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter` | `actor` | `onSpawned` |
-| `pal.damaged` | `/Script/Pal.PalCharacter:OnDamageReaction` | `actor` | `onDamaged` |
-| `pal.death` | `/Script/Pal.PalCharacter:OnDeadCharacter` | `actor` | `onDeath` |
-| `pal.captured` | `/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing`, only when the argument is `true` | `actor`, `comp` | `onCaptured` |
-| `item.obtain` | `/Script/Pal.PalPlayerState:AddItemGetLog_ToClient` | `itemId`, `count` | `onObtain` |
-| `item.use` | `/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal` | `itemId`, `actor`, `processor` | `onUse` |
-| `item.craft` | nothing yet | — | `onCraft` |
-| `item.discard` | nothing yet | — | `onDiscard` |
-| `tick` | `LoopAsync(500)` inside `ExecuteInGameThread` | `count`, `now` | building `onTick`, through the tick list |
+| Channel | State | Emitted by | `ctx` carries | Dispatches to |
+| --- | --- | --- | --- | --- |
+| `gameStart` | synthetic | `registry.initialize`, after `event.start()` — so also on every F9 reload | no payload | nothing; direct subscribers only |
+| `world.ready` | synthetic | the first reconstruction scan that completes after the gate opens; the gate is the ready watch, `LoopAsync(1000)` polling `PalPlayerCharacter`, after 5 consecutive valid polls | no payload | `onWorldReady` on every live building instance, and that first scan has already tracked them |
+| `world.left` | synthetic | the same watch, when the pawn stops answering | no payload | `onWorldLeft` on every live building instance, then live instances are dropped |
+| `building.place` | synthetic | the scan, when it creates an instance that matches a pending `RequestBuild_ToServer` intent within 300 cm | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
+| `building.load` | synthetic | the scan, on every newly tracked instance | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
+| `building.interact` | LIVE | `/Script/Pal.PalBuildObject:OnBeginInteractBuilding` | `actor`, `player`, `buildId` | `onRightClick` |
+| `building.remove` | synthetic | the scan removal sweep, after 6 consecutive misses | `key`, `buildId`, `actor`, `reason` | `onRemove` |
+| `building.build` | LIVE | `/Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal`, armed at `world.ready` | `buildId`, `model` | `onBuild`, on the definition class |
+| `pal.spawned` | LIVE | `/Script/Pal.PalNPC:OnCompletedInitParam` and `/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter`, both armed at `world.ready` | `actor`, `via` | `onSpawned` |
+| `pal.damaged` | LIVE | `/Script/Pal.PalCharacter:OnDamageReaction` | `actor` | `onDamaged` |
+| `pal.death` | LIVE | `/Script/Pal.PalCharacter:OnDeadCharacter` | `actor` | `onDeath` |
+| `pal.captured` | LIVE | `/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing`, only when the argument is `true` | `actor`, `comp` | `onCaptured` |
+| `item.obtain` | LIVE | `/Script/Pal.PalPlayerState:AddItemGetLog_ToClient`, with `/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal` armed beside it | `itemId`, `count`, `via` | `onObtain` |
+| `item.use` | LIVE | `/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal` | `itemId`, `actor`, `player`, `itemData`, `targetId`, `processor` | `onUse` |
+| `item.craft` | LIVE | `OnFinishWorkInServer` on `/Script/Pal.PalMapObjectConvertItemModel` and on `/Script/Pal.PalMapObjectProductItemModel` | `itemId`, `recipeId`, `count` (always nil), `model`, `work`, `via` | `onCraft` |
+| `item.discard` | LIVE | `/Script/Pal.PalNetworkItemComponent:RequestDrop_ToServer` and `:RequestDispose_ToServer` | `itemId`, `count`, `reason` | `onDiscard` |
+| `skill.activate` | LIVE | `/Script/Pal.PalActionBase:OnBeginAction`, with `PalPlayerCharacter:OnBeginAction` and `PalUtility:PlayActionByWazaID` armed beside it | `skillId`, `wazaId`, `owner`, `actor`, `target`, `action`, `via` | `onActivate`, with the owner as its second argument |
+| `skill.hit` | armed, unseen | `/Script/Pal.PalUtility:MakeDamageInfoByWazaType` and `/Script/Pal.PalAnimNotifyState_AttackCollision:OnHit`, both measured silent | `skillId`, `wazaId`, `target`, `owner`, `attacker`, `location`, `via` | `onHit`, with the target as its second argument |
+| `skill.equip` | LIVE | `/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill`, plus the `PalPassiveSkillComponent:SetupSkillFromSelf` list diff; both armed at `world.ready` | `skillId`, `owner`, `actor`, `params` or `component`, `overrides`, `via` | `onEquip` |
+| `skill.unequip` | LIVE | `:RemovePassiveSkill` and the same list diff | `skillId`, `owner`, `actor`, `via` | `onUnequip` |
+| `tick` | synthetic | `LoopAsync(500)` inside `ExecuteInGameThread` | `count`, `now` | building `onTick`, through the tick list |
+
+Several channels carry more than one source at once, and that is deliberate rather than
+untidy: a session in July measured four hooks registering and never firing while ten other
+channels announced themselves, UE4SS cannot unregister a hook, and a silent hook costs
+nothing — so the candidates the header dump named are armed BESIDE the ones that went
+quiet. Each is guarded on the identity it needs, so an extra source can only add silence,
+never a wrong event. `ctx.via` names which one carried a given event, and the log announces
+the first firing per channel and per source.
 
 <Callout type="info">
 `world.ready` and `world.left` are emitted with no payload at all, so a direct subscriber
@@ -171,12 +236,16 @@ receives `nil`. The building dispatch substitutes an empty table before calling
 </Callout>
 
 <Callout type="warn">
-Every native hook except the heartbeat returns early while the world is not ready. The
-building scan, the interact hook, the place-intent hook and all four pal hooks and both
-item hooks check `worldReady` first. If the ready watch cannot be installed at all, the
-gate fails open and dispatch runs from the start. `world.ready` is armed in that fallback
-too, but nothing emits it: without `LoopAsync` there is no heartbeat, so there is no scan
-to announce it.
+Every native hook except the heartbeat returns early while the world is not ready: the
+building scan, the interact and place-intent hooks and every pal, item and skill hook open
+with the same gate check. Seven of them are not even armed until then — `building.build`,
+the three `pal.spawned` candidates and the three passive-skill ones — because each also
+fires for every pre-existing object during the world-load storm, where reading
+half-initialised memory produced a native access violation that `pcall` cannot catch. If
+the ready watch cannot be installed at all, the gate fails open and dispatch runs from the
+start. `world.ready` is armed in that fallback too, but nothing emits it: without
+`LoopAsync` there is no heartbeat, so there is no scan to announce it, and the late hooks
+never arm.
 </Callout>
 
 You can invent your own channel names. `event.emit` and `event.on` create the channel the
@@ -217,6 +286,7 @@ flowchart LR
     S --> W["emit world.ready - once on the first scan after the gate opens"]
     T --> B["tickAll - building onTick"]
     T --> E["effect step - advance live applications"]
+    T --> P["pal onTick sweep - every PAL_SCAN_MS"]
     T --> U["event.every callbacks"]
 ```
 
@@ -272,13 +342,27 @@ Every hook with a source is live, and this is the only domain with per-structure
 | `onTick` | LIVE | the heartbeat, gated by `tickInterval` |
 | `onWorldReady` | LIVE | the first scan that completes after the ready gate opens |
 | `onWorldLeft` | LIVE | the ready watch |
-| `onBuild` | declarable | no native source yet |
-| `onLeftClick` | declarable | no native source yet |
-| `onBreak` | declarable | no native source yet |
+| `onBuild` | LIVE | `OnCompleteBuild_ServerInternal`, armed at `world.ready` |
+| `onLeftClick` | declarable | no native source, and the search is closed |
+| `onBreak` | declarable | no native source, and the search is closed |
 
-`onBuild`, `onLeftClick` and `onBreak` are accepted by the spec and never called. Use
-`onPlace` in place of `onBuild`, `onRemove` in place of `onBreak`, and `onRightClick` for
-player interaction.
+`onBuild` is the one building hook that is not handed a live instance. It fires at
+build-complete time, before the scan has created the instance — up to 500 ms later — and
+the native call carries a `UPalMapObjectModel` rather than an actor, so dispatch resolves
+the definition CLASS by build id and your handler reads `ctx.buildId` and `ctx.model`. Its
+hook is armed at `world.ready` rather than at load, because it also fires for every
+existing building during the world-load storm, and reading half-initialised model memory
+there produced a native access violation. `onPlace` remains the safe placement hook;
+`onBuild` is the extra one, and it is worth trying in a throwaway world first.
+
+`onLeftClick` and `onBreak` are accepted by the spec and never called, and that is a
+measurement rather than an omission. The one candidate for both, `OnDamage`, turned out to
+be a deterioration timer: the reference recording caught 196 firings, every one on a placed
+`WorkBench`, at a steady 12-13 s per structure, with no player involved and no structure
+ever destroyed. And none of the four candidate classes declares a Destroy, Dismantle, Break
+or Click entry at all — destruction appears only as delegate fields, which `RegisterHook`
+cannot address by path. Destruction stays covered by the scan's miss sweep, one threshold
+late and without an instigator, so use `onRemove` for it.
 
 `onRightClick` is filtered and debounced at the source: only a `PalCharacter` interactor
 counts, and a second interact on the same structure within one second is dropped.
@@ -346,36 +430,64 @@ that scan happens, with `ctx.reconstructed` telling you it came from a save.
 | `onCaptured` | LIVE | `SetIsCapturedProcessing` with `true` |
 | `onDamaged` | LIVE | `OnDamageReaction` |
 | `onDeath` | LIVE | `OnDeadCharacter` |
-| `onSpawned` | LIVE, unconfirmed hook | `BroadcastOnCompleteInitializeParameter` |
-| `onTick` | declarable | none |
+| `onSpawned` | LIVE | `PalNPC:OnCompletedInitParam` and `PalPlayerCharacter:OnCompleteInitializeParameter` |
+| `onTick` | LIVE | the pal sweep, every `event.PAL_SCAN_MS` |
 
 <Callout type="warn">
-`onSpawned` is wired to `BroadcastOnCompleteInitializeParameter`, which the source marks
-as an unconfirmed candidate: the in-game event probe ran against pals that already
-existed, so the hook has not been observed firing on a real spawn. Treat it as best
-effort and verify before you build a feature on it.
+`onSpawned` is not wired to `PalCharacter:BroadcastOnCompleteInitializeParameter`, and the
+reason is worth carrying: that broadcaster is measured SILENT. It was armed after
+`world.ready` in a real save, pals were caught and released, and the channel carried
+nothing from it while ten other channels announced themselves — hooking a broadcaster
+rather than the bound delegate target is the mistake it exists to record. The two sources
+that carry are those targets. `PalNPC:OnCompletedInitParam` sees every pal, because
+`APalMonsterCharacter` inherits it without redeclaring, and
+`PalPlayerCharacter:OnCompleteInitializeParameter` sees only the characters the player
+subscribed to, which is the party path. `ctx.via` names which one fired. What is still
+open is narrower than "does it work": every firing recorded so far landed in the same
+second as `world.ready`, the load storm in which every pal in range initialises at once, so
+"this pal did not exist a moment ago" is not yet measured. Keep `onSpawned` idempotent —
+the source already dedupes per actor within one second.
 </Callout>
 
-<Callout type="warn">
-Pal `onTick` never fires. Pals have no instance scan the way buildings do, so nothing
-drives a per-pal periodic hook. If you need per-pal work on a schedule, subscribe to
-`tick` yourself and walk the actors you care about. There is a recipe for it at the end of
-this page.
+<Callout type="info">
+Pal `onTick` has no native hook and is driven by a sweep instead. Every
+`event.PAL_SCAN_MS` — 3000 ms, and public, so a pack can retune it at runtime — the sweep
+walks `FindAllOf("PalCharacter")`, resolves each actor to a registered pal class and calls
+`onTick` on it with `ctx.actor`, `ctx.count` and `ctx.now`. Two consequences follow from
+that being class-level rather than per-instance: `self` is the definition and the pawn is
+on `ctx`, so per-pal state belongs in a table you key yourself; and a handler that raises
+five times without a success in between is disabled for the session, with its id in the
+log. The sweep is deliberately slower than the heartbeat, because a `FindAllOf` walks every
+UObject and is the known periodic-hitch source, and it skips the enumeration entirely while
+no pal is defined.
 </Callout>
 
 ### Item
 
 | Hook | State | Source |
 | --- | --- | --- |
-| `onObtain` | LIVE | `AddItemGetLog_ToClient` |
+| `onObtain` | LIVE | `AddItemGetLog_ToClient`, with `AddItem_ServerInternal` armed beside it |
 | `onUse` | LIVE | `UseItemToCharacter_ServerInternal` |
-| `onCraft` | declarable | none |
-| `onDiscard` | declarable | none |
+| `onCraft` | LIVE | `OnFinishWorkInServer` on the convert and product work models |
+| `onDiscard` | LIVE | `RequestDrop_ToServer` and `RequestDispose_ToServer` |
 
 `onObtain` rides the game's own "obtained item" log, so it fires on pickup, loot and
-rewards. Silent internal adds that never surface a get-log are not covered.
-`item.craft` and `item.discard` have a channel and a dispatch subscriber, and nothing
-emits them, so `onCraft` and `onDiscard` never run.
+rewards. Silent internal adds that never surface a get-log are covered only if they take
+the inventory-add route. The two sources are two views of one pickup, so a repeat of the
+same id within 0.5 s is dropped and you hear about it once; `ctx.via` says which carried it.
+
+`onCraft` fires when a production work finishes at a bench or a furnace, observed live on
+2026-07-26 by crafting at a real machine. `ctx.count` is nil and stays nil: the per-craft
+count lives in the recipe row, and a DataTable read inside a native hook is not something
+this source does. On the convert route `ctx.itemId` is the recipe id, which for a vanilla
+recipe is the product item id, and it is handed over under both names so a pack need not
+rely on that.
+
+`onDiscard` fires when the player drops a stack or trashes one from the inventory menu,
+with `ctx.reason` telling you which. The item id has to be read off the slot the request
+points at before the server empties it, by matching the slot's container GUID against every
+live `PalItemContainer`. When that walk fails the source emits nothing rather than an event
+with a guessed id, and logs which step failed, once per distinct reason.
 
 Both live item channels carry a game item id, and dispatch matches it against your
 definitions in two steps: the exact id, then the resolved DataTable row name of every
@@ -403,11 +515,14 @@ Item{
 ```
 
 <Callout type="warn">
-`ctx.actor` on `item.use` is the native call's first parameter, and under the signature
-that was confirmed in game that parameter is the item data object, not the character. The
-target is an `FPalInstanceID` in the second parameter, which has never been probed. Use
-`ctx.itemId`, and reach the player through `Player.character()` rather than trusting
-`ctx.actor` to be a pawn.
+`ctx.actor` on `item.use` is a real pawn: `FindFirstOf("PalPlayerCharacter")`, the local
+player, handed over again as `ctx.player`. The native call's first parameter — the
+`UPalStaticItemDataBase` item data object — is `ctx.itemData`, and the second is
+`ctx.targetId`, an `FPalInstanceID` passed through unresolved because no instance-id to
+actor lookup is demonstrated anywhere in either tree. The caveat that remains is about
+WHICH character rather than about the type: `ctx.actor` is the one who USED the item, which
+is the one it was used ON only for self-use such as food. Feed a pal and the pal is
+`ctx.targetId`.
 </Callout>
 
 ### Effect
@@ -431,8 +546,36 @@ put the gameplay in your handlers, whether that is draining health or giving an 
 
 ### Skill
 
-Nothing in the game fires a skill for you. No channel emits `skill.*`. What works is
-calling the skill yourself, with the cooldown enforced in Lua.
+Three of the four skill channels carry events from the game. All four also run when you
+call them yourself, with the cooldown enforced in Lua.
+
+| Hook | State | Source |
+| --- | --- | --- |
+| `onActivate` | LIVE | `PalActionBase:OnBeginAction` — a pal's move IS an action object, and it carries its own `EPalWazaID` |
+| `onEquip` | LIVE | `AddPassiveSkill`, plus the `SetupSkillFromSelf` list diff |
+| `onUnequip` | LIVE | `RemovePassiveSkill`, plus the same list diff |
+| `onHit` | armed, unseen | `MakeDamageInfoByWazaType` and `PalAnimNotifyState_AttackCollision:OnHit`, both measured silent |
+
+`onHit` is the one that does not arrive, and the negative is settled from both sides. Both
+hooks were armed and carried nothing through fights in which `pal.damaged` and `pal.death`
+did fire, so a blow certainly connected and certainly did damage. And nothing on the damage
+path names a move: `FPalDamageRactionInfo` has six fields, `FPalDamageInfo` forty and
+`FPalDamageResult` twelve, and not one of them is an `EPalWazaID`. The id could only reach
+a hit by being remembered from the activation that preceded it, which is inference rather
+than a source and is deliberately not wired as one — a move that misses, or a second
+attacker in the same window, would be attributed to whatever activated last. `:hit(target)`
+is the working entry point.
+
+Only a skill DEFINED with `Skill{ ... }` is dispatched to: `Skill.get("FireBlast")` hands
+back a handle that was never registered, so the game firing FireBlast reaches nothing.
+`ctx.skillId` is an `EPalWazaID` name for the two combat channels and a passive row FName
+for the two passive ones.
+
+The firing that closed the passive question came from PalForge's own write —
+`Skill.Handle:teach` reaching `AddPassiveSkill` on a live pal — so a handler hears about
+changes its own pack made, and it is the equip direction that was recorded. Keep `onEquip`
+idempotent for a second reason as well: the first `SetupSkillFromSelf` call for a character
+reports every passive that character already has.
 
 ```lua
 local log = require("palforge.utils.log").scope("fireball")
@@ -454,8 +597,9 @@ Fireball:activate(myPalActor)   -- false while cooling down
 Fireball:hit(targetActor)
 ```
 
-Drive `:activate` / `:hit` / `:equip` / `:unequip` from code you control: a pal handler, a
-building's `onRightClick`, or a keybind.
+`:activate` / `:hit` / `:equip` / `:unequip` run the handler on demand from code you
+control — a pal handler, a building's `onRightClick`, a keybind — and they are unaffected
+by whether the channel carries. For `onHit` they are the only route.
 
 ### Audio, Mesh, UI
 
@@ -598,7 +742,9 @@ An instance is keyed by build id plus quantized world position:
 `"<buildId>@<qx>,<qy>,<qz>"`, using `gridCm` from the definition, default 100 cm. The
 canonical position is always the live actor's location. The **actor**, not the key, is
 what binds an already-known instance across scans, because a placed building's reported
-location jitters by more than a cell between scans.
+location jitters by more than a cell between scans. That binding is on the actor's
+`GetFullName()` string and never on the handle: UE4SS mints a fresh wrapper per lookup, and
+each scan's `FindAllOf` hands back new ones.
 </Step>
 
 <Step>
@@ -607,8 +753,10 @@ location jitters by more than a cell between scans.
 `def.cls:new{ ... }` produces the instance, so every method you declared on the definition
 resolves on it. State comes from the saved record if there is one, otherwise from the
 definition's `state` field, which may be a table or a factory function. A fresh instance is
-written to `state/entities_<saveId>.json` under the mod folder. `saveId` falls back to
-`world` when the world guid cannot be read.
+written to `state/entities_<saveId>.json` under the mod folder. `saveId` is read off
+`PalGameInstance`: the save DIRECTORY name first (`GetSelectedWorldSaveDirectoryName`, or
+its backing property), then the world's display name, sanitised and prefixed `w_`. When
+neither answers it falls back to the shared bucket `world`.
 </Step>
 
 <Step>
@@ -1038,7 +1186,7 @@ Pal{
     color = { r = 1.0, g = 0.4, b = 0.2, a = 1.0 },
     events = {
         onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)                 -- pals have no scan, so you attach it
+            pal:renderOn(ctx.actor)                 -- already done for you; the guard makes this free
         end,
         onDamaged = function(pal, ctx)
             Burning:apply(ctx.actor)                -- re-apply stacks and refreshes
@@ -1054,37 +1202,39 @@ Pal{
 }
 ```
 
-### A per-pal ticker, since pal onTick never fires
+### Per-pal state, on top of the class-level onTick
+
+Pal `onTick` runs on the definition CLASS, once per live matching actor, so anything you
+want to remember about one particular pal has to be keyed by you. Key it on
+`uobject.key(actor)`, the actor's `GetFullName()` string, and never on the actor value
+itself: UE4SS builds a fresh wrapper on every lookup, so a table keyed on the wrapper
+written in one sweep misses in the next for the very same engine object.
 
 ```lua title="content/patrol.lua"
-local event = require("palforge.core.event")
-local log   = require("palforge.utils.log").scope("patrol")
+local uobject = require("palforge.core.uobject")
+local log     = require("palforge.utils.log").scope("patrol")
 
-local watched = setmetatable({}, { __mode = "k" })   -- weak: never keep a pawn alive
+local seen = {}     -- GetFullName string -> seconds watched
 
 Pal{
     id = "SheepBall",
     events = {
         onSpawned = function(pal, ctx)
-            if ctx.actor then watched[ctx.actor] = 0 end
+            local k = uobject.key(ctx.actor)
+            if k then seen[k] = 0 end
+        end,
+        onTick = function(pal, ctx)
+            local k = uobject.key(ctx.actor)
+            if not k then return end                 -- a pawn that will not answer its name
+            seen[k] = (seen[k] or 0) + 3             -- PAL_SCAN_MS, in seconds
+            log.info("sheepball " .. k .. " watched for " .. tostring(seen[k]) .. " s")
         end,
         onDeath = function(pal, ctx)
-            if ctx.actor then watched[ctx.actor] = nil end
+            local k = uobject.key(ctx.actor)
+            if k then seen[k] = nil end
         end,
     },
 }
-
-event.every(2000, function()
-    for actor, seconds in pairs(watched) do
-        local ok, valid = pcall(function() return actor:IsValid() end)
-        if not (ok and valid) then
-            watched[actor] = nil
-        else
-            watched[actor] = seconds + 2
-            log.info("sheepball alive for " .. tostring(watched[actor]) .. " s")
-        end
-    end
-end)
 ```
 
 ### A building that fires a skill on interaction
@@ -1152,12 +1302,15 @@ teardown, so marking dirty is enough.
 - The first argument is the thing it happened to: a building handler gets the live
   structure, everything else gets its handle.
 - A building keeps state across reloads: change `inst.state`, then call `inst:save()`.
-- Everything periodic runs on one 500 ms heartbeat — building `onTick`, effect timing and
-  `event.every(ms, fn)`.
-- Some hooks are accepted but never called: pal `onTick`, item `onCraft` and `onDiscard`,
-  building `onBuild`, `onLeftClick` and `onBreak`. Drive that work from `tick` or from a
-  hook that does fire.
-- No skill fires by itself. Call `:activate` or `:hit` from your own code.
+- Everything periodic runs on one 500 ms heartbeat — building `onTick`, effect timing,
+  `event.every(ms, fn)` and the slower pal sweep behind pal `onTick`.
+- There are 21 channels: 13 LIVE from a named native function, 7 derived by PalForge from
+  the scan or a loop, and one — `skill.hit` — armed and never seen carrying anything.
+- Three hooks are accepted and never called: building `onLeftClick` and `onBreak`, which
+  have no channel because the dumps offer nothing to feed one, and skill `onHit`. Use
+  `onRemove` for destruction and `:hit(target)` for a hit.
+- F9 replaces every module but keeps the armed hooks, the registry, the bus and the
+  building runtime state — and it refuses while a repeating callback is outstanding.
 
 Next, read [Building](/docs/api/building) for the definition fields behind the runtime on
 this page.

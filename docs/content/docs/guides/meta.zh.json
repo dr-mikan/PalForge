@@ -2,6 +2,10 @@
   "title": "指南",
   "pages": [
     "first-content-pack",
+    "what-a-pack-can-ship",
+    "vanilla-assets",
+    "console-commands",
+    "dev-tooling",
     "testing"
   ]
 }

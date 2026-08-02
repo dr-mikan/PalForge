@@ -36,18 +36,38 @@ Palworld の Lua Mod がすでに動いているなら、UE4SS は入ってい�
 ue4ss/
 └── Mods/
     └── PalForge/
-        ├── enabled.txt
+        ├── enabled.txt          <- 空ファイル。これがあるときだけ UE4SS は Mod を起動する
         └── Scripts/
             ├── main.lua
             └── palforge/
-                ├── env.lua
-                ├── types.lua
-                ├── api/
-                ├── core/
-                ├── native/
-                ├── tests/
-                └── utils/
+                ├── env.lua      <- dev/release スイッチと、計測対象のゲームビルド
+                ├── types.lua    <- エディタ用の注釈のみ。実行時には読み込まれない
+                ├── autorun.txt  <- キー不要の dev キュー（core/autorun.lua がここを読む）
+                ├── api/         <- パックが書く相手になる公開サーフェス
+                ├── core/        <- エンジン本体。カーネル、イベント系、Palworld ブリッジ
+                ├── native/      <- Palworld 自身のコンテンツをデータカタログにしたもの
+                ├── test/        <- ゲーム内 API スイート（単数形。下を参照）
+                ├── tests/       <- ヘッドレスのユニットバンドル。dev では起動時に走る
+                └── utils/       <- log, json, file, items
 ```
+
+これは `tools/deploy.sh` がコピーする一覧そのものです。`Scripts/main.lua` と
+`Scripts/palforge/` 全体から、参照専用で実行時には不要な `deprecated/` と `tmp/` を除いたものに
+なります。
+
+抜けやすいエントリが 2 つあり、どちらも別の症状に化けます。
+
+- **`palforge/test/`（単数形）**。`core/registry.lua` は `palforge.test` を require しており、
+  **F1** を割り当てているのはこのモジュールです。このディレクトリが無いインストールでは、dev
+  モードでもテストスイートも F1 キーも存在せず、その理由を説明する行はログのどこにも出ません。
+  （`palforge/tests/`（*複数形*）は別物で、dev では起動時にカーネルが走らせるヘッドレスの
+  ユニットバンドルであり、`ps_catalog` コンソールコマンドの中身でもあります。こちらも同梱
+  されます。`core/registry.lua` が起動時に require していることが分かった時点で、これを隠して
+  いた `.gitignore` の行は削除されたので、クローンにも入っています。それでも無い場合は、
+  カーネルが「dev tooling NOT loaded」の行に名前付きで挙げます。）
+- **`palforge/autorun.txt`**。`core/autorun.lua` が `palforge/` の隣からこれを読み、ワールド
+  ロード時に名前付きのアクションを実行します。キーもコンソールも効かないマシンで何かを走らせる
+  唯一の方法です。このプロジェクトでは入力経路が 3 つ続けて死んでいます。
 
 `Scripts/palforge/types.lua` は型注釈だけのファイルで、ゲームの実行中はどこからも読み込まれません。
 入力中にエディタが定義のフィールドを補完できるようにするためのものです。
@@ -64,16 +84,18 @@ UE4SS で Lua Mod を有効にする方法は 2 つあります。Mod フォル�
 
 ```text title="ue4ss/Mods/mods.txt"
 CheatManagerEnablerMod : 1
-ConsoleEnablerMod : 1
 PalForge : 1
 ```
 
 `CheatManagerEnablerMod` は、ゲーム本体の管理オブジェクト `UPalCheatManager` を PalForge に
-使わせるための Mod です。有効なままにしてください。パルをワールドに出す処理はこのオブジェクトを
-通るので、無いと `Pal.Handle:spawn` はゲームに届く前に断られ、次の行を出して諦めます。
+渡す Mod です。ワールドへのスポーンはこのオブジェクトを通ります。ただし必須ではなく、あくまで
+利便性のためのものです。`core/spawn.lua` の `cheatManager()` はまず生きているものを探し、次に
+コントローラ自身の `CheatManager` を見て、どちらも無ければ
+`StaticConstructObject(pc.CheatClass, pc)` で自分で 1 つ作ります。作れないのはプレイヤー
+コントローラが無いときだけで、その状況を報告するのが次の行です。
 
 ```text
-[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager and none could be constructed (no player controller yet?)
 ```
 
 </Step>
@@ -97,10 +119,18 @@ UE4SS が実行するのは `main.lua` 1 ファイルだけです。順に次を
 1. Lua の `package.path` を自分のフォルダに向けます
    （`thisDir .. "?.lua;" .. thisDir .. "?\\init.lua;"`）。これで `require("palforge.api")` が隣にある
    モジュールを見つけられます。
-2. `palforge.env` を読み込み、バージョンと dev フラグを出力します。
-3. `registry.initialize()` を `pcall` の中で呼び、失敗したら `initialize failed: <err>`、成功したら
+2. 省略可能なモジュール `palforge_dev`（`Scripts/palforge_dev.lua`）を require し、3 つのうち
+   どれが起きたかを記録します。`loaded`、`absent (release copy)`、`FAILED TO LOAD` です。この
+   1 ファイルが dev スイッチのすべてで、3 つ目だけは別途 warn を出します。構文エラーで読めない
+   dev オーバーレイと、フラグを無視するフレームワークは、外から見ると見分けがつかないからです。
+3. 動いているゲームに `UKismetSystemLibrary` の CDO 経由でビルド文字列を尋ね、答えを
+   `env.gameBuildLive` に入れます。この時点で何も答えないのは普通のことです（Lua Mod は早い段階で
+   起動します）。そのため最初の `world.ready` で 1 度だけ読み直します。
+4. 起動バナーを出力します。バージョン、宣言されたゲームビルドとライブのゲームビルド、`dev` と
+   `debug`、dev オーバーレイの有無です。続けてシングルプレイヤー宣言を全文で出します。
+5. `registry.initialize()` を `pcall` の中で呼び、失敗したら `initialize failed: <err>`、成功したら
    `ready` を出力します。
-4. `_G.PalForge` を公開し、ほかの Mod が動作中の PalForge をそのまま使えるようにします。
+6. `_G.PalForge` を公開し、ほかの Mod が動作中の PalForge をそのまま使えるようにします。
 
 ```lua title="Scripts/main.lua (excerpt)"
 local thisDir = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
@@ -110,7 +140,12 @@ local env      = require("palforge.env")
 local registry = require("palforge.core.registry")
 local log      = require("palforge.utils.log").scope("main")
 
-log.info("PalForge v" .. tostring(env.version) .. " starting (dev=" .. tostring(env.dev) .. ")")
+log.info(string.format(
+    "PalForge v%s starting | game build: declared %s, live %s | dev=%s debug=%s | dev overlay: %s",
+    tostring(env.version),
+    tostring(env.gameBuild),
+    liveBuild and (liveBuild .. " (" .. buildSource .. ")") or ("unknown (" .. buildSource .. ")"),
+    tostring(env.dev), tostring(env.debug), devOverlay))
 ```
 
 すべてが立ち上がるのは `registry.initialize()` の中です。5 つのステップを実行します。
@@ -126,21 +161,27 @@ flowchart TD
   G --> H["_G.PalForge published"]
 ```
 
-カタログのロード順は `buildings`、`items`、`pals`、`skills`、`effects`、`audio`、`ui` です。カタログを
-読み込むことがそのまま登録になります。定義の呼び出しが、実行されたときに自分自身を
-`core/object_manager` に書き込むからです。それらのファイルに並んでいる長い ID のリストは、`get(id)` で
-要求されるまで単なるデータのままなので、起動時に何千もの行 ID が一度に登録されることはありません。
+カタログのロード順は `buildings`、`items`、`pals`、`skills`、`effects`、`audio`、`ui` です。1 つを
+require すると、そのカタログが持つ手書きの定義呼び出しが走り、定義の呼び出しは実行時に自分自身を
+`core/object_manager` に書き込みます。ファイルに並んでいる長い ID のリストは単なるデータのままで、
+遅延評価の `get(id)` はハンドルを `{ register = false }` で作ってそこで止まります。つまり起動時も、
+1 回のルックアップも、行を登録しません。登録するのは opt-in の `<catalog>.publish(id)` だけです。
+`native/buildings` は何も登録しません。手書きの `WorkBench` と `PalBoxV2` にも
+`{ register = false }` が付いています。建築の登録は無害ではなく、`core/event` のスキャンが、すでに
+ワールドに建っている該当構造物をすべて追跡して永続化し始めるからです。
 
 `_G.PalForge` には、ほかの Mod が必要とするものが一式載っています。
 
 ```lua
 _G.PalForge = {
-    env = env,
-    api = require("palforge.api"),
+    env  = env,
+    api  = api,
+    pack = api.pack,       -- PalForge.pack("mypack").Item{ ... } は所有パックを記録する
     utils = { log = ..., json = ..., file = ..., items = ... },
     core = {
         registry = ..., event = ..., object_manager = ..., spawn = ..., mesh = ...,
         sound = ..., player = ..., spatial = ..., icons = ...,
+        uobject = ..., assetpath = ...,
     },
     native = require("palforge.native"),
 }
@@ -148,23 +189,52 @@ _G.PalForge = {
 
 ## 正常な起動ログ
 
-同梱の既定値は `env.dev = true` です。この状態での正常な起動は次のようになります。
+dev ツールはすべて既定でオフなので、プレイヤーが見るログは短いほうです。リリース状態での正常な
+起動は次のようになります。
 
 ```text
-[PalForge.main][info] PalForge v0.3.0 starting (dev=true)
+[PalForge.main][info] PalForge v0.3.0 starting | game build: declared v1.0.2.101103, live unknown (UKismetSystemLibrary CDO did not resolve) | dev=false debug=false | dev overlay: absent (release copy)
+[PalForge.main][info] PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not supported and are not tested: there is no replication layer, and the item, spawn and event routes are all client-authoritative. A pack may appear to work for the host and do nothing for anyone else.
 [PalForge.event][info] tick source live
-[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item live; onBuild + onSpawned arm at world.ready; craft+discard have no native source) + dispatch
-[PalForge.keyboard][info] bound F4
-[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
-[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
-[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
-[PalForge.keyboard][info] bound F1
-[PalForge.registry][info] initialized (dev=true, 19 class(es) registered)
+[PalForge.event][info] event wired: bus + sources (tick/world/building/pal/item/skill; onBuild, the three onSpawned candidates and the three passive ones arm at world.ready; skill.activate has three sources and skill.hit two, and the log says which one carried it; building.leftclick and building.break have no native source and never will) + dispatch
+[PalForge.registry][info] dev tooling NOT loaded (env.dev = false, the shipped default): no dev keybinds — including F4, unlock all technologies — no F1 API suite, no F9 reload, no ps_catalog dumper, no headless unit bundle and no test hooks. ...
+[PalForge.registry][info] initialized (dev=false, debug=false, 17 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-クラス数は、登録された定義の数そのものです。同梱カタログが宣言しているものに、自分の定義が加わります。
-PalForge が起動したことを示す行は `[PalForge.main][info] ready` です。
+`live` は、ビルド文字列を尋ねたときに動いているゲームが答えた内容です。UE4SS は Lua Mod を早い
+段階で起動するため、この時点の `unknown` は失敗ではなく普通のことです。読み取りは最初のワールド
+ロードで 1 度だけやり直され、その答えがそこに記録されます。PalForge は推測を書くくらいなら
+`unknown` と書きます。宣言されたビルドとライブのビルドが食い違ったときは、両方を挙げて 1 度だけ
+warn を出します。
+
+クラス数は登録済みの定義の数です。17 は同梱カタログだけで出る数（audio 6、item 3、effect 3、
+pal 2、ui 2、skill 1、building 0）で、自分の定義はここに加算されます。PalForge が起動したことを
+示す行は `[PalForge.main][info] ready` です。
+
+dev デプロイではツール類の行が加わります。各バインドは、そのキーにゲーム自身のキーコンフィグが
+何を持っていたかを、バインドと同じ行で報告します。
+
+```text
+[PalForge.main][info] PalForge v0.3.0 starting | game build: ... | dev=true debug=true | dev overlay: loaded
+[PalForge.keyboard][info] bound F4 [keymap: unknown — the game's key config has not been read yet (the config source needs a loaded world), so nothing is claimed either way; run pf_keys inside a save]
+[PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
+[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
+[PalForge.keyboard][info] bound F9 [keymap: ...]
+[PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
+[PalForge.keyboard][info] bound F1 [keymap: ...]
+[PalForge.test][info] keyboard: F1                   unknown  tests: all suites                        game: the game's key config has not been read
+[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, ps_catalog console command, F9 reload, headless unit bundle (palforge.tests), in-game API suite on F1 (palforge.test), game-required test hooks (palforge.test.hooks)
+[PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
+[PalForge.main][info] ready
+```
+
+`tests: 8 passed ...` はヘッドレスのユニットバンドル `palforge/tests/`（複数形）です。リポジトリ
+に入っているので、これが通常の行です。このディレクトリを落としたインストールでは、代わりに
+カーネルが `dev tooling NOT loaded` の行に名前付きで挙げます。この行は両方のモードで出力され、
+ロードされなかったものとその理由をすべて
+名前で列挙します。バインドされなかったキーと、バインドされたのに届かなかったキーは外から見ると
+同じに見えるので、両者を区別できるのはこの行だけです。
 
 もう 2 行はワールドのゲートに対応します。PalForge はセーブデータのロードが終わるまでワールド内の
 オブジェクトに触れません。1 行目はセーブの準備ができたとき、2 行目はそのワールドを離れたときに出ます。
@@ -182,38 +252,89 @@ world ソースは 1000 ms ごとに `FindFirstOf("PalPlayerCharacter")` を確�
 `ready-watch unavailable (...) - dispatch always on` が出て、そのまま全部動きます。
 </Callout>
 
-## dev トグル
+## dev スイッチ
 
 `Scripts/palforge/env.lua` には、PalForge が実行時に読む設定が入っています。`require()` にキャッシュ
-されるため、どのモジュールも同じテーブルを見ます。
+されるため、どのモジュールも同じテーブルを見ます。そして、ここにあるスイッチはすべて**オフ**で
+出荷されます。
 
 ```lua title="Scripts/palforge/env.lua"
 return {
-    dev     = true,        -- THE dev/release switch (dev tools load only when true)
-    name    = "PalForge",
-    version = "0.3.0",
+    dev        = false,       -- THE dev/release switch (dev tools load only when true)
+    debug      = false,       -- game-required test hooks (test/hooks); needs dev too
+    debugHooks = {},          -- per-hook opt-in for the hooks that WRITE
+    name       = "PalForge",
+    version    = "0.3.0",
+    gameBuild     = "v1.0.2.101103",
+    gameBuildLive = nil,
+    multiplayer   = false,
 }
 ```
 
-`dev` が true のとき、`registry.initialize()` は追加で次を行います。
+フレームワークの中に `dev` をオンにするものはありません。オンにするのは省略可能な 1 ファイル、
+`Scripts/palforge_dev.lua` だけです。`main.lua` は `registry.initialize()` の直前にこれを require
+し、無ければ黙って無視します。
 
-- `core/keyboard/` のキーバインドファイルを読み込みます。これにより **F4** が
-  `utils.items.unlockAllTech` になり、押すとカスタムの建物やチェストがビルドメニューに出ます。
-- `ps_catalog` コンソールコマンドを登録します。これは手動で実行する DataTable ダンパーで、自動では
-  決して動きません。
-- `palforge.tests` のヘッドレステスト一式を実行します。`tests: ...` の行はこれによるものです。
-- ゲーム内テストスイート `palforge.test` を読み込み、**F1** に割り当てます。キーを押すまで何も実行され
-  ません。これらのテストは動いているワールドに触れるからです。
-
-コンテンツカタログだけを登録する静かなリリースビルドにするには `dev = false` にします。
-
-```lua title="Scripts/palforge/env.lua"
-return {
-    dev     = false,
-    name    = "PalForge",
-    version = "0.3.0",
-}
+```lua title="Scripts/palforge_dev.lua"
+local env = require("palforge.env")
+env.dev   = true
+env.debug = true
+-- env.debugHooks["pal-skills-equip"] = true   -- 書き込むフックごとの opt-in
 ```
+
+このファイルは gitignore されているのでリポジトリ経由でプレイヤーに届くことはなく、
+`tools/deploy.sh` が代わりに書き出します。スクリプトはデプロイ先の `Scripts/` を丸ごと差し替え
+（先にステージングし、リネーム 2 回で入れ替えるので、ゲームが中途半端なツリーを見ることはありま
+せん）、コピーにビルドのタイムスタンプを刻み、`env.lua` は決して書き換えません。
+
+```bash
+tools/deploy.sh                        # 既定のインストール先へ dev デプロイ。オーバーレイを書く
+tools/deploy.sh "/path/to/Palworld"    # 別の場所へ dev デプロイ
+tools/deploy.sh --release              # オーバーレイ無し。古いコピーは名前を挙げて削除する
+```
+
+つまりループはこうなります。**ファイルを編集 → `tools/deploy.sh` → ゲーム内で F9（新規デプロイの
+初回だけは再起動）→ F1**。Lua は Mod ロード時に読まれるので、デプロイしただけでは動作中のゲームは
+何も変わりません。ビルドのタイムスタンプは、古い実行結果を 1 時間かけて調べる代わりにログ上で
+一目で分かるようにするためのものです。
+
+### `dev` が有効にするもの: 9 個のキー
+
+`registry.initialize()` は `core/keyboard/` 以下のキーバインドファイル、F9 のリロード、
+`ps_catalog` DataTable ダンパー、ヘッドレスのユニットバンドル、そして `palforge.test` を読み込み
+ます。F1 を割り当て、各 discovery プローブにキーを 1 つずつ与えているのは最後のモジュールです。
+合計 9 個です。
+
+| キー | 何をするか | 画面に何が必要か |
+| --- | --- | --- |
+| **F1** | ゲーム内 API スイートの実行。14 スイート、481 チェック | どこでも動くが、セーブをロードしていないと 28 チェックが skip |
+| **F2** | プローブ `title` — ゲーム自身のタイトルメニューボタン | タイトル画面 |
+| **F3** | プローブ `uislot` — そのボタンの内側スロットをワールドから読む | ロード済みのセーブ |
+| **F4** | **ロード中のセーブのテクノロジーをすべて解放する** | ロード済みのセーブ |
+| **F5** | プローブ `reflect` — クラス、関数、引数、DataTable の行 | ロード済みのセーブ |
+| **F6** | プローブ `pal` — パルのメッシュコンポーネント、アニメクラス、マテリアル | 近くに立っているパル |
+| **F8** | プローブ `watch` — ネイティブフックを仕掛け、操作中に何が発火したかを記録 | ロード済みのセーブと、クラフト／ドロップ／スポーン |
+| **F9** | `palforge.*` の全モジュールをリロード | — |
+| **F10** | プローブ `uievents` — UI 再構築フック 4 つの発火数を数える | ロード済みのセーブと、タイトルへ戻って再ロード |
+
+9 個のうち 7 個は読んで出力するだけです。**何かを変えるのは 2 個だけです。**
+
+- **F4** はロード中のセーブに書き込みます。1 回押すだけ、確認も無く、全テクノロジーが解放されます。
+- **F8** はネイティブフックを登録します。UE4SS にはフックを外す手段が無いため、仕掛けたものは
+  ゲームを終了するまで残り続けます。目の前に ChickenPal を 1 体スポーンさせ、その後およそ 60 秒間
+  は F9 を拒否します。長い非同期チェーンが 2 本まだ残っており、その最中のリロードはエンジンの
+  tick フックごと道連れにするからです。
+
+F7 が入っていないのは意図的です。Palworld 自身の音量キーであり、バインドは成功し、ログにも
+成功と出て、押しても一度も届きません。すべてのアクションにはコンソールコマンドも用意されており
+（`pf_tests`、`pf_watch`、`pf_hooks`、プローブごとに 1 つ、フックごとに 1 つ）、
+`core/autorun.lua` は `palforge/autorun.txt` に書かれた名前付きアクションをワールドロード時に
+実行します。入口が 3 通りあるのは、このプロジェクトで入力経路が 3 つ続けて死んだからです。
+
+`env.debug` は 2 つ目の、より狭いスイッチです。ゲームが動いていないと計測できない 13 件の測定を
+まとめた `palforge/test/hooks/` を読み込みます。これらは実行されるのではなく宣言されるだけで、
+`pf_hook <id>` で名前を指定して呼び出します。`pf_hooks` は宣言済みのフックと、それぞれが skip
+する理由を一覧します。セーブに書き込むものは、さらに `env.debugHooks[id] = true` が必要です。
 
 どのモジュールからも同じテーブルを読めます。
 
@@ -228,8 +349,9 @@ end
 
 <Callout type="warn">
 dev ゲートは `registry.initialize()` の内部で読まれます。そのあとに `require("palforge.env").dev` を
-書き換えても、自分のコードから見える値が変わるだけで、dev ツールのロード状態は変わりません。確実に
-切り替えるには `env.lua` を編集してください。
+書き換えても、自分のコードから見える値が変わるだけで、dev ツールのロード状態は変わりません。
+オーバーレイのファイルが効くのは、`main.lua` が `initialize()` の *前* にそれを require している
+からです。
 </Callout>
 
 ## 最初の定義
@@ -305,15 +427,21 @@ api.Building{
 ```
 
 1 つの ID が持てる定義は 1 つだけです。`object_manager` は種類と ID をキーにしているため、PalForge が
-すでに定義を同梱している ID を定義すると、そちらを置き換えます。`native/buildings` は `WorkBench` と
-`PalBoxV2`、`native/items` は `Wood` / `Berries` / `Arrow`、`native/pals` は `ChickenPal` と `SheepBall`
-を同梱しています。置き換えたい場合を除いて、別の ID を選んでください。
+すでに登録済みの ID を定義すると、そちらを置き換えます。同梱カタログが実際に登録するのは、起動行に
+出る 17 クラスです。`native/items` の `Wood` / `Berries` / `Arrow`、`native/pals` の `ChickenPal` と
+`SheepBall`、それに audio・effect・skill・UI のものです。`native/buildings` は**何も登録しません**。
+`WorkBench` と `PalBoxV2` は `{ register = false }` で作られ、要求に応じて
+`native.buildings.publish(id)` が渡します。したがって上の `ItemChest` は何とも衝突せず、パックを
+またぐ衝突は黙って上書きされる代わりに、名前付きで warn が出ます。
 
 パルの例では、ハンドラではなくアクションを見てみます。スポーンには数秒の猶予をあげてください。
-クリーチャーが現れるのは呼び出しから 4〜8 秒後で、宣言したメッシュとハンドラを持って出てきます。
+`SpawnMonster` は非同期で、実際に計測できた唯一の到着は 5.9 秒後でした。`core/spawn` は最大 12 秒
+ワールドを監視し、到着を見つけたらログに書きます。`:spawn` が返す真偽値は呼び出しについてのもので
+あって、目の前にパルが立っていることを意味しません。
 
 ```lua
 local api = require("palforge.api")
+local log = require("palforge.utils.log").scope("mypack")
 
 -- Pal.get works for any game CharacterID, defined or not.
 api.Pal.get("ChickenPal"):spawn(api.Player.coordinate())   -- the pal arrives a few seconds later
@@ -330,8 +458,10 @@ local chicken = api.Pal{
         animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C",
     },
     events = {
+        -- The mesh declared above is attached FOR YOU on pal.spawned; nothing here calls
+        -- renderOn. Your own handler runs after that attach, and may fire more than once.
         onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)
+            log.info("chicken spawned: " .. tostring(ctx.actor))
         end,
     },
 }
@@ -420,8 +550,10 @@ end
 
 </Steps>
 
-`env.dev = true` なら、**F1**（ゲーム内テストスイートの実行）と **F4**（すべてのテクノロジーを解放）が
-そのまま動作確認に使えます。
+`object_manager.owner(type, id)` は、その登録がどのパックのものかを答えます。`entry` と
+`byResolved` は同じ問いに別の方向から答えます。dev デプロイなら、いちばん手早い動作確認は **F1**
+です。14 スイートすべてを実行し、答えを出せなかったチェックが何件で、どちら方向なのかをサマリが
+書きます。
 
 ## API へのアクセス方法
 
@@ -618,10 +750,19 @@ PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required
 
 ### ハンドラが呼ばれない
 
-- そのフックを呼ぶものがあるか確認します。アイテムの `onCraft` と `onDiscard`、建築の `onLeftClick` と
-  `onBreak` は書けますが、まだ何も発行しません。代わりに `onUse` / `onObtain`、`onRightClick` /
-  `onRemove` を使ってください。ライブなものは [ライフサイクル](/docs/concepts/lifecycle) にまとまっています。
+- そのフックを呼ぶものがあるか確認します。アイテムのイベントは 4 つとも発火します。`onObtain` と
+  `onUse` はインベントリと使用の経路から、`onCraft` は 2 つのマップオブジェクトモデルの
+  `OnFinishWorkInServer` から、`onDiscard` は `RequestDrop_ToServer` / `RequestDispose_ToServer`
+  からです。決して発火しないのは建築の `onLeftClick` と `onBreak` の 2 つで、これは候補になり得る
+  クラスの関数一覧を全部読んだ結果として否定側で決着しています。代わりに `onRightClick` を、消失に
+  ついては `reason = "missing"` で届く `onRemove` を使ってください。3 つ目はスキルの `onHit` で、
+  こちらはまだ未解決です。ライブなものは [ライフサイクル](/docs/concepts/lifecycle) にまとまっています。
 - ワールドのゲートを確認します。`world ready - building dispatch enabled` より前は何も動きません。
+  `onBuild`、`onSpawned`、パッシブスキルのソースは Mod ロード時ではなく `world.ready` の時点で
+  仕掛けられるため、ワールドのロードが最後まで終わらないセッションでは沈黙したままになります。
+- ソースの名前を挙げる行がログにあるか確認します。チャンネルが最初に何かを運んだとき、必ずその旨が
+  出ます。`channel item.craft carried its first event this session — the native source is LIVE,
+  whether or not any definition handled it`。この行が無ければ、ゲームが一度も呼んでいません。
 - ゲーム側の都合で設置できなかったフックがないか確認します。
 
   ```text
@@ -664,16 +805,20 @@ events = {
 
 ### スポーンしても何も起きない
 
-まずはもう数秒待ってください。パルが現れるのは `:spawn` が返ってから 4〜8 秒後で、いつ現れたかは
-ログに出ます（[Pal](/docs/api/pal) を参照）。それだけ待っても何も出てこない場合は、次の行を探して
-ください。
+まずはもう数秒待ってください。`:spawn` が `true` を返すのは「ネイティブ呼び出しが発行された」と
+いう意味であって、パルが存在するという意味ではありません。座標を指定する形は、およそ 5.9 秒後に
+到着するのが実測されています。`core/spawn` はワールドを監視し、到着を専用の行でログに出します
+（[Pal](/docs/api/pal) を参照）。それだけ待っても何も出てこない場合は、次のどちらかを探してください。
 
 ```text
-[PalForge.spawn][warn] spawn.pal: no PalCheatManager (CheatManagerEnabler mod missing this session?)
+[PalForge.spawn][warn] spawn.pal: no PalCheatManager and none could be constructed (no player controller yet?)
+[PalForge.spawn][err] spawn.pal: SpawnMonster did not execute for ChickenPal [evidence ...]
 ```
 
-これは、呼び出しがゲームに届く前に拒否されたという意味です。ワールドへのスポーンには
-`UPalCheatManager` が必要なので、`mods.txt` で `CheatManagerEnablerMod` を有効にしてください。
+前者は、チートマネージャを作る相手のプレイヤーコントローラが無かった、つまりまだワールドに入って
+いないという意味です。後者は、ライブのクラスがヘッダダンプどおりに `SpawnMonster` を宣言していな
+かったため `core/signature` が呼び出しを拒否したという意味で、どの引数個数を期待したかはすでに
+ログに出ています。
 
 ## 次に読むもの
 
@@ -695,7 +840,11 @@ events = {
 ## まとめ
 
 - PalForge は `ue4ss/Mods/PalForge/Scripts/` に置き、`palforge/` を `main.lua` の隣に置きます。
-  配置が違うと動きません。
+  配置が違うと動きません。`palforge/test/` と `palforge/autorun.txt` も一緒にコピーしてください。
+  前者が無いと F1 が存在せず、後者が無いとキー無しで入る手段が無くなります。
+- dev ツールはすべてオフで出荷されます。9 個のキーを有効にするのは `Scripts/palforge_dev.lua` で、
+  これは `tools/deploy.sh` が書き出し、gitignore されており、プレイヤーの手元のコピーには決して
+  入りません。F4 はロード中のセーブの全テクノロジーを解放します。
 - `[PalForge.main][info] ready` は PalForge が起動した合図、
   `world ready - building dispatch enabled` は自分のハンドラが動き出せる合図です。
 - 自分のコンテンツは `main.lua` と同じ階層の自分のファイルに書き、`registry.initialize()` のあと、

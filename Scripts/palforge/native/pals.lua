@@ -11,11 +11,26 @@
 --                    naming rule; for this table it is the identity, because every one of the
 --                    753 ids is already a Lua identifier.
 --   (c) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
---   (d) CURATED    — the two DEMO creatures (with live lifecycle log hooks).
+--   (d) M.publish(id) — register that handle with object_manager, on request. See below.
+--   (e) CURATED    — the two DEMO creatures (with live lifecycle log hooks).
 --
 -- Only the CURATED definitions call Pal{ ... } at load, so only they self-register into
--- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- object_manager at mod start; a named field and get(id) both build on demand. That is why
 -- requiring this file never registers the hundreds of pal ids.
+--
+-- AND A READ NO LONGER REGISTERS EVEN THE ONE ROW IT TOUCHES (2026-08-02). M.get builds with
+-- `{ register = false }` (contract C2) — the publish gate, forced by native/buildings.lua where
+-- registration is not inert (a registered building def makes core/event track and PERSIST every
+-- matching actor, so a field read started writing to the save; the measurement is in that
+-- file's header). Pals persist nothing, but the gate is one rule in all six catalogs rather
+-- than five exceptions, and it keeps a catalog walk from leaving 753 classes in the registry
+-- that every namespaced lookup miss then walks.
+--
+-- WHAT REGISTRATION IS FOR HERE: core/event dispatches pal.spawned / pal.damaged / pal.death /
+-- pal.captured by looking the CharacterID up in object_manager, and Pal.get(id) hands back a
+-- registered class instead of fabricating a thin one. A lazy catalog handle declares no
+-- handlers, so publishing one changes nothing observable — which is exactly why the two CURATED
+-- demos below, which do declare handlers, still register at load and a lazy one does not.
 --
 -- WHAT A LAZY NATIVE HANDLE HONESTLY DOES:
 --   * :spawn() is real for every id here — it hands the CharacterID to the game's own spawn
@@ -31,7 +46,7 @@
 --     DT_PalIconDataTable keyed by exactly these row ids (674 of 674 rows carry an icon,
 --     measured 2026-07-26).
 --   * :renderOn(actor) returns false for a lazy handle, and that is correct rather than broken.
---     It attaches PalForge's OWN declared mesh (api/pal.lua:393) and a lazy handle declares
+--     It attaches PalForge's OWN declared mesh (api/pal.lua:500) and a lazy handle declares
 --     none — the game is already drawing the creature. The two curated demos below have one.
 --   * :name() answers the id; the localised name is a DataTable row VALUE and reading one from
 --     Lua is still unsolved on this build (the marker in api/item.lua).
@@ -40,6 +55,27 @@
 --     ON a pal, not a way to be told about one. Declare your own Pal{ id = "...", events = ... }
 --     under the same id to be dispatched to — which replaces the registration, see
 --     test/cases/definitions.
+--
+-- ONE CREATURE, TWO SPELLINGS, AND WHAT THAT COSTS YOU. The game itself spells the sheep two
+-- ways and this catalog carries both, because both are real:
+--
+--   "SheepBall"  — the BLUEPRINT id (live actor BP_SheepBall_C). It is what the runtime
+--                  dispatches on, so it is the id the curated demo below is declared under.
+--   "Sheepball"  — the DT_PalMonsterParameter_Common row FName (lowercase b), and therefore
+--                  the key DT_PalCharacterIconDataTable answers to.
+--
+-- The consequence is not theoretical and it is not a typo to be fixed: `pals.SheepBall` and
+-- `pals.Sheepball` are TWO HANDLES for ONE creature with DIFFERENT capabilities.
+-- `pals.SheepBall:iconOf()` MISSES (no row is spelled that way) and `pals.Sheepball:iconOf()`
+-- HITS; conversely the lifecycle handlers hang off "SheepBall", because that is the id the
+-- dispatch carries. native/buildings.lua has the same split for WorkBench / Workbench.
+--
+-- What is done about it here, given that neither spelling can be dropped: the alternate is
+-- carried as DATA in M.ROW_ID and M.iconOf(id) follows it, so `pals.iconOf("SheepBall")` answers
+-- the game's own artwork while `pals.SheepBall:iconOf()` still misses. Handle:iconOf cannot
+-- consult it — it is api/pal.lua's method and it reads self.id and self.icon only. A Pal.Spec
+-- field for the icon-table spelling (`iconId`) would close the gap on the handle itself; until
+-- it exists this module's iconOf is the whole of it.
 
 local Pal     = require("palforge.api.pal")
 local catalog = require("palforge.native._catalog")
@@ -194,14 +230,52 @@ M.ALIASES = aliases
 M.UNNAMED = unnamed
 
 -- get(id): a Pal wrapper for ANY real catalog id, built on first use + cached; nil if
--- id is not a known monster row. defining sets .id and registers into object_manager.
--- Reading a named field comes through here, so it is just as lazy.
+-- id is not a known monster row. Reading a named field comes through here, so it is just as
+-- lazy — and, since 2026-08-02, just as non-registering: `{ register = false }` is contract
+-- C2's publish gate (see the header). The handle is complete and cached; only object_manager is
+-- left out of it, until M.publish(id).
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Pal{ id = id }
+    local h = Pal({ id = id }, { register = false, pack = catalog.PACK })
     cache[id] = h
     return h
+end
+
+---Register this catalog's handle for `id` with object_manager: the opt-in half of the publish
+---gate. What it buys is named in the header — pal.* dispatch resolving to this class, and
+---Pal.get(id) finding it — and a lazy handle declares no handlers, so publishing one is mostly
+---of use to something that wants to see the catalog through Pal.get_all().
+---
+---Idempotent, and it publishes the SAME handle the named field hands back. Returns nil for an id
+---this catalog does not have.
+---@param id string
+---@return Pal.Handle?
+function M.publish(id)
+    local h = M.get(id)
+    if not h then return nil end
+    catalog.publish("pal", h, "native.pals")
+    return h
+end
+
+---The DataTable row spelling for an id whose BLUEPRINT spelling differs — the two-spellings note
+---in the header. Published as data so the mismatch is readable at runtime rather than folklore,
+---and consumed by M.iconOf below.
+M.ROW_ID = { SheepBall = "Sheepball" }
+
+---This creature's paldeck icon, resolved through BOTH spellings: the id as given, then the row
+---spelling M.ROW_ID knows it by. `pals.SheepBall:iconOf()` misses because the icon table is keyed
+---by the DataTable row FName and "SheepBall" is not one; this function is the way in that does
+---not make the caller know that.
+---@param id string
+---@return any?  # texture ref from DT_PalCharacterIconDataTable, else nil
+function M.iconOf(id)
+    local h = M.get(id)
+    local tex = h and h:iconOf()
+    if tex ~= nil then return tex end
+    local row = id and M.ROW_ID[id]
+    local rh = row and M.get(row)
+    return rh and rh:iconOf() or nil
 end
 
 -- ---- CURATED demo creatures (real dump ids, with lifecycle hooks) ----
@@ -209,9 +283,17 @@ end
 -- the captured / damaged / death channels (real UE4SS hooks in core.event) dispatch to
 -- the hooks below. Hooks are dispatched as cls:hook(ctx); the first arg IS ctx (the
 -- channel payload { actor = <pal actor> }). Each just logs to prove it fired.
+--
+-- BOTH STILL REGISTER AT LOAD, unlike native/buildings.lua's curated pair, and the difference is
+-- what registration DOES in each domain. A registered pal class is how core/event finds a
+-- handler for a spawn / damage / death / capture it just saw; it starts no tracking and writes
+-- no file. A registered BUILDING class starts a scan that persists a record for every matching
+-- actor in the world, which is why that pair had to stop registering itself and these two did
+-- not. They register under the framework's own pack id (contract C3), so a pack that declares
+-- "ChickenPal" replaces a definition whose previous owner can be named.
 
 -- ChickenPal — id "ChickenPal" (live BP_ChickenPal_C; also a CATALOG member).
-M.Chicken = Pal{
+M.Chicken = Pal({
     id          = "ChickenPal",
     name        = "Chicken Pal (demo)",
     mesh = {
@@ -230,12 +312,12 @@ M.Chicken = Pal{
             log.info("ChickenPal onDeath: " .. tostring(ctx and ctx.actor))
         end,
     },
-}
+}, { pack = catalog.PACK })
 
 -- SheepBall — dispatch id "SheepBall" (live BP_SheepBall_C). The DT row FName is
 -- spelled "Sheepball" (lowercase b); the runtime keys off the BP id, so we define
 -- under "SheepBall" — which is therefore NOT itself a CATALOG member (pre-seeded).
-M.SheepBall = Pal{
+M.SheepBall = Pal({
     id          = "SheepBall",
     name        = "Sheepball (demo)",
     mesh = {
@@ -254,7 +336,7 @@ M.SheepBall = Pal{
             log.info("SheepBall onDeath: " .. tostring(ctx and ctx.actor))
         end,
     },
-}
+}, { pack = catalog.PACK })
 
 -- Pre-seed curated so get(id) returns the curated handle (hooks intact), and so
 -- get("SheepBall") resolves even though the DT row is spelled "Sheepball".
@@ -263,7 +345,8 @@ M.SheepBall = Pal{
 -- id, so it names nothing but this hand-written definition, while `pals.ChickenPal` is the row's
 -- own name and resolves to this very handle through the cache below. `M.SheepBall` is the
 -- blueprint spelling the runtime dispatches by; `pals.Sheepball` is the DataTable row, whose
--- lazy handle is what the icon table answers to. Neither pair is a typo and neither is hidden.
+-- lazy handle is what the icon table answers to. Neither pair is a typo and neither is hidden —
+-- the split is written out in the header, carried as data in M.ROW_ID, and followed by M.iconOf.
 for _, h in ipairs({ M.Chicken, M.SheepBall }) do
     set[h.id] = true
     cache[h.id] = h

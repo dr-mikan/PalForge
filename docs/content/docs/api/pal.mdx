@@ -88,7 +88,7 @@ instead of being quietly ignored. The same list is readable while the game runs,
       type: 'string[]',
     },
     mesh: {
-      description: 'the mesh attached to a spawned pawn: inline, or a Mesh handle',
+      description: 'the mesh a spawned pawn wears, attached for you on pal.spawned: inline, or a Mesh handle',
       type: 'Mesh.Spec',
     },
     material: {
@@ -100,12 +100,12 @@ instead of being quietly ignored. The same list is readable while the game runs,
       type: 'table',
     },
     texture: {
-      description: 'png path applied to the mesh — shorthand for material.texture',
+      description: 'a /Game/... texture asset path, or an absolute png, applied to the mesh — shorthand for material.texture',
       type: 'string',
     },
     icon: {
-      description: 'fallback icon used when the DataTable lookup misses',
-      type: 'any',
+      description: '/Game/... texture path used when the icon DataTable has no row for this id',
+      type: 'string',
     },
     events: {
       description: 'lifecycle handlers, grouped',
@@ -167,19 +167,29 @@ The mesh fields are `kind` (`procedural`, `static`, `skeletal` or `obj`; default
 `skeletal`), `model` (required), `animClass` (skeletal only), `scale`, `offset`, `texture`,
 `color`, `material` and `params`. `obj` is another name for the procedural backend.
 
-Declaring a mesh does not put it on anything. You attach it yourself with
-`:renderOn(actor)`, normally from `onSpawned` — the handler that runs once a pal has finished
-appearing in the world:
+A declared mesh attaches itself. `Pal{ ... }` wraps the definition's `onSpawned` so that
+`renderOn` runs on the `pal.spawned` channel, before your own handler, for every pawn of that
+id. Declaring the mesh is the whole of it:
 
 ```lua
 Pal{
     id   = "ChickenPal",
-    mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal" },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+    mesh = {
+        kind      = "skeletal",
+        model     = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal",
+        animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C",
     },
 }
 ```
+
+`pal.spawned` is the earliest moment the pawn's `.Mesh` component is real, which is why the
+attach rides that channel rather than the `onTick` sweep — a mesh needs setting once, and the
+sweep would pay for it every three seconds forever. The attach goes through `attachOnce`, so a
+second spawn event for one pawn does not stack a second mesh, and the whole of it is inside a
+`pcall`: a model path that will not resolve costs the pal a log line, never its lifecycle.
+
+You still call `:renderOn(actor)` yourself for a pawn PalForge did not spawn, for one you
+found through the `onTick` sweep, and to re-apply after a `detach`.
 
 ### material, color and texture
 
@@ -189,7 +199,7 @@ fields, for when that is all you need.
 <TypeTable
   type={{
     color: { description: 'tint r, g, b, a in 0..1', type: 'table' },
-    texture: { description: 'absolute path to a png applied to the mesh', type: 'string' },
+    texture: { description: 'a /Game/... texture asset path, or an absolute png, applied to the mesh', type: 'string' },
     params: { description: 'extra material parameters passed through', type: 'table' },
     material: { description: 'base material asset path to instance from', type: 'string' },
   }}
@@ -215,22 +225,33 @@ Pal{
     mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall" },
     material = {
         color    = { r = 0.2, g = 0.5, b = 1.0, a = 1.0 },
-        texture  = "C:/mods/example/sheep.png",
-        material = "/Game/.../M_YourBaseMaterial",
-        params   = { Roughness = 0.2 },
+        texture  = "/Game/Pal/Model/Other/AttackHelicopter/Material/T_AttackHelicopter_B.T_AttackHelicopter_B",
+        material = "/Game/.../MI_YourBaseMaterial",
+        params   = { scalar = { ["Roughness Add"] = 0.2 } },
     },
 }
 ```
 
 There is no top-level short spelling for `params` or for a base material path. Those live
-inside `material` only.
+inside `material` only. `params` is grouped by type — `vector`, `scalar`, `texture` — because
+that is what the three engine setters behind it take.
+
+A pal's own `texture` (both spellings) reaches the renderer exactly as you wrote it: a
+`/Game/...` texture asset, which needs no file on the player's disk, or an absolute png of
+your own. A path relative to your pack's directory is resolved only inside a mesh's own
+`texture` field, not here.
 
 <Callout type="warn">
-Those four fields only paint on the procedural and `obj` backends. `kind = "skeletal"` — the
-default for a pal's mesh — swaps the creature's model and reads nothing else, and `static`
-paints nothing either. A `color` or `texture` next to a skeletal mesh is carried down to
-`core.mesh` and does nothing there. On that backend a `true` from `:renderOn` means the model
-was swapped, not that it was painted. The backend table is on [Mesh](/docs/api/mesh).
+All four fields reach every backend, skeletal included. The material work lives in
+`core/mesh/base/renderer.lua` and each backend calls it, so a `color` beside a
+`kind = "skeletal"` mesh is written to that pawn's own material slots through a dynamic
+material instance.
+
+What a `true` from `:renderOn` does not say is that anything looks different. The parameter
+names it writes were read off a running game and are real — `BaseColor`, `Base Texture`,
+`Normal Map` and the rest of the list are on [Mesh](/docs/api/mesh) — but a write to a name a
+material does not carry is a silent no-op, and no run has yet watched a pal's colour change.
+Read a `true` as "the mesh was swapped and the material write ran".
 </Callout>
 
 ### skills
@@ -259,14 +280,24 @@ skills, use `:teachAll(actor)` — see [teachAll](#teachall) below.
 
 `:iconOf()` looks the id up in the game's own pal icon tables —
 `DT_PalCharacterIconDataTable`, then `DT_PalCharacterIconDataTable_Common` — and reads the
-first of the `SoftIcon`, `IconName`, `IconTexture`, `Icon` and `Texture` columns that holds
-something. On any miss, whether the table, the row or the column is what is missing, you get
-the `icon` you declared. The lookup uses the raw id, so a namespaced `"example:Boss"` never
-matches a row and always falls back.
+`Icon` column. That column name is measured rather than guessed: a live read of all four icon
+tables in a loaded save answered 674 of 674 pal rows, 1183 of 1207 item rows, 567 of 571
+building rows and 311 of 311 partner-skill rows. Pals and items key on `Icon`, buildings on
+`SoftIcon`, partner skills on `TextureID_8_2B2F889C43EB586246BDB981B6462ACA`. What comes back
+is always a `/Game/...` asset path as a plain string, never an engine object.
+
+The id is resolved before the lookup, so `"example:Boss"` is looked up as the row spelling
+`example_Boss` and reaches a live row when one exists; an id that will not resolve is looked
+up literally. On any miss — no table, no row, no value — you get the `icon` you declared, and
+`nil` when you declared none.
+
+The row match is case-sensitive, and both spellings of one creature are real on this build:
+`SheepBall` is the blueprint id dispatch keys on, `Sheepball` is the DataTable row this lookup
+answers to.
 
 ```lua
 local pal = Pal{ id = "example:Boss", icon = "/Game/.../T_icon_example_boss" }
-pal:iconOf()   -- the declared icon, since the DataTable has no "example:Boss" row
+pal:iconOf()   -- the row "example_Boss" if PalSchema wrote one, else the declared icon
 ```
 
 ### data
@@ -305,7 +336,7 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 
 | Hook | Channel | Native source | ctx | State |
 | --- | --- | --- | --- | --- |
-| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE, unconfirmed hook, armed after the world loads |
+| `onSpawned` | `pal.spawned` | `PalNPC:OnCompletedInitParam`, and `PalPlayerCharacter:OnCompleteInitializeParameter` | `ctx.actor` | LIVE, observed firing; armed at `world.ready`, never at load |
 | `onDamaged` | `pal.damaged` | `PalCharacter:OnDamageReaction` | `ctx.actor` | LIVE |
 | `onDeath` | `pal.death` | `PalCharacter:OnDeadCharacter` | `ctx.actor` | LIVE |
 | `onCaptured` | `pal.captured` | `PalCharacterParameterComponent:SetIsCapturedProcessing` with `started == true` | `ctx.actor`, `ctx.comp` | LIVE |
@@ -315,6 +346,16 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 game fires on the pal's parameter component, so the actor is that component's owner and
 `ctx.comp` is the component itself. `onDamaged` fires on the pal that **took** the damage,
 never on the attacker — the game's own hook does not say who attacked.
+
+`pal.spawned` has two sources because the obvious one carries nothing.
+`PalCharacter:BroadcastOnCompleteInitializeParameter` is the function that announces a
+character has finished its parameter init, it hooks cleanly, and it was measured **silent** in
+a live save while ten other channels reported. What a hook sees is what `ProcessEvent` runs,
+and a broadcaster is not it — so the two channels PalForge listens on are the delegate
+**targets** the broadcast invokes: `PalNPC:OnCompletedInitParam`, which every pal reaches on
+its own side, and `PalPlayerCharacter:OnCompleteInitializeParameter`, which fires for the
+characters the player subscribed to. Both were observed firing on 2026-07-26. The two are
+deduplicated per actor over a one-second window, so one pawn reaching both is one event.
 
 A handler that reacts to a capture and gives the player something back:
 
@@ -566,15 +607,19 @@ stacking it twice, so calling it again on the same actor is harmless. It returns
 does nothing when the actor is not valid, when the definition declares no mesh, or when that
 mesh has no `model`.
 
+**You do not normally call this.** A definition that declares a `mesh` attaches it itself on
+`pal.spawned`. This is the manual route: a pawn PalForge did not spawn, a pawn you found
+through the `onTick` sweep, or re-applying after a `detach`. Calling it from `onSpawned` as
+well is harmless — the guard means the second call finds the mesh already there.
+
 ```lua
+-- reach the sheepballs that were already standing there when the pack loaded
 Pal{
     id   = "SheepBall",
     mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall" },
     events = {
-        onSpawned = function(pal, ctx)
-            if not pal:renderOn(ctx.actor) then
-                require("palforge.utils.log").scope("example").warn("no mesh attached")
-            end
+        onTick = function(pal, ctx)
+            pal:renderOn(ctx.actor)   -- one-shot per pawn: the dressed ones cost nothing
         end,
     },
 }
@@ -597,14 +642,13 @@ Pal{
         model     = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall",
         animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/SheepBall/ABP_SheepBall.ABP_SheepBall_C",
     },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
-    },
 }
 ```
 
 A `true` says the backend's setter ran — for the skeletal backend, that the model was set on
-the creature's own component. What it ends up drawing is not something the call can report.
+the creature's own component and read back off it. What it ends up drawing is not something
+the call can report, and neither is whether the material write landed on a parameter the
+material carries.
 
 ### teachAll
 
@@ -643,7 +687,7 @@ the definition declared no skills at all.
 pal:skillsOf()      --> string[]   the declared skill ids, an empty table when none
 pal:teachAll(actor) --> integer, integer   how many landed, how many were asked for
 pal:mesh()          --> table?     the validated mesh declaration, nil when none
-pal:iconOf()        --> any?       DataTable texture ref, else the declared icon, else nil
+pal:iconOf()        --> string?    the DataTable row's /Game/... path, else the declared icon, else nil
 pal:name()          --> string     the declared name, else the id
 pal:description()   --> string?    the declared description, or nil
 ```
@@ -696,9 +740,8 @@ local Chicken = Pal{
     color = { r = 1.0, g = 0.4, b = 0.1, a = 1.0 },
     events = {
         onSpawned = function(pal, ctx)
-            if not pal:renderOn(ctx.actor) then
-                log.warn("mesh not attached for " .. pal:name())
-            end
+            -- the mesh is already on ctx.actor by the time this runs
+            log.info("party chicken arrived: " .. tostring(ctx.actor))
             Fanfare:play(ctx.actor)
         end,
     },
@@ -706,6 +749,10 @@ local Chicken = Pal{
 
 Chicken:spawn(Player.coordinateOffset(300, 0, 0))
 ```
+
+The declared mesh goes on before this handler runs, so a handler that wants to move, rename or
+re-tint the pawn finds the body already there. Whether the attach itself worked is in the mesh
+log, not in anything this handler can read.
 
 Define the sound once, at the top of the file, and only play it from the handler. Defining
 inside a handler would register the sound again on every single spawn. When you have no local
@@ -798,9 +845,6 @@ local Squad = Pal{
     material = {
         color = { r = 0.2, g = 0.5, b = 1.0, a = 1.0 },
     },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
-    },
 }
 
 -- spread `n` of them in a line to the player's north-east
@@ -822,9 +866,10 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-Each member takes its own spawn call, and each one's `onSpawned` attaches the mesh to its own
-creature as it arrives. The squad does not appear all at once or immediately: every member is a
-few seconds behind its own call, so they turn up over the following handful of seconds.
+Each member takes its own spawn call, and each one wears the declared mesh as it arrives — no
+handler in the definition, because the attach rides `pal.spawned` on its own. The squad does
+not appear all at once or immediately: every member is a few seconds behind its own call, so
+they turn up over the following handful of seconds.
 
 ## Limits
 
@@ -850,12 +895,16 @@ few seconds behind its own call, so they turn up over the following handful of s
 - **A broken `onTick` gets switched off.** Five failures in a row and PalForge logs it and
   stops calling that definition's `onTick` for the rest of the session — for every creature of
   that id, not just the one that failed.
-- **`onSpawned` rides a hook that has not been confirmed.**
-  `PalCharacter:BroadcastOnCompleteInitializeParameter` has not been verified in-game the way
-  capture, damage and death have, and it is armed only once the world has loaded, because
-  arming it earlier jams the shared hook dispatch during the world-load storm. Treat it as
-  best-effort and write a handler that is safe to run more than once; `:renderOn` attaches
-  once, so calling it again is safe.
+- **`onSpawned` fires, but nobody has watched it fire for a genuinely NEW pal.** Every firing
+  observed so far landed in the same second as `world.ready` — the load storm, when every pal
+  in range initialises at once. That proves the channel works and says nothing about the case
+  a pack cares about: a pal that did not exist a moment ago. The hook `pf_hook
+  pal-spawned-fresh` is what settles it. Until then, write the handler so being called twice
+  for one pawn is harmless, and do not use it to count how many pals appeared.
+- **`onSpawned`'s sources arm at `world.ready`, never at load.** The initialise broadcast
+  fires in the world-load pal-init storm, and a firing there once wedged the shared UE4SS hook
+  dispatch and took the three confirmed hooks down with it. Late arming protects capture,
+  damage and death, not just this channel.
 - **Nothing runs before the world is ready.** All four game hooks return immediately until
   five one-second polls in a row have found a valid `PalPlayerCharacter`, and the `onTick`
   sweep waits for the same gate.
@@ -872,12 +921,15 @@ few seconds behind its own call, so they turn up over the following handful of s
   the position you asked for, so PalForge waits for the creature, picks out the new one and
   teleports it onto your point — where it lands exactly. That pass reports only to the log, and
   the line it writes carries the position read back off the pal.
-- **A mesh is never attached for you.** Call `:renderOn(actor)` from a handler.
-  `core.mesh.ENABLED` is a global kill switch that turns every attach into a no-op, and the
-  material fields reach a backend that paints only when `kind` is `procedural` or `obj`.
+- **A declared mesh is attached for you, on `pal.spawned`.** `:renderOn(actor)` is the manual
+  route for a pawn that did not come from that channel. `core.mesh.ENABLED` is a global kill
+  switch that turns every attach into a no-op. The material fields reach every backend, but a
+  parameter name the material does not carry is a silent no-op, so an attach is not a promise
+  of a visible tint.
 - **`Pal.get` does not register.** Only `Pal{ ... }` puts a definition in the registry, so a
   handle from `Pal.get` can act but can never receive an event. Defining the same id twice
-  replaces the earlier definition.
+  replaces the earlier definition, and the registry logs it — naming both packs when the two
+  definitions came from different ones.
 
 </Callout>
 
@@ -890,8 +942,8 @@ few seconds behind its own call, so they turn up over the following handful of s
 - `pal:spawn()` puts a pal in the world, and the pal arrives four to eight seconds later. Pass a
   coordinate to place it exactly, or `{ toPlayer = true, num = 3 }` to send them to the player.
   The boolean is about the call, so react in `onSpawned`.
-- A `mesh` changes what a pal looks like, but you attach it yourself with
-  `pal:renderOn(ctx.actor)` from `onSpawned`.
+- A `mesh` changes what a pal looks like, and a declared one is attached for you on
+  `pal.spawned`. `pal:renderOn(actor)` is the manual route.
 - Only ids you defined with `Pal{ ... }` get their handlers called; `Pal.get` gives you the
   actions without the events.
 - `onTick` runs about every three seconds per live pal, and has no memory of its own — key

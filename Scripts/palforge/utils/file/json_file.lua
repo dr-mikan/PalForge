@@ -72,6 +72,13 @@ end
 --   file -> utils -> palforge -> Scripts -> PalForge, then /state/.
 -- (Keep this count in step with the module's depth — it was one too deep while this file
 --  lived under core/util/, which silently put state/ outside the mod dir.)
+--
+-- THIS IS THE TECHNIQUE utils/file/init.lua's packDir / resolvePackPath generalise: resolve
+-- a directory from a SOURCE FILE's own path rather than from a hardcoded string. The
+-- difference is only which frame is asked — level 1 here (this module), the calling pack's
+-- frame there — and it is what lets a pack ship `model = "art/marker.obj"` instead of the
+-- `C:/mods/example/marker.obj` that was the only documented shape. The count above stays
+-- hand-written because THIS path is fixed by the module's own location, not by a caller's.
 local function stateDir()
     local here = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
     local up   = table.concat({ "..", "..", "..", "..", "state" }, SEP)

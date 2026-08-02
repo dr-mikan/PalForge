@@ -8,7 +8,7 @@ description: コンテンツの作り方、返ってくるもの、そしてあ�
 - 自分の Pal、アイテム、建物、サウンド、メッシュをゲームに追加する
 - もとからあるものに、何も宣言せずに新しい動きを付ける
 - さきに作ったものを、パックのどこからでも探し出す
-- ほかの人の Mod と名前がぶつからない名前をつける
+- ほかの人の Mod と名前がぶつからない名前をつけ、ぶつかったときにそれを知る
 - フィールドを書き間違えたときのメッセージを読んで直す
 
 ## 何かを作る
@@ -176,28 +176,45 @@ end
 for name, handler in pairs(spec.events) do cls[name] = handler end
 ```
 
-そのうえでクラスが登録されます。
+そのうえで、いま定義しているパックの情報と一緒にクラスが登録されます。
 
 ```lua
-pcall(function() om.register("pal", spec.id, cls) end)
+om.register("pal", spec.id, cls, { pack = pack })
 ```
 
-ここから 2 つのことが言えます。登録は `pcall` の中で走るので、レジストリ側の問題が定義の
-呼び出しを壊すことはありません。そしてキーは **あなたが書いたとおりの id** で、コロンも含み
-ます。`"example:Boss"` は `"example_Boss"` ではなく `"example:Boss"` として格納されます。
+`register` はクラス、または `nil` と理由を返します。例外は投げません。8 ドメイン中 6 つはこれを
+ベストエフォートで呼んで戻り値を捨てるので、レジストリ側の問題が定義の呼び出しを壊すことはあり
+ません。残る 2 つは黙りません。登録されなかった定義は誰にも見つけられないからです。
+`api/pal.lua` は戻り値を確認し、`api/ui.lua` は例外を捕まえて何が動かなくなるのかを名指しします。
 
-レジストリは直接読めます。
+```text
+[PalForge.pal][err] Pal 'example:Boss' could NOT be registered (...) — it will receive no lifecycle events and Pal.get will not find it
+```
+
+キーは **あなたが書いたとおりの id** で、コロンも含みます。`"example:Boss"` は
+`"example:Boss"` として格納されます。解決後の綴り `example_Boss` はその隣、2 本目の
+インデックスに入り、ディスパッチがゲームの行名と突き合わせるのはそちらです。
+
+レジストリは直接読めますし、誰が所有しているかも訊けます。
 
 ```lua
 local om = require("palforge.core.object_manager")
 
-om.get("pal", "ChickenPal")   -- the definition class, or nil
-om.all("pal")                 -- { id -> cls }, a shallow copy you may not mutate into
-om.TYPES                      -- audio, building, effect, item, mesh, pal, skill, ui
+om.get("pal", "ChickenPal")          -- the definition class, or nil
+om.all("pal")                        -- { id -> cls }, a shallow copy you may not mutate into
+om.TYPES                             -- audio, building, effect, item, mesh, pal, skill, ui
+
+om.isRegistered("pal", "ChickenPal") -- always a boolean: is this id taken
+om.owner("pal", "example:Boss")      -- the pack id that registered it, or nil
+om.entry("pal", "example:Boss")      -- a copy of { cls = , pack = , resolved = }
+om.byResolved("pal", "example_Boss") -- cls, sourceId - one table read, not a scan
+om.unregister("pal", "example:Boss") -- true when something was there to forget
+om.validId("my-pack:Bench")          -- false, plus the reason
 ```
 
-`om.all` はコピーを返すので、そこに書き込んでも何も変わりません。一度登録した id は登録された
-ままです。変えたいときは定義し直します。
+「この id はもう使われているか」に公に答えられるのは `om.isRegistered` だけです。`X.get` では
+答えられません。7 つのドメインは外れたときに薄いハンドルをでっち上げ、`Mesh.get` は例外を投げる
+からです。`om.all` と `om.entry` はコピーを返すので、そこに書き込んでも何も変わりません。
 
 ## 呼び出しの全体像
 
@@ -335,8 +352,9 @@ Pal{
 ## ID: 自分のものと、ゲームのもの
 
 コロンを含む id はパック id で、形は `"packid:name"` です。ゲームの DataTable では対応する行の
-FName が `packid_name` になります。PalSchema の行はすべての Mod で共有されるので、この接頭辞が
-パック同士の衝突を防ぎます。
+FName が `packid_name` になります。これは推測ではなく、ダンプした `DT_ItemDataTable` に注入されて
+いる 2 行が、まさに `PalSmith_TestPotion` と `example_Potion` という綴りだったことで確かめてあり
+ます。PalSchema の行はすべての Mod で共有されるので、この接頭辞がパック同士の衝突を防ぎます。
 
 コロンのない id はリテラルなゲーム id です。`"Wood"`、`"ChickenPal"`、`"PalBoxV2"`、
 `"WorkBench"`、`"AKE_BGM_Title"` などがそれにあたります。
@@ -349,14 +367,26 @@ om.resolve("PalBoxV2")        -- "PalBoxV2"
 om.resolve("my pack:Bench")   -- nil, "invalid pack id 'my pack' (letters/digits/_ only)"
 ```
 
-名前空間つき id の前後どちらの区間も、英数字かアンダースコアでなければなりません。この検査が
-走るのは id を **解決** するときで、定義するときではありません。定義時に `id` にかかるのは、
-空でない文字列かどうかだけです。
+名前空間つき id の前後どちらの区間も、英数字かアンダースコアでなければなりません。この形は
+解決時だけでなく **定義時** にも検査されます。いちばん高くつく形なので書き下しておくと、
+`Building{ id = "my-pack:Bench" }` はハイフンのせいで解決できず、build id がスキャンの
+インデックスに入らず、`onPlace` / `onLoad` / `onTick` / `onRemove` のどれも発火しえません。
+しかもハンドルは正常に見えるものが返ります。いまはルールを名指しするハードエラーです。
+
+```text
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
+id は **ドメインごと** です。レジストリのキーは `(type, id)` の組なので、`Pal{ id = "Ash" }` と
+`Item{ id = "Ash" }` は別々のエントリで、衝突しません。衝突しうるのは、同じドメインで同じ行名に
+解決される 2 つの id のほうで、そちらは定義時に警告されます。
 
 解決はゲームの行名が必要になる箇所で行われ、レジストリでは行われません。
 
 - `Building.Handle:unlock()` はテクノロジー行をアンロックする前に id を解決します。
 - `core/event` は設置されたアクターと突き合わせる前に建築物の `buildIds` を解決します。
+- `:iconOf()`、パッシブスキルの書き込み、オーディオカタログの参照もすべて先に解決するので、
+  `Item{ id = "pack:Potion" }:iconOf()` は本物の行に届きます。
 
 レジストリのキーは書いたままの id です。これは検索するときに効いてきます。
 
@@ -366,6 +396,29 @@ Building{ id = "example:Bench" }
 Building.get("example:Bench")   -- the definition
 Building.get("example_Bench")   -- a thin fallback: nothing is registered under that key
 ```
+
+### どのパックが定義しているかを名乗る
+
+定義の呼び出しはただの Lua の呼び出しで、どの Mod が行ったのかという証拠を持ちません。だから
+パック自身が名乗らない限り、登録に持ち主を付けることも、自分の id を上書きしたパックと他人の id
+を上書きしたパックを区別することもできません。名乗る場所が `PalForge.pack(packId)` です。
+
+```lua
+local mine = PalForge.pack("mypack", { depends = { "otherpack" } })
+local Item = mine.Item
+
+Item{ id = "mypack:Potion" }     -- registered with pack = "mypack"
+```
+
+返ってくるメンバーは同じ 9 つです。8 つのコンストラクタは、定義がパック名を記録した状態で走る
+ようにラップされ、ドメインが名前つき関数として足している別の定義ルート（`Audio.bgm`、
+`Audio.se`）も同じです。そちらも登録を行うからです。それ以外（`X.get`、`X.get_all`、`Player`）は
+そのまま素通りします。スコープ付きのテーブルは読み取り専用のビューで、代入はエラーになります。
+他の呼び出し側が見ているモジュールとの静かな食い違いを作らないためです。
+
+使うかどうかは任意です。使わないパックのエントリは `pack = nil` になりますが、これは「特定の
+パックが名乗らずに宣言した」という立派な記録です。困るのは、衝突したときに持ち主を名指しでき
+ないことだけです。
 
 <Callout type="warn">
 名前空間つき id を定義すると、その id に振る舞いとメタデータが与えられます。ゲームに新しい
@@ -466,8 +519,9 @@ Building{ id = "WorkBench", name = "Workbench", gridCm = 100, mesh = BenchBody }
 
 ## 同じ ID を 2 回定義する
 
-`om.register` はバケットへ直接書き込むので、同じ `(type, id)` を 2 回定義するとエントリが置き
-換わります。警告は出ず、登録を取り消すこともできません。
+同じ `(type, id)` を 2 回定義するとエントリが置き換わります。last-wins は方針であり、方針のまま
+です。レジストリが足したのは、その置き換えが目に見えること、そしてパックが名乗っていれば持ち主
+まで分かることです。
 
 ```lua
 local first  = Item{ id = "Wood", name = "Wood" }
@@ -477,6 +531,28 @@ first:name()              -- "Wood"          (the first class, still held by tha
 second:name()             -- "Seasoned Wood"
 Item.get("Wood"):name()   -- "Seasoned Wood" (the registry holds the second)
 ```
+
+3 つの場合があり、ログの出し方が意図的に違います。
+
+- **2 つのパックが 1 つの id を取り合う。** 種別・id・持っていたパック・奪うパック・結果を名指し
+  する警告が出ます。
+- **1 つのパックが自分の id を定義し直す。** 警告レベルでは黙ります。F9 リロード、テスト
+  スイート、ネイティブカタログの行の再生成など、これはごく普通の出来事なので、`env.debug` で
+  ゲートされた info 行になります。作者が何百行も読まされる警告にはしません。
+- **2 つの id が 1 つのゲーム行に解決される。** `"my:pack_Thing"` と `"my_pack:Thing"` はどちらも
+  `my_pack_Thing` になるので、1 行に 2 つの定義がぶら下がります。両方の元 id と、解決後の参照を
+  いまどちらが持っているかを名指しする警告が出ます。どちらかを改名してください。
+
+```text
+[PalForge.objects][warn] item 'Wood' was defined by pack 'first' and is being redefined by pack 'second'; the new definition replaces the old one (last-wins)
+[PalForge.objects][warn] item ids 'my:pack_Thing' and 'my_pack:Thing' both resolve to the single game row 'my_pack_Thing' — one row, two definitions. 'my_pack:Thing' now owns the resolved lookup; rename one of them
+```
+
+持ち主を名指しするには名前が要ります。`PalForge.pack("mypack")` を使わなければ両方とも
+`pack = nil` で登録され、それは同じ持ち主と読めるため、衝突は警告ではなく静かな再定義として
+記録されます。
+
+登録は取り消せます。`om.unregister(type, id)` がそれで、何かがあったかどうかを返します。
 
 ここから導かれることは次のとおりです。
 
@@ -715,8 +791,12 @@ Pal{
 - あとから探すときは `X.get(id)` です。7 つのドメインは見つからないと id だけの薄いハンドルを
   返すので、バニラのコンテンツは宣言なしで扱えます。`Mesh.get` だけは例外を投げます。
 - コロンつきの id は自分のもの（`"mypack:Bench"`）、コロンなしはゲームのもの（`"Wood"`）です。
-  定義は、すでに存在する id に振る舞いを付けます。
+  名前空間つき id の両区間は英数字と `_` だけで、これは定義時に検査されます。id はドメインごと
+  に分かれています。
 - フィールドの間違いや綴りミスはハードエラーになり、フィールド名が出て、何も登録されません。
+- 同じ id を 2 回定義すると置き換わり、レジストリはそれを言います。パックをまたぐ衝突は両方の
+  持ち主を、1 つのゲーム行に解決される 2 つの id は両方の id を名指しします。そこに自分の名前を
+  出すために `PalForge.pack("mypack")` でパックを名乗ってください。
 - 各 id はロード時に一度だけ定義し、ハンドラの中では `X.get` を使います。
 
 次は [ライフサイクル](/docs/concepts/lifecycle) を読むと、どのイベントが実際にハンドラまで

@@ -6,11 +6,20 @@ logs/
 *.log
 
 # Dev-only trees: scratch references and the legacy PalSmith code kept on disk for
-# reference while porting. Scripts/palforge/test/ is NOT here — the in-game API suite
-# is part of the framework and ships with it.
+# reference while porting.
+#
+# NEITHER Scripts/palforge/test/ NOR Scripts/palforge/tests/ IS HERE, and the second of those
+# was a real defect rather than a judgement call. `Scripts/palforge/tests/` used to be listed on
+# this line, and it is LIVE CODE: core/registry.lua requires `palforge.tests` and runs its 8
+# checks at startup under dev, and `require("palforge.tests.catalog")` is the body of the
+# `ps_catalog` console command registered in the same file. A clone therefore had a boot path
+# and a console command pointing at four files the repository did not carry, and the install
+# tree in the docs could not be right about it either. Both directories ship.
+#
+# /tests/ below is ROOT-anchored and is a different tree entirely — the Python/Mojo scratch
+# harness at the repo root — so it stays ignored and does not reach anything under Scripts/.
 tmp/
 /tests/
-Scripts/palforge/tests/
 deprecated/
 
 # Editor / OS noise
@@ -52,3 +61,13 @@ dumps/*
 # Written into the DEPLOYED copy by tools/deploy.sh so a stale in-game run is visible in
 # the log. Never part of the source tree.
 Scripts/palforge/build.lua
+
+# THE DEV OVERLAY, and the reason it is listed here is a release gate rather than tidiness.
+# main.lua requires `palforge_dev` immediately before registry.initialize() and ignores it when
+# absent; the file sets env.dev = true and env.debug = true, which arms the nine dev keybinds —
+# one of them, F4, unlocks EVERY technology in the loaded save — plus the F1 API suite, F9
+# reload and the test bundles. `dev = true` was once the shipped default in env.lua and that is
+# exactly what this line exists to prevent happening a second time: the switch now lives in a
+# file that tools/deploy.sh writes into a DEPLOYED tree (default mode), deletes with --release,
+# and that can never travel to a player through the repository.
+Scripts/palforge_dev.lua

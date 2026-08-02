@@ -79,10 +79,12 @@ PalForge は読み込みの最後に、自分自身を `_G.PalForge` という�
 
 ```lua
 _G.PalForge = {
-    env    = env,                       -- { dev, name, version }
+    env    = env,                       -- dev, debug, name, version, gameBuild, multiplayer
     api    = require("palforge.api"),   -- Pal, Item, Building, Skill, Effect, Audio, Mesh, UI, Player
+    pack   = api.pack,                  -- the SCOPED surface: PalForge.pack("beacon").Item{ ... }
     utils  = { log, json, file, items },
-    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons },
+    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons,
+               uobject, assetpath },
     native = require("palforge.native"),
 }
 ```
@@ -90,6 +92,24 @@ _G.PalForge = {
 パックはこのテーブルを読みます。PalForge から必要なものはこれがすべてです。`api` が
 コンテンツを書く相手、`utils.log` がゲームのコンソールに出すロガー、`core.event` が
 イベントバス、`native` が Palworld 自身のコンテンツを id ごとに並べたカタログです。
+
+**パックは `api` を直接ではなく `PalForge.pack("beacon")` に対して書いてください。** 返るのは
+同じ 9 つのメンバーで、8 つのコンストラクタは包まれており、そこを通した定義はすべて所有者として
+`beacon` を記録します。この所有情報があるかどうかが、id の衝突を「黙って上書き」から「両方の
+パック名を挙げたログ 1 行」に変えます。そもそも定義の呼び出しはただの Lua 呼び出しで、誰が
+呼んだかの証拠を持たないので、フレームワークが持ち主を言えるのはこの経路だけです。使わなくても
+パックは動きます。その場合、コンテンツは所有者なしで登録されるだけです。
+
+```lua
+local api = _G.PalForge.pack("beacon", { depends = { "otherpack" } })
+local Item = api.Item
+
+Item{ id = "beacon:Potion" }        -- registered with pack = "beacon"
+```
+
+`depends`（および `recommends`）は、このパックが値の中で言及してよい名前空間を記録します。
+他人の名前空間の id は、宣言してあるか、さもなければ報告されます。包まれない唯一のメンバーが
+`Player` です。何も定義しないので、帰属させるものがありません。
 
 ```mermaid
 flowchart TD
@@ -213,7 +233,7 @@ return M
 
 ```lua title="Scripts/beacon/audio.lua"
 -- beacon.audio — the sounds this pack plays.
-local api   = _G.PalForge.api
+local api   = _G.PalForge.pack("beacon")
 local log   = _G.PalForge.utils.log.scope("beacon.audio")
 local Audio = api.Audio
 
@@ -241,10 +261,12 @@ return M
 BGM も効果音も再生の呼び出しは同じです。
 
 <Callout type="warn">
-このドメインには、名前から想像するものとは違うものが 2 つあります。`soundFile`（独自の音声
-ファイル）は受け付けられますが何もしないので、カタログにある `AkAudioEvent` を使ってください。
-そして `Handle:stop` も `Handle:setVolume` もサウンド単位ではありません。どちらもそのアクターで
-鳴っているものすべてに効くので、特定の 1 つを静かにしたいときは静かなイベントを選んでください。
+`soundFile`（自前の音声ファイル）は定義時に拒否され、未解決項目 `audio-custom-file-loader` を
+名指しするエラーになります。このビルドでは独自音声は再生できません。UE ネイティブ経路には製品
+ビルドまで残るインポーターがなく、Wwise 経路はクックが既に用意したメディアを差し替えるだけで、
+ファイルを読みません。代わりにゲームのサウンドを名前で指定してください。そして `Handle:stop` も
+`Handle:setVolume` もサウンド単位ではありません。どちらもそのアクターで鳴っているものすべてに
+効くので、特定の 1 つを静かにしたいときは静かなイベントを選んでください。
 </Callout>
 
 </Step>
@@ -258,7 +280,7 @@ BGM も効果音も再生の呼び出しは同じです。
 
 ```lua title="Scripts/beacon/effects.lua"
 -- beacon.effects — the blessing the beacon hands out.
-local api    = _G.PalForge.api
+local api    = _G.PalForge.pack("beacon")
 local log    = _G.PalForge.utils.log.scope("beacon.effects")
 local Effect = api.Effect
 local Item   = api.Item
@@ -322,7 +344,7 @@ context です（`effect`、`elapsed`、`stacks`、終了時は `reason`）。
 
 ```lua title="Scripts/beacon/pals.lua"
 -- beacon.pals — the guardian the beacon calls.
-local api = _G.PalForge.api
+local api = _G.PalForge.pack("beacon")
 local log = _G.PalForge.utils.log.scope("beacon.pals")
 local Pal = api.Pal
 
@@ -371,7 +393,7 @@ PalForge はスポーンした生物のブループリントクラス名から�
 
 ```lua title="Scripts/beacon/items.lua"
 -- beacon.items — the reward the beacon pays out.
-local api  = _G.PalForge.api
+local api  = _G.PalForge.pack("beacon")
 local log  = _G.PalForge.utils.log.scope("beacon.items")
 local Item = api.Item
 
@@ -395,7 +417,12 @@ M.Reward = Item{
     },
     events = {
         onObtain = function(item, ctx)
-            log.info("reward obtained x" .. tostring(ctx.count))
+            log.info("reward obtained x" .. tostring(ctx.count) .. " via " .. tostring(ctx.via))
+        end,
+        onCraft = function(item, ctx)
+            -- Fired when a production finishes at a real machine. ctx.count is absent: the
+            -- per-craft count lives in the recipe row, not on the hook.
+            log.info("reward crafted from recipe " .. tostring(ctx.recipeId))
         end,
     },
 }
@@ -403,12 +430,15 @@ M.Reward = Item{
 return M
 ```
 
-<Callout type="warn">
-`onObtain` が追いかけているのは、ゲーム自身の「アイテムを入手した」ログ
-（`PalPlayerState:AddItemGetLog_ToClient`）で、拾得・戦利品・報酬で発火します。この入手ログに
-出ないインベントリー追加は対象外なので、自分で呼んだ `:give` が `onObtain` として返ってくると
-思わないでください。記録したいなら `:give` を呼んだ場所で書きます。`onCraft` と `onDiscard` は
-書けますが、まだ何も送られてきません。
+<Callout type="info">
+アイテムのハンドラーは 4 つとも動いています。`onObtain` にはソースが 2 つあり、1 つのイベントに
+まとめられます。ゲーム自身の「アイテムを入手した」ログ（`PalPlayerState:AddItemGetLog_ToClient`、
+`ctx.via = "getlog"`）と、インベントリーへの追加（`PalPlayerInventoryData:AddItem_ServerInternal`、
+`ctx.via = "additem"`）です。両方を有効にしているのは、この 2 つが逆向きに失敗するからで、どちらが
+運んだかは `ctx.via` が言います。`onCraft` は実際の設備で生産が完了したときに発火します
+（`ctx.itemId`、`ctx.recipeId`、`ctx.via = "convert" | "product"`）。`ctx.count` は意図的にありません。
+1 回あたりの個数はレシピ行にあり、フックはデータテーブルを読む場所ではないからです。`onDiscard` は
+ドロップまたは破棄で発火します（`ctx.itemId`、`ctx.count`、`ctx.reason = "drop" | "dispose"`）。
 </Callout>
 
 </Step>
@@ -424,7 +454,7 @@ return M
 ```lua title="Scripts/beacon/skills.lua"
 -- beacon.skills — the signal the beacon fires. :activate runs the handler now and refuses
 -- while the skill is still cooling down, so the beacon gets its rate limit for free.
-local api     = _G.PalForge.api
+local api     = _G.PalForge.pack("beacon")
 local log     = _G.PalForge.utils.log.scope("beacon.skills")
 local Skill   = api.Skill
 local audio   = require("beacon.audio")
@@ -471,7 +501,7 @@ return M
 
 ```lua title="Scripts/beacon/buildings.lua"
 -- beacon.buildings — the structure the player interacts with.
-local api      = _G.PalForge.api
+local api      = _G.PalForge.pack("beacon")
 local log      = _G.PalForge.utils.log.scope("beacon.buildings")
 local Building = api.Building
 local items    = require("beacon.items")
@@ -561,8 +591,9 @@ return M
 UE4SS のコンソールに一部始終が出ます。
 
 ```text
-[PalForge.main][info] PalForge v0.3.0 starting (dev=true)
-[PalForge.registry][info] initialized (dev=true, 12 class(es) registered)
+[PalForge.main][info] PalForge v0.3.0 starting | game build: declared v1.0.2.101103, live v1.0.2.101103 (PalGameSetting) | dev=true debug=true | dev overlay: Scripts/palforge_dev.lua
+[PalForge.main][info] PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not supported and are not tested: there is no replication layer, and the item, spawn and event routes are all client-authoritative. A pack may appear to work for the host and do nothing for anyone else.
+[PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
 [PalForge.beacon][info] loading against PalForge v0.3.0
 [PalForge.beacon][info] loaded
 [PalForge.event][info] world ready - building dispatch enabled
@@ -660,15 +691,19 @@ state の保存には 2 つのやり方があります。`self:save()` は変更
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
 | Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`（パルは数秒後に到着します）、`:renderOn(actor)`、`:skillsOf()`、`:teachAll(actor)` |
-| Item | `onObtain`, `onUse` | `:count()`、`:give(n)`、`:take(n)`（消費します。プレイヤーが何かを装備している必要があります）、`:iconOf()`、`:recipeOf()` |
+| Item | `onObtain`, `onUse`, `onCraft`, `onDiscard` | `:count()`、`:give(n)`、`:take(n)`（消費します。プレイヤーが何かを装備している必要があります）、`:iconOf()`、`:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`（PalForge 自身のスケジュール） | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
 | Skill | なし | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | なし | `:play()`, `:stop()` |
 
-書けるけれどまだ動かないハンドラーが 4 つあります。ゲーム側に知らせる仕組みが無いためです。
-`Building.onLeftClick`、`Building.onBreak`、`Item.onCraft`、`Item.onDiscard` です。構造物には
-`onRightClick` と `onRemove` を、アイテムには `onObtain` と `onUse` を使ってください。将来
-ソースが見つかったときにパックを書き換えずに済むよう、宣言だけは通ります。
+書けるけれど決して動かないハンドラーが 2 つあります。`Building.onLeftClick` と
+`Building.onBreak` です。これは「まだ見つかっていない」ではなく、否定として決着した結果です。
+それを持ちうるクラスの関数一覧をすべて読んだ上での話で、`PalBuildObject` の 22 関数にクリック・
+命中・打撃に当たるものはなく、唯一ダメージらしい 1 つはプレイヤーが近くにいなくても 12〜13 秒
+ごとに走る劣化タイマーで、破壊はデリゲートの*フィールド*としてしか存在せず、`RegisterHook` は
+パスで指定できません。操作には `onRightClick` を、消えた構造物には `ctx.reason = "missing"` の
+`onRemove` を使ってください（これは解体とストリーミングでの消滅を区別できません）。どちらも
+パック自身の emit のため、そして将来ソースが現れたときの受け皿として宣言だけは通ります。
 
 `Building.onBuild` は建築が完了したときに走ります。ライブオブジェクトができるまで最大で
 スキャン 1 回ぶんの時間があるので、`self` がライブオブジェクトではなく定義になる唯一の建築
@@ -684,9 +719,13 @@ state の保存には 2 つのやり方があります。`self:save()` は変更
 `ctx.reconstructed` で分かります。`event.on("world.ready", fn)` でチャンネルを直接購読する
 のでも構いません。
 
-`Pal.onSpawned` は `BroadcastOnCompleteInitializeParameter` に接続されていますが、これは
-確定したフックではなく候補で、PalForge もワールドの読み込み後にだけ有効にします。ベスト
-エフォートとして扱い、2 回走っても平気なハンドラーにしてください。
+`Pal.onSpawned` は 3 つのソースに仕掛けられ、いずれもワールドの読み込み後にだけ有効になります。
+同じ合図はロード時の嵐の中で既存のパル全部について発火し、起動時に仕掛けると共有フック
+ディスパッチを詰まらせたからです。`BroadcastOnCompleteInitializeParameter` は実際のセーブで
+何も運ばないことが計測されたので、実際に効いているのはそこに束ねられたデリゲートの受け手 2 つ、
+`PalPlayerCharacter:OnCompleteInitializeParameter`（プレイヤーが購読したキャラクターにだけ
+発火します）と `PalNPC:OnCompletedInitParam`（パル自身の側に束ねられているので、誰かの購読に
+依存しません）です。2 回走っても平気なハンドラーにしてください。
 
 ## 応用
 
@@ -697,7 +736,7 @@ mesh もひとつのコンテンツなので、一度宣言すれば複数の定
 
 ```lua title="Scripts/beacon/meshes.lua"
 -- beacon.meshes — named visuals, so a model is declared once and reused by id.
-local api  = _G.PalForge.api
+local api  = _G.PalForge.pack("beacon")
 local Mesh = api.Mesh
 
 local M = {}
@@ -757,7 +796,11 @@ _G.PalForge.api.Building.get("beacon:Beacon"):unlock()
 ```
 
 この呼び出しは `PalCheatManager` がすでにセッションに存在している必要があるので、
-CheatManagerEnabler モッドを入れておいてください。
+CheatManagerEnabler モッドを入れておいてください。無ければプレイヤーコントローラー上に自分で
+組み立てるスポーン経路とは違い、テクノロジー解放はアイテム側のヘルパーの探索を通り、そちらは
+チートマネージャを要求するだけで作りません。解放後の確認も行います。その名前のテクノロジー行が
+無ければ、呼び出しは発行したが解放するものが無かったとログに出て、`unlock()` は `false` を
+返します。
 
 ### デバッグ用モジュールを足す
 
@@ -822,6 +865,14 @@ PalForge: Building: field "events" (Building.Spec.Events): unknown field "onRigh
 PalForge: Building: field "id" is required (build id: a game BuildObjectId ("PalBoxV2") or "pack:name")
 ```
 
+そして id 自身の形も、定義の時点で検査されます。名前空間付きの id はデータテーブルの行名
+`packid_name` に解決されるので、両側とも英数字か `_` でなければなりません。ハイフンを含む id は
+定義も登録も通ったうえで、どこにも解決しません。
+
+```text
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
 同じ情報は、当てずっぽうに書く代わりに実行時に読めます。
 
 ```lua
@@ -853,9 +904,12 @@ print(schema.help("Building.Spec.Events"))
 **エフェクトは tick しているのに何も変わらない。** エフェクトが回すのは自分のスケジュール
 であって、ゲームの状態異常システムではありません。実際の効果は `onTick` に書きます。
 
-**同じ id の定義が 2 つある。** 同じ種類のコンテンツで同じ id を 2 回登録すると先のものが
-置き換わるので、最後に走った定義が勝ちます。定義はロード時に行い、ハンドラーの中では
-再定義せず `X.get(id)` を使ってください。
+**同じ id の定義が 2 つある。** 最後に走った定義が勝つのは変わりませんが、黙って上書きせず
+レジストリがそう言います。別のパック同士なら両方の名前を挙げます:
+`item 'mypack:Potion' was defined by pack 'mypack' and is being redefined by pack 'other'; the
+new definition replaces the old one (last-wins)`。この行が出るのはパックが自分の名前を言って
+いるときだけで、そのための `PalForge.pack("beacon")` です。定義はロード時に行い、ハンドラーの
+中では再定義せず `X.get(id)` を使ってください。
 
 ## 次に読むもの
 
@@ -899,8 +953,11 @@ print(schema.help("Building.Spec.Events"))
 
 - パックは `Scripts/main.lua` を持つ独立したモッドフォルダーです。`_G.PalForge` を読み、
   自分のモジュールを require すると、その中の `X{ ... }` が読み込み時にコンテンツを登録します。
-- どのコンテンツでも必須フィールドは `id` だけです。コロンを含む id（`"beacon:Flare"`）は
-  自分のもの、含まない id（`"Altar"`、`"Ruby"`、`"Kitsunebi"`）はゲームにすでにあるものです。
+- api は `PalForge.api` ではなく `PalForge.pack("beacon")` から取ってください。メンバーは同じ
+  9 つで、そこを通した定義はどのパックのものかを記録します。
+- どのコンテンツでも必須フィールドは `id` だけで、その形は定義時に検査されます。コロンを含む
+  id（`"beacon:Flare"`）は自分のもの、含まない id（`"Altar"`、`"Ruby"`、`"Kitsunebi"`）は
+  ゲームにすでにあるものです。どちらの側も英数字か `_` です。
 - 専用のライブオブジェクトを持つのは、設置した建築だけです。`self.state` が自分のテーブルで、
   `self:save()` でワールドファイルに書けば次のセッションにも残ります。
 - 建築・パル・アイテムのハンドラーはゲームが呼びます。スキルと音は自分で鳴らし、エフェクトは

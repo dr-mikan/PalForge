@@ -68,9 +68,10 @@ flowchart LR
     C --> U["your own event.on subscriber"]
 ```
 
-有几条频道后两层都在，但还没有任何东西往里推送。`item.craft` 就是其中之一：`onCraft` 处理函数
-会被接受，但永远不会运行。把这份活儿放到真的会运行的地方 —— 合成出来的道具进入背包时
-`onObtain` 会触发。
+`event.CHANNELS` 里的每条频道都备有 SOURCE。只有一条 `skill.hit` 从来没有运过事件：它的两个原生
+候选都注册成功，却在确实打出伤害的战斗中始终沉默，这就是未决项 `skill-hit-source`。建筑物的
+`onLeftClick` 和 `onBreak` 则连频道都没有，因为翻遍转储也找不到能喂给它的东西。哪条是哪种，下面
+的频道表都写了。
 
 ### 启动时的接线顺序
 
@@ -82,14 +83,43 @@ flowchart TD
     A["registry.initialize"] --> B["require palforge.api"]
     B --> C["load the native catalogs"]
     C --> D["event.start"]
-    D --> E["install SOURCES - tick / world / building / pal / item"]
+    D --> E["install SOURCES - tick / world / building / pal / item / skill"]
     D --> F["install DISPATCH - one subscriber per channel"]
     E --> G["emit gameStart"]
     F --> G
 ```
 
-`event.start()` 只会真正运行一次，再调用它不做任何事。`event.CHANNELS` 里的每条频道都在第一个
-游戏事件到达之前就已经存在，所以你可以在模组包还在加载时就订阅，一个都不会漏。
+`event.start()` 每个会话只把面向引擎的那一层装备一次。UE4SS 既收不回 `RegisterHook`，也收不回
+`LoopAsync`，重复装备就意味着每个处理函数跑两遍、再跑三遍。第二次调用走的是另一条分支：重新执行
+`installDispatch()`，先退订上一轮的频道订阅，再把每条频道接到刚加载好的定义类上。这条分支就是
+F9 热重载。
+
+`event.CHANNELS` 里的每条频道都在第一个游戏事件到达之前就已经存在，所以你可以在模组包还在加载时
+就订阅，一个都不会漏。
+
+### F9 热重载会换掉什么
+
+F9 会把每个 `palforge.*` 模块从 `package.loaded` 里丢掉，再跑一次 `registry.initialize()`，所以
+定义、规格、处理函数、API 表面、测试套件以及你自己的模组包代码都是真的被换掉了。有四样东西刻意
+挺过这次清空，而每一样都是曾经付过代价才明白的。
+
+| 挺过清空的 | 存放位置 | 原因 |
+| --- | --- | --- |
+| 面向引擎的钩子和循环 | 只装备一次，由 `_G.__PalForgeArmed` 记录 | 第一次加载装备的钩子会一直跑它当时拿到的那个回调，所以只有改动事件 SOURCE 内部才需要重启游戏，其余都能热更。 |
+| 全部已注册的定义 | `core.object_manager`，写在 `reload.KEEP` 里 | 内容模组包是拥有自己 require 命名空间的另一个 UE4SS 模组，清空不会重新执行它的定义调用。留住注册表，才留得住模组包的内容。 |
+| 频道本身 | `_G.__PalForgeBus` | 第一次加载装备的钩子往它当时闭包住的 subjects 表里推送。换成新表，旧的发送方就对着没人听的地方推，而新的分发在听一条空总线。 |
+| 建筑物运行时注册表 | `_G.__PalForgeBuildingRegistry`，以及 `_G.__PalForgeSpatialIndex` 上的空间索引 | 重建扫描只装备一次，一直握着创建时拿到的那些表。放在 `_G` 上的同一张表，正是扫描和分发不会看到两份不同注册表的原因。 |
+
+另外，只要还有重复执行的回调没有结束，这次按键就会被**拒绝**。`core/poll` 的每个轮询器和
+`pf_watch` 里两条长链都会向重载守卫申报自己；在还有申报未释放时按下，日志会写明它在等哪条链、
+这条链装备了多久，而不会重载。在已排期的 UE4SS 回调脚下清掉 `package.loaded`，可能让它的注册表
+引用指向一个不再是函数的东西，而 UE4SS 对此的回应是摘掉引擎 tick 钩子 —— tick 钩子正是负责排空
+`ExecuteInGameThread` 的东西，于是游戏照常运行，模组里的每个按键却要等到重启才会有反应。申报会在
+180 秒后自动失效，拒绝信息里也会打印解除用的控制台行
+`require('palforge.core.reload').asyncReset()`。
+
+有两件事重载不会撤销：按键之前放下的建筑物实例，会一直用创建时的那张处理函数表，直到扫描重新
+发现它；按键之前注册的轮询器，也会继续跑注册时的那个闭包。
 
 ### 事件发生在哪个对象上
 
@@ -105,56 +135,80 @@ flowchart TD
     B2 -->|hit| BI
     B3 -->|hit| BI
     P["pal ctx"] --> P1["actor BP class name to a pal id"]
-    P1 --> PX["exact id or a walk for a namespaced match"]
+    P1 --> PX["exact id, else the resolved-form index"]
     PX --> PC["the registered Pal class"]
-    I["item ctx"] --> I1["ctx.itemId"]
-    I1 --> IX["exact id or a walk for a namespaced match"]
-    IX --> IC["the registered Item class"]
+    I["item or skill ctx"] --> I1["ctx.itemId or ctx.skillId"]
+    I1 --> IX["exact id, else the resolved-form index"]
+    IX --> IC["the registered Item or Skill class"]
+    V["building.build ctx"] --> V1["ctx.buildId against the definition index"]
+    V1 --> VC["the registered Building class"]
 ```
 
-建筑物解析到一个**活动实例**：世界里发生这件事的那一座建筑。帕鲁和道具没有被逐个跟踪，所以
-它们解析到已注册的**类**，你的处理函数从 `ctx` 上读取 actor。你从没定义过的原版帕鲁或道具
-解析不到任何东西，钩子会被跳过。
+建筑物解析到一个**活动实例**：世界里发生这件事的那一座建筑。帕鲁、道具和技能没有被逐个跟踪，
+所以它们解析到已注册的**类**，你的处理函数从 `ctx` 上读取 actor。你从没定义过的原版帕鲁或道具
+解析不到任何东西，钩子会被跳过。建筑物频道里同样解析到类的只有 `building.build`，因为它在 actor
+存在之前就发火。
 
-帕鲁和道具的匹配分两步：先用一次表查找试完全相同的 id，没中就遍历这个域已注册的 id，把每个 id
-解析出来的 DataTable 行名和游戏报告的 id 相比。带命名空间的 id 也能收到事件，原因就在这里：
-游戏生成的是 `BP_example_Boss_C`，报告的道具行是 `example_Ration`，从来不是冒号形式。
+类的匹配就是两次表查找：先用游戏报告的 id 原样查，没中就查 `object_manager.byResolved` —— 注册表
+在注册时维护的索引，把解析后的行名反查回它当初被定义时用的 id。带命名空间的 id 也能收到事件，
+原因就在这里（游戏生成的是 `BP_example_Boss_C`，报告的道具行是 `example_Ration`，从来不是冒号
+形式）；同时这也是两个解析到同一行的 id 会在定义时就发出警告、而不是每次事件靠运气的原因。
 
 ## 频道
 
-一条频道就是一个有名字的时刻。`event.CHANNELS` 是完整列表，按声明顺序排列：
+一条频道就是一个有名字的时刻。`event.CHANNELS` 里有 21 条，按声明顺序排列：
 
 ```lua
 event.CHANNELS   --> {
 --   "gameStart",
 --   "world.ready", "world.left",
 --   "building.place", "building.load", "building.interact", "building.remove",
+--   "building.build",
 --   "pal.spawned", "pal.damaged", "pal.death", "pal.captured",
 --   "item.obtain", "item.use", "item.craft", "item.discard",
+--   "skill.activate", "skill.hit", "skill.equip", "skill.unequip",
 --   "tick",
 -- }
 ```
 
+一条频道的事件从哪里来，用三个词就能说清，而这个区别决定了你能不能在它上面盖东西：
+
+- **LIVE** —— 由一个有名有姓的原生游戏函数发出，并且在真实存档里被观测到运过事件。
+- **synthetic** —— PalForge 自己从重建扫描或某个循环推导出来。背后没有原生调用，它在这个版本上
+  一定会发火，因为不需要 PalForge 之外的任何东西配合。
+- **armed, unseen** —— 原生钩子已注册，但至今一次都没运过东西。
+
 每条频道由什么发出、往 `ctx` 里放了什么、最后调用哪个钩子：
 
-| 频道 | 由什么发出 | `ctx` 带着 | 分发到 |
-| --- | --- | --- | --- |
-| `gameStart` | `registry.initialize`，在 `event.start()` 之后 | 无载荷 | 无；只有直接订阅者 |
-| `world.ready` | 闸门打开后第一次跑完的重建扫描；闸门本身是 ready 监视，用 `LoopAsync(1000)` 轮询 `PalPlayerCharacter`，连续 5 次有效之后打开 | 无载荷 | 每个活动建筑物实例的 `onWorldReady`，而那第一次扫描已经把它们跟踪好了 |
-| `world.left` | 同一个监视，pawn 变成无效时 | 无载荷 | 每个活动建筑物实例的 `onWorldLeft`，之后活动实例被丢弃 |
-| `building.place` | 重建扫描，新实例被创建并且匹配上一条待处理的建造意图时 | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
-| `building.load` | 重建扫描，每个新跟踪到的实例 | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
-| `building.interact` | `/Script/Pal.PalBuildObject:OnBeginInteractBuilding` | `actor`, `player`, `buildId` | `onRightClick` |
-| `building.remove` | 扫描的移除清理，连续 6 次没看到之后 | `key`, `buildId`, `actor`, `reason` | `onRemove` |
-| `pal.spawned` | `/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter` | `actor` | `onSpawned` |
-| `pal.damaged` | `/Script/Pal.PalCharacter:OnDamageReaction` | `actor` | `onDamaged` |
-| `pal.death` | `/Script/Pal.PalCharacter:OnDeadCharacter` | `actor` | `onDeath` |
-| `pal.captured` | `/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing`，仅当参数为 `true` 时 | `actor`, `comp` | `onCaptured` |
-| `item.obtain` | `/Script/Pal.PalPlayerState:AddItemGetLog_ToClient` | `itemId`, `count` | `onObtain` |
-| `item.use` | `/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal` | `itemId`, `actor`, `processor` | `onUse` |
-| `item.craft` | 目前没有 | — | `onCraft` |
-| `item.discard` | 目前没有 | — | `onDiscard` |
-| `tick` | `ExecuteInGameThread` 里的 `LoopAsync(500)` | `count`, `now` | 建筑物的 `onTick`，经由 tick 列表 |
+| 频道 | 状态 | 由什么发出 | `ctx` 带着 | 分发到 |
+| --- | --- | --- | --- | --- |
+| `gameStart` | synthetic | `registry.initialize`，在 `event.start()` 之后（所以每次 F9 热重载也会有） | 无载荷 | 无；只有直接订阅者 |
+| `world.ready` | synthetic | 闸门打开后第一次跑完的重建扫描；闸门本身是 ready 监视，用 `LoopAsync(1000)` 轮询 `PalPlayerCharacter`，连续 5 次有效之后打开 | 无载荷 | 每个活动建筑物实例的 `onWorldReady`，而那第一次扫描已经把它们跟踪好了 |
+| `world.left` | synthetic | 同一个监视，pawn 不再应答时 | 无载荷 | 每个活动建筑物实例的 `onWorldLeft`，之后活动实例被丢弃 |
+| `building.place` | synthetic | 扫描创建出的新实例，在 300 厘米内匹配上一条待处理的 `RequestBuild_ToServer` 意图时 | `key`, `actor`, `pos`, `buildId`, `player`, `firstSeen` | `onPlace` |
+| `building.load` | synthetic | 扫描，每个新跟踪到的实例 | `key`, `actor`, `pos`, `buildId`, `reconstructed` | `onLoad` |
+| `building.interact` | LIVE | `/Script/Pal.PalBuildObject:OnBeginInteractBuilding` | `actor`, `player`, `buildId` | `onRightClick` |
+| `building.remove` | synthetic | 扫描的移除清理，连续 6 次没看到之后 | `key`, `buildId`, `actor`, `reason` | `onRemove` |
+| `building.build` | LIVE | `/Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal`，在 `world.ready` 时装备 | `buildId`, `model` | 定义类上的 `onBuild` |
+| `pal.spawned` | LIVE | `/Script/Pal.PalNPC:OnCompletedInitParam` 和 `/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter`，都在 `world.ready` 时装备 | `actor`, `via` | `onSpawned` |
+| `pal.damaged` | LIVE | `/Script/Pal.PalCharacter:OnDamageReaction` | `actor` | `onDamaged` |
+| `pal.death` | LIVE | `/Script/Pal.PalCharacter:OnDeadCharacter` | `actor` | `onDeath` |
+| `pal.captured` | LIVE | `/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing`，仅当参数为 `true` 时 | `actor`, `comp` | `onCaptured` |
+| `item.obtain` | LIVE | `/Script/Pal.PalPlayerState:AddItemGetLog_ToClient`，旁边还装备着 `/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal` | `itemId`, `count`, `via` | `onObtain` |
+| `item.use` | LIVE | `/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal` | `itemId`, `actor`, `player`, `itemData`, `targetId`, `processor` | `onUse` |
+| `item.craft` | LIVE | `/Script/Pal.PalMapObjectConvertItemModel` 和 `/Script/Pal.PalMapObjectProductItemModel` 上的 `OnFinishWorkInServer` | `itemId`, `recipeId`, `count`（始终为 nil）, `model`, `work`, `via` | `onCraft` |
+| `item.discard` | LIVE | `/Script/Pal.PalNetworkItemComponent:RequestDrop_ToServer` 和 `:RequestDispose_ToServer` | `itemId`, `count`, `reason` | `onDiscard` |
+| `skill.activate` | LIVE | `/Script/Pal.PalActionBase:OnBeginAction`，旁边还装备着 `PalPlayerCharacter:OnBeginAction` 和 `PalUtility:PlayActionByWazaID` | `skillId`, `wazaId`, `owner`, `actor`, `target`, `action`, `via` | `onActivate`，第二个参数是 owner |
+| `skill.hit` | armed, unseen | `/Script/Pal.PalUtility:MakeDamageInfoByWazaType` 和 `/Script/Pal.PalAnimNotifyState_AttackCollision:OnHit`，两个都实测沉默 | `skillId`, `wazaId`, `target`, `owner`, `attacker`, `location`, `via` | `onHit`，第二个参数是 target |
+| `skill.equip` | LIVE | `/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill`，外加 `PalPassiveSkillComponent:SetupSkillFromSelf` 的列表差分；都在 `world.ready` 时装备 | `skillId`, `owner`, `actor`, `params` 或 `component`, `overrides`, `via` | `onEquip` |
+| `skill.unequip` | LIVE | `:RemovePassiveSkill`，以及同一份列表差分 | `skillId`, `owner`, `actor`, `via` | `onUnequip` |
+| `tick` | synthetic | `ExecuteInGameThread` 里的 `LoopAsync(500)` | `count`, `now` | 建筑物的 `onTick`，经由 tick 列表 |
+
+有几条频道同时挂着多个 SOURCE，这是刻意的而不是随手堆的：七月的一次实测里，四个钩子注册成功却
+一次也没发火，同一场里另外十条频道却都报到了。UE4SS 无法解除钩子，而沉默的钩子不花任何代价，
+所以头文件转储点名的候选就装备在哑掉的那些**旁边**。每一个都按它需要的身份做了守卫，所以多一个
+SOURCE 只可能多出沉默，不可能多出错误的事件。是哪一个运来的由 `ctx.via` 说明，每条频道、每个
+SOURCE 的首次发火日志都会宣告。
 
 <Callout type="info">
 `world.ready` 和 `world.left` 发出时完全没有载荷，所以直接订阅者收到的是 `nil`。建筑物的分发在
@@ -162,10 +216,13 @@ event.CHANNELS   --> {
 </Callout>
 
 <Callout type="warn">
-除心跳之外，每个原生钩子在世界还没准备好时都会直接返回。建筑物扫描、interact 钩子、放置意图
-钩子、帕鲁的四个钩子和道具的两个钩子，都会先检查 `worldReady`。如果 ready 监视根本装不上，
-这道闸门就默认打开，分发从一开始就运行。这个回退里 `world.ready` 也是备好的，但没有任何东西
-发出它：没有 `LoopAsync` 就没有心跳，也就没有扫描来宣告它。
+除心跳之外，每个原生钩子在世界还没准备好时都会直接返回：建筑物扫描、interact 钩子、放置意图
+钩子，以及帕鲁、道具和技能的每个钩子，开头都是同一句闸门检查。其中七个甚至要等到那时才装备
+——`building.build`、`pal.spawned` 的三个候选，还有被动技能相关的三个——因为它们在世界加载的
+风暴里也会为每个既有对象发火，而在那里读到初始化到一半的内存，会产生 `pcall` 抓不住的原生访问
+违规。如果 ready 监视根本装不上，这道闸门就默认打开，分发从一开始就运行。这个回退里
+`world.ready` 也是备好的，但没有任何东西发出它：没有 `LoopAsync` 就没有心跳，也就没有扫描来宣告
+它，那七个延迟装备的钩子也永远装不上。
 </Callout>
 
 频道名可以自己发明。`event.emit` 和 `event.on` 会在你第一次写出某个名字时创建这条频道，所以一个
@@ -205,6 +262,7 @@ flowchart LR
     S --> W["emit world.ready - once on the first scan after the gate opens"]
     T --> B["tickAll - building onTick"]
     T --> E["effect step - advance live applications"]
+    T --> P["pal onTick sweep - every PAL_SCAN_MS"]
     T --> U["event.every callbacks"]
 ```
 
@@ -258,12 +316,23 @@ sub:unsubscribe()   -- stop it
 | `onTick` | LIVE | 心跳，按 `tickInterval` 间隔 |
 | `onWorldReady` | LIVE | ready 闸门打开后第一次跑完的扫描 |
 | `onWorldLeft` | LIVE | ready 监视 |
-| `onBuild` | 可声明 | 还没有原生来源 |
-| `onLeftClick` | 可声明 | 还没有原生来源 |
-| `onBreak` | 可声明 | 还没有原生来源 |
+| `onBuild` | LIVE | `OnCompleteBuild_ServerInternal`，在 `world.ready` 时装备 |
+| `onLeftClick` | 可声明 | 没有原生来源，且这条线索已经查到底了 |
+| `onBreak` | 可声明 | 没有原生来源，且这条线索已经查到底了 |
 
-`onBuild`、`onLeftClick` 和 `onBreak` 会被 spec 接受，但永远不会被调用。用 `onPlace` 代替
-`onBuild`，用 `onRemove` 代替 `onBreak`，玩家交互用 `onRightClick`。
+建筑物的钩子里，唯一不会拿到活动实例的是 `onBuild`。它在建造完成的时刻发火，也就是扫描创建出
+实例（最多晚 500 毫秒）之前，而且原生调用带来的是 `UPalMapObjectModel` 而不是 actor。所以分发按
+build id 解析出定义**类**，你的处理函数读 `ctx.buildId` 和 `ctx.model`。它的钩子在 `world.ready`
+而不是加载时装备，因为它在世界加载的风暴里也会为每座既有建筑发火，而在那里读到初始化到一半的
+模型内存曾经引发原生访问违规。安全的放置钩子仍然是 `onPlace`，`onBuild` 是额外的那一个，值得先
+在可以丢掉的存档里试。
+
+`onLeftClick` 和 `onBreak` 会被 spec 接受但永远不会被调用，而这是量出来的结论、不是漏掉了。两者
+唯一的候选 `OnDamage` 其实是劣化计时器：参考记录里抓到 196 次发火，每一次都落在放好的
+`WorkBench` 上，按每座建筑 12–13 秒的固定节奏，全程没有玩家参与，也没有任何建筑被摧毁。而且四个
+候选类里都没有 Destroy / Dismantle / Break / Click 之类的条目 —— 摧毁只以委托**字段**的形式存在，
+而 `RegisterHook` 无法按路径寻址它们。摧毁仍由扫描的丢失清理覆盖，晚一个阈值，也不知道是谁干的；
+那种情况请用 `onRemove`。
 
 `onRightClick` 在源头就做了过滤和防抖：只有 `PalCharacter` 交互者才算数，同一座建筑一秒之内的
 第二次交互会被丢掉。
@@ -328,37 +397,57 @@ end)
 | `onCaptured` | LIVE | `SetIsCapturedProcessing` 参数为 `true` 时 |
 | `onDamaged` | LIVE | `OnDamageReaction` |
 | `onDeath` | LIVE | `OnDeadCharacter` |
-| `onSpawned` | LIVE，但钩子未确认 | `BroadcastOnCompleteInitializeParameter` |
-| `onTick` | 可声明 | 无 |
+| `onSpawned` | LIVE | `PalNPC:OnCompletedInitParam` 和 `PalPlayerCharacter:OnCompleteInitializeParameter` |
+| `onTick` | LIVE | 帕鲁扫描，每 `event.PAL_SCAN_MS` 一次 |
 
 <Callout type="warn">
-`onSpawned` 接在 `BroadcastOnCompleteInitializeParameter` 上，而源码把它标为未确认的候选：
-游戏内的事件探测是对已经存在的帕鲁跑的，所以没有观测到这个钩子在真正的生成时触发。把它当作
-尽力而为，在拿它做功能之前先自己验证。
+`onSpawned` 并没有接在 `PalCharacter:BroadcastOnCompleteInitializeParameter` 上，原因值得记住：
+那个广播方是**实测沉默**的。它曾在真实存档里于 `world.ready` 之后装备，玩家反复捕捉又放生帕鲁，
+在另外十条频道纷纷报到时，这条频道从它那里什么也没运到 —— 去钩广播方而不是绑定的委托**目标**，
+正是它留下来记录的那个错误。真正会运的是那两个目标。`PalNPC:OnCompletedInitParam` 能看到每只
+帕鲁，因为 `APalMonsterCharacter` 继承了它而没有重新声明；
+`PalPlayerCharacter:OnCompleteInitializeParameter` 只看到玩家订阅过的角色，也就是队伍那条路径。
+是哪一个发火了由 `ctx.via` 说明。仍然未决的问题比“它能不能用”更窄：至今记录到的每一次发火都落在
+和 `world.ready` 同一秒内，也就是周围帕鲁一起初始化的加载风暴里，所以“这只帕鲁刚才还不存在”还
+没有被量到。请把 `onSpawned` 写成幂等的 —— SOURCE 侧也已经按 actor 做了一秒内的去重。
 </Callout>
 
-<Callout type="warn">
-帕鲁的 `onTick` 永远不会触发。帕鲁没有建筑物那样的实例扫描，所以没有东西驱动一个逐帕鲁的周期
-钩子。如果你需要按节奏对每只帕鲁做事，请自己订阅 `tick`，再遍历你关心的 actor。本页末尾有一个
-现成的写法。
+<Callout type="info">
+帕鲁的 `onTick` 没有原生钩子，改由一次扫描驱动。每 `event.PAL_SCAN_MS`（默认 3000 毫秒，而且是
+公开值，模组包可以在运行时调整）扫描会走一遍 `FindAllOf("PalCharacter")`，把每个 actor 解析到
+已注册的帕鲁类，再带着 `ctx.actor`、`ctx.count` 和 `ctx.now` 调用它的 `onTick`。它是类级而不是
+实例级，由此有两个后果：`self` 是定义，pawn 在 `ctx` 上，所以每只帕鲁的状态要放进你自己定键的
+表里；以及一个中间没有成功、连续抛错五次的处理函数会被停用一整个会话，并把它的 id 写进日志。
+扫描比心跳慢是刻意的，因为 `FindAllOf` 要走遍所有 UObject，是已知的周期性卡顿来源；而在一只
+帕鲁都没定义时，它会整段跳过枚举。
 </Callout>
 
 ### Item
 
 | 钩子 | 状态 | SOURCE |
 | --- | --- | --- |
-| `onObtain` | LIVE | `AddItemGetLog_ToClient` |
+| `onObtain` | LIVE | `AddItemGetLog_ToClient`，旁边还装备着 `AddItem_ServerInternal` |
 | `onUse` | LIVE | `UseItemToCharacter_ServerInternal` |
-| `onCraft` | 可声明 | 无 |
-| `onDiscard` | 可声明 | 无 |
+| `onCraft` | LIVE | convert 与 product 两个作业模型上的 `OnFinishWorkInServer` |
+| `onDiscard` | LIVE | `RequestDrop_ToServer` 和 `RequestDispose_ToServer` |
 
 `onObtain` 搭的是游戏自己的“获得道具”日志，所以捡取、战利品和奖励都会触发它。那些从不产生
-获得日志的静默内部添加不在覆盖范围内。`item.craft` 和 `item.discard` 有频道，也有分发订阅者，
-但没有任何东西发出它们，所以 `onCraft` 和 `onDiscard` 永远不会运行。
+获得日志的静默内部添加，只有走背包添加那条路时才被覆盖。两个 SOURCE 是同一次捡取的两个视角，
+所以同一个 id 在 0.5 秒内重复出现会被丢掉，你只会收到一次；是哪一个运来的由 `ctx.via` 说明。
 
-两条 LIVE 的道具频道都带着游戏的道具 id，分发分两步把它和你的定义相比：先是完全相同的 id，
-再是每个已注册 id 解析出来的 DataTable 行名。所以带命名空间的 `Item{ id = "example:Ration" }`
-也能收到事件，尽管游戏只会报告 `example_Ration`。
+`onCraft` 在工作台或熔炉上一次生产作业完成时触发（2026-07-26 在真机上制作时观测到）。
+`ctx.count` 是 nil，而且会一直是 nil：每次制作的数量在配方行里，而在原生钩子内部读 DataTable
+不是这个 SOURCE 会做的事。走 convert 那条路时 `ctx.itemId` 是配方 id，对原版配方来说它就是产物
+的道具 id；两个名字都会传过来，这样模组包不必依赖这一点。
+
+`onDiscard` 在玩家把一叠道具丢到地上、或从背包界面销毁时触发，是哪一种由 `ctx.reason` 告诉你。
+道具 id 必须在服务器清空槽位之前读出来：用请求指向的槽位的容器 GUID，去和每个活着的
+`PalItemContainer` 精确比对。这一步走不通时，SOURCE 宁可什么都不发，也不会拿猜出来的 id 发事件，
+并按不同原因各记录一次是哪一步失败了。
+
+两条道具频道都带着游戏的道具 id，分发分两步把它和你的定义相比：先是完全相同的 id，再是解析形式
+的索引。所以带命名空间的 `Item{ id = "example:Ration" }` 也能收到事件，尽管游戏只会报告
+`example_Ration`。
 
 ```lua title="content/rations.lua"
 local log = require("palforge.utils.log").scope("rations")
@@ -381,9 +470,12 @@ Item{
 ```
 
 <Callout type="warn">
-`item.use` 上的 `ctx.actor` 是原生调用的第一个参数，而在游戏里确认过的签名下，这个参数是道具
-数据对象，不是角色。目标是第二个参数里的 `FPalInstanceID`，这个参数从来没有被探测过。请用
-`ctx.itemId`，需要玩家时通过 `Player.character()` 拿，不要指望 `ctx.actor` 是一个 pawn。
+`item.use` 上的 `ctx.actor` 是一个真正的 pawn：`FindFirstOf("PalPlayerCharacter")`，也就是本地
+玩家，同一个值还会以 `ctx.player` 再给你一次。原生调用的第一个参数 —— `UPalStaticItemDataBase`
+道具数据对象 —— 在 `ctx.itemData` 上；第二个参数是 `ctx.targetId`（`FPalInstanceID`），原样传出
+而不做解析，因为两棵树里都没有从实例 id 反查 actor 的可行做法。剩下的注意点是“哪个角色”而不是
+类型：`ctx.actor` 是**使用**道具的那个角色，只有吃食物之类的自用情形，它才同时是被使用的对象。
+喂给帕鲁时，那只帕鲁在 `ctx.targetId` 那一侧。
 </Callout>
 
 ### Effect
@@ -405,8 +497,30 @@ Item{
 
 ### Skill
 
-游戏里没有任何东西会替你发动技能。也没有频道会发出 `skill.*`。可行的做法是自己调用技能，冷却
-由 Lua 这边强制。
+四条技能频道里有三条会从游戏那边运来事件。四条也都可以由你自己调用来运行，冷却在 Lua 这边强制。
+
+| 钩子 | 状态 | SOURCE |
+| --- | --- | --- |
+| `onActivate` | LIVE | `PalActionBase:OnBeginAction` —— 帕鲁的招式本身就是一个动作对象，自带 `EPalWazaID` |
+| `onEquip` | LIVE | `AddPassiveSkill`，外加 `SetupSkillFromSelf` 的列表差分 |
+| `onUnequip` | LIVE | `RemovePassiveSkill`，以及同一份列表差分 |
+| `onHit` | armed, unseen | `MakeDamageInfoByWazaType` 和 `PalAnimNotifyState_AttackCollision:OnHit`，两个都实测沉默 |
+
+不会到达的只有 `onHit`，而这个否定结论从两边都已经坐实。两个钩子都在装备状态下，经历了
+`pal.damaged` 和 `pal.death` 都发火的战斗却什么也没运来，所以攻击确实命中、确实造成了伤害。而
+伤害路径上没有任何东西能指出是哪一招：`FPalDamageRactionInfo` 有 6 个字段、`FPalDamageInfo` 有
+40 个、`FPalDamageResult` 有 12 个，没有一个是 `EPalWazaID`。id 想到达一次命中，只能靠记住它前面
+那次发动再挂到随后的伤害上，那是推断而不是 SOURCE，因此刻意没有接上去 —— 否则打空的招式、或者
+同一时间窗里的第二个攻击者，都会被算到最后一次发动头上。能用的入口是 `:hit(target)`。
+
+只有用 `Skill{ ... }` **定义过**的技能才会被分发到。`Skill.get("FireBlast")` 返回的是一个从未注册
+的句柄，所以游戏放出 FireBlast 时不会到达任何地方。`ctx.skillId` 在两条战斗频道上是
+`EPalWazaID` 的名字，在两条被动频道上是被动行的 FName。
+
+让被动这个问题收尾的那次发火，来自 PalForge 自己的写入：`Skill.Handle:teach` 在一只活着的帕鲁上
+走到了 `AddPassiveSkill`。也就是说，处理函数也会收到自己模组包做出的改动，而被记录下来的是装备
+方向。把 `onEquip` 写成幂等还有第二个理由：对某个角色的第一次 `SetupSkillFromSelf` 调用，会把它
+已经拥有的每个被动都报一遍。
 
 ```lua
 local log = require("palforge.utils.log").scope("fireball")
@@ -428,8 +542,9 @@ Fireball:activate(myPalActor)   -- false while cooling down
 Fireball:hit(targetActor)
 ```
 
-从你能控制的代码里驱动 `:activate` / `:hit` / `:equip` / `:unequip`：帕鲁的处理函数、建筑物的
-`onRightClick`，或者一个按键绑定。
+`:activate` / `:hit` / `:equip` / `:unequip` 可以从你能控制的代码里随时运行处理函数 —— 帕鲁的
+处理函数、建筑物的 `onRightClick`、一个按键绑定 —— 与频道是否运来事件无关。对 `onHit` 来说，
+这是唯一的路径。
 
 ### Audio、Mesh、UI
 
@@ -565,7 +680,9 @@ sequenceDiagram
 
 实例的 key 由建造 id 加上量化后的世界坐标组成：`"<buildId>@<qx>,<qy>,<qz>"`，量化用定义里的
 `gridCm`，默认 100 厘米。基准坐标始终取活动 actor 的位置。跨扫描把一个已知实例绑定起来的是
-**actor**，不是 key，因为刚放下的建筑物报告的位置在两次扫描之间的抖动会超过一格。
+**actor**，不是 key，因为刚放下的建筑物报告的位置在两次扫描之间的抖动会超过一格。这个绑定落在
+actor 的 `GetFullName()` 字符串上，绝不会落在句柄上：UE4SS 每次查找都新造一个包装器，每次扫描的
+`FindAllOf` 交回来的也都是新的。
 </Step>
 
 <Step>
@@ -573,8 +690,9 @@ sequenceDiagram
 
 `def.cls:new{ ... }` 产出实例，所以你在定义里写的每个方法都能在它上面解析到。状态优先来自已
 保存的记录，没有就来自定义的 `state` 字段，这个字段可以是一张表，也可以是一个工厂函数。新建的
-实例会写进模组文件夹下的 `state/entities_<saveId>.json`。读不到世界 guid 时，`saveId` 退回成
-`world`。
+实例会写进模组文件夹下的 `state/entities_<saveId>.json`。`saveId` 是从 `PalGameInstance` 上读的：
+先取存档**目录**名（`GetSelectedWorldSaveDirectoryName`，或它背后的属性），再取世界的显示名，
+清理掉非法字符后加上 `w_` 前缀。两者都读不到时，退回到共享的 `world`。
 </Step>
 
 <Step>
@@ -987,7 +1105,7 @@ Pal{
     color = { r = 1.0, g = 0.4, b = 0.2, a = 1.0 },
     events = {
         onSpawned = function(pal, ctx)
-            pal:renderOn(ctx.actor)                 -- pals have no scan, so you attach it
+            pal:renderOn(ctx.actor)                 -- already done for you; the guard makes this free
         end,
         onDamaged = function(pal, ctx)
             Burning:apply(ctx.actor)                -- re-apply stacks and refreshes
@@ -1003,37 +1121,38 @@ Pal{
 }
 ```
 
-### 帕鲁的 onTick 不触发，所以自己做一个逐帕鲁的定时器
+### 在类级 onTick 之上放逐帕鲁的状态
+
+帕鲁的 `onTick` 跑在定义**类**上，每一只符合条件的活着的 actor 各调用一次，所以想记住某一只帕鲁
+的东西，得由你自己定键来保存。键请用 `uobject.key(actor)`，也就是这个 actor 的 `GetFullName()`
+字符串，绝不要用 actor 值本身：UE4SS 每次查找都会新建一个包装器，所以某次扫描里用包装器写下的
+键，在下一次扫描里即使是同一个引擎对象也匹配不上。
 
 ```lua title="content/patrol.lua"
-local event = require("palforge.core.event")
-local log   = require("palforge.utils.log").scope("patrol")
+local uobject = require("palforge.core.uobject")
+local log     = require("palforge.utils.log").scope("patrol")
 
-local watched = setmetatable({}, { __mode = "k" })   -- weak: never keep a pawn alive
+local seen = {}     -- GetFullName string -> seconds watched
 
 Pal{
     id = "SheepBall",
     events = {
         onSpawned = function(pal, ctx)
-            if ctx.actor then watched[ctx.actor] = 0 end
+            local k = uobject.key(ctx.actor)
+            if k then seen[k] = 0 end
+        end,
+        onTick = function(pal, ctx)
+            local k = uobject.key(ctx.actor)
+            if not k then return end                 -- a pawn that will not answer its name
+            seen[k] = (seen[k] or 0) + 3             -- PAL_SCAN_MS, in seconds
+            log.info("sheepball " .. k .. " watched for " .. tostring(seen[k]) .. " s")
         end,
         onDeath = function(pal, ctx)
-            if ctx.actor then watched[ctx.actor] = nil end
+            local k = uobject.key(ctx.actor)
+            if k then seen[k] = nil end
         end,
     },
 }
-
-event.every(2000, function()
-    for actor, seconds in pairs(watched) do
-        local ok, valid = pcall(function() return actor:IsValid() end)
-        if not (ok and valid) then
-            watched[actor] = nil
-        else
-            watched[actor] = seconds + 2
-            log.info("sheepball alive for " .. tostring(watched[actor]) .. " s")
-        end
-    end
-end)
 ```
 
 ### 交互时发动技能的建筑物
@@ -1098,11 +1217,13 @@ end)
 - 往定义的 `events` 表里放一个函数，游戏里发生那个时刻时它就会运行。键的名字说明“何时”。
 - 第一个参数是事件发生在其上的东西：建筑物的处理函数拿到那座活动建筑，其他都拿到自己的句柄。
 - 建筑物的状态能跨重新加载保留：改 `inst.state`，然后调用 `inst:save()`。
-- 所有周期性的东西都跑在同一个 500 毫秒心跳上 —— 建筑物的 `onTick`、效果的计时，以及
-  `event.every(ms, fn)`。
-- 有些钩子会被接受，但永远不会被调用：帕鲁的 `onTick`，道具的 `onCraft` 和 `onDiscard`，
-  建筑物的 `onBuild`、`onLeftClick` 和 `onBreak`。这些活儿请从 `tick`，或者从一个真的会触发的
-  钩子里驱动。
-- 没有技能会自己发动。从你自己的代码里调用 `:activate` 或 `:hit`。
+- 所有周期性的东西都跑在同一个 500 毫秒心跳上 —— 建筑物的 `onTick`、效果的计时、
+  `event.every(ms, fn)`，以及帕鲁 `onTick` 背后那次较慢的扫描。
+- 一共有 21 条频道：13 条来自有名有姓的原生函数，是 LIVE；7 条由 PalForge 从扫描或循环推导；
+  剩下一条 `skill.hit` 已装备却从未运过任何东西。
+- 会被接受但永远不会被调用的钩子有三个：建筑物的 `onLeftClick` 和 `onBreak`（转储里没有能喂给
+  它们的东西，连频道都没有），以及技能的 `onHit`。摧毁请用 `onRemove`，命中请用 `:hit(target)`。
+- F9 会换掉每个模块，但保留已装备的钩子、注册表、总线和建筑物运行时状态；只要还有重复执行的
+  回调没结束，它就会拒绝。
 
 接着读 [Building](/docs/api/building)，了解支撑本页运行时的那些定义字段。

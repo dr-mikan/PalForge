@@ -26,6 +26,7 @@
 -- — "no-MID -> white"). The layer is FULLY fail-soft; the mesh always attaches.
 
 local Renderer = require("palforge.core.mesh.base.renderer")
+local uo       = require("palforge.core.uobject")
 local log      = require("palforge.utils.log").scope("mesh")
 
 local Procedural = Renderer:extend("Procedural")
@@ -38,7 +39,42 @@ local function readFile(path)
     return data
 end
 
-local objCache = {} -- path -> parsed mesh
+-- Parsed OBJs, by path. BOUNDED, which it was not: this held the full verts / tris / uvs
+-- arrays for every OBJ path ever parsed, strongly and unevicted, for the life of the
+-- process. That is a real amount of memory per entry — three Lua tables sized by the model,
+-- one FVector table per vertex — and the count grew with the number of distinct paths a
+-- session touched, which for a pack that generates paths is not bounded at all.
+--
+-- Least-recently-USED eviction rather than least-recently-added: the attach loop re-parses
+-- the same handful of models over and over, so recency of use is exactly the right thing to
+-- keep. The cap is a judgement, not a measurement — 8 distinct procedural models live at
+-- once is already more than anything in this tree does — and evicting is cheap, because a
+-- miss costs one io.open and a linear parse, not an engine call.
+local OBJ_CACHE_MAX = 8
+local objCache = {}      -- path -> parsed mesh
+local objOrder = {}      -- paths, least-recently-used first
+
+local function objTouch(path)
+    for i = 1, #objOrder do
+        if objOrder[i] == path then table.remove(objOrder, i); break end
+    end
+    objOrder[#objOrder + 1] = path
+end
+
+local function objCacheGet(path)
+    local mesh = objCache[path]
+    if mesh then objTouch(path) end
+    return mesh
+end
+
+local function objCachePut(path, mesh)
+    objCache[path] = mesh
+    objTouch(path)
+    while #objOrder > OBJ_CACHE_MAX do
+        local oldest = table.remove(objOrder, 1)
+        objCache[oldest] = nil
+    end
+end
 
 -- Parse a (triangulated-or-not) OBJ file: v / vt / f records.
 -- Faces with >3 vertices are fan-triangulated. Both windings are emitted so the
@@ -48,7 +84,8 @@ local objCache = {} -- path -> parsed mesh
 -- it — a best-effort per-vertex UV (correct for meshes that don't share a position
 -- across differing UVs; good enough for probe meshes, never crashes).
 function Procedural.parseObj(path)
-    if objCache[path] then return objCache[path] end
+    local cached = objCacheGet(path)
+    if cached then return cached end
     local text = readFile(path)
     if not text then return nil, "cannot read " .. path end
     local verts, tris, texcoords = {}, {}, {}
@@ -91,7 +128,7 @@ function Procedural.parseObj(path)
         for i = 0, #verts - 1 do uvs[i + 1] = uvOf[i] or { X = 0, Y = 0 } end
     end
     local mesh = { verts = verts, tris = tris, uvs = uvs, hasUV = hasUV }
-    objCache[path] = mesh
+    objCachePut(path, mesh)
     return mesh
 end
 
@@ -103,18 +140,60 @@ end
 
 -- Keep the component we created per actor, so detach removes exactly what attach added
 -- (and nothing that was already on the actor), and so the base setColor knows which
--- component to reach for. __mode="k" weak table.
-local compByActor = setmetatable({}, { __mode = "k" })
+-- component to reach for.
+--
+-- KEYED ON core.uobject.key (the actor's full name), NOT on the actor handle — contract C1,
+-- and the identical defect static.lua carried: UE4SS mints a fresh userdata wrapper per
+-- lookup, so a `__mode="k"` table keyed on a handle could only ever be read back with the
+-- one Lua value that wrote it. The record holds the handle:
+--   { actor = <freshest handle we were given>, comp = <the ProceduralMeshComponent> }
+-- and the separate `dressed` boolean table is gone, because the once-guard now rests on
+-- whether a component of ours is still live rather than on a flag that survived a detach
+-- that never ran.
+local byActor = {}
+
+-- The record for `actor`, re-validated, handle refreshed from the caller's fresher one. A
+-- record whose component is already gone is dropped: nothing left to detach, nothing left
+-- to guard.
+local function recordFor(actor)
+    local k = uo.key(actor)
+    if not k then return nil, nil end
+    local rec = byActor[k]
+    if rec == nil then return nil, k end
+    if not uo.live(rec.comp) then byActor[k] = nil; return nil, k end
+    rec.actor = actor
+    return rec, k
+end
 
 -- The component this backend dressed `actor` with (base/renderer contract).
-function Procedural:componentFor(actor) return actor and compByActor[actor] or nil end
+function Procedural:componentFor(actor)
+    local rec = recordFor(actor)
+    return rec and rec.comp or nil
+end
 
 -- Attach a runtime mesh to an actor. def = { model, scale, offset, color, texture, params, material }.
--- Returns true on success. The mesh always attaches; the material layer is best-effort.
+-- Returns true on success, or false PLUS the English reason (the same string this logs) —
+-- a pack author who gets a bare false back has to go and read UE4SS.log to find out which
+-- step refused. The mesh always attaches; the material layer is best-effort.
 function Procedural:attach(actor, def)
-    if not (actor and type(def) == "table") then return false end
+    if not (actor and type(def) == "table") then return false, "procedural: no actor or no spec" end
     local mesh, e = Procedural.parseObj(def.model)
-    if not mesh then log.err("mesh: " .. tostring(e)); return false end
+    if not mesh then
+        local why = "mesh: " .. tostring(e)
+        log.err(why)
+        return false, why
+    end
+
+    -- NEVER STACK: a component a previous attach put on this actor is destroyed first, so a
+    -- second attach cannot orphan the first. Keyed on a handle, the store used to be
+    -- overwritten on every re-attach and the earlier component became unreachable.
+    local prev = recordFor(actor)
+    if prev then
+        local gone = Renderer.destroyComponent(prev.comp)
+        log.info("procedural: replacing the component a previous attach put on this actor"
+            .. (gone and "" or " (K2_DestroyComponent did not fire, so the old one may still "
+                .. "be on the actor - core.signature has logged why)"))
+    end
 
     local vertexColors = def.color and (function()
         local bc = Renderer.byteColor(def.color)
@@ -129,8 +208,12 @@ function Procedural:attach(actor, def)
         assert(pmcClass and pmcClass:IsValid(), "ProceduralMeshComponent class not found")
         local comp = actor:AddComponentByClass(pmcClass, false, {}, false)
         assert(comp and comp:IsValid(), "AddComponentByClass failed")
-        -- remember it immediately: even a half-built component is ours to destroy again
-        pcall(function() compByActor[actor] = comp end)
+        -- remember it immediately: even a half-built component is ours to destroy again.
+        -- A nil key (an actor that will not answer GetFullName) means no record — which
+        -- costs the ability to detach it later, not the attach itself, and the log line at
+        -- the end of this function says so.
+        local k = uo.key(actor)
+        if k then byActor[k] = { actor = actor, comp = comp } end
         -- CreateMeshSection(int32 SectionIndex, TArray<FVector>& Vertices,
         --   TArray<int32>& Triangles, TArray<FVector>& normals, TArray<FVector2D>& UV0,
         --   TArray<FColor>& VertexColors, TArray<FProcMeshTangent>& Tangents,
@@ -165,23 +248,30 @@ function Procedural:attach(actor, def)
                 st, tostring(mesh.hasUV), tostring(#vertexColors > 0), tostring(def.model)))
         end
     end)
-    if not ok then log.err("attach failed: " .. tostring(aerr)); return false end
+    if not ok then
+        local why = "attach failed: " .. tostring(aerr)
+        log.err(why)
+        return false, why
+    end
+    if not uo.key(actor) then
+        log.warn("procedural: the mesh is attached but this actor would not answer "
+            .. "GetFullName, so nothing was recorded - detach and setColor will find no "
+            .. "record for it")
+    end
     return true
 end
 
--- Track actors we've already dressed so lazy re-attach doesn't stack meshes.
-local dressed = setmetatable({}, { __mode = "k" })
-
 -- Attach once per actor (guards against re-stacking). The global ENABLED kill-switch
 -- lives on the facade (core.mesh); this backend only owns the per-actor guard.
+--
+-- The guard reads the record, whose liveness recordFor has just re-checked, so "already
+-- dressed" means "a component this backend created is still on this actor". The separate
+-- `dressed` flag table it used to consult was keyed on the actor handle, so it missed on
+-- every call after the first and the stacking it existed to prevent happened anyway.
 function Procedural:attachOnce(actor, def)
-    if not (actor and def) then return false end
-    if dressed[actor] then return true end
-    if self:attach(actor, def) then
-        dressed[actor] = true
-        return true
-    end
-    return false
+    if not (actor and def) then return false, "procedural: no actor or no spec" end
+    if recordFor(actor) then return true end
+    return self:attach(actor, def)
 end
 
 -- Destroy the component this backend added to `actor`, so attach can dress it again.
@@ -189,28 +279,26 @@ end
 -- that second case the bookkeeping is deliberately LEFT in place, because the component
 -- is still on the actor and the once-guard is the only thing stopping a second one.
 function Procedural:detach(actor)
-    if not actor then return false end
-    local comp = compByActor[actor]
-    if not comp then return false end
-    local live = false
-    pcall(function() live = comp:IsValid() == true end)
-    if not live then
-        -- already gone (the actor was torn down under us): forget it, but nothing was
-        -- removed BY this call, so say so
-        compByActor[actor] = nil
-        dressed[actor]     = nil
-        self:forgetMaterial(actor)
-        return false
+    if not actor then return false, "procedural: no actor" end
+    -- recordFor already dropped a record whose component the engine tore down under us, so
+    -- "no record" and "the component is gone" arrive here as one case, and both mean this
+    -- call removed nothing. The material bookkeeping is cleared either way.
+    local rec, k = recordFor(actor)
+    if not rec then
+        if k then self:forgetMaterial(actor) end
+        return false, "procedural: nothing of PalForge's is recorded on this actor to remove"
     end
-    if not Renderer.destroyComponent(comp) then
-        log.warn("detach failed (K2_DestroyComponent did not fire - core.signature has "
-            .. "logged whether it was refused or raised)")
-        return false
+    if not Renderer.destroyComponent(rec.comp) then
+        local why = "detach failed (K2_DestroyComponent did not fire - core.signature has "
+            .. "logged whether it was refused or raised)"
+        log.warn(why)
+        -- bookkeeping deliberately LEFT in place: the component is still on the actor and
+        -- the once-guard is the only thing stopping a second one
+        return false, why
     end
     -- the whole component goes, so there is no material to put back — just drop the record
     self:forgetMaterial(actor)
-    compByActor[actor] = nil
-    dressed[actor]     = nil
+    byActor[k] = nil
     return true
 end
 

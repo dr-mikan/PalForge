@@ -85,7 +85,7 @@ id 也就顺带注册了它，事件从此开始送到这个 id——在你写�
       type: 'string[]',
     },
     mesh: {
-      description: '装到生成出的 pawn 上的网格：就地写，或者传一个 Mesh 句柄',
+      description: '生成出的 pawn 身上穿的网格，会在 pal.spawned 上替你装好：就地写，或者传一个 Mesh 句柄',
       type: 'Mesh.Spec',
     },
     material: {
@@ -97,12 +97,12 @@ id 也就顺带注册了它，事件从此开始送到这个 id——在你写�
       type: 'table',
     },
     texture: {
-      description: '应用到网格上的 png 路径，是 material.texture 的简写',
+      description: '应用到网格上的 /Game/... 纹理资源路径，或者一个 png 的绝对路径，是 material.texture 的简写',
       type: 'string',
     },
     icon: {
-      description: 'DataTable 查不到时使用的备用图标',
-      type: 'any',
+      description: '图标 DataTable 里没有这个 id 的行时使用的 /Game/... 纹理路径',
+      type: 'string',
     },
     events: {
       description: '生命周期处理函数，集中放在这里',
@@ -162,18 +162,28 @@ Pal{ id = "ChickenPal", mesh = Mesh.get("example:sheep_body") }
 （必填）、`animClass`（仅 skeletal）、`scale`、`offset`、`texture`、`color`、`material` 和
 `params`。`obj` 是 procedural 后端的另一个名字。
 
-写了网格，并不会把它装到任何东西上。装载要你自己调用 `:renderOn(actor)`，一般写在 `onSpawned`
-里——这个处理函数在帕鲁完成出场之后运行：
+写好的网格会自己装上去。`Pal{ ... }` 会把这份定义的 `onSpawned` 包起来，让 `renderOn` 在
+`pal.spawned` 频道上、在你自己的处理函数之前，为该 id 的每一只 pawn 运行一次。写下网格，
+就是装载的全部：
 
 ```lua
 Pal{
     id   = "ChickenPal",
-    mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal" },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+    mesh = {
+        kind      = "skeletal",
+        model     = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal.SK_ChickenPal",
+        animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/ChickenPal/ABP_ChickenPal.ABP_ChickenPal_C",
     },
 }
 ```
+
+`pal.spawned` 是这只 pawn 的 `.Mesh` 组件最早成为实体的那一刻，所以装载走的是这条频道，而不是
+`onTick` 巡检：网格只需要设置一次，而巡检每三秒都要为它付一次代价。装载走 `attachOnce`，所以
+同一只 pawn 收到第二次生成事件也不会叠上第二个网格；整段都在 `pcall` 里，所以一个解析不出来的
+`model` 路径只花掉一行日志，绝不会连累这只帕鲁的生命周期。
+
+`:renderOn(actor)` 仍然要你自己调用的场合是：不是 PalForge 生成的 pawn、通过 `onTick` 巡检找到
+的 pawn，以及 `detach` 之后重新装上。
 
 ### material、color 和 texture
 
@@ -182,7 +192,7 @@ Pal{
 <TypeTable
   type={{
     color: { description: '色调 r, g, b, a，取值 0..1', type: 'table' },
-    texture: { description: '应用到网格上的 png 的绝对路径', type: 'string' },
+    texture: { description: '应用到网格上的 /Game/... 纹理资源路径，或者一个 png 的绝对路径', type: 'string' },
     params: { description: '原样传下去的额外材质参数', type: 'table' },
     material: { description: '用来实例化的基础材质资源路径', type: 'string' },
   }}
@@ -206,20 +216,29 @@ Pal{
     mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall" },
     material = {
         color    = { r = 0.2, g = 0.5, b = 1.0, a = 1.0 },
-        texture  = "C:/mods/example/sheep.png",
-        material = "/Game/.../M_YourBaseMaterial",
-        params   = { Roughness = 0.2 },
+        texture  = "/Game/Pal/Model/Other/AttackHelicopter/Material/T_AttackHelicopter_B.T_AttackHelicopter_B",
+        material = "/Game/.../MI_YourBaseMaterial",
+        params   = { scalar = { ["Roughness Add"] = 0.2 } },
     },
 }
 ```
 
-`params` 和基础材质路径没有顶层简写。它们只存在于 `material` 里面。
+`params` 和基础材质路径没有顶层简写。它们只存在于 `material` 里面。`params` 按 `vector`、
+`scalar`、`texture` 分组，是因为它背后的三个引擎 setter 就是这么分的。
+
+帕鲁自己的 `texture`（两种写法都算）会按你写的样子原样送到渲染器：可以是一个 `/Game/...` 纹理
+资源，玩家磁盘上不需要任何文件；也可以是你自己的 png 绝对路径。相对于你这个 pack 目录的路径，
+只在网格自己的 `texture` 字段里才会被解析，在这里不会。
 
 <Callout type="warn">
-这四个字段只在 procedural 和 `obj` 后端上真的上色。`kind = "skeletal"`——帕鲁网格的默认值——
-只替换生物的模型，其余什么都不读；`static` 也同样不上色。写在 skeletal 网格旁边的 `color` 或
-`texture` 会一路带到 `core.mesh`，然后在那里什么也不做。在这个后端上，`:renderOn` 返回 `true`
-表示模型被替换了，不表示它被上了色。后端一览表在 [Mesh](/docs/api/mesh)。
+这四个字段会送到每一个后端，skeletal 也不例外。材质那部分工作放在
+`core/mesh/base/renderer.lua` 里，每个后端都会调用它，所以写在 `kind = "skeletal"` 网格旁边的
+`color`，也会通过一个动态材质实例写进那只 pawn 自己的材质插槽。
+
+`:renderOn` 返回 `true` 仍然不代表看得出任何变化。它写入的参数名是从运行中的游戏里读出来的真
+名字（`BaseColor`、`Base Texture`、`Normal Map` 等，完整清单在 [Mesh](/docs/api/mesh)），但往
+材质没有的名字上写是悄无声息的空操作，而且至今没有任何一次运行看到帕鲁的颜色真的变了。请把
+`true` 读作“网格换掉了，材质写入跑过了”。
 </Callout>
 
 ### skills
@@ -247,13 +266,22 @@ end
 ### icon
 
 `:iconOf()` 会拿这个 id 去查游戏自带的帕鲁图标表——先查 `DT_PalCharacterIconDataTable`，再查
-`DT_PalCharacterIconDataTable_Common`——并按 `SoftIcon`、`IconName`、`IconTexture`、`Icon`、
-`Texture` 的顺序，取第一个有内容的列。只要没查到，无论缺的是表、是行还是列，你拿到的都是自己
-写的 `icon`。查询用的是原始 id，所以带命名空间的 `"example:Boss"` 永远匹配不到行，一定会回退。
+`DT_PalCharacterIconDataTable_Common`——读的是 `Icon` 这一列。这个列名是实测出来的，不是猜的：
+在一个加载好的存档里一次性读了四张图标表，帕鲁 674 行里答了 674 行，道具 1207 行里答了
+1183 行，建筑物 571 行里答了 567 行，伙伴技能 311 行里答了 311 行。帕鲁和道具用 `Icon`，
+建筑物用 `SoftIcon`，伙伴技能用 `TextureID_8_2B2F889C43EB586246BDB981B6462ACA`。返回的永远是
+一个 `/Game/...` 资源路径字符串，绝不是引擎对象。
+
+id 会先被解析再去查，所以 `"example:Boss"` 是按行的写法 `example_Boss` 去查的，只要那一行存在
+就能查到真表；解析不出来的 id 就按字面去查。只要没查到——没有表、没有行、没有值——你拿到的
+都是自己写的 `icon`，一个都没写就是 `nil`。
+
+行的匹配区分大小写，而且同一只生物的两种写法在这个版本里都真实存在：分发用的蓝图 id 是
+`SheepBall`，这次查询要对上的 DataTable 行是 `Sheepball`。
 
 ```lua
 local pal = Pal{ id = "example:Boss", icon = "/Game/.../T_icon_example_boss" }
-pal:iconOf()   -- the declared icon, since the DataTable has no "example:Boss" row
+pal:iconOf()   -- the row "example_Boss" if PalSchema wrote one, else the declared icon
 ```
 
 ### data
@@ -291,7 +319,7 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 
 | 钩子 | 频道 | 原生来源 | ctx | 状态 |
 | --- | --- | --- | --- | --- |
-| `onSpawned` | `pal.spawned` | `PalCharacter:BroadcastOnCompleteInitializeParameter` | `ctx.actor` | LIVE，钩子未经确认，世界加载完成后才启用 |
+| `onSpawned` | `pal.spawned` | `PalNPC:OnCompletedInitParam` 和 `PalPlayerCharacter:OnCompleteInitializeParameter` | `ctx.actor` | LIVE，已观测到触发；在 `world.ready` 时启用，绝不在加载时启用 |
 | `onDamaged` | `pal.damaged` | `PalCharacter:OnDamageReaction` | `ctx.actor` | LIVE |
 | `onDeath` | `pal.death` | `PalCharacter:OnDeadCharacter` | `ctx.actor` | LIVE |
 | `onCaptured` | `pal.captured` | `PalCharacterParameterComponent:SetIsCapturedProcessing`，且 `started == true` | `ctx.actor`、`ctx.comp` | LIVE |
@@ -300,6 +328,15 @@ native hook -> event.emit -> channel -> dispatch -> resolve BP class name -> pal
 `ctx.actor` 是世界里发生了这件事的那只生物。`pal.captured` 是在帕鲁的参数组件上触发的，所以
 actor 是这个组件的持有者，`ctx.comp` 就是组件本身。`onDamaged` 在**受到**伤害的那只帕鲁身上
 触发，永远不会在攻击者身上触发——游戏自己的钩子没有说是谁发起的攻击。
+
+`pal.spawned` 有两个来源，因为最顺理成章的那一个什么都不带。
+`PalCharacter:BroadcastOnCompleteInitializeParameter` 正是宣告“某个角色参数初始化完成”的那个
+函数，钩子也挂得干干净净——可是在另外十条频道都在报告的真实存档里，它被实测为**沉默**。钩子
+能看到的只有 `ProcessEvent` 真正执行的东西，而发广播的那一方不在其中。所以 PalForge 监听的是
+这次广播调用的委托**目标**：`PalNPC:OnCompletedInitParam`，它在帕鲁自己这一侧，所有帕鲁都会
+走到；以及 `PalPlayerCharacter:OnCompleteInitializeParameter`，它为玩家订阅过的角色触发。两者
+都在 2026-07-26 观测到触发。两条来源会按 actor 在一秒的窗口里去重，所以同一只 pawn 同时走到
+两边，也只算一次事件。
 
 一个响应捕捉、并回赠玩家东西的处理函数：
 
@@ -534,15 +571,18 @@ pal:renderOn(actor)
 actor 再调一次也没有害处。当 actor 无效、定义里没有网格，或者那个网格没有 `model` 时，它什么都
 不做并返回 `false`。
 
+**通常你不需要调用它。** 写了 `mesh` 的定义会自己在 `pal.spawned` 上把它装好。这里是手动的
+路线：不是 PalForge 生成的 pawn、通过 `onTick` 巡检找到的 pawn，或者 `detach` 之后重新装上。
+在 `onSpawned` 里再调一次也没有害处——有那道防重叠的门，第二次调用只会发现网格已经在那里了。
+
 ```lua
+-- reach the sheepballs that were already standing there when the pack loaded
 Pal{
     id   = "SheepBall",
     mesh = { kind = "skeletal", model = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall" },
     events = {
-        onSpawned = function(pal, ctx)
-            if not pal:renderOn(ctx.actor) then
-                require("palforge.utils.log").scope("example").warn("no mesh attached")
-            end
+        onTick = function(pal, ctx)
+            pal:renderOn(ctx.actor)   -- one-shot per pawn: the dressed ones cost nothing
         end,
     },
 }
@@ -563,14 +603,12 @@ Pal{
         model     = "/Game/Pal/Model/Character/Monster/SheepBall/SK_SheepBall.SK_SheepBall",
         animClass = "/Game/Pal/Blueprint/Character/Monster/PalActorBP/SheepBall/ABP_SheepBall.ABP_SheepBall_C",
     },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
-    },
 }
 ```
 
 返回 `true` 表示后端的设置方法执行了——对 skeletal 后端来说，就是模型被设置到了生物自己的组件
-上。至于最终画出来是什么样，这个调用没法告诉你。
+上，并且能从那里读回来。至于最终画出来是什么样，这个调用没法告诉你；材质写入有没有落在材质
+真正带有的参数上，同样也没法告诉你。
 
 ### teachAll
 
@@ -607,7 +645,7 @@ local taught, asked = Blaze:teachAll(somePalActor)
 pal:skillsOf()      --> string[]   the declared skill ids, an empty table when none
 pal:teachAll(actor) --> integer, integer   how many landed, how many were asked for
 pal:mesh()          --> table?     the validated mesh declaration, nil when none
-pal:iconOf()        --> any?       DataTable texture ref, else the declared icon, else nil
+pal:iconOf()        --> string?    the DataTable row's /Game/... path, else the declared icon, else nil
 pal:name()          --> string     the declared name, else the id
 pal:description()   --> string?    the declared description, or nil
 ```
@@ -659,9 +697,8 @@ local Chicken = Pal{
     color = { r = 1.0, g = 0.4, b = 0.1, a = 1.0 },
     events = {
         onSpawned = function(pal, ctx)
-            if not pal:renderOn(ctx.actor) then
-                log.warn("mesh not attached for " .. pal:name())
-            end
+            -- the mesh is already on ctx.actor by the time this runs
+            log.info("party chicken arrived: " .. tostring(ctx.actor))
             Fanfare:play(ctx.actor)
         end,
     },
@@ -669,6 +706,9 @@ local Chicken = Pal{
 
 Chicken:spawn(Player.coordinateOffset(300, 0, 0))
 ```
+
+写好的网格会在这个处理函数运行之前就装上去，所以想移动、改名或者重新上色的处理函数，一开始
+就能看到身体已经在了。装载本身成没成功，这个处理函数读不到——那在网格的日志里。
 
 音效在文件顶部定义一次，处理函数里只负责播放。写在处理函数里定义，等于每生成一次就重新注册一次
 音效。手边没有局部变量时，改用 `Audio.get("AKE_CampLevelUp"):play(ctx.actor)`。
@@ -758,9 +798,6 @@ local Squad = Pal{
     material = {
         color = { r = 0.2, g = 0.5, b = 1.0, a = 1.0 },
     },
-    events = {
-        onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
-    },
 }
 
 -- spread `n` of them in a line to the player's north-east
@@ -782,8 +819,9 @@ summonSquad(5, 20)
 Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 ```
 
-每个成员各用一次自己的生成调用，各自的 `onSpawned` 会在自己的生物到达时把网格装上去。这支小队不会
-一起出现，也不会立刻出现：每一只都比自己那次调用晚几秒，所以它们会在接下来的几秒里陆续到位。
+每个成员各用一次自己的生成调用，到达的个体都会穿上写好的那套网格——定义里没有任何处理函数，
+因为装载自己就骑在 `pal.spawned` 上。这支小队不会一起出现，也不会立刻出现：每一只都比自己那次
+调用晚几秒，所以它们会在接下来的几秒里陆续到位。
 
 ## 限制
 
@@ -804,10 +842,14 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
   句柄，所以要按生物记住的东西，请放进你自己的表里，用 `ctx.actor` 作键。
 - **坏掉的 `onTick` 会被关掉。** 连续失败五次，PalForge 就会记进日志，并在这个会话剩下的时间里
   不再调用这份定义的 `onTick`——该 id 下的所有生物都不再调用，不只是出错的那一只。
-- **`onSpawned` 依赖的钩子还没有被确认。**
-  `PalCharacter:BroadcastOnCompleteInitializeParameter` 没有像捕捉、伤害和死亡那样在游戏里验证过，
-  而且只有在世界加载完成之后才会启用，因为更早启用会在世界加载的洪峰里堵住共享的钩子分发。请把它
-  当成尽力而为，并写一个多运行几次也安全的处理函数；`:renderOn` 只装一次，所以再调一次是安全的。
+- **`onSpawned` 会触发，但还没有人看到它为一只真正“新”的帕鲁触发。** 至今观测到的每一次触发，
+  都落在和 `world.ready` 同一秒里——也就是加载时的洪峰，那一刻附近的每只帕鲁都在同时初始化。
+  这证明这条频道是通的，却对 pack 真正在意的那个场景一言不发：一只上一刻还不存在的帕鲁。
+  给出结论的是 `pf_hook pal-spawned-fresh`。在那之前，请把处理函数写成对同一只 pawn 跑两次也
+  无害的样子，也不要拿它来数出现了多少只帕鲁。
+- **`onSpawned` 的来源在 `world.ready` 时才启用，绝不在加载时启用。** 那次初始化广播就发生在
+  世界加载的帕鲁初始化洪峰里，而在那里的一次触发曾经堵死过共享的 UE4SS 钩子分发，把三个已确认
+  的钩子一起拖下水。推迟启用保护的不只是这条频道，还有捕捉、伤害和死亡。
 - **世界准备好之前什么都不会运行。** 四个游戏钩子都会立即返回，直到连续五次每秒一轮的轮询都找到
   有效的 `PalPlayerCharacter` 为止，`onTick` 的巡检也在等同一道门。
 - **处理函数出错，这个处理函数就到此为止。** PalForge 在 `pcall` 里调用你的钩子，并把失败连同
@@ -821,11 +863,13 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
 - **坐标是生成之后的移动，不是生成位置。** 游戏自己的调用会忽略你要求的位置，所以 PalForge 会等生物
   到达，挑出新的那一只，再把它传送到你给的点上 —— 落点分毫不差。这一轮的结果只会写进日志，那一行里
   带着从帕鲁身上读回来的位置。
-- **网格永远不会自动装上。** 请在处理函数里调用 `:renderOn(actor)`。`core.mesh.ENABLED` 是一个
-  全局开关，关掉它以后所有装载都变成空操作；而材质相关的字段送到的后端，只有在 `kind` 是
-  `procedural` 或 `obj` 时才上色。
+- **写好的网格会在 `pal.spawned` 上替你装上。** `:renderOn(actor)` 是给不是从那条频道来的 pawn
+  准备的手动路线。`core.mesh.ENABLED` 是一个全局开关，关掉它以后所有装载都变成空操作。材质相关
+  的字段会送到每一个后端，但往材质没有的参数名上写是悄无声息的空操作，所以装上了并不等于看得
+  见颜色。
 - **`Pal.get` 不会注册。** 只有 `Pal{ ... }` 会把定义放进注册表，所以 `Pal.get` 拿到的句柄能做
-  动作，却永远收不到事件。同一个 id 定义两次，后一份定义会替换前一份。
+  动作，却永远收不到事件。同一个 id 定义两次，后一份定义会替换前一份，注册表会把这件事写进
+  日志——两份定义来自不同 pack 时，还会写出双方的名字。
 
 </Callout>
 
@@ -836,7 +880,8 @@ Squad:spawn{ toPlayer = true, num = 3, level = 20 }
   `onTick`。这五个都是可用的。
 - `pal:spawn()` 把帕鲁放进世界，帕鲁会在 4 到 8 秒后到。传坐标就能精确放到那个点，传
   `{ toPlayer = true, num = 3 }` 就直接送给玩家。那个布尔值说的是调用本身，所以反应写在 `onSpawned` 里。
-- `mesh` 改变帕鲁的样子，但要你自己在 `onSpawned` 里调用 `pal:renderOn(ctx.actor)` 装上去。
+- `mesh` 改变帕鲁的样子，写好的网格会在 `pal.spawned` 上替你装上；`pal:renderOn(actor)` 是手动
+  路线。
 - 只有你用 `Pal{ ... }` 定义过的 id 才会被调用处理函数；`Pal.get` 给你动作，但不给你事件。
 - `onTick` 对每只活着的帕鲁大约每三秒运行一次，自己不记东西——要按生物记的内容，用 `ctx.actor`
   作键。

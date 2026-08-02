@@ -30,6 +30,14 @@ jobs:
           cache: npm
           cache-dependency-path: docs/package-lock.json
 
+      # Before the install, not after: the linter imports nothing but node builtins, so a
+      # page with a dead link, an untranslated locale or a count the Lua tree contradicts
+      # fails here in a second or two instead of after a full Next build. `npm run build`
+      # runs it again through docs `prebuild`; this step is the one that reports it as its
+      # own red step.
+      - name: Lint content
+        run: node docs/scripts/lint-content.mjs
+
       - name: Install
         working-directory: docs
         run: npm ci

@@ -20,11 +20,26 @@
 --                    aliases (M.ALIASES) for the two the game spells with a "*".
 --   (d) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
 --   (e) M.tableOf(id) — which DataTable a row came from.
---   (f) CURATED    — the hand-written Fireball definition.
+--   (f) M.publish(id) — register that handle with object_manager, on request. See below.
+--   (g) CURATED    — the hand-written Fireball definition.
 --
 -- Only the CURATED definition calls Skill{ ... } at load, so only it self-registers into
--- object_manager at mod start; a named field and get(id) both define on demand. That is why
+-- object_manager at mod start; a named field and get(id) both build on demand. That is why
 -- requiring this file never registers the thousands of skill ids.
+--
+-- AND A READ NO LONGER REGISTERS EVEN THE ONE ROW IT TOUCHES (2026-08-02). M.get builds with
+-- `{ register = false }` (contract C2) — the publish gate, forced by native/buildings.lua where
+-- registration is not inert (a registered building def makes core/event track and PERSIST every
+-- matching actor, so a field read started writing to the save). Skills persist nothing, but the
+-- gate is one rule in all six catalogs rather than five exceptions, and this is the catalog
+-- where a walk costs the most: 2587 rows, in the registry that every namespaced lookup miss
+-- then walks.
+--
+-- WHAT REGISTRATION IS FOR HERE: Skill.get(id) hands back a registered class instead of
+-- fabricating a thin one, and core/event's skill.activate dispatch resolves the waza id through
+-- object_manager. A lazy catalog handle declares no handlers, so publishing one changes nothing
+-- observable — which is why the CURATED definition below, which does declare one, still
+-- registers at load and a lazy one does not.
 --
 -- WHAT A LAZY NATIVE HANDLE HONESTLY DOES:
 --   * :kind() is now TRUE of the row rather than a default. It used to answer "active" for all
@@ -49,6 +64,7 @@
 
 local Skill   = require("palforge.api.skill")
 local catalog = require("palforge.native._catalog")
+local log     = require("palforge.utils.log").scope("native.skills")
 
 local M = {}
 
@@ -568,11 +584,34 @@ end
 -- MEMBERSHIP IS `set[id] ~= nil`, NOT `set[id]`. The value carries the source table, and the
 -- curated definition is pre-seeded with `false` because it came from no table at all — a truthy
 -- test would drop it back out of the catalog it was just added to.
+--
+-- `{ register = false }` (contract C2) is the publish gate described in the header: the handle
+-- is fully built and fully cached, and object_manager is simply not told about it until
+-- M.publish(id) is called.
 function M.get(id)
     if id == nil or set[id] == nil then return nil end
     if cache[id] then return cache[id] end
-    local h = Skill{ id = id, kind = KIND_OF_TABLE[set[id]] }
+    local h = Skill({ id = id, kind = KIND_OF_TABLE[set[id]] },
+                    { register = false, pack = catalog.PACK })
     cache[id] = h
+    return h
+end
+
+---Register this catalog's handle for `id` with object_manager: the opt-in half of the publish
+---gate. What it buys is named in the header — Skill.get(id) finding this class, and the
+---skill.activate dispatch resolving to it — and a lazy handle declares no handlers, so
+---publishing one is mostly of use to something that wants to see the catalog through
+---Skill.get_all().
+---
+---Idempotent, and it publishes the SAME handle the named field hands back, so the curated
+---definition keeps its element / cooldown / power and its handler. Returns nil for an id this
+---catalog does not have.
+---@param id string
+---@return Skill.Handle?
+function M.publish(id)
+    local h = M.get(id)
+    if not h then return nil end
+    catalog.publish("skill", h, "native.skills")
     return h
 end
 
@@ -583,7 +622,26 @@ end
 -- FNames in these two tables are encounter-keyed (RAID_/GYM_/BOSS_) or passive-trait
 -- rows, so "FlameThrower" is NOT a CATALOG member (pre-seeded below). element/cooldown/
 -- power are framework-side metadata (the dump lists schema columns, not per-row values).
-M.Fireball = Skill{
+--
+-- IT REGISTERS AT LOAD, and that is deliberate rather than left over: it declares a handler, and
+-- a skill class is only dispatched to if object_manager holds it. Registering a skill writes
+-- nothing anywhere — the persistence that made native/buildings.lua's curated pair a release
+-- gate is the building runtime's alone. It registers under the framework's own pack id
+-- (contract C3) so a pack that declares "FlameThrower" replaces something whose previous owner
+-- can be named.
+--
+-- WHAT THIS DEFINITION DOES WHEN YOU ACTIVATE IT: it logs, once, that nothing was spawned. That
+-- is the whole of it, and the log line exists because the return value cannot say it —
+-- Skill.Handle:activate (api/skill.lua:382-389) stamps the cooldown, runs the handler under
+-- pcall and returns pcall's own ok, so `true` there means "the handler did not raise", never
+-- "a skill happened". A handler that quietly did nothing was therefore indistinguishable from
+-- one that fired a projectile, which is the specific dishonesty this replaces. Making the
+-- RETURN honest needs api/skill.lua to let a handler report "nothing happened" (activate would
+-- have to consult the handler's return, which today it discards); until then the log line is
+-- the honest channel, and it names what it refused.
+local warnedNoProjectile = false
+
+M.Fireball = Skill({
     id       = "FlameThrower",
     kind     = "active",
     element  = "fire",
@@ -591,10 +649,93 @@ M.Fireball = Skill{
     power    = 50,
     events = {
         onActivate = function(self, owner, ctx)
-            -- TODO: spawn the projectile through the native gameplay layer.
+            -- TODO(skill-projectile-spawn): a declared active skill can decide WHEN it fires and
+            -- nothing about WHAT comes out. This marker used to say no projectile class and no
+            -- spawn route had been found; both halves of that were wrong and are corrected here.
+            --
+            -- WHAT A PACK AUTHOR SEES. `Skill{ kind = "active", element = "fire", power = 50 }`
+            -- defines, registers and dispatches, and `onActivate` runs at exactly the right
+            -- moment on a REAL activation — that half is measured: core/event hooks
+            -- PalActionBase:OnBeginAction and skill.activate carries the waza id (the
+            -- skill-hit-source marker at api/skill.lua:118 records that session). But element,
+            -- power and cooldown are framework-side metadata that reach nothing, and the handler
+            -- has no call available to it that puts an object in the world. So a pack's active
+            -- skill is a well-timed Lua function, and that is all it is. This definition exists
+            -- to demonstrate exactly that, which is why it logs instead of pretending.
+            --
+            -- THE SINGLE UNKNOWN FACT: whether a STRUCT argument can be marshalled into a
+            -- Palworld UFunction on this build. Everything else on this path is already read:
+            --   * the actor class exists — APalSkillEffectBase : AActor (dumps/cxx/Pal.hpp:11345),
+            --     with Initialize(const AActor* SkillOwner, const FVector& MyOffset,
+            --     AActor* Target, FRandomStream RandomStream) at :11370 and
+            --     CreateChildSkillEffect(TSubclassOf<APalSkillEffectBase>, FTransform,
+            --     FRandomStream, ESpawnActorCollisionHandlingMethod, AActor*) at :11374;
+            --   * the waza row NAMES a class to spawn — FPalWazaDatabaseRaw (Pal.hpp:7534)
+            --     carries TSubclassOf<UPalWazaBulletEmiiterOverlapBase> BulletEmiiterOverlapClass
+            --     (:7558), reachable through UPalWazaDatabase::FindWazaForBP (:32646);
+            --   * PalForge ALREADY HAS the generic spawn — core/spawn.lua:152 M.actor is
+            --     BeginDeferredActorSpawnFromClass + FinishSpawningActor, both read off the dump.
+            -- What blocks it is that every one of those calls carries an FVector, an FTransform,
+            -- an FRandomStream or an out-struct by reference, and core/signature refuses a struct
+            -- on "present" evidence because a struct pushed against an unread declaration is the
+            -- failure shape that kills the process. M.actor is gated on precisely this and has
+            -- therefore never run. The bullet route is the same story: APalBullet (Pal.hpp:8849),
+            -- with ShootOneBullet(TSubclassOf<APalBullet>, UNiagaraSystem*, FVector, FRotator,
+            -- float) on APalMonsterEquipWeaponBase (:10186) — and ONE argument-free sibling,
+            -- ShootOneBulletDefault() (:10185), which is the only entry on this whole surface
+            -- that needs no struct at all.
+            --
+            -- WHAT MEASURES IT — test/hooks/skill_projectile_spawn.lua, declared as the hook
+            -- `skill-projectile-spawn` and written to this paragraph. needs = { world = true,
+            -- pal = true }, writes = true, so it runs only with
+            -- `env.debugHooks["skill-projectile-spawn"] = true` in Scripts/palforge_dev.lua, on
+            -- a throwaway save. `pf_hook skill-projectile-spawn` in the UE4SS console, or
+            -- `20 pf_hook_skill_projectile_spawn` in autorun.txt. What it does:
+            --   1. ask core/signature to DESCRIBE, not call, each of ShootOneBulletDefault,
+            --      ShootOneBullet, CreateChildSkillEffect and BeginDeferredActorSpawnFromClass on
+            --      live objects, and print the parameter list the running build reports for each.
+            --      Whether the walk answers "declared" for a StructProperty is the finding, and it
+            --      settles core/spawn.lua's M.actor at the same time.
+            --   2. call ShootOneBulletDefault() on a live APalMonsterEquipWeaponBase and report
+            --      whether an APalBullet comes back. Zero arguments, so this is the safe call, and
+            --      it is the one thing on this surface that can be tried before step 1 answers.
+            --   3. REFUSE every remaining route BY NAME, printing for each one the parameter
+            --      that stopped it — ShootOneBullet's FVector muzzle location, Initialize's
+            --      FVector offset and FRandomStream, CreateChildSkillEffect's FTransform,
+            --      M.actor's FTransform, FindWazaForBP's out-struct.
+            --      ⚠️ THIS STEP USED TO READ "only if step 1 reported declared for a struct
+            --      parameter: spawn an APalSkillEffectBase through core/spawn.lua's M.actor and
+            --      Initialize it". The hook does NOT do that, deliberately. A wrong-typed
+            --      argument faults inside UE4SS's marshalling where pcall cannot see it, and a
+            --      hook that dies mid-block destroys the log it was writing — so a crash is not
+            --      a worse result than a refusal, it is NO result. A refusal that names what the
+            --      build declared is a complete answer for this item; pushing the first struct
+            --      this tree has ever pushed is a separate decision, taken deliberately with
+            --      that log block in front of you, and not a side effect of a measurement.
+            --   ⚠️ Do not push a hand-built FVector or FTransform at a call whose declaration the
+            --   walk could not read. That is the one failure shape pcall cannot see.
+            --
+            -- IS THE CURRENT RETURN HONEST? The return itself is not the problem — the DOC is what
+            -- carries the meaning, and it does: api/skill.lua:427-434 defines the value of
+            -- Handle:activate (body at :435-442) as false for a passive, false when the cooldown
+            -- blocked it, false when the handler raised, and otherwise "the handler ran to
+            -- completion". It promises nothing about the world, and reading it as "a skill
+            -- happened" is a misreading rather than a lie. What a boolean CANNOT express is the
+            -- case this definition is in — the handler ran, deliberately, and produced nothing —
+            -- so that is said in the log line below instead, once per session. If activate is
+            -- ever made to consult the handler's return (today it discards it), this is the
+            -- distinction it should carry.
+            if not warnedNoProjectile then
+                warnedNoProjectile = true
+                log.warn("native.skills.Fireball (\"FlameThrower\") was activated and spawned "
+                    .. "NOTHING: this demo definition carries element/power/cooldown metadata "
+                    .. "and no projectile route -- that is the open item skill-projectile-spawn. "
+                    .. ":activate() still answers true, which per its doc means only that this "
+                    .. "handler ran to completion. Logged once per session.")
+            end
         end,
     },
-}
+}, { pack = catalog.PACK })
 
 -- Pre-seed curated so get("FlameThrower") returns the curated handle (hooks intact), and so
 -- `skills.FlameThrower` names it — M.Fireball is a NICKNAME, since "Fireball" is not an id of

@@ -49,6 +49,7 @@
 local Renderer = require("palforge.core.mesh.base.renderer")
 local assets   = require("palforge.core.mesh.assets")
 local sig      = require("palforge.core.signature")
+local uo       = require("palforge.core.uobject")
 local log      = require("palforge.utils.log").scope("mesh")
 
 local StaticMesh = Renderer:extend("StaticMeshRenderer")
@@ -85,28 +86,81 @@ local destroyComponent = Renderer.destroyComponent
 
 -- The component this backend created, per actor, so detach removes exactly what attach
 -- added (and nothing that was already on the actor), and so base/renderer's setColor
--- knows which component to instance a material on. __mode="k" weak table.
-local compByActor = setmetatable({}, { __mode = "k" })
+-- knows which component to instance a material on.
+--
+-- KEYED ON core.uobject.key (the actor's full name), NOT on the actor handle — contract C1.
+-- It was a `__mode="k"` table keyed on the handle, and UE4SS mints a fresh userdata wrapper
+-- per lookup, so every entry was findable only by the one Lua value that created it. Three
+-- of the four silent failures the audit found came out of this one line: detach(actor)
+-- returned false and left the component on the pawn forever, attachOnce's guard missed the
+-- same way, and the store below then OVERWROTE the record so the first component became
+-- unreachable and could never be destroyed. Unbounded growth, no log line.
+--
+-- The record carries the handle, and the two things that used to be separate tables:
+--   { actor = <freshest handle we were given>, comp = <the UStaticMeshComponent we added> }
+-- There is no `dressed` flag any more. The once-guard now rests on a FACT that can be
+-- re-read — is a component of ours still live on this actor — rather than on a boolean that
+-- said only "we set this once", which is the same read-back discipline attach already uses
+-- for the mesh setter.
+local byActor = {}
+
+-- The record for `actor`, re-validated, with its handle refreshed from the caller's fresher
+-- one. A record whose component the engine has already destroyed is DROPPED: there is
+-- nothing left to detach and nothing left to guard against.
+local function recordFor(actor)
+    local k = uo.key(actor)
+    if not k then return nil, nil end
+    local rec = byActor[k]
+    if rec == nil then return nil, k end
+    if not uo.live(rec.comp) then byActor[k] = nil; return nil, k end
+    rec.actor = actor
+    return rec, k
+end
 
 -- The component this backend dressed `actor` with (base/renderer contract). This is the
 -- whole of what setColor needs: the base creates the MID on demand from it.
-function StaticMesh:componentFor(actor) return actor and compByActor[actor] or nil end
+function StaticMesh:componentFor(actor)
+    local rec = recordFor(actor)
+    return rec and rec.comp or nil
+end
 
 -- Attach spec's UStaticMesh to `actor` on a component of our own.
--- Returns true only when the asset is confirmed to be sitting on that component.
+-- Returns true only when the asset is confirmed to be sitting on that component; otherwise
+-- false PLUS the English reason, which is the same string this logs. The reason is returned
+-- as well as logged because a pack author who gets a bare `false` back from attachTo has to
+-- go and read UE4SS.log to find out which of half a dozen things went wrong.
 function StaticMesh:attach(actor, spec)
-    if not (actor and spec) then return false end
+    if not (actor and spec) then return false, "static: no actor or no spec" end
     local model = spec.model or spec.asset
     if type(model) ~= "string" or #model == 0 then
-        log.err("static: spec carries no model path")
-        return false
+        local why = "static: spec carries no model path"
+        log.err(why)
+        return false, why
     end
     -- THE PRIMARY ROUTE: a /Game/... path, loaded and class-checked. The error string is
     -- deliberately the resolver's own — it distinguishes "that path is not in the pak" from
     -- "that path IS an asset, just not a UStaticMesh", and the second one is the mistake a
     -- pack actually makes (naming an SK_ mesh with kind = "static", or the reverse).
     local asset, rerr = assets.load(model, { class = ASSET_CLASS })
-    if not asset then log.err("static: " .. tostring(rerr)); return false end
+    if not asset then
+        local why = "static: " .. tostring(rerr)
+        log.err(why)
+        return false, why
+    end
+
+    -- NEVER STACK. A previous component of ours on this actor is destroyed before a new one
+    -- is added, so a second attach cannot leave the first orphaned. That orphan is what the
+    -- old code produced whenever the store was overwritten (which, keyed on a handle, was
+    -- every time): the component stayed on the pawn with nothing left holding a reference to
+    -- it, so no detach could ever reach it. Destroying it is logged, because "your mesh was
+    -- replaced" is a thing an author wants to see when they did not expect a second attach.
+    local prev = recordFor(actor)
+    if prev then
+        local gone = Renderer.destroyComponent(prev.comp)
+        log.info("static: replacing the component a previous attach put on this actor"
+            .. (gone and "" or " (K2_DestroyComponent did not fire, so the old one may still "
+                .. "be on the pawn - core.signature has logged why)"))
+    end
 
     local comp
     local ok, aerr = pcall(function()
@@ -147,10 +201,21 @@ function StaticMesh:attach(actor, spec)
     end)
     if not ok then
         destroyComponent(comp)   -- never leave a half-dressed component behind
-        log.err("static: attach failed: " .. tostring(aerr))
-        return false
+        local why = "static: attach failed: " .. tostring(aerr)
+        log.err(why)
+        return false, why
     end
-    pcall(function() compByActor[actor] = comp end)
+    -- File the component under the actor's NAME. A nil key means the actor would not answer
+    -- GetFullName, which is not a reason to refuse an attach that has already succeeded — it
+    -- only means detach and setColor will have no record to find, and the log line says so
+    -- rather than leaving that a surprise.
+    local k = uo.key(actor)
+    if k then
+        byActor[k] = { actor = actor, comp = comp }
+    else
+        log.warn("static: the mesh is attached but this actor would not answer GetFullName, "
+            .. "so nothing was recorded - detach and setColor will find no record for it")
+    end
     -- Material layer, AFTER the mesh is confirmed: fail-soft and never able to undo the
     -- attach, but no longer silently dropped the way it was when only the procedural
     -- backend could paint. `always` is off — the mesh's authored materials stay as they
@@ -166,19 +231,18 @@ function StaticMesh:attach(actor, spec)
     return true
 end
 
--- Track actors we've already dressed so lazy re-attach doesn't stack meshes.
-local dressed = setmetatable({}, { __mode = "k" })
-
 -- Attach once per actor (guards against re-stacking). The global ENABLED kill-switch
 -- lives on the facade (core.mesh); this backend only owns the per-actor guard.
+--
+-- The guard reads the record, whose liveness recordFor has just re-checked, so "already
+-- dressed" means "a component this backend created is still on this actor" rather than "a
+-- flag was set once". The separate `dressed` boolean table this used to keep is gone: it was
+-- keyed on the actor handle like everything else here, so it missed on every second call and
+-- the stacking it existed to prevent happened anyway.
 function StaticMesh:attachOnce(actor, spec)
-    if not (actor and spec) then return false end
-    if dressed[actor] then return true end
-    if self:attach(actor, spec) then
-        dressed[actor] = true
-        return true
-    end
-    return false
+    if not (actor and spec) then return false, "static: no actor or no spec" end
+    if recordFor(actor) then return true end
+    return self:attach(actor, spec)
 end
 
 -- Destroy the component this backend added to `actor`, so attach can dress it again.
@@ -186,28 +250,28 @@ end
 -- that second case the bookkeeping is deliberately LEFT in place, because the component
 -- is still on the actor and the once-guard is the only thing stopping a second one.
 function StaticMesh:detach(actor)
-    if not actor then return false end
-    local comp = compByActor[actor]
-    if not comp then return false end
-    local live = false
-    pcall(function() live = comp:IsValid() == true end)
-    if not live then
-        -- already gone (the actor was torn down under us): forget it, but nothing was
-        -- removed BY this call, so say so
-        compByActor[actor] = nil
-        dressed[actor]     = nil
-        self:forgetMaterial(actor)
-        return false
+    if not actor then return false, "static: no actor" end
+    -- recordFor drops a record whose component is already gone, so the two cases the old
+    -- code spelled separately — "no record" and "the record's component was torn down under
+    -- us" — arrive here as one, and both are an honest "this call removed nothing". The
+    -- material bookkeeping is still cleared in the second case, which is why forgetMaterial
+    -- runs on the miss too.
+    local rec, k = recordFor(actor)
+    if not rec then
+        if k then self:forgetMaterial(actor) end
+        return false, "static: nothing of PalForge's is recorded on this actor to remove"
     end
-    if not destroyComponent(comp) then
-        log.warn("static: detach failed (K2_DestroyComponent did not fire - core.signature "
-            .. "has logged whether it was refused or raised)")
-        return false
+    if not destroyComponent(rec.comp) then
+        local why = "static: detach failed (K2_DestroyComponent did not fire - core.signature "
+            .. "has logged whether it was refused or raised)"
+        log.warn(why)
+        -- the bookkeeping is deliberately LEFT in place: the component is still on the actor
+        -- and the once-guard is the only thing stopping a second one
+        return false, why
     end
     -- the whole component goes with it, so there is no material to put back
     self:forgetMaterial(actor)
-    compByActor[actor] = nil
-    dressed[actor]     = nil
+    byActor[k] = nil
     return true
 end
 

@@ -9,6 +9,7 @@ description: Every field you can write, what each one does, and the exact messag
 - Read the message PalForge prints when a definition is wrong, and change the exact line it names
 - Ask the game, while it is running, which fields a pal or a building takes
 - Reuse one model across several pals instead of writing it out again
+- Build a definition without registering it, and record which pack owns an id
 - Check your own pack's settings the same way, so a typo stops at load instead of mid-game
 
 Every `X{ ... }` call — `Pal{ ... }`, `Item{ ... }`, `Building{ ... }` and the rest — is
@@ -34,14 +35,18 @@ local Spec = schema.define("Mesh.Spec", {
                    doc = "mesh id, e.g. \"pack:name\" (required when defined directly; omit when inline)" },
     { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
                    default = "skeletal", doc = "which core.mesh backend renders it" },
-    { "model",     type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" },
-    { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
+    { "model",     type = "string", required = true,
+                   doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it" },
+    { "animClass", type = "string",
+                   doc = "a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only" },
     { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
-    { "offset",    type = "table",  doc = "{ x, y, z } offset from the pawn's origin" },
-    { "texture",   type = "string", doc = "absolute path to a png applied to the mesh" },
+    { "offset",    type = "table",  doc = "{ x, y, z } offset from the mesh's normal position, in cm" },
+    { "texture",   type = "string",
+                   doc = "a /Game/... UTexture2D path (see Mesh.assets.T), or a png of your own - absolute, or relative to the .lua file that declares it" },
     { "color",     type = "table",  doc = "tint { r, g, b, a } in 0..1" },
     { "material",  type = "string", doc = "base material asset path to instance from" },
-    { "params",    type = "table",  doc = "extra material parameters passed through" },
+    { "params",    type = "table",
+                   doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"/Game/... or <abs png>\" } }" },
 }, { handle = "Mesh.Handle" })
 ```
 
@@ -161,7 +166,8 @@ Checked only when you left the field out, and before `default` is looked at, so 
 never both required and defaulted.
 
 ```lua
-{ "model", type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" }
+{ "model", type = "string", required = true,
+           doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); ..." }
 ```
 
 `id` is required on every domain. `Mesh.Spec` is the one place it is optional, because a
@@ -209,9 +215,9 @@ result. The message grows to name the inner shape, so a complaint about a field 
 nested table tells you which list to go and read.
 
 ```lua
-{ "mesh",   type = "table", of = Mesh,   doc = "the mesh attached to a spawned pawn" }
+{ "mesh",   type = "table", of = Mesh,   doc = "the mesh worn by a spawned pawn ..." }
 { "events", type = "table", of = Events, doc = "lifecycle handlers (grouped)" }
-{ "recipe", type = "table", of = Recipe, doc = "the recipe that produces THIS item" }
+{ "recipe", type = "table", of = Recipe, doc = "the recipe that produces THIS item ..." }
 ```
 
 ### arrayOf
@@ -264,7 +270,7 @@ and only to write a better type into `types.lua`.
 
 ```lua
 { "onSpawned", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-               doc = "LIVE (candidate hook) - finished spawning into the world" }
+               doc = "LIVE - a pal finished initialising (ctx.actor); may repeat per pawn, keep it idempotent" }
 ```
 
 ### check
@@ -273,7 +279,8 @@ A test of your own that runs **after** everything else, including nested `of`. R
 `true` to accept. Return `false` plus a reason string to reject, and that reason is quoted
 back in the message.
 
-`schema.nonEmpty` is the shared one, used by the `id` field of every domain:
+`core/schema.lua` publishes two of them. `schema.nonEmpty` is the weak one — a non-empty
+string and nothing else:
 
 ```lua title="Scripts/palforge/core/schema.lua"
 function M.nonEmpty(v)
@@ -281,6 +288,34 @@ function M.nonEmpty(v)
     return false, "must be a non-empty string"
 end
 ```
+
+`schema.validId` is the strong one, and it is how **id validation happens at define time**.
+An id with no colon is a literal game id and only has to be non-empty. An id *with* a colon
+is namespaced, and both halves must match `^[%w_]+$` — the exact shape
+`core/object_manager.resolve` needs, because the row PalSchema writes for `pack:name` is
+spelled `pack_name`. `schema.validId` delegates to `om.validId` and keeps no second copy of
+the pattern. Five domains hang it on the field:
+
+```lua title="Scripts/palforge/api/pal.lua"
+{ "id",  type = "string", required = true, check = schema.validId,
+         doc = "pal id: a game CharacterID (\"ChickenPal\") or \"pack:name\"" },
+```
+
+`Item.Spec`, `Skill.Spec`, `Effect.Spec` and `Audio.Spec` declare `id` the same way. The
+other three — `Mesh`, `Building` and `UI` — call `om.validId` directly inside their own
+`define`, because each wants a different sentence in front of the reason. All eight refuse
+the same ids:
+
+```text
+PalForge: Pal: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Boss' (letters/digits/_ only)
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+PalForge: Mesh: id "my-pack:body" is not a valid PalForge id: invalid pack id 'my-pack' in 'my-pack:body' (letters/digits/_ only)
+```
+
+A hyphen in the pack half is the case this catches. `Building{ id = "my-pack:Bench" }`
+registers cleanly and is then dead at every engine boundary — the icon lookup, the
+technology unlock and the build-id match all miss, with nothing in the log. The check turns
+that into a line you read while writing the definition.
 
 Your own check follows the same contract:
 
@@ -312,6 +347,66 @@ Declare it once on the shape and every field pointing at that shape through `of`
 union in your editor without restating it — `Pal.Spec.mesh` becomes
 `Mesh.Spec|Mesh.Handle`. A derived shape inherits the base's `handle`, so
 `Building.Spec.Mesh` reports `Mesh.Handle` too.
+
+## The second argument to a definition
+
+`X{ ... }` is the one-argument form of `X(spec, opts)`. All eight domain constructors accept
+that second argument, it is optional, and it controls **registration only** — never the
+definition itself. The handle you get back is identical either way.
+
+```lua
+Item{ id = "example:Torch", maxStack = 20 }                             -- define and register
+
+local h = Item({ id = "example:Torch", maxStack = 20 },
+               { register = false })                                    -- build the handle, register nothing
+
+Item({ id = "example:Torch", maxStack = 20 }, { pack = "mypack" })      -- register with an owner
+```
+
+<TypeTable
+  type={{
+    register: {
+      description: 'false builds and returns the handle without putting the id in the registry. Anything else registers.',
+      type: 'boolean',
+      default: 'true',
+    },
+    pack: {
+      description: 'The pack id recorded as the owner of the registration, which is what makes an id collision attributable to a pack.',
+      type: 'string',
+    },
+  }}
+/>
+
+`register = false` is what keeps a **read** from becoming a write. The native catalogs
+fabricate a definition on demand — `native.buildings.Foundation` is `Building{ id = ... }`
+under the hood — and for buildings registering is not inert: `core/event`'s reconstruction
+scan picks the new definition up, and every matching actor already standing in the world
+becomes a tracked instance that is persisted to the save. Reading one building id in a
+tooltip therefore started writing a record for every foundation in the base. The catalogs
+pass `{ register = false }`, so a lookup is a lookup again.
+
+`pack` is filled in for you by the scoped surface: `PalForge.pack("mypack").Item` is the
+same constructor with `{ pack = "mypack" }` already attached.
+
+`Pal`, `Item`, `Skill`, `Effect` and `Audio` route the argument through
+`schema.defineOpts`, which is also what rejects a misspelling — an option silently ignored
+is the failure this whole layer exists to prevent:
+
+```lua
+Item({ id = "example:Torch" }, { registr = false })
+Item({ id = "example:Torch" }, { register = "no" })
+Item({ id = "example:Torch" }, "nope")
+```
+
+```text
+PalForge: Item: unknown define option "registr". Valid options: register, pack
+PalForge: Item: define option "register" expects boolean, got string
+PalForge: Item: the second argument is the options table { register = false, pack = "packid" }, got string
+```
+
+`Mesh`, `Building` and `UI` read the same two keys inside their own `define` instead of
+calling `schema.defineOpts`, so they accept `register` and `pack` identically but do not
+raise on a third key.
 
 ## What happens when you call a definition
 
@@ -549,7 +644,7 @@ Pal{ id = "example:Boss", mesh = { kind = "skeletal" } }
 ```
 
 ```text
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
 ```
 
 ```lua
@@ -643,7 +738,7 @@ Pal{ id = "example:Boss", mesh = { model = "/Game/Pal/Model/Character/Monster/Ch
 local body = Mesh{
     id      = "example:body",
     model   = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal",
-    texture = "C:/mods/example/body.png",
+    texture = "art/body.png",
 }
 
 Pal{ id = "example:Boss", mesh = body }
@@ -718,13 +813,15 @@ The difference shows in the two help dumps:
 ```text
 Mesh.Spec {
   kind          string     (default=skeletal, one of { "procedural", "static", "skeletal", "obj" }) which core.mesh backend renders it
-  model         string     (required) USkeletalMesh / UStaticMesh asset path
+  model         string     (required) a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
+  offset        table      { x, y, z } offset from the mesh's normal position, in cm
   ...
 }
 
 Building.Spec.Mesh {
   kind          string     (default=static, one of { "procedural", "static", "skeletal", "obj" }) which core.mesh backend renders it
   model         string     (required) UStaticMesh asset path, or an OBJ path for the procedural backend
+  offset        table      { x, y, z } offset from the actor's origin
   ...
 }
 ```
@@ -775,11 +872,11 @@ Pal.Spec {
   name          string     shown in UI (defaults to id)
   description   string     one-line description, for UI and tooling
   skills        table      (string[]) skill ids this pal owns (see Skill)
-  mesh          table      (Mesh.Spec) the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+  mesh          table      (Mesh.Spec) the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
   material      table      (Pal.Spec.Material) material override applied to that mesh
   color         table      base tint { r, g, b, a } (shorthand for material.color)
   texture       string     png path applied to the mesh (shorthand for material.texture)
-  icon          any        fallback icon used when the DataTable lookup misses
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Pal.Spec.Events) lifecycle handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
 }
@@ -798,7 +895,7 @@ print(schema.help("Pal.Specc"))
 ```
 
 ```text
-PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
+PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Node.Border, UI.Node.Button, UI.Node.Frame, UI.Node.GameWidget, UI.Node.HBox, UI.Node.Label, UI.Node.Overlay, UI.Node.ScrollBox, UI.Node.SizeBox, UI.Node.Sprite, UI.Node.VBox, UI.Spec, UI.Spec.Host
 ```
 
 `schema.all()` returns a fresh list in **declaration order**, not sorted. A nested shape is
@@ -812,25 +909,42 @@ end
 ```
 
 ```text
-Mesh.Spec            Mesh.Handle
-Pal.Spec.Material    nil
-Pal.Spec.Events      nil
-Pal.Spec             nil
-Item.Spec.Recipe     nil
-Item.Spec.Events     nil
-Item.Spec            nil
-Building.Spec.Mesh   Mesh.Handle
+Mesh.Spec              Mesh.Handle
+Pal.Spec.Material      nil
+Pal.Spec.Events        nil
+Pal.Spec               nil
+Item.Spec.Recipe       nil
+Item.Spec.Events       nil
+Item.Spec              nil
+Building.Spec.Mesh     Mesh.Handle
 Building.Spec.Material nil
-Building.Spec.Events nil
-Building.Spec        nil
-Skill.Spec.Events    nil
-Skill.Spec           nil
-Effect.Spec.Events   nil
-Effect.Spec          nil
-Audio.Spec           nil
-UI.Spec              nil
-Coord                nil
+Building.Spec.Events   nil
+Building.Spec          nil
+Skill.Spec.Events      nil
+Skill.Spec             nil
+Effect.Spec.Events     nil
+Effect.Spec            nil
+Audio.Spec             nil
+UI.Node.VBox           nil
+UI.Node.HBox           nil
+UI.Node.Overlay        nil
+UI.Node.ScrollBox      nil
+UI.Node.Border         nil
+UI.Node.SizeBox        nil
+UI.Node.Label          nil
+UI.Node.Frame          nil
+UI.Node.Button         nil
+UI.Node.Sprite         nil
+UI.Node.GameWidget     nil
+UI.Spec.Host           nil
+UI.Spec                nil
+Coord                  nil
 ```
+
+Thirty shapes, and eleven of them are the `UI.Node.*` constructors — one per node kind
+`UI.VBox`, `UI.Label`, `UI.Button` and the rest accept — plus `UI.Spec.Host`, the table
+form of a panel's `host` field. They are declared by `api/ui.lua` like any other spec, so
+`schema.help("UI.Node.Button")` answers the same way `schema.help("Pal.Spec")` does.
 
 `Coord` is the one shape with no domain in front of its name. It is the world coordinate
 `Player.coordinate()` gives you and `Pal.Handle:spawn` takes, declared in `api/player.lua`
@@ -868,11 +982,11 @@ doc comment. The result for `Pal.Spec`:
 ---@field name? string # shown in UI (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field skills? string[] # skill ids this pal owns (see Skill)
----@field mesh? Mesh.Spec|Mesh.Handle # the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+---@field mesh? Mesh.Spec|Mesh.Handle # the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
 ---@field material? Pal.Spec.Material # material override applied to that mesh
 ---@field color? table # base tint { r, g, b, a } (shorthand for material.color)
 ---@field texture? string # png path applied to the mesh (shorthand for material.texture)
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Pal.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 ```
@@ -1006,10 +1120,10 @@ local ok, err = pcall(function()
         mesh        = Mesh{
             id      = "example:chicken",
             model   = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal",
-            texture = "C:/mods/example/chicken.png",
+            texture = "art/chicken.png",
         },
         events = {
-            onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+            onSpawned = function(pal, ctx) log.info("chicken spawned") end,
         },
     }
 end)
@@ -1021,8 +1135,13 @@ if not ok then log.err(tostring(err)) end
 
 - Every `X{ ... }` call is checked before anything is registered. It either succeeds whole
   or raises and registers nothing.
-- `id` is required on every domain. A field you leave out is either optional or filled by
-  its default.
+- `id` is required on every domain, and its shape is checked while you write it: an id with
+  a colon whose halves are not letters, digits and `_` raises instead of registering
+  something the game can never reach.
+- `X{ ... }` is the one-argument form of `X(spec, opts)`. The optional second argument
+  controls registration and nothing else: `{ register = false }` builds the handle and
+  registers nothing, `{ pack = "mypack" }` records the owner.
+- A field you leave out is either optional or filled by its default.
 - A misspelled field name is an error, and the message usually names the field you meant.
 - Every message starts with `PalForge: `, then the domain, then the field, then the reason.
   When a shape name appears in `(...)`, that is the inner list to look up.

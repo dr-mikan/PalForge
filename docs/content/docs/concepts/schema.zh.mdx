@@ -9,6 +9,7 @@ description: 可以写的每个字段、它们各自的作用，以及写错时�
 - 读懂定义写错时 PalForge 打印的消息，直接改它点名的那一行
 - 在游戏运行中查出帕鲁或建筑物能写哪些字段
 - 让同一个模型在多个帕鲁之间复用，不用再写一遍
+- 只组装定义而不注册它，并记录 id 归哪个内容包所有
 - 用同样的方式检查自己内容包的设置，让笔误停在加载时，而不是玩到一半才出问题
 
 `Pal{ ... }`、`Item{ ... }`、`Building{ ... }` 这些 `X{ ... }` 调用，在任何东西到达游戏之前，
@@ -32,14 +33,18 @@ local Spec = schema.define("Mesh.Spec", {
                    doc = "mesh id, e.g. \"pack:name\" (required when defined directly; omit when inline)" },
     { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
                    default = "skeletal", doc = "which core.mesh backend renders it" },
-    { "model",     type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" },
-    { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
+    { "model",     type = "string", required = true,
+                   doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it" },
+    { "animClass", type = "string",
+                   doc = "a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only" },
     { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
-    { "offset",    type = "table",  doc = "{ x, y, z } offset from the pawn's origin" },
-    { "texture",   type = "string", doc = "absolute path to a png applied to the mesh" },
+    { "offset",    type = "table",  doc = "{ x, y, z } offset from the mesh's normal position, in cm" },
+    { "texture",   type = "string",
+                   doc = "a /Game/... UTexture2D path (see Mesh.assets.T), or a png of your own - absolute, or relative to the .lua file that declares it" },
     { "color",     type = "table",  doc = "tint { r, g, b, a } in 0..1" },
     { "material",  type = "string", doc = "base material asset path to instance from" },
-    { "params",    type = "table",  doc = "extra material parameters passed through" },
+    { "params",    type = "table",
+                   doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"/Game/... or <abs png>\" } }" },
 }, { handle = "Mesh.Handle" })
 ```
 
@@ -154,7 +159,8 @@ Pal{ id = "example:Boss", events = { onSpawned = counter } }   -- accepted
 只在你没写这个字段时判断，而且在看 `default` 之前判断，所以一个字段不会既必填又有默认值。
 
 ```lua
-{ "model", type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" }
+{ "model", type = "string", required = true,
+           doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); ..." }
 ```
 
 `id` 在每个领域都是必填。只有 `Mesh.Spec` 里它是可选的，因为写在帕鲁或建筑物内部的内联网格
@@ -199,9 +205,9 @@ PalForge 自己的字段列表目前没有用函数默认值的，但你的可�
 所以就算问题出在嵌套表里的字段，你也知道该去读哪一份列表。
 
 ```lua
-{ "mesh",   type = "table", of = Mesh,   doc = "the mesh attached to a spawned pawn" }
+{ "mesh",   type = "table", of = Mesh,   doc = "the mesh worn by a spawned pawn ..." }
 { "events", type = "table", of = Events, doc = "lifecycle handlers (grouped)" }
-{ "recipe", type = "table", of = Recipe, doc = "the recipe that produces THIS item" }
+{ "recipe", type = "table", of = Recipe, doc = "the recipe that produces THIS item ..." }
 ```
 
 ### arrayOf
@@ -249,7 +255,7 @@ Item{
 
 ```lua
 { "onSpawned", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-               doc = "LIVE (candidate hook) - finished spawning into the world" }
+               doc = "LIVE - a pal finished initialising (ctx.actor); may repeat per pawn, keep it idempotent" }
 ```
 
 ### check
@@ -257,7 +263,7 @@ Item{
 你自己写的判断，在**其他所有步骤之后**运行，包括嵌套的 `of`。接受就返回 `true`。拒绝就返回
 `false` 加一个原因字符串，这个原因会原样引用到消息里。
 
-公用的那个是 `schema.nonEmpty`，每个领域的 `id` 字段都在用它：
+`core/schema.lua` 公开了两个公用 check。`schema.nonEmpty` 是弱的那个，只看是不是非空字符串：
 
 ```lua title="Scripts/palforge/core/schema.lua"
 function M.nonEmpty(v)
@@ -265,6 +271,31 @@ function M.nonEmpty(v)
     return false, "must be a non-empty string"
 end
 ```
+
+强的那个是 `schema.validId`，**定义期的 id 校验就是靠它表达的**。不带冒号的 id 是游戏自己的
+字面 id，只要非空就通过。带冒号的 id 是带命名空间的，前后两半都必须匹配 `^[%w_]+$` ——
+正是 `core/object_manager.resolve` 要求的形状，因为 PalSchema 为 `pack:name` 写进表里的行名
+拼作 `pack_name`。`schema.validId` 委托给 `om.validId`，这里不留第二份模式的副本。五个领域
+把它挂在字段上：
+
+```lua title="Scripts/palforge/api/pal.lua"
+{ "id",  type = "string", required = true, check = schema.validId,
+         doc = "pal id: a game CharacterID (\"ChickenPal\") or \"pack:name\"" },
+```
+
+`Item.Spec`、`Skill.Spec`、`Effect.Spec`、`Audio.Spec` 的 `id` 也是同样的写法。剩下三个 ——
+`Mesh`、`Building`、`UI` —— 在各自的 `define` 里直接调用 `om.validId`，因为它们想在原因前面
+放不一样的句子。八个领域拒绝的是同一批 id：
+
+```text
+PalForge: Pal: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Boss' (letters/digits/_ only)
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+PalForge: Mesh: id "my-pack:body" is not a valid PalForge id: invalid pack id 'my-pack' in 'my-pack:body' (letters/digits/_ only)
+```
+
+被抓住的典型情况是包名那半里的连字符。`Building{ id = "my-pack:Bench" }` 注册得干干净净，
+然后在每一个引擎边界上都是死的：图标查找、科技解锁、建造 id 匹配全都落空，日志里什么都没有。
+有了这个 check，它就变成你写定义时当场能读到的一行字。
 
 你自己写的 check 遵循同样的约定：
 
@@ -295,6 +326,61 @@ end
 在结构上声明一次，所有通过 `of` 指向这个结构的字段，不用重写就能在编辑器里显示联合类型。
 `Pal.Spec.mesh` 变成 `Mesh.Spec|Mesh.Handle`。派生出来的结构会继承基础结构的 `handle`，
 所以 `Building.Spec.Mesh` 报告的也是 `Mesh.Handle`。
+
+## 定义的第二个参数
+
+`X{ ... }` 是 `X(spec, opts)` 只写一个参数的写法。八个领域的构造器都接受这第二个参数，它是可选
+的，而且只控制**注册**，从不影响定义本身。两种写法拿回来的句柄完全一样。
+
+```lua
+Item{ id = "example:Torch", maxStack = 20 }                             -- define and register
+
+local h = Item({ id = "example:Torch", maxStack = 20 },
+               { register = false })                                    -- build the handle, register nothing
+
+Item({ id = "example:Torch", maxStack = 20 }, { pack = "mypack" })      -- register with an owner
+```
+
+<TypeTable
+  type={{
+    register: {
+      description: 'false 表示只构建并返回句柄，不把 id 放进注册表。其他情况都会注册。',
+      type: 'boolean',
+      default: 'true',
+    },
+    pack: {
+      description: '记为这次注册所有者的内容包 id，id 撞车时能追查到具体是哪个包靠的就是它。',
+      type: 'string',
+    },
+  }}
+/>
+
+`register = false` 是让**读取**不会变成写入的那把闸。原生目录会在需要时现场伪造一份定义
+（`native.buildings.Foundation` 底下就是 `Building{ id = ... }`），而对建筑物来说注册并不是
+无副作用的：`core/event` 的重建扫描会捡到这份新定义，世界里已经立着的每一个匹配 actor 都会变成
+被追踪的实例，并持久化进存档。于是在一个提示框里读一个建筑物 id，就开始为基地里的每一块地基
+写记录。目录那边传的是 `{ register = false }`，所以查询重新只是查询。
+
+`pack` 由带作用域的接口替你填好：`PalForge.pack("mypack").Item` 就是预先带上
+`{ pack = "mypack" }` 的同一个构造器。
+
+`Pal`、`Item`、`Skill`、`Effect`、`Audio` 把这个参数交给 `schema.defineOpts`，写错也在那里被挡下
+—— 一个被悄悄忽略的选项，正是这一整层存在要防的那种失败：
+
+```lua
+Item({ id = "example:Torch" }, { registr = false })
+Item({ id = "example:Torch" }, { register = "no" })
+Item({ id = "example:Torch" }, "nope")
+```
+
+```text
+PalForge: Item: unknown define option "registr". Valid options: register, pack
+PalForge: Item: define option "register" expects boolean, got string
+PalForge: Item: the second argument is the options table { register = false, pack = "packid" }, got string
+```
+
+`Mesh`、`Building`、`UI` 不调用 `schema.defineOpts`，而是在各自的 `define` 里读同样这两个键：
+`register` 和 `pack` 的行为一致，但多写第三个键不会报错。
 
 ## 调用定义时会发生什么
 
@@ -527,7 +613,7 @@ Pal{ id = "example:Boss", mesh = { kind = "skeletal" } }
 ```
 
 ```text
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
 ```
 
 ```lua
@@ -615,7 +701,7 @@ Pal{ id = "example:Boss", mesh = { model = "/Game/Pal/Model/Character/Monster/Ch
 local body = Mesh{
     id      = "example:body",
     model   = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal",
-    texture = "C:/mods/example/body.png",
+    texture = "art/body.png",
 }
 
 Pal{ id = "example:Boss", mesh = body }
@@ -688,13 +774,15 @@ local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
 ```text
 Mesh.Spec {
   kind          string     (default=skeletal, one of { "procedural", "static", "skeletal", "obj" }) which core.mesh backend renders it
-  model         string     (required) USkeletalMesh / UStaticMesh asset path
+  model         string     (required) a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
+  offset        table      { x, y, z } offset from the mesh's normal position, in cm
   ...
 }
 
 Building.Spec.Mesh {
   kind          string     (default=static, one of { "procedural", "static", "skeletal", "obj" }) which core.mesh backend renders it
   model         string     (required) UStaticMesh asset path, or an OBJ path for the procedural backend
+  offset        table      { x, y, z } offset from the actor's origin
   ...
 }
 ```
@@ -743,11 +831,11 @@ Pal.Spec {
   name          string     shown in UI (defaults to id)
   description   string     one-line description, for UI and tooling
   skills        table      (string[]) skill ids this pal owns (see Skill)
-  mesh          table      (Mesh.Spec) the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+  mesh          table      (Mesh.Spec) the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
   material      table      (Pal.Spec.Material) material override applied to that mesh
   color         table      base tint { r, g, b, a } (shorthand for material.color)
   texture       string     png path applied to the mesh (shorthand for material.texture)
-  icon          any        fallback icon used when the DataTable lookup misses
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Pal.Spec.Events) lifecycle handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
 }
@@ -765,7 +853,7 @@ print(schema.help("Pal.Specc"))
 ```
 
 ```text
-PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
+PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Node.Border, UI.Node.Button, UI.Node.Frame, UI.Node.GameWidget, UI.Node.HBox, UI.Node.Label, UI.Node.Overlay, UI.Node.ScrollBox, UI.Node.SizeBox, UI.Node.Sprite, UI.Node.VBox, UI.Spec, UI.Spec.Host
 ```
 
 `schema.all()` 返回一份新的列表，按**声明顺序**排，不排序。嵌套结构总是在引用它的结构之前
@@ -778,25 +866,42 @@ end
 ```
 
 ```text
-Mesh.Spec            Mesh.Handle
-Pal.Spec.Material    nil
-Pal.Spec.Events      nil
-Pal.Spec             nil
-Item.Spec.Recipe     nil
-Item.Spec.Events     nil
-Item.Spec            nil
-Building.Spec.Mesh   Mesh.Handle
+Mesh.Spec              Mesh.Handle
+Pal.Spec.Material      nil
+Pal.Spec.Events        nil
+Pal.Spec               nil
+Item.Spec.Recipe       nil
+Item.Spec.Events       nil
+Item.Spec              nil
+Building.Spec.Mesh     Mesh.Handle
 Building.Spec.Material nil
-Building.Spec.Events nil
-Building.Spec        nil
-Skill.Spec.Events    nil
-Skill.Spec           nil
-Effect.Spec.Events   nil
-Effect.Spec          nil
-Audio.Spec           nil
-UI.Spec              nil
-Coord                nil
+Building.Spec.Events   nil
+Building.Spec          nil
+Skill.Spec.Events      nil
+Skill.Spec             nil
+Effect.Spec.Events     nil
+Effect.Spec            nil
+Audio.Spec             nil
+UI.Node.VBox           nil
+UI.Node.HBox           nil
+UI.Node.Overlay        nil
+UI.Node.ScrollBox      nil
+UI.Node.Border         nil
+UI.Node.SizeBox        nil
+UI.Node.Label          nil
+UI.Node.Frame          nil
+UI.Node.Button         nil
+UI.Node.Sprite         nil
+UI.Node.GameWidget     nil
+UI.Spec.Host           nil
+UI.Spec                nil
+Coord                  nil
 ```
+
+一共 30 个结构，其中 11 个是 `UI.Node.*` —— `UI.VBox`、`UI.Label`、`UI.Button` 等节点构造器
+各自接受的那份结构 —— 再加上 `UI.Spec.Host`，也就是面板 `host` 写成表时的形状。它们都由
+`api/ui.lua` 像别的 spec 一样声明，所以 `schema.help("UI.Node.Button")` 的回答方式和
+`schema.help("Pal.Spec")` 完全一样。
 
 `Coord` 是唯一一个名字前面不带领域的结构。它是 `Player.coordinate()` 给你、
 `Pal.Handle:spawn` 接受的世界坐标，声明在 `api/player.lua` 里，好让 `schema.help("Coord")`
@@ -833,11 +938,11 @@ lua5.4 tools/gen-types.lua
 ---@field name? string # shown in UI (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field skills? string[] # skill ids this pal owns (see Skill)
----@field mesh? Mesh.Spec|Mesh.Handle # the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+---@field mesh? Mesh.Spec|Mesh.Handle # the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
 ---@field material? Pal.Spec.Material # material override applied to that mesh
 ---@field color? table # base tint { r, g, b, a } (shorthand for material.color)
 ---@field texture? string # png path applied to the mesh (shorthand for material.texture)
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Pal.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 ```
@@ -968,10 +1073,10 @@ local ok, err = pcall(function()
         mesh        = Mesh{
             id      = "example:chicken",
             model   = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal",
-            texture = "C:/mods/example/chicken.png",
+            texture = "art/chicken.png",
         },
         events = {
-            onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+            onSpawned = function(pal, ctx) log.info("chicken spawned") end,
         },
     }
 end)
@@ -982,7 +1087,11 @@ if not ok then log.err(tostring(err)) end
 ## 小结
 
 - 每个 `X{ ... }` 调用都在注册任何东西之前先检查。要么整体成功，要么抛出并且什么都不注册。
-- `id` 在每个领域都是必填。你没写的字段，要么是可选的，要么由默认值填上。
+- `id` 在每个领域都是必填，而且它的形状在你写的时候就会被检查：带冒号的 id，任一半里出现
+  字母、数字和 `_` 以外的字符，就会抛出，而不是注册一个游戏永远够不着的东西。
+- `X{ ... }` 是 `X(spec, opts)` 只写一个参数的写法。可选的第二个参数只控制注册：
+  `{ register = false }` 组装句柄但什么都不注册，`{ pack = "mypack" }` 记录所有者。
+- 你没写的字段，要么是可选的，要么由默认值填上。
 - 字段名写错会报错，消息通常会点名你本来想写的那个字段。
 - 每条消息都以 `PalForge: ` 开头，接着是领域、字段、原因。`(...)` 里出现结构名时，那就是要去
   查的内层列表。

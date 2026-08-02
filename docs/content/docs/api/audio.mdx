@@ -92,8 +92,9 @@ Audio.bgm{ id = "example:Theme", kind = "se" }
 
 ## Fields you can set
 
-Most sounds need two fields: `id` to name it, and `soundPath` to point at the audio asset.
-Everything else is optional. You can print the same list from the game at any time:
+Most sounds need one field: `id`. Add `soundId` to name a game event, and `soundPath` only when
+that name is not in the catalog or you want to override it. You can print the same list from the
+game at any time:
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -122,15 +123,15 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
       default: 'se',
     },
     soundId: {
-      description: 'Native AkAudioEvent name. This is the SoundID fallback route, taken only when no asset path loads. A definition carrying just this field still resolves.',
+      description: 'Native AkAudioEvent name. When you pass no soundPath, its asset path is filled in from the catalog in native/audio.lua, so a catalogued name on its own plays.',
       type: 'string',
     },
     soundPath: {
-      description: 'Native AkAudioEvent asset path. This is the route that actually produces sound, and a definition carrying just this field resolves and plays.',
+      description: 'Native AkAudioEvent asset path, written package.object. Overrides the catalog lookup; a package-only path is completed for you.',
       type: 'string',
     },
     soundFile: {
-      description: 'Custom audio file path. Accepted, but nothing plays - see What does not work yet below.',
+      description: 'REFUSED at define time - setting it is a hard error. Custom audio files do not play on this build (open item audio-custom-file-loader). Use soundId or soundPath.',
       type: 'string',
     },
     source: {
@@ -155,21 +156,22 @@ turned into a small table that says which of those you gave, and that table deci
 
 ```mermaid
 flowchart TD
-  A["Audio declaration"] --> B["Class:source"]
-  B -->|soundFile set| C["kind: file"]
-  B -->|soundId or soundPath set| D["kind: native"]
-  B -->|nothing named| E["nil"]
-  C --> F["core.sound.file"]
-  D --> G["core.sound.native"]
-  F --> H["no-op, returns false"]
-  G --> I["the native play route"]
+  A["Audio declaration"] --> B{"soundFile set"}
+  B -->|yes| C["hard error at define time"]
+  B -->|no| D["Class:source"]
+  D -->|nothing named| E["the id becomes the soundId"]
+  E --> F["kind: native"]
+  D -->|soundId or soundPath set| F
+  F --> G["core.sound.native"]
+  G --> H["the native play route"]
 ```
 
-`soundFile` wins over the other two. A definition that names no sound at all ends at `nil`,
-though few declarations get that far, because `Audio{ ... }` fills `soundId` in from the id
-first — see "Leaving the sound fields out" below.
+`soundFile` never reaches that chart: setting it stops the define call, and the message names the
+two fields that do play. A definition that names no sound at all does not end at nothing either,
+because `Audio{ ... }` fills `soundId` in from the id first — see "Leaving the sound fields out"
+below.
 
-For a name plus a path, the game is asked to load the asset and then play it on your actor:
+For a name, a path, or both, the game is asked to load the asset and then play it on your actor:
 
 ```mermaid
 flowchart LR
@@ -180,15 +182,23 @@ flowchart LR
   E --> F["PlayAkEventSoundByActor"]
 ```
 
-`PlayAkEventSoundByActor` is a real function on the shipping game, so the call reaches the
-engine. No run log in this tree records it producing an audible sound, so treat the route as
-credible and the result as unproven — that is why `:play()` reports whether a call was issued
-and nothing more.
+`PlayAkEventSoundByActor` is not a guess. It is one of the reflected functions on
+`UPalSoundUtility`, the CXX dump of the installed binary declares it as
+`bool PlayAkEventSoundByActor(AActor*, UAkAudioEvent*)`, and a recorded session caught the game
+itself calling it six times with exactly those two arguments in that order. What no run log in
+this tree records is the audibility of *your* call, which is why `:play()` reports whether a call
+was issued and nothing more.
 
-Loaded assets are kept by path, so the first play of a sound pays the load and every later one
-reuses it. If the loader cannot get the asset, it tries once more with `StaticFindObject(path)`.
+The path is completed before the asset is loaded. A UE object path is `<package>.<object>`, so a
+`soundPath` written with only the package half — `/Game/.../AKE_BGM_Title` — is turned into
+`/Game/.../AKE_BGM_Title.AKE_BGM_Title` by `core/assetpath`, and a path that already carries an
+object half is passed through untouched. Loaded assets are then kept by that completed path, so
+the first play pays the load and every later one reuses it. If `LoadAsset` cannot get the asset,
+the loader tries once more with `StaticFindObject(path)`, and whatever comes back is class-checked
+before it is passed: an object that is not an `AkAudioEvent` is refused with a log line naming what
+it really was, rather than marshalled into a `UAkAudioEvent*` parameter.
 
-### Why you pass both soundId and soundPath
+### What soundId and soundPath each do
 
 The two fields are not alternatives. They feed two stages of the same call, and **either one
 on its own is a complete definition**: a sound resolves when it has a non-empty `soundId` or a
@@ -196,62 +206,66 @@ non-empty `soundPath`.
 
 ```mermaid
 flowchart TD
-  A["NativeSource:play"] --> B["asset loaded from soundPath"]
-  B -->|yes| C["PlayAkEventSoundByActor"]
-  B -->|no| D["PlaySoundByActor with FName soundId"]
-  C --> E["the route that plays"]
-  D --> F["silent for AkAudioEvent names"]
+  A["Class:source"] --> B{"soundPath declared"}
+  B -->|yes| C["use it verbatim"]
+  B -->|no| D["catalog lookup on soundId"]
+  D -->|hit| C
+  D -->|miss| E["no path"]
+  C --> F["PlayAkEventSoundByActor"]
+  E --> G["PlaySoundByActor with FName soundId"]
+  G --> H["silent for AkAudioEvent names"]
 ```
 
 - `soundPath` is what makes noise. Playing prefers it: it loads the asset, posts the sound, and
   stops there. A definition carrying only `soundPath` takes this branch.
-- `soundId` is the fallback. With no loadable asset the code falls through to
-  `PlaySoundByActor(actor, { Key = FName(id) }, ...)`, which looks the name up in a different
-  table of sounds — one that does not contain AkAudioEvent names, so it stays silent for them.
-  A definition carrying only `soundId` works, but this is the branch it lands on.
-- Passing both gives you the path that plays plus a name to fall back on when the asset cannot
-  be loaded. The catalog in `native/audio.lua` passes both for every entry.
+- `soundId` is an AkAudioEvent name, and lowering looks it up for you. `Class:source()` resolves a
+  namespaced id first (`"pack:Theme"` becomes `"pack_Theme"`), then — when you passed no
+  `soundPath` — reads that name out of `native/audio.lua`'s catalog, 1957 AkAudioEvent names paired
+  with their asset paths, and attaches the real path. So a catalogued name on its own takes the
+  branch that plays.
+- A name the catalog does not carry gets no path, and the call falls through to
+  `PlaySoundByActor(actor, { Key = FName(id) }, ...)`, which looks the name up in the SoundID
+  table — a different namespace, and silent for AkAudioEvent names.
+- A `soundPath` you wrote yourself is never overwritten by the catalog.
 
 <Callout type="warn">
 A `true` from `:play()` means a native call was **issued**, never that you heard something. The
-combination that still fools you is a name with no path: it resolves, it reaches
-`PlaySoundByActor`, and it returns `true` while playing nothing. When a sound is silent, check
-`:source().path` first.
+case that still returns `true` and plays nothing is a `soundId` the catalog does not carry: no
+path is attached, so the call lands on the silent `PlaySoundByActor` branch. When a sound is
+silent, print `:source().path` — a `nil` there is the whole diagnosis.
 </Callout>
 
 ```lua
 -- plays: the asset path is a complete definition on its own
 Audio.se{ id = "example:Quiet", soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem" }
 
--- resolves, reaches the engine, stays silent -- a name with no path
+-- plays too: AKE_GrabItem is in the catalog, so lowering attaches its path
 Audio.se{ id = "example:NameOnly", soundId = "AKE_GrabItem" }
 
--- preferred: the path plays, the id is there if the asset cannot be loaded
-Audio.se{
-    id        = "example:Loud",
-    soundId   = "AKE_GrabItem",
-    soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem",
-}
+-- silent: no AkAudioEvent of that name, so there is no path to attach
+Audio.se{ id = "example:Missing", soundId = "AKE_NotAnEvent" }
 ```
 
 ## Leaving the sound fields out
 
-A definition that names **no** sound at all — no `soundId`, no `soundPath`, no `soundFile`,
-no `source` — uses its own `id` as the sound name. That is what makes the one-line form work:
+A definition that names **no** sound at all — no `soundId`, no `soundPath`, no `source` — uses
+its own `id` as the AkAudioEvent name. That is what makes the one-line form work:
 
 ```lua
 local Theme = Audio.bgm{ id = "AKE_BGM_Title" }
-Theme:source()   --> { kind = "native", id = "AKE_BGM_Title", path = nil }
+Theme:source()
+--> { kind = "native", id = "AKE_BGM_Title",
+-->   path = "/Game/Pal/Sound/Events/SE/UI/BGM_Title/AKE_BGM_Title.AKE_BGM_Title" }
 ```
 
-You get something that resolves, so `:play()` reaches the game and, with a valid actor, returns
-`true`. What it cannot give you is an asset path, so the call takes the `PlaySoundByActor`
-fallback — the silent branch for these names, and that `true` only says the call went out. Use
-the one-line form to *register* a name; add `soundPath` when you want to hear it.
+Nothing in that declaration carries a path; the catalog lookup put it there. So the one-line form
+takes the branch that plays for any of the 1957 event names, and only falls back to the silent
+`PlaySoundByActor` branch for an id the catalog has never heard of.
 
 <Callout type="info">
-The id is used as the sound name only when all four sound-naming fields are absent. Setting any
-one of them, including `source`, turns that off.
+The id is used as the sound name only when all three sound-naming fields are absent. Setting any
+one of them, including `source`, turns that off. `soundFile` takes no part in the test — it is
+refused before the test is reached.
 </Callout>
 
 ## bgm and se
@@ -329,9 +343,10 @@ which handle you use makes no difference. `actor` is optional and defaults to th
 character, the same as `:play` and `:stop`.
 
 `volume` is a plain multiplier: `1.0` leaves things as they are, `0.5` is half, `0.0` is
-silence. It returns `true` when the call was issued, which is as far as the game lets Lua see —
-nobody has yet confirmed by ear what a given number sounds like, so treat the number as
-something to tune rather than a promise.
+silence. It returns `true` when the call was issued, and issued is all it means: nobody has heard
+this change a volume. That measurement needs a loaded world and a person listening, so it is owed
+as a declared hook — `pf_hook audio-setvolume-audible` plays a catalog event, sets `0.2`, and
+plays it again for you to judge.
 
 To make **one** sound quieter than another on the same actor, pick a quieter event from the
 catalog. Playing them on separate actors is the other way round: then a volume applies to one
@@ -365,11 +380,13 @@ Audio.get_all()   --> Audio.Handle[]
 
 `Audio.get` returns a sound you defined earlier when there is one. When there is not, it builds
 a thin definition on the spot — `{ id = id, soundId = id }` — so any sound name is at least
-something you can hold. That built definition has **no asset path**, which puts it on the silent
-fallback route, exactly like the one-line form above.
+something you can hold. That definition carries no asset path of its own, but lowering runs the
+same catalog lookup, so `Audio.get("AKE_General_Explosion"):play()` takes the branch that plays
+for any catalogued event name without the sound ever having been defined.
 
-At startup PalForge loads `palforge.native.audio`, which defines six ready-made sounds. Those
-are the ids `Audio.get` finds with a path attached:
+At startup PalForge loads `palforge.native.audio`, which registers six ready-made sounds under
+the framework's own pack. Those are the ids `Audio.get` answers with a real definition rather
+than a thin one:
 
 | Helper | Id |
 | --- | --- |
@@ -405,9 +422,11 @@ audio.CATALOG["AKE_CampLevelUp"]
 ```
 
 <Callout type="info">
-For a stock game sound you have not defined yourself, prefer `native.audio.se(name)` /
-`native.audio.bgm(name)` over `Audio.get(name)`. `Audio.get` cannot know the asset path;
-`native.audio` looks it up in the catalog.
+`native.audio.se(name)` / `native.audio.bgm(name)` and `Audio.get(name)` both reach the catalog,
+so either one plays a stock game sound. The `native.audio` pair still tells you something
+`Audio.get` cannot: they return `nil` for a name that is not an AkAudioEvent in this build, while
+`Audio.get` never returns `nil` and hands you a handle whose `:play()` is silent. They also do not
+register what they build — `native.audio.publish(name)` is the opt-in for that.
 </Callout>
 
 ## Define once, play many
@@ -460,16 +479,19 @@ end
 
 ## What does not work yet
 
-Three things here do less than you would expect: one is unfinished, and two reach further than
-you asked for. All three stay quiet instead of raising an error, so read this before you spend
-an evening on a silent sound.
+Three things here do less than you would expect: one is refused outright, and two reach further
+than you asked for.
 
 <Callout type="warn">
-**Custom audio files do not play.** A `soundFile` declaration is accepted, resolves to a file
-source, and then that source returns `false` without doing anything — and `:play()` hands you
-that `false`. Palworld exposes no confirmed loader for custom audio, so this is a documented
-no-op rather than a pretend implementation. Your own audio assets are not playable through
-PalForge today: pick the closest sound from the catalog instead.
+**Custom audio files do not play, and `soundFile` is a hard error.** Setting it stops the define
+call, and the message names the open item `audio-custom-file-loader` plus the two fields that do
+play. Erroring rather than ignoring is the point: `soundFile` is lowered ahead of
+`soundId`/`soundPath`, so a pack that added one beside a working `soundId` silenced a sound that
+was playing, and it has never been playable on any build this tree has measured. Both halves of
+the engine are closed to it — `USoundWave` declares no importer and `USoundWaveProcedural`
+declares nothing at all, so nothing survives shipping to read a `.wav`, and the Wwise half
+(`UWwiseExternalSourceStatics::SetExternalSourceMediaBy*`) rebinds media the Wwise cook already
+staged, which is not a file on a pack's disk. Pick the closest sound from the catalog instead.
 </Callout>
 
 <Callout type="warn">
@@ -479,9 +501,19 @@ sound to keep going, play it on a different actor — music on a placed building
 and effects on the player.
 </Callout>
 
-`:setVolume` shares `:stop`'s actor-wide scope, covered above: it scales everything that actor
-is emitting rather than the one sound you called it on. A per-sound volume slider still has to
-be separate actors, or separate events.
+`:setVolume` shares `:stop`'s actor-wide scope, and it is actor-wide **by construction** rather
+than by choice. The native call is
+`UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)`, which has no bus name in
+it at all — the second parameter is the actor, that is, the Wwise game object — so what it scales
+is what one emitter sends to its output bus. That is exactly the scope `:play` posts at and
+`:stop` clears.
+
+Nothing narrower exists on this build, and that is settled rather than untried. The RTPC route is
+the one that would have been per sound, and it is closed by a count: the whole build declares
+**three** `AkRtpc` assets — `Supply_Altitude`, `OverHeatRifle` and `ChargeLaserRifle_01` — and
+**no** `AkAuxBus` and **no** `AkAudioBank`. None of the three is a volume, so there was never an
+RTPC volume parameter to address, and no bus name to give the named-bus overload. A per-sound
+volume slider still has to be separate actors, or separate events.
 
 ## Recipes
 
@@ -619,6 +651,17 @@ PalForge: Audio: field "kind" must be one of { "se", "bgm" }, got "music"
 PalForge: Audio.bgm: kind is fixed to "bgm" here, but got "se" - use Audio{ ... } to set it
 ```
 
+`soundFile` has its own, and it is the longest message in the module because it has to say why a
+declared field is refused. Abridged:
+
+```text
+PalForge: Audio: soundFile is not accepted (id "example:Blast", soundFile "C:/mods/example/blast.wav").
+Custom audio files do not play on this build: [...] This is the open item audio-custom-file-loader.
+It is an ERROR rather than a no-op because soundFile used to OUTRANK soundId/soundPath, so setting it
+beside a working soundId silenced a sound that was playing. Name a game sound instead:
+soundId = "AKE_UI_Common_Menu_Close", or soundPath = the asset path from PalForge.native.audio.CATALOG.
+```
+
 `Audio.get` takes a bare string, so it complains differently:
 
 ```text
@@ -639,7 +682,9 @@ Filing the sound away is best-effort: if that step fails, you still get a workin
 ## Summary
 
 - Define a sound with `Audio{ ... }`, `Audio.bgm{ ... }` or `Audio.se{ ... }`. Only `id` is required.
-- Pass `soundPath` as well as `soundId`. The path is what you hear; the name alone is silent.
+- A catalogued `soundId` is enough on its own: lowering fills the asset path in from
+  `native/audio.lua`. Pass `soundPath` for a name the catalog does not carry, or to override it.
+- `soundFile` is a hard error at define time. Custom audio files do not play on this build.
 - Play it with `handle:play(actor)`. Leave `actor` out and it plays on the player's character.
 - `true` from `:play()` means the call went out, not that you heard it. Check `:source().path`
   when a sound is silent.

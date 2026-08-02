@@ -93,8 +93,9 @@ Audio.bgm{ id = "example:Theme", kind = "se" }
 
 ## 指定できるフィールド
 
-ほとんどのサウンドで必要なのは 2 つだけです。名前を決める `id` と、音声アセットを指す
-`soundPath` です。ほかは任意です。同じ一覧はゲーム内からいつでも表示できます。
+ほとんどのサウンドで必要なのは `id` 1 つだけです。ゲーム側のイベント名を指定するなら
+`soundId` を足し、`soundPath` はその名前がカタログに無いときや、カタログを上書きしたいときだけ
+足します。同じ一覧はゲーム内からいつでも表示できます。
 
 ```lua
 local schema = require("palforge.core.schema")
@@ -123,15 +124,15 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
       default: 'se',
     },
     soundId: {
-      description: 'ネイティブの AkAudioEvent 名。SoundID フォールバック経路で、アセットパスがロードできなかったときにだけ使われます。このフィールドだけの定義でも解決されます。',
+      description: 'ネイティブの AkAudioEvent 名。soundPath を渡していない場合、native/audio.lua のカタログからアセットパスが補完されるので、カタログにある名前ならこれだけで鳴ります。',
       type: 'string',
     },
     soundPath: {
-      description: 'ネイティブの AkAudioEvent アセットパス。実際に音を鳴らすのはこちらの経路で、このフィールドだけの定義でも解決されて再生まで進みます。',
+      description: 'ネイティブの AkAudioEvent アセットパス。package.object 形式で書きます。カタログ参照より優先され、package だけのパスは自動で補完されます。',
       type: 'string',
     },
     soundFile: {
-      description: 'カスタム音声ファイルのパス。解決はされますが何もしません。後述の「まだ動かないこと」を参照。',
+      description: '定義時に拒否されます（ハードエラー）。このビルドではカスタム音声ファイルは再生できません（未解決項目 audio-custom-file-loader）。soundId か soundPath を使ってください。',
       type: 'string',
     },
     source: {
@@ -156,21 +157,22 @@ schema.get("Audio.Spec").fields           -- the same as a table, for tooling
 
 ```mermaid
 flowchart TD
-  A["Audio declaration"] --> B["Class:source"]
-  B -->|soundFile set| C["kind: file"]
-  B -->|soundId or soundPath set| D["kind: native"]
-  B -->|nothing named| E["nil"]
-  C --> F["core.sound.file"]
-  D --> G["core.sound.native"]
-  F --> H["no-op, returns false"]
-  G --> I["the native play route"]
+  A["Audio declaration"] --> B{"soundFile set"}
+  B -->|yes| C["hard error at define time"]
+  B -->|no| D["Class:source"]
+  D -->|nothing named| E["the id becomes the soundId"]
+  E --> F["kind: native"]
+  D -->|soundId or soundPath set| F
+  F --> G["core.sound.native"]
+  G --> H["the native play route"]
 ```
 
-`soundFile` はほかの 2 つより優先されます。サウンドを何も指定していない定義は `nil` で
-終わりますが、ここに到達する宣言はほとんどありません。`Audio{ ... }` が先に `id` から
-`soundId` を埋めるためです。後述の「サウンド指定を省いた場合」を参照してください。
+`soundFile` はこの図に到達しません。指定した時点で定義呼び出しが止まり、メッセージには実際に
+鳴る 2 つのフィールド名が入ります。サウンドを何も指定していない定義も行き止まりにはなりません。
+`Audio{ ... }` が先に `id` から `soundId` を埋めるためです。後述の「サウンド指定を省いた場合」を
+参照してください。
 
-名前とパスの両方がある場合は、アセットをロードしてからアクター上で再生するよう依頼します。
+名前だけ、パスだけ、両方のいずれでも、アセットをロードしてからアクター上で再生するよう依頼します。
 
 ```mermaid
 flowchart LR
@@ -181,79 +183,87 @@ flowchart LR
   E --> F["PlayAkEventSoundByActor"]
 ```
 
-`PlayAkEventSoundByActor` は製品版のゲームに実在する関数なので、呼び出し自体はエンジンに
-届きます。ただしこのツリーの実行ログに、それが実際に音を鳴らした記録はありません。経路は
-妥当だが結果は未検証、と考えてください。`:play()` が報告するのが「呼び出しを発行したか
-どうか」だけなのは、そのためです。
+`PlayAkEventSoundByActor` は推測ではありません。`UPalSoundUtility` にリフレクトされている関数の
+1 つであり、インストール済みバイナリの CXX ダンプは
+`bool PlayAkEventSoundByActor(AActor*, UAkAudioEvent*)` と宣言しており、記録されたセッションでは
+ゲーム自身がまさにこの 2 引数・この順序で 6 回呼んでいるところが捕らえられています。このツリーの
+実行ログに無いのは*こちら側の*呼び出しが聞こえたかどうかの記録で、`:play()` が報告するのが
+「呼び出しを発行したかどうか」だけなのはそのためです。
 
-ロード済みのアセットはパスごとに保持されるので、ロードのコストを払うのは初回だけで、以降は
-使い回されます。ローダーがアセットを取得できなかった場合は、`StaticFindObject(path)` で
-もう一度試します。
+アセットをロードする前に、パスが補完されます。UE のオブジェクトパスは `<package>.<object>` なので、
+package 側だけを書いた `soundPath`（`/Game/.../AKE_BGM_Title`）は `core/assetpath` によって
+`/Game/.../AKE_BGM_Title.AKE_BGM_Title` に補完され、すでに object 側を持つパスはそのまま通ります。
+ロード済みのアセットはその補完後のパスごとに保持されるので、ロードのコストを払うのは初回だけです。
+`LoadAsset` で取得できなかった場合は `StaticFindObject(path)` でもう一度試し、返ってきたものは
+渡す前にクラス検査されます。`AkAudioEvent` でないオブジェクトは、`UAkAudioEvent*` の引数に
+マーシャリングされる代わりに、実際のクラス名を書いたログとともに拒否されます。
 
-### soundId と soundPath を両方渡す理由
+### soundId と soundPath はそれぞれ何をするか
 
 この 2 つは択一ではありません。同じ呼び出しの別々の段階で使われ、**どちらか一方だけでも
 完全な定義になります**。空でない `soundId` か、空でない `soundPath` があれば解決されます。
 
 ```mermaid
 flowchart TD
-  A["NativeSource:play"] --> B["asset loaded from soundPath"]
-  B -->|yes| C["PlayAkEventSoundByActor"]
-  B -->|no| D["PlaySoundByActor with FName soundId"]
-  C --> E["the route that plays"]
-  D --> F["silent for AkAudioEvent names"]
+  A["Class:source"] --> B{"soundPath declared"}
+  B -->|yes| C["use it verbatim"]
+  B -->|no| D["catalog lookup on soundId"]
+  D -->|hit| C
+  D -->|miss| E["no path"]
+  C --> F["PlayAkEventSoundByActor"]
+  E --> G["PlaySoundByActor with FName soundId"]
+  G --> H["silent for AkAudioEvent names"]
 ```
 
 - 音を鳴らすのは `soundPath` です。再生処理はこちらを優先し、アセットをロードしてサウンドを
   送出したらそこで終わります。`soundPath` だけの定義はこの分岐に入ります。
-- フォールバックが `soundId` です。ロードできるアセットがないと、処理は
-  `PlaySoundByActor(actor, { Key = FName(id) }, ...)` に落ちます。これは名前を別のサウンド表
-  から引くもので、その表に AkAudioEvent 名は入っていないため無音になります。`soundId` だけの
-  定義も動きますが、行き着く先はこの分岐です。
-- 両方渡すと、音を鳴らすパスに加えて、アセットをロードできなかったときの名前も手に入ります。
-  `native/audio.lua` のカタログは全エントリで両方を渡しています。
+- `soundId` は AkAudioEvent 名で、こちらは変換時に引かれます。`Class:source()` はまず名前空間付き
+  の id を解決し（`"pack:Theme"` → `"pack_Theme"`）、`soundPath` が渡されていなければ、その名前を
+  `native/audio.lua` のカタログ — 1957 個の AkAudioEvent 名とアセットパスの対 — から引いて実際の
+  パスを付けます。つまりカタログにある名前は、それだけで鳴る分岐に入ります。
+- カタログに無い名前にはパスが付かず、呼び出しは
+  `PlaySoundByActor(actor, { Key = FName(id) }, ...)` に落ちます。これは SoundID 表を引くもので、
+  別の名前空間であり、AkAudioEvent 名に対しては無音です。
+- 自分で書いた `soundPath` がカタログに上書きされることはありません。
 
 <Callout type="warn">
 `:play()` が返す `true` は、ネイティブ呼び出しを**発行した**という意味であって、音が聞こえたと
-いう意味ではありません。いまも引っかかりやすいのは、パスのない名前だけの定義です。解決され、
-`PlaySoundByActor` まで到達し、何も鳴らないまま `true` を返します。無音のときはまず
-`:source().path` を確認してください。
+いう意味ではありません。いまも `true` を返しながら何も鳴らないのは、カタログに無い `soundId` の
+場合です。パスが付かないので、無音の `PlaySoundByActor` 分岐に落ちます。無音のときは
+`:source().path` を表示してください。そこが `nil` なら、それが診断のすべてです。
 </Callout>
 
 ```lua
 -- plays: the asset path is a complete definition on its own
 Audio.se{ id = "example:Quiet", soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem" }
 
--- resolves, reaches the engine, stays silent -- a name with no path
+-- plays too: AKE_GrabItem is in the catalog, so lowering attaches its path
 Audio.se{ id = "example:NameOnly", soundId = "AKE_GrabItem" }
 
--- preferred: the path plays, the id is there if the asset cannot be loaded
-Audio.se{
-    id        = "example:Loud",
-    soundId   = "AKE_GrabItem",
-    soundPath = "/Game/Pal/Sound/Events/SE/UI/Item/AKE_GrabItem.AKE_GrabItem",
-}
+-- silent: no AkAudioEvent of that name, so there is no path to attach
+Audio.se{ id = "example:Missing", soundId = "AKE_NotAnEvent" }
 ```
 
 ## サウンド指定を省いた場合
 
-サウンドを**まったく**指定していない定義、つまり `soundId`、`soundPath`、`soundFile`、
-`source` のいずれもない定義は、自分の `id` をサウンド名として使います。1 行の書き方が動くのは
-このためです。
+サウンドを**まったく**指定していない定義、つまり `soundId`、`soundPath`、`source` のいずれも
+ない定義は、自分の `id` を AkAudioEvent 名として使います。1 行の書き方が動くのはこのためです。
 
 ```lua
 local Theme = Audio.bgm{ id = "AKE_BGM_Title" }
-Theme:source()   --> { kind = "native", id = "AKE_BGM_Title", path = nil }
+Theme:source()
+--> { kind = "native", id = "AKE_BGM_Title",
+-->   path = "/Game/Pal/Sound/Events/SE/UI/BGM_Title/AKE_BGM_Title.AKE_BGM_Title" }
 ```
 
-これで解決はされるので、`:play()` はゲームまで到達し、有効なアクターがあれば `true` を返します。
-ただしアセットパスは手に入らないため、実際に走るのは `PlaySoundByActor` のフォールバック、
-つまりこの種の名前では無音になる分岐で、その `true` は呼び出しを出したことしか意味しません。
-1 行の書き方は名前を*登録*するために使い、実際に鳴らしたいときは `soundPath` を足してください。
+この宣言のどこにもパスは書かれていません。付けたのはカタログ参照です。つまり 1 行の書き方でも、
+1957 個のイベント名のどれに対しても鳴る分岐に入り、カタログが知らない id のときだけ無音の
+`PlaySoundByActor` 分岐に落ちます。
 
 <Callout type="info">
-id がサウンド名として使われるのは、サウンド指定用の 4 フィールドがすべて無いときだけです。
-`source` を含めどれか 1 つでも設定すると無効になります。
+id がサウンド名として使われるのは、サウンド指定用の 3 フィールドがすべて無いときだけです。
+`source` を含めどれか 1 つでも設定すると無効になります。`soundFile` はこの判定に関与しません。
+判定に届く前に拒否されるためです。
 </Callout>
 
 ## bgm と se
@@ -331,8 +341,10 @@ end
 プレイヤーのキャラクターが使われます。
 
 `volume` はただの倍率です。`1.0` はそのまま、`0.5` は半分、`0.0` は無音です。戻り値は呼び出しが
-発行されたときに `true` で、ゲームが Lua に見せてくれるのはそこまでです。どの数値がどう聞こえるかを
-耳で確かめた人はまだいないので、約束ではなく調整用のつまみとして扱ってください。
+発行されたときに `true` で、意味はそこまでです。これで音量が変わったのを耳で聞いた人はまだ
+いません。その計測にはワールドの読み込みと聞く人が必要なので、宣言済みのフックとして残されて
+います。`pf_hook audio-setvolume-audible` は、カタログのイベントを鳴らし、`0.2` を設定し、
+もう一度鳴らすところまでをやってくれます。
 
 同じアクター上で**特定の 1 つ**だけを静かにしたいときは、カタログから静かなイベントを選んでください。
 別々のアクターで鳴らせば、音量をどちらか一方にだけ効かせられます。
@@ -364,12 +376,13 @@ Audio.get_all()   --> Audio.Handle[]
 ```
 
 `Audio.get` は、すでに定義したサウンドがあればそれを返します。無い場合はその場で薄い定義
-`{ id = id, soundId = id }` を作るので、どのサウンド名でも少なくとも掴むことはできます。ただし
-その定義には**アセットパスがない**ため、上の 1 行の書き方とまったく同じく無音のフォールバック
-経路に乗ります。
+`{ id = id, soundId = id }` を作るので、どのサウンド名でも少なくとも掴むことはできます。その定義
+自体はアセットパスを持ちませんが、変換時に同じカタログ参照が走るので、
+`Audio.get("AKE_General_Explosion"):play()` は、一度も定義していないカタログ上のイベント名でも
+鳴る分岐に入ります。
 
-起動時に PalForge は `palforge.native.audio` を読み込み、6 つの既製サウンドを定義します。
-`Audio.get` がパス付きで見つけられるのはこれらの id です。
+起動時に PalForge は `palforge.native.audio` を読み込み、6 つの既製サウンドをフレームワーク自身の
+パックとして登録します。`Audio.get` が薄い定義ではなく本物の定義で答えるのはこれらの id です。
 
 | ヘルパー | ID |
 | --- | --- |
@@ -405,9 +418,11 @@ audio.CATALOG["AKE_CampLevelUp"]
 ```
 
 <Callout type="info">
-自分で定義していないゲーム標準のサウンドには、`Audio.get(name)` より
-`native.audio.se(name)` / `native.audio.bgm(name)` を使ってください。`Audio.get` はアセットパスを
-知りようがありませんが、`native.audio` はカタログから引いてきます。
+`native.audio.se(name)` / `native.audio.bgm(name)` も `Audio.get(name)` も、どちらもカタログに
+届くので、ゲーム標準のサウンドはどちらでも鳴ります。それでも `native.audio` 側にしか言えないことが
+あります。こちらはこのビルドに AkAudioEvent として存在しない名前に対して `nil` を返しますが、
+`Audio.get` は決して `nil` を返さず、`:play()` が無音になるハンドルを返します。また `native.audio`
+側は作ったものを登録しません。登録したい場合は `native.audio.publish(name)` を明示的に呼びます。
 </Callout>
 
 ## 定義は 1 回、再生は何度でも
@@ -461,16 +476,20 @@ end
 
 ## まだ動かないこと
 
-ここには期待どおりには働かないものが 3 つあります。1 つは未完成で、2 つは頼んだ以上の範囲に
-届きます。いずれもエラーにならず静かに終わるので、無音のサウンドに一晩溶かす前に読んで
-おいてください。
+ここには期待どおりには働かないものが 3 つあります。1 つは明確に拒否され、2 つは頼んだ以上の
+範囲に届きます。
 
 <Callout type="warn">
-**カスタム音声ファイルは再生されません。** `soundFile` の宣言は受け付けられ、ファイル用の
-ソースに解決されますが、そのソースは何もせずに `false` を返し、`:play()` はその `false` を
-そのまま返します。Palworld 側に確認できたカスタム音声のローダーが無いため、実装したふりを
-せず、意図的な no-op として残されています。自前の音声アセットを PalForge から再生することは
-現時点ではできません。カタログの中から近いサウンドを選んでください。
+**カスタム音声ファイルは再生されず、`soundFile` はハードエラーです。** 指定すると定義呼び出しが
+止まり、メッセージには未解決項目 `audio-custom-file-loader` と、実際に鳴る 2 つのフィールド名が
+入ります。無視ではなくエラーにしているのが要点です。`soundFile` は `soundId` / `soundPath` より
+先に変換されるため、動いている `soundId` の横にこれを足したパックは、鳴っていたサウンドを
+黙らせていました。しかもこのツリーが計測したどのビルドでも再生できたことはありません。エンジン側の
+両方の経路が閉じています。`USoundWave` はインポーターを宣言しておらず、`USoundWaveProcedural` は
+そもそも何も宣言していないので、製品ビルドで `.wav` を読む手段は残っていません。Wwise 側の
+`UWwiseExternalSourceStatics::SetExternalSourceMediaBy*` は、Wwise のクックがすでに用意した
+メディアを差し替えるものであって、パックのディスク上のファイルを読むものではありません。
+カタログの中から近いサウンドを選んでください。
 </Callout>
 
 <Callout type="warn">
@@ -480,8 +499,18 @@ end
 鳴らす、といった具合です。
 </Callout>
 
-3 つ目は上で触れた `:setVolume` で、`:stop` と同じアクター単位の範囲を持ちます。呼び出した
-サウンド 1 つではなく、そのアクターが出しているものすべての音量を変えます。サウンドごとの音量
+3 つ目は上で触れた `:setVolume` で、`:stop` と同じアクター単位の範囲を持ちます。しかもそれは
+選択の結果ではなく**構造上そうなっている**ものです。呼んでいるネイティブ関数は
+`UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)` で、そこにバス名は
+一切入っていません。第 2 引数はアクター、つまり Wwise のゲームオブジェクトなので、変わるのは
+「1 つのエミッターが出力バスへ送る量」です。これは `:play` が送出し `:stop` が止めるのと同じ
+範囲です。
+
+このビルドにはこれより細かい制御が存在せず、それは試していないのではなく決着済みです。サウンド
+単位になり得たのは RTPC 経路ですが、数で閉じています。ビルド全体が宣言している `AkRtpc` アセットは
+**3 つ**（`Supply_Altitude`、`OverHeatRifle`、`ChargeLaserRifle_01`）で、`AkAuxBus` は **0 個**、
+`AkAudioBank` も **0 個**です。3 つのどれも音量ではないので、そもそも指定できる RTPC の音量
+パラメーターは存在せず、バス名を取るオーバーロードに渡す名前もありません。サウンドごとの音量
 スライダーが必要なら、アクターを分けるかイベントを分けてください。
 
 ## レシピ
@@ -620,6 +649,17 @@ PalForge: Audio: field "kind" must be one of { "se", "bgm" }, got "music"
 PalForge: Audio.bgm: kind is fixed to "bgm" here, but got "se" - use Audio{ ... } to set it
 ```
 
+`soundFile` には専用のメッセージがあります。宣言済みのフィールドを拒否する理由まで書くので、この
+モジュールで最も長いメッセージです。以下は抜粋です。
+
+```text
+PalForge: Audio: soundFile is not accepted (id "example:Blast", soundFile "C:/mods/example/blast.wav").
+Custom audio files do not play on this build: [...] This is the open item audio-custom-file-loader.
+It is an ERROR rather than a no-op because soundFile used to OUTRANK soundId/soundPath, so setting it
+beside a working soundId silenced a sound that was playing. Name a game sound instead:
+soundId = "AKE_UI_Common_Menu_Close", or soundPath = the asset path from PalForge.native.audio.CATALOG.
+```
+
 `Audio.get` は素の文字列を受け取るため、出るメッセージが少し違います。
 
 ```text
@@ -640,7 +680,9 @@ Audio.get: id (string) is required
 ## まとめ
 
 - サウンドは `Audio{ ... }`、`Audio.bgm{ ... }`、`Audio.se{ ... }` で定義します。必須は `id` だけです。
-- `soundId` だけでなく `soundPath` も渡します。聞こえるのはパスの方で、名前だけでは無音です。
+- カタログにある `soundId` はそれだけで十分です。変換時に `native/audio.lua` からアセットパスが
+  補完されます。`soundPath` は、カタログに無い名前のときや上書きしたいときに渡します。
+- `soundFile` は定義時のハードエラーです。このビルドではカスタム音声ファイルは再生できません。
 - 再生は `handle:play(actor)` です。`actor` を省くとプレイヤーのキャラクターで鳴ります。
 - `:play()` の `true` は呼び出しが出たという意味で、聞こえた保証ではありません。無音のときは
   `:source().path` を確認します。

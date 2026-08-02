@@ -83,36 +83,36 @@ PalForge: Mesh.get("example:no_such_mesh"): no mesh is defined under that id
       default: '"skeletal"',
     },
     model: {
-      description: 'モデル。skeletal / static バックエンドでは USkeletalMesh または UStaticMesh のアセットパス、procedural / obj では Wavefront OBJ ファイルのファイルシステムパスです。',
+      description: 'モデル。skeletal / static バックエンドでは /Game/... の USkeletalMesh または UStaticMesh のパス、procedural / obj では .obj ファイルのパス（絶対、または宣言した .lua ファイルからの相対）です。',
       type: 'string',
       required: true,
     },
     animClass: {
-      description: 'ABP_*_C アニメーションブループリントのパス。skeletal バックエンドだけが読みます。',
+      description: 'ABP_*_C アニメーションブループリントのパス。末尾の _C は付けても付けなくてもかまいません。skeletal バックエンドだけが読みます。',
       type: 'string',
     },
     scale: {
-      description: 'アタッチしたメッシュに掛ける等倍スケール。procedural と static のバックエンドが読みます。',
+      description: 'アタッチしたメッシュに掛ける等倍スケール。skeletal では、元のスケールを先に控えられたときだけ適用されます。',
       type: 'number',
     },
     offset: {
-      description: 'アクター原点からのオフセット。x, y, z のキーで指定します。procedural と static のバックエンドが読みます。',
+      description: 'x, y, z のキーで書くオフセット。procedural と static ではアクター原点から、skeletal ではメッシュコンポーネント自身の相対位置に加算されます。',
       type: 'table',
     },
     texture: {
-      description: 'png の絶対パス。実行時にインポートされ、テクスチャパラメータへ書き込まれます。procedural 専用です。',
+      description: '/Game/... の UTexture2D パス、または自前の png（絶対、または宣言した .lua ファイルからの相対）。すべてのバックエンドで、実測したテクスチャパラメータ名へ書き込まれます。',
       type: 'string',
     },
     color: {
-      description: '0..1 の r, g, b, a によるティント。procedural 専用です。',
+      description: '0..1 の r, g, b, a によるティント。すべてのバックエンドで実測したベクターパラメータ名へ書き込まれ、procedural では頂点カラーとしても焼き込まれます。',
       type: 'table',
     },
     material: {
-      description: 'ダイナミックマテリアルの元にするベースマテリアルのアセットパス。procedural 専用です。',
+      description: 'ダイナミックマテリアルの親にするベースマテリアルのアセットパス。すべてのバックエンドが読みます。作りたてのメッシュセクションが自前のマテリアルを持たない procedural では必須です。',
       type: 'string',
     },
     params: {
-      description: 'そのまま渡される追加のマテリアルパラメータ。vector / scalar / texture のサブテーブルに分けて書きます。procedural 専用です。',
+      description: '追加のマテリアルパラメータ。vector / scalar / texture のサブテーブルに分けて書きます。すべてのバックエンドが読みます。',
       type: 'table',
     },
   }}
@@ -161,27 +161,37 @@ flowchart TD
 真ん中の段を誰がやるかは、そのメッシュを着るものによって変わります。
 
 - **Mesh** — 自分で `meshHandle:attachTo(actor)` を呼びます。
-- **Pal** — 通常は `onSpawned` の中で `pal:renderOn(ctx.actor)` を呼びます。パルのメッシュを
-  代わりに貼るものはないので、この呼び出しがないパルは元の姿のままです。
-- **Building** — PalForge が代わりに貼ります。設置した建物をスキャンが見つけ、その `render()`
-  を呼びます。しかも最初に見つかったスキャンではなく、意図的にその次のスキャンで呼びます。
-  まだ起動途中のアクターにアタッチするとゲームがクラッシュするためです。
+- **Pal** — 書いておいた `mesh` は、定義自身の `onSpawned` より先に、`pal.spawned` チャンネルで
+  代わりに貼られます。`pal:renderOn(actor)` は、そのチャンネルから来ていないポーン向けの手動の
+  経路です。
+- **Building** — 書いておいた `mesh` はこちらも代わりに貼られます。設置した建物をビルディングの
+  スキャンが見つけ、その `render()` を呼びます。しかも最初に見つかったスキャンではなく、意図的に
+  その次のスキャンで呼びます。まだ起動途中のアクターにアタッチするとゲームがクラッシュするため
+  です。この遅延呼び出しが実際に建物へ届くのは、スキャンがアクターごとの記録をアクターの
+  `GetFullName()` でキーにしているからです。ルックアップのたびに作り直される UE4SS のハンドルを
+  キーにしていると、レンダリング待ちのフラグは一度立つだけで二度と読まれません。
 
-どの経路も最後は `core.mesh.attachOnce` に入ります。アクターか spec が欠けていれば `false` を
-返します。実行時のメッシュはスイッチひとつでまとめて止められます。
+どの経路も最後は `core.mesh.attachOnce` に入ります。アクターか spec が欠けていれば `false` と
+その理由（英語）を返します。実行時のメッシュはスイッチひとつでまとめて止められます。
 
 ```lua
 require("palforge.core.mesh").ENABLED = false   -- stop attaching runtime meshes entirely
 ```
 
 <Callout type="info">
-procedural と static のバックエンドが覚えているのは、どのメッシュを使ったかではなく、どの
-**アクター** を着せ替えたかです。すでに同じ kind のメッシュを着ているアクターにもう 1 つ貼っ
-ても、何もせずに `true` を返します。この記録はバックエンドごとに別なので、1 体のアクターが
-procedural と static のメッシュを同時に着ることはできます。ただし `core.mesh` が覚えているのは
-最後にそのアクターを着せ替えたバックエンドだけで、`setColor` と `detach` が届くのもそれです。
-skeletal バックエンドはこの記録を持ちません。同じメッシュを貼り直しても害はなく、2 つ目の
-skeletal メッシュをアタッチすると 1 つ目を置き換えます。
+メッシュ層のアクターごとの記録はすべて、渡された Lua の値ではなく、アクター自身の
+`GetFullName()` をキーにして保存されます。UE4SS はルックアップのたびに新しい userdata の
+ラッパーを作るので、同じアクターへの 2 つの参照は同じ Lua の値になりません。ラッパーをキーに
+したテーブルは、それを書き込んだまさにその値でしか読み戻せないのです。`detach`、`setColor`、
+重ね掛け防止のガード、skeletal の復元記録はどれも、あとから来た `ctx.actor` や次の
+`FindAllOf` からその記録を見つけられることに依存しています。実際の呼び出し元はすべてそちらです。
+
+各バックエンドが覚えているのは、使ったメッシュではなく着せ替えた **アクター** です。すでに同じ
+kind のメッシュを着ているアクターにもう 1 つ貼っても、何もせずに `true` を返します。この記録は
+バックエンドごとに別なので、1 体のアクターが procedural と static のメッシュを同時に着ることは
+できます。ただし `core.mesh` が覚えているのは最後にそのアクターを着せ替えたバックエンドだけで、
+`setColor` と `detach` が届くのもそれです。`attachOnce` ではない `core.mesh.attach` は、別の
+バックエンドの仕事を先に外すので、2 つが 1 体のアクターを取り合うことはありません。
 </Callout>
 
 ## 4 つの kind と 3 つのバックエンド
@@ -198,9 +208,10 @@ skeletal メッシュをアタッチすると 1 つ目を置き換えます。
 
 ### procedural と obj
 
-自分で用意したモデルを出すときはこれを使います。`model` は自分のディスク上にある `.obj`
-ファイルのパスです。`io.open` で読み込み、パスごとに覚えておくので、同じファイルを読むのは
-一度だけです。
+自分で用意したモデルを出すときはこれを使います。`model` はディスク上にある `.obj` ファイルの
+パスです。`io.open` で読み込み、パスごとに覚えておきます。キャッシュは解析済みモデルを 8 個
+持ち、最後に使われてから最も古いものを追い出すので、パスを生成し続けるパックでも無限には
+増えません。
 
 角が 4 つ以上ある面は三角形に分割されます。表裏の両方が書き出されるので、面の向きに関係なく
 モデルが見えます。テクスチャ座標はベストエフォートで、ある頂点に対して最初に現れた `vt` が
@@ -215,37 +226,62 @@ skeletal メッシュをアタッチすると 1 つ目を置き換えます。
 local marker = Mesh{
     id     = "example:marker",
     kind   = "obj",
-    model  = "C:/mods/example/marker.obj",
+    model  = "art/marker.obj",       -- relative to the .lua file that declares it
     scale  = 2.0,
     offset = { x = 0, y = 0, z = 120 },
     color  = { 1.0, 0.4, 0.1, 1.0 },
 }
 ```
 
-`scale` と `offset` を読むのは、ここと static バックエンドだけです。書いた `color` はモデルの
-頂点カラーとしても焼き込まれるので、マテリアルパラメータが効かない環境でもティントが見える
-ことがあります。
+書いた `color` はモデルの頂点カラーとしても焼き込まれるので、マテリアルパラメータが効かない
+環境でもティントが見えることがあります。ベースマテリアルを既定で要求するのはこのバックエンド
+だけです。作ったばかりのメッシュセクションには、インスタンス化の元になるマテリアルが 1 つも
+無いためです。
 
 ### skeletal
 
-クリーチャーにはこれを使います。PalForge はポーンの体のコンポーネントを `actor.Mesh`、だめ
-なら `GetMesh()` で見つけ、メッシュ変更を止めているパル側のガード `SetDisableChangeMesh` を
-解除してから、`SetSkinnedAssetAndUpdate(mesh, true)` でモデルを差し替えます。それが無い環境
-では `SetSkeletalMeshAsset` にフォールバックします。モデルは `LoadAsset`、だめなら
-`StaticFindObject` で読み込み、パスごとに覚えておきます。
+クリーチャーにはこれを使います。各ステップの経路はどれも 1 本だけです。出荷バイナリ自身の
+クラス一覧が、1 本しか残していないからです。
 
-`attach` が `true` を返すのは、この 2 つのセッターのどちらかが実際に走ったときだけです。どちらも
-持たないコンポーネントは、黙って成功したことにはせず失敗として扱います。
+ポーンの体のコンポーネントは `ACharacter` のリフレクトされた `Mesh` UProperty で、
+`APalCharacter` はこれを継承しています。読み方は `actor.Mesh` です。`GetMesh()` という
+UFunction は `ACharacter` にも `APalCharacter` にも、1579 ヘッダのダンプのどこにも宣言されて
+いないので、フォールバックするゲッターは存在しません。
+
+PalForge はパル側のガード `SetDisableChangeMesh` を解除してから、
+`SetSkinnedAssetAndUpdate(asset, true)` でモデルを差し替えます。`SetSkeletalMeshAsset` も
+宣言されており、`UPalSkeletalMeshComponent` は両方を継承しているので、こちらは何かの
+フォールバックには一度もなり得ませんでした。1 本目が動く場合にしか動けないからです。つまり
+選択は挙動だけで決まります。`SetSkinnedAssetAndUpdate` はレンダーステートを作り直してポーズを
+初期化し直すので、スケルトンをまたぐ差し替えでもきちんと描画されます。もう一方には無い第 2
+引数 `bReinitPose` こそが、これを選ぶ理由です。
+
+アセットの解決は `core.mesh.assets` が行い、パッケージをロードしてからその中のオブジェクトを
+引き、引数がマーシャリングされる前に `SkinnedAsset` かどうかを**クラスチェック**します。この
+チェックは形式ではありません。`UStaticMesh` は `USkinnedAsset` ではなく、両者は兄弟クラスです。
+引数の型が違う呼び出しは、`pcall` では捕まえられない UE4SS のマーシャリング内部で落ちます。
+`kind` の書き間違いが英語のエラーと `false` になるのはそのためです。
+
+`attach` は、セッターと対になるゲッター `GetSkinnedAsset()` でアセットを読み戻し、設定した
+ものと一致したときだけ `true` を返します。読み戻せないコンポーネントは「判断できない」ので、
+その場合は「セッターが走った」が上限です。
 
 <Callout type="warn">
-この経路はまだゲーム内で確認できていません。`true` はセッターが走ったという意味であって、
-新しいモデルが画面に見えているという保証ではありません。差し替えが見えないときは `animClass`
-を足してみて、どちらのセッターを使ったかを書いたログ行を確認してください。
+パルの姿が実際に変わるところは、どの実行でも見られていません。`true` は、生きたクラスから
+セッターが見つかり、呼び出しが走り、コンポーネントが設定したアセットを読み戻したという意味
+であって、画面に別のものが出ているという意味ではありません。差し替えが見えないときは
+`animClass` を足し、`skeletal:` のログ行を読んでください。この行は、書いたパスをそのまま繰り返す
+のではなく、実際に届いたオブジェクトのクラス名を出します。
 </Callout>
 
 `animClass` は任意です。指定すると、コンポーネントをアニメーションブループリントモードに
 切り替えてからクラスを結び付けるので、新しいスケルトンが実際に動きます。何にも動かされない
-スキンメッシュは、画面から消えてしまうことがあります。
+スキンメッシュは、画面から消えてしまうことがあります。生成クラスはブループリントのパッケージ
+自身のアセットオブジェクトではないので、1 つを解決するには互いに代われない 2 段階が要ります。
+**ロード**されるのはアセットパス `ABP_X.ABP_X` で、そのあと**引かれる**のがオブジェクトパス
+`ABP_X.ABP_X_C` です。どちらの書き方も受け付けます。パスから 1 つを解決できた実行はまだなく、
+実測されているのはパスの形（生きたポーンから読み取ったもの）だけなので、`animClass` の失敗は
+警告にとどまり、差し替え自体は残ります。
 
 ```lua
 local sheep = Mesh{
@@ -259,11 +295,25 @@ local sheep = Mesh{
 1 つのメッシュでできたクリーチャーではきれいに動きます。プレイヤーのように body と outfit の
 複数メッシュでできたポーンでは、ベースのコンポーネントしか差し替わりません。
 
+`kind` の既定値は `skeletal` なので、`kind` を書かずに `SM_` のモデルを書くと、スタティック
+メッシュを skeletal として宣言したことになります。これは 2 か所で捕まります。まずワールドの
+無い定義時に、ファイル名の接頭辞を読む警告が出ます。次にアタッチ時に上のクラスチェックが
+止めます。エラーではなく警告なのは、`SM_` / `SK_` の接頭辞が PalForge の実測した範囲では
+このビルド全体で守られている「慣習」であり、慣習は保証ではないからです。
+
+```text
+[PalForge.mesh][warn] Mesh example:crate declares kind = "skeletal" but its model is named "SM_ChestWood.SM_ChestWood" - the SM_ prefix is this build's convention for a static mesh. A UStaticMesh and a USkeletalMesh are sibling classes, not relatives, so the wrong one will be refused by the class check at attach time and nothing will render. Did you mean kind = "static"?
+```
+
 ### static
 
 ゲームに元から入っているモデルを建物に付けるときはこれを使います。`model` はそのアセットの
-オブジェクトパスです。`LoadAsset`、だめなら `StaticFindObject` で読み込んでパスごとに覚えて
-おき、PalForge が実行中に作る `UStaticMeshComponent` に載せます。
+オブジェクトパスです。`core.mesh.assets` がパッケージをロードし、続いてその中のオブジェクトを
+引きます。これはフォールバックの連鎖ではなく 2 段階です。`LoadAsset` はどのビルドでも
+オブジェクトを返すわけではなく、`StaticFindObject` は何もロードしないからです。成功は解決に
+使った文字列そのままでキャッシュされ、失敗はキャッシュされません。失敗はたいてい「その
+パッケージがまだストリーミングされていない」だからです。結果はセッターに届く前に `StaticMesh`
+かどうかクラスチェックされ、それから PalForge が実行中に作る `UStaticMeshComponent` に載ります。
 
 手順は `AddComponentByClass`、`SetStaticMesh`、そして `SetWorldScale3D` と
 `K2_SetRelativeLocation` です。スケールの呼び出しは省略できません。`AddComponentByClass` に
@@ -287,18 +337,122 @@ Building{
 }
 ```
 
-`scale` と `offset` は procedural バックエンドとまったく同じように読まれます。塗り用の
-フィールドは読まれません。`texture` / `color` / `material` / `params` は procedural のもの
-なので、static のメッシュはアセット自身が持つマテリアルで表示され、この方法で着せたアクター
-への `setColor` は `false` を返します。
+`scale` と `offset` は procedural バックエンドとまったく同じように読まれ、塗り用のフィールドも
+同じく読まれます。作り込まれた `UStaticMesh` はスロットに本物のマテリアルを持って届くので、
+このコンポーネントはベースマテリアルを必要とせず、そのままインスタンス化できます。建物を
+あとから `setColor` やビルディングの `update()` で塗り直せるのはそのためです。ダイナミック
+マテリアルは遅延して作られるので、マテリアルを何も書かないアタッチはメッシュ本来の見た目を
+そのまま残します。
 
 <Callout type="warn">
-`UStaticMeshComponent:SetStaticMesh` はこのビルドでは確認が取れていないため、`attach` はその
-呼び出しを鵜呑みにしません。コンポーネントからモデルを読み戻し（まず `GetStaticMesh()`、次に
-`StaticMesh` プロパティ）、実際にそこに載っていることが確認できたときだけ成功を報告します。
-途中で失敗した場合は追加したコンポーネントを破棄するので、描画されていないモデルを成功と
-偽ることはなく、`false` が返って余計なコンポーネントも残りません。
+この方法で `UStaticMesh` がコンポーネントに載るところを見た実行はまだないので、`attach` は
+呼び出しを鵜呑みにしません。`bool SetStaticMesh(UStaticMesh*)` は `UStaticMeshComponent` に
+宣言されており、同じクラス一覧は読み戻しの側も逆向きに決着させています。リフレクトされた
+`GetStaticMesh` はダンプのどこにも**存在しません**。アセットに届く手段は `StaticMesh`
+UProperty だけで、dumps/reflection が生きたアクターから読んでいるのもこれです。だから `attach`
+はこの 1 つのプロパティを読み、モデルが本当にそこに載っているときだけ成功を報告します。途中で
+失敗した場合は追加したコンポーネントを破棄するので、描画されていないモデルを成功と偽ることは
+なく、`false` と理由が返り、余計なコンポーネントも残りません。
 </Callout>
+
+## パックが同梱できるもの
+
+主役は、ゲームが既に持っているアセットを指すことです。クックされた `/Game/...` のアセットは
+pak の中にあります。インポートも解析も要らず、プレイヤーがインストールするファイルもありません。
+しかもマテリアルとテクスチャが一緒に付いてきます。クックされたアセットは自分のマテリアル
+スロットを持ち、そのスロットが自分のテクスチャを持っているからです。
+
+これが大事なのは、それ以外についての正直な答えが見た目より狭いからです。
+
+| 同梱したいもの | パックで同梱できるか | 存在する経路 |
+| --- | --- | --- |
+| static / skeletal のメッシュ | **できません** | バニラの `/Game/...` パスである必要があります。Lua から新しい `UStaticMesh` や `USkeletalMesh` をゲームに入れる経路はありません |
+| procedural のモデル | **できます** | ディスク上の Wavefront `.obj` を実行時に解析します。パックが本当に同梱できる唯一のアセット経路です |
+| テクスチャ | **未検証** | `ImportFileAsTexture2D` は出荷バイナリから読んだシグネチャで配線済みですが、このツリーのどの実行も一度も呼んでいません。`/Game/...` のテクスチャなら今日から使えます |
+| マテリアル | **親にするだけ** | `material` は、ダイナミックインスタンスの親にする「既にロード済みの」`UMaterialInterface` を指します。ここでマテリアルを作ったりインポートしたりはしません |
+| サウンドファイル | **できません** | `Audio.Spec.soundFile` は定義時のハードエラーです。[Audio](/docs/api/audio) を参照してください |
+
+### Mesh.assets
+
+`Mesh.assets` は、このビルドで実測したパスのカタログと、その裏にあるリゾルバです。テーブルの
+エントリはすべてこのビルドで観測されています。生きたロード済みオブジェクトのスイープか、生きた
+アクター自身のコンポーネントから直接読んだものです。
+
+```lua
+Mesh.assets.SM.ChestWood             -- UStaticMesh paths                 (kind = "static")
+Mesh.assets.SK.PinkCat               -- USkeletalMesh paths               (kind = "skeletal")
+Mesh.assets.ABP.PinkCat              -- AnimBlueprintGeneratedClass paths (animClass)
+Mesh.assets.T.HelicopterBase         -- UTexture2D paths                  (texture, params.texture)
+Mesh.assets.MI.PlayerOutfitOldCloth  -- material instance paths           (material)
+
+Mesh.assets.palMesh("ChickenPal")    -- the conventional SK_ path for a monster folder name
+Mesh.assets.palAnim("ChickenPal")    -- the conventional ABP _C path for the same
+Mesh.assets.load(path, { class = "StaticMesh" })   -- resolve one yourself -> obj, or nil + why
+Mesh.assets.probe(print)             -- try them all and report; loads packages, writes nothing
+```
+
+2 つのビルダーはより弱い主張であり、それを自分で表明しています。`palMesh` が返すのは、生きた
+スイープに出てきたモンスターのエントリ 5 件がすべて当てはまる「形」です。ただしパルは同じ
+フォルダに別のメッシュを持てて、その名前までは予測できないので、結果は事実ではなく「解決して
+確かめる候補」として扱ってください。`palAnim` の裏にある実測サンプルはちょうど 1 件です。
+
+つまり 1 つのメッシュで、ゲームのモデルとゲーム自身のマップ一式を、すべて実測パスだけで、
+プレイヤーのディスクに何も置かずに指定できます。
+
+```lua
+local heli = Mesh{
+    id     = "example:heli",
+    model  = Mesh.assets.SK.AttackHelicopter,
+    params = {
+        texture = {
+            ["Base Texture"] = Mesh.assets.T.HelicopterBase,
+            ["Normal Map"]   = Mesh.assets.T.HelicopterNormal,
+        },
+    },
+}
+```
+
+### パックからの相対パス
+
+`model` と `texture` は、そのメッシュを宣言した `.lua` ファイルからの相対パスを受け付け、定義時に
+そのファイル自身のディレクトリを基準に解決します。絶対パスはそのままで、`/Game/...` の
+オブジェクトパスもそのままです。こちらは `/` で始まり、まさにこの理由で絶対として扱われます。
+
+```lua
+-- <pack>/content/meshes.lua, with the model at <pack>/content/art/marker.obj
+Mesh{ id = "example:marker", kind = "obj", model = "art/marker.obj" }
+```
+
+呼び出し元のファイルは PalForge 自身のツリーの外へ歩いて見つけるので、宣言がどのスタック深さで
+届いても機能します。`Mesh{ ... }` と `Pal{ mesh = { ... } }` ではフレーム数が違い、固定の数値では
+どちらかが必ず外れるからです。文字列チャンク、C、あるいは PalForge 自身のテストスイートから
+行われた宣言にはパックのディレクトリがありません。その場合パスは推測に連結されず**そのまま**
+返ります。相対のままのパスは、書いた文字列そのままで `io.open` に失敗するので読めば分かります。
+
+この解決が効くのは `Mesh.Spec` だけです。パルやビルディング自身の `texture` ショートハンドと、
+その `material` テーブルの中の `texture` は、書いたままレンダラーに届きます。
+
+### 探しに行く前に、書いた内容を確かめる
+
+`Mesh.validateDeclared()` は、**登録済み**のメッシュが宣言しているアセットをすべて解決し、
+1 つのブロックとして報告します。`core/event` が `world.ready` を出した直後に一度実行します。
+パッケージをロードするだけで、アクターにもコンポーネントにもセーブにも書かないので、いつ手動で
+実行し直しても安全です。`Pal{ }` や `Building{ }` の中にインラインで書いたメッシュはレジストリに
+無いため、対象外です。
+
+```lua
+require("palforge.core.mesh").validateDeclared()
+```
+
+```text
+MESHVALIDATE 2 declared mesh(es)
+MESHVALIDATE OK   example:marker.model -> readable OBJ file
+MESHVALIDATE MISS example:boss.model -> /Game/Pal/Model/.../SK_Nope.SK_Nope did not resolve: LoadAsset ran and StaticFindObject found nothing under that name, and its package is not in memory either.
+MESHVALIDATE 2 asset reference(s) checked, 1 resolved, 1 did not
+```
+
+「ボスが見えない」への答えがこれです。間違った `model` を、黙って何も描かない状態から、id と
+フィールド名とそのパスの解決結果を書いた 1 行に変えます。
 
 ## kind の既定値は着せる側で決まる
 
@@ -336,7 +490,7 @@ flowchart TD
 なりません。フィールドがすでにある以上、ビルディング側の既定値は発動しないからです。
 
 ```lua
-local shared = Mesh{ id = "example:shared", model = "C:/mods/example/box.obj" }
+local shared = Mesh{ id = "example:shared", model = "art/box.obj" }
 shared:kind()                                    -- "skeletal", filled by the default
 
 Building{ id = "example:Bench", mesh = shared }  -- still skeletal, not static
@@ -407,43 +561,92 @@ Pal{ id = "ChickenPal", mesh = Mesh.get("example:chicken_body") }
 
 ## マテリアル: texture / color / material / params
 
-モデルの塗り方を決めるフィールドは 4 つあり、読むのは procedural バックエンドだけです。
+モデルの塗り方を決めるフィールドは 4 つあり、どのバックエンドも 4 つとも読みます。処理の中身は
+`UPrimitiveComponent` と `UMaterialInstanceDynamic` の API で、これはどのメッシュコンポーネント
+も持っているので、特定のバックエンドではなく共有の層に置かれています。
 
-- `texture` — png の絶対パス。実行中に
-  `UKismetRenderingLibrary:ImportFileAsTexture2D` でインポートされ、候補となる複数のテクスチャ
-  パラメータ名へ書き込まれます。
-- `color` — 0..1 の `{ r, g, b, a }` あるいは `{ [1], [2], [3], [4] }` によるティント。候補となる
-  複数のベクターパラメータ名へ書き込まれ、同時にモデルの頂点カラーにも焼き込まれます。
-- `material` — 塗りの土台にするマテリアルのアセットパス。
-- `params` — 型ごとに分けて、そのまま渡す追加のパラメータ。
+- `texture` — `/Game/...` のテクスチャアセット、または自前の png。どちらの経路になるかは文字列の
+  形で決まります。オブジェクトパスは `/` で始まり、それ以外は始まらないので、どの文字列にも
+  片方しか当てはまらず、もう片方は試されません。どちらの経路も、解決に使った文字列そのままで
+  成功をキャッシュします。効いてくるのはディスク側で、こちらは**すべての**アタッチで通るため、
+  キャッシュが無いと `Pal{ mesh = { texture = ".../body.png" } }` はパルがスポーンするたびに新しい
+  `UTexture2D` をインポートし、それを追跡するものも破棄するものも無い状態になります。
+- `color` — 0..1 の `{ r, g, b, a }` あるいは `{ [1], [2], [3], [4] }` によるティント。カラーと
+  エミッシブのパラメータ名へ書き込まれ、procedural ではモデルの頂点カラーにも焼き込まれます。
+- `material` — ダイナミックインスタンスの親にするマテリアルのアセットパス。
+- `params` — 受け取るセッターごとに分けて、そのまま書き込む追加のパラメータ。
 
 ```lua
 local painted = Mesh{
     id       = "example:painted",
     kind     = "procedural",
-    model    = "C:/mods/example/marker.obj",
-    texture  = "C:/mods/example/marker.png",
+    model    = "art/marker.obj",
+    texture  = "art/marker.png",
     color    = { r = 0.2, g = 0.8, b = 1.0, a = 1.0 },
-    material = "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",
+    material = Mesh.assets.MI.PlayerOutfitOldCloth,
     params   = {
-        vector  = { EmissiveColor = { 1, 0, 0, 1 } },
-        scalar  = { Roughness = 0.4 },
-        texture = { Normal = "C:/mods/example/marker_n.png" },
+        vector  = { ["Subsurface Color"] = { 1, 0, 0, 1 } },
+        scalar  = { ["Roughness Add"] = 0.4 },
+        texture = { ["Normal Map"] = Mesh.assets.T.HelicopterNormal },
     },
 }
 ```
 
-<Callout type="warn">
-塗るにはベースマテリアルが必要ですが、PalForge はそれを同梱していません。まず指定された
-`material` のパスを探し、次に `BasicShapeMaterial` を先頭とするエンジンマテリアルの短い候補
-リストを順に試します。探すのに使うのは `StaticFindObject` で、これはゲームが **すでに読み込んで
-いる** マテリアルしか見つけられません。つまり明示した `material` も、読み込み済みでなければ
-見つかりません。どれも見つからなければ塗りは作られず、`color` も `texture` も `params` も
-黙って効きません。モデル自体はそれでもアタッチされ、見つからなかったことは例外ではなくログに
-残ります。この失敗は覚えられないので、次のアタッチで再試行されます。
+### パラメータ名と、その出どころ
 
-ベースマテリアルが無くても効くものが 2 つあります。書いた `color` はモデルの頂点カラーとして
-焼き込まれます。また `require("palforge.core.mesh").probeMaterials()` を呼ぶと、いまどの候補が
+ヘッダのダンプでは決して答えられない問いでした。ダンプが記録するのはクラス宣言であり、
+マテリアルがどのパラメータを公開しているかは `.uasset` の中のデータだからです。そこで名前は
+**動いているゲームから読み取り**ました。プレイヤーの `CharacterMesh0` にある各ダイナミック
+マテリアルインスタンスから、派生元の `MaterialInstanceConstant` まで辿った結果がこれです。
+
+| 種類 | 持っていた名前 |
+| --- | --- |
+| vector | `BaseColor`、`Subsurface Color` |
+| texture | `Base Texture`、`MetallicRoughnessOcclusionSpecularTexture`、`Normal Map`、`Subsurface Texture` |
+| scalar | `Character CameraFade Distance`、`Occlusion Add`、`Roughness Add`、`Light Affect Subsurface Max`、`RefractionDepthBias` |
+
+ほとんどが**スペース入りの Title Case** で、これはどの推測にも無い形でした。例外は `BaseColor`
+だけで、これは元からカラーの候補に入っていたため、ティントには最初から現実的な見込みがあり、
+テクスチャ側の書き込みにはまったく見込みがありませんでした。
+
+書いた `color` は `BaseColor`、`Subsurface Color`、続けて古い推測 5 つ、さらに上の読み取りには
+出てこなかったエミッシブの推測 3 つへ書き込まれます。書いた `texture` は `Base Texture`、
+`Subsurface Texture`、`Normal Map`、続けて推測 5 つへ書き込まれます。マテリアルが持っていない
+名前への書き込みは黙って何もしないので、両方試して失うものはありません。ただしどちらの一覧にも
+**入っていない** `MetallicRoughnessOcclusionSpecularTexture` とすべての scalar は、`params` で
+自分から名前を書いたときにだけ届きます。
+
+名前は自分でも読めます。何も書き込みません。
+`require("palforge.core.mesh").describeMaterials(actor, print)` です。子のメッシュコンポーネント
+まで歩き、各マテリアルを `Parent` の連鎖に沿って遡ります。ダイナミックインスタンスが並べるのは
+**そのインスタンスで**上書きされたものだけなので、MID に対する「vector: (none)」は元の
+マテリアルについて何も語りません。
+
+<Callout type="warn">
+色が実際に変わるところは誰も見ていません。書き込みは宣言どおりに呼ばれているので「書き込みが
+走らなかった」は除外できますし、上の名前は推測ではなく実測です。しかしティントが画面に乗ることは
+3 つ目の観測であり、それはまだ行われていません。それを記録するのが
+`pf_hook mesh-color-change` です。
+</Callout>
+
+<Callout type="warn">
+procedural のセクションはマテリアルを 1 つも持たないので、既にロード済みのマテリアルを親にする
+必要があります。そして PalForge はマテリアルを同梱していません。先頭の候補は**プレイヤー自身の
+アウトフィットのマテリアルインスタンス**で、`BP_Player_Female_C.CharacterMesh0` から実際に読んだ
+ものです。いま描画されているマテリアルは、その事実だけでクック済みかつロード可能です。アセット
+パスがほかに推測しかありえなかった中で、この問いに答えられたのはそのおかげでした。しかもティント
+に必要な `BaseColor` ベクターパラメータを持っています。
+
+キャラクター用のシェーダを procedural の立方体に載せる形になるのは確かに妙で、隠さずここに書いて
+おきます。見た目が変でも動くマテリアルは改良できますが、ロードできないマテリアルはそもそも
+使えません。`BasicShapeMaterial` ほか 4 つの `/Engine/` パスがこれに続きますが、そちらは出荷
+ビルドが何をロードしたままにしているかについての推測です。
+
+探すのに使うのは `StaticFindObject` で、**すでに読み込まれている**ものしか見つけられません。
+つまり明示した `material` も、読み込み済みでなければ見つかりません。1 つも見つからなければ
+ダイナミックマテリアルは作られず、`color` / `texture` / `params` は黙って効かず、メッシュ自体は
+アタッチされ、見つからなかったことはログに残ります。失敗はキャッシュされないので次のアタッチで
+再試行されますし、`require("palforge.core.mesh").probeMaterials()` を呼べば、いまどの候補が
 読み込まれているかがログに出ます。
 </Callout>
 
@@ -456,7 +659,7 @@ local painted = Mesh{
 ```lua
 Pal{
     id    = "example:Boss",
-    mesh  = { kind = "procedural", model = "C:/mods/example/boss.obj",
+    mesh  = { kind = "procedural", model = "art/boss.obj",
               color = { 1, 1, 1, 1 } },
     color = { 1, 0, 0, 1 },              -- shorthand: wins over the mesh color
 }
@@ -478,10 +681,13 @@ Pal{
 ```lua
 Pal{
     id       = "example:Boss",
-    mesh     = { kind = "procedural", model = "C:/mods/example/boss.obj" },
+    mesh     = { kind = "procedural", model = "art/boss.obj" },
     material = { color = { 1, 0, 0, 1 }, texture = "C:/mods/example/boss.png" },
 }
 ```
+
+ここでメッシュの `model` はパック相対で解決されますが、パル側の `material.texture` は解決されない
+ので、絶対パスで書いてあります。
 </Callout>
 
 `Mesh.Handle:attachTo` はこの流れをすべて飛ばします。メッシュ自身の宣言をそのままアタッチ
@@ -497,13 +703,18 @@ Pal{
 
 ```lua
 ---@param actor any
----@return boolean ok
+---@return boolean ok, string? reason
 meshHandle:attachTo(actor)
 ```
 
 このメッシュを、生きているアクターへ 1 回だけ着せます。アクターが nil か無効ならただちに
 `false` を返し、そうでなければ `source()` を `core.mesh.attachOnce` に渡して、バックエンドの
 報告をそのまま返します。
+
+失敗は `false` と、バックエンドが作った**英語の一文**として返ります。「… is a StaticMesh, not a
+SkinnedAsset」「that path did not resolve and its package is not in memory either」といった具合
+です。おかげでパスの間違い、`kind` の間違い、キャラクターではないアクターを、`UE4SS.log` を
+読みに行かずに区別できます。`true` の側は変わらないので、`if m:attachTo(a) then` はそのままです。
 
 ```lua
 Pal{
@@ -528,39 +739,50 @@ Pal{
 ```lua
 ---@param actor any
 ---@param color table  # { r, g, b, a } in 0..1
----@return boolean ok
+---@return boolean ok, string? reason
 meshHandle:setColor(actor, color)
 ```
 
 すでにアクターに載っているメッシュを塗り直します。アタッチが成功すると、どのバックエンドが
 そのアクターを着せ替えたかが記録され、塗り直しはその記録に従います。このメッシュ自身の `kind`
 はヒントとして渡されるだけで、PalForge 経由でまったく着せていないアクターのときにしか使われ
-ません。塗り直せるのは procedural バックエンドだけで、アタッチ時にそのアクターに対して記録
-した塗りを引き、color 系と emissive 系のパラメータ名に書き込みます。アクターが無効なとき、
-そのアクターを着せたのが static か skeletal のバックエンドだったとき、そのアクター用の塗りが
-無いとき、color がテーブルでないときは `false` を返します。
+ません。
+
+**塗り直せるのはすべてのバックエンド**で、skeletal も含みます。バックエンドは自分が着せた
+コンポーネントを名乗るだけでよく、共有の層がその場でダイナミックマテリアルを作ります。だから
+`color` / `texture` / `material` / `params` をどれも書かずにアタッチしたメッシュも、あとから
+塗り直せます。アクターが無効なとき、color がテーブルでないとき、そのアクターを着せた記録が
+PalForge に無いとき、そしてバックエンドが届けるあるいは作れるマテリアルインスタンスが無かった
+ときは、`false` と理由を返します。`false` が塗ったふりになることはありません。
 
 <Callout type="info">
 `setColor` はこのメッシュではなく **アクター** をたどります。どのメッシュハンドルから呼んでも、
-そのアクターが持っているマテリアルを塗り直します。procedural バックエンドは、色の宣言があっても
-無くてもアタッチのたびに塗りを作るので、`color` / `texture` / `material` / `params` をどれも
-指定せずにアタッチしたメッシュも後から塗り直せます。必要なのはベースマテリアルのほうで、候補が
-どれも読み込まれていなければ塗りは作られず、塗り直しは `false` を返します。
+そのアクターが持っているマテリアルを塗り直します。
+
+分からないのは、そのティントが見えるかどうかです。書き込むパラメータ名は実測されたものですが、
+マテリアルが持っていない名前への書き込みは黙って何もしないので、`true` は「本物のダイナミック
+マテリアルインスタンスに書き込みが走った」までを意味し、そこで止まります。
 </Callout>
 
 ### detach
 
 ```lua
 ---@param actor any
----@return boolean ok
+---@return boolean ok, string? reason
 meshHandle:detach(actor)
 ```
 
 アタッチが `actor` に載せたものを外し、もう一度着せ替えられる状態に戻します。`setColor` と
 同じ記録に従い、`core.mesh` はそのアクターを着せ替えたバックエンドに、自分が載せたものを外す
-よう頼みます。procedural と static のバックエンドは、自分が作ったコンポーネントを
-`K2_DestroyComponent` で破棄し、コンポーネントとアクターごとの記録の両方を忘れるので、あとから
-`attachTo` を呼べばまた着せ替えられます。
+よう頼みます。
+
+何をするかはバックエンドによって違います。procedural と static は、自分が作ったコンポーネントを
+`K2_DestroyComponent` で破棄し、コンポーネントとアクターごとの記録の両方を忘れます。skeletal は
+自前のコンポーネントを持たず、ポーン**自身**の体を着せ替えたので、その取り消しは復元です。
+差し替え前に控えたアセット、相対スケール、相対位置、マテリアルインターフェースがすべて戻ります。
+この控えは最初のアタッチのときに一度だけ行われますが、それが確実なのは記録がアクターの名前を
+キーにしているからです。ハンドルで引いていたら、2 回目のアタッチが「元」として控えるのは
+PalForge がついさっき載せたメッシュになり、あとの detach はそれを「復元」してしまいます。
 
 ```lua
 Pal{
@@ -579,10 +801,17 @@ Pal{
 <Callout type="warn">
 `detach` は **アクター** をたどるので、どのハンドルから呼んでも、PalForge が最後にアタッチした
 ものを外します。`false` が返る状況は 3 つあり、それぞれ意味が違います。PalForge がそのアクター
-を一度も着せ替えていない、着せ替えたバックエンドに外すべき自前のものが無い（skeletal はポーン
-自身のコンポーネントに書き込むので、破棄するものがありません）、そして `K2_DestroyComponent`
-の呼び出しが走らなかった場合です。最後のケースでは記録をわざと残します。コンポーネントはまだ
-アクターに載っており、その上にもう 1 つ載るのを止めているのがその記録だけだからです。
+を一度も着せ替えていない場合、取り消しが実行されなかった場合（`K2_DestroyComponent` が走らな
+かった、あるいは skeletal の復元で戻すべきアセットが控えられていなかった——アタッチ時に
+コンポーネントが読み戻せなかったため）、そしてアクターが生きた UObject でない場合です。2 番目の
+ケースでは記録をわざと残します。変更はまだアクターに残っており、その上にもう 1 つ載るのを
+止めているのがその記録だけだからです。
+
+コンポーネントが実際に消えるところは、どの実行でも見られていません。
+`K2_DestroyComponent(UObject*)` は ObjectProperty 1 個の引数で宣言されていて、実際の呼び出しも
+まさにそれなので、`detach` が黙って何もせず `true` を返すような引数個数の食い違いは否定されて
+います。それでも、誰かが前後でコンポーネントを数えるまでは「呼び出しが例外を出さずに返った」が
+正直な上限です。
 </Callout>
 
 ### source / model / kind
@@ -628,7 +857,7 @@ chicken:spawn(Player.coordinate())   -- the pal arrives a few seconds later
 local marker = Mesh{
     id     = "example:marker",
     kind   = "procedural",
-    model  = "C:/mods/example/marker.obj",
+    model  = "art/marker.obj",
     scale  = 1.5,
     offset = { x = 0, y = 0, z = 150 },
     color  = { 0.1, 0.9, 0.4, 1.0 },
@@ -648,14 +877,14 @@ Pal{ id = "example:Third", mesh = Mesh.get("example:marker") }
 ### 使うたびに色が変わるビルディング
 
 建物を設置したあとのスキャンで、PalForge がメッシュを代わりにアタッチします。塗り直しの
-書き込み先になる塗りは procedural バックエンドがアタッチのたびに作るので、宣言した color は
-最初のティントというだけです。
+書き込み先になるダイナミックマテリアルは、色の宣言があってもなくても procedural バックエンドが
+アタッチのたびに作るので、宣言した color は最初のティントというだけです。
 
 ```lua title="content/bench.lua"
 local glow = Mesh{
     id     = "example:bench_glow",
     kind   = "procedural",
-    model  = "C:/mods/example/bench.obj",
+    model  = "art/bench.obj",
     scale  = 1.0,
     offset = { x = 0, y = 0, z = 60 },
     color  = { 0.3, 0.3, 0.3, 1.0 },       -- the starting tint
@@ -689,7 +918,7 @@ Building{
 ります。
 
 ```lua title="content/bench_lift.lua"
-local BENCH = "/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBenchPrimitive.SM_WorkBenchPrimitive"
+local BENCH = Mesh.assets.SM.WorkBench   -- the measured /Game/... path for SM_WorkBenchPrimitive
 
 local resting = Mesh{
     id     = "example:bench_resting",
@@ -734,12 +963,12 @@ Building{
 local painted = Mesh{
     id       = "example:painted",
     kind     = "obj",
-    model    = "C:/mods/example/crate.obj",
-    material = "/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial",
-    texture  = "C:/mods/example/crate.png",
+    model    = "art/crate.obj",
+    material = Mesh.assets.MI.PlayerOutfitOldCloth,   -- read live off the player; it carries BaseColor
+    texture  = "art/crate.png",
     params   = {
-        vector = { EmissiveColor = { 0.0, 0.6, 1.0, 1.0 } },
-        scalar = { Metallic = 0.0 },
+        vector = { ["Subsurface Color"] = { 0.0, 0.6, 1.0, 1.0 } },
+        scalar = { ["Occlusion Add"] = 0.0 },
     },
 }
 
@@ -757,22 +986,27 @@ Building{
 
 ## エラー
 
-以下はいずれも `PalForge: ` で始まり、ドメイン名を含みます。最初の 3 つはメッシュを定義した
-ときに起き、フィールド名も出ます。最後の 1 つは `Mesh.get` が何も見つけられなかったときに
-起きます。
+以下はいずれも `PalForge: ` で始まり、ドメイン名を含みます。最初の 4 つはメッシュを定義した
+ときに起き、最後の 1 つは `Mesh.get` が何も見つけられなかったときに起きます。
 
 ```text
-PalForge: Mesh: field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Mesh: field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
 PalForge: Mesh: field "kind" must be one of { "procedural", "static", "skeletal", "obj" }, got "skeletel"
 PalForge: Mesh: unknown field "modelPath" (did you mean "model"?). Valid fields: id, kind, model, animClass, scale, offset, texture, color, material, params
+PalForge: Mesh: id "my-pack:body" is not a valid PalForge id: invalid pack id 'my-pack' in 'my-pack:body' (letters/digits/_ only)
 PalForge: Mesh.get("example:body"): no mesh is defined under that id
 ```
+
+id のチェックが定義時のハードエラーなのは意図的です。コロンを含む id は、前半も後半も英数字と
+アンダースコアだけでできている必要があります。これがレジストリの解決する形だからです。解決
+できない id は登録自体は通り、そのあとあらゆるエンジン境界で黙って死にます。ハイフンがまさに
+それを起こす書き間違いです。
 
 他の定義の中に書いたメッシュでは、外側のフィールド名と、検査に使った形の名前が出るので、どの
 spec を読みに行けばよいかがわかります。
 
 ```text
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
 PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required (UStaticMesh asset path, or an OBJ path for the procedural backend)
 ```
 
@@ -780,22 +1014,36 @@ PalForge: Building: field "mesh" (Building.Spec.Mesh): field "model" is required
 [Pal](/docs/api/pal) と [Building](/docs/api/building) が代わりにやってくれる処理は、ハンドラに
 例外を投げません。アクターが無い、コンポーネントが無い、OBJ ファイルが読めない、スタティック
 メッシュのアセットが見つからない、ベースマテリアルが無い、といった場合は `false` を返してログ
-に残します。
+に残します。しかも、ログに書いたのと同じ一文を第 2 の戻り値として**返します**。
+
+```text
+skeletal: /Game/Pal/Model/Prop/.../SM_ChestWood.SM_ChestWood is a StaticMesh, not a SkinnedAsset
+skeletal: actor carries no readable .Mesh component (ACharacter::Mesh) - it is probably not an APalCharacter
+static: /Game/.../SK_Nope.SK_Nope did not resolve, but its package /Game/.../SK_Nope IS in memory - so the <package>.<object> tail is wrong rather than the path
+mesh: cannot read /mods/example/marker.obj
+core.mesh.detach: PalForge has no record of dressing this actor
+```
+
+素の `false` では、これらはどれも互いに見分けが付きません。そして実際にパックがやる間違いは
+最初の 2 つです。
 
 ## まとめ
 
 - `Mesh{ id = ..., model = ... }` で、使い回せるモデルに名前を付けます。`model` は常に必須で、
   `Mesh` を直接呼ぶときは `id` も必須です。
 - `kind` が付け方を決めます。パルの体には `skeletal`、建物にゲームのモデルを付けるなら
-  `static`、自分の OBJ ファイルなら `procedural` か `obj` です。
-- パルやビルディングの中で `mesh = ...` として渡すか、`meshHandle:attachTo(actor)` で自分で
-  アクターに着せます。
-- パルは `onSpawned` などで `pal:renderOn(ctx.actor)` を呼んだときだけメッシュを着ます。建物は
-  設置した少しあとに、PalForge が代わりに着せます。
-- `setColor` と `detach` はアクターをたどり、procedural か static が着せたメッシュにしか効き
-  ません。
-- 実行中に例外は飛びません。`attachTo` と `setColor` と `detach` は `false` を返し、ログに
-  残します。
+  `static`、自分の OBJ ファイルなら `procedural` か `obj` です。`kind` の間違いは定義時の警告と
+  アタッチ時の英語のエラーであって、ネイティブのクラッシュにはなりません。
+- static と skeletal のモデルはバニラの `/Game/...` パスである必要があり、実測済みのものは
+  `Mesh.assets` にあります。パックが本当に同梱できるモデルはディスク上の `.obj` だけで、その
+  パスは宣言した `.lua` ファイルからの相対で書けます。
+- パルやビルディングの中で `mesh = ...` として渡せば代わりに着せてもらえますし、
+  `meshHandle:attachTo(actor)` で自分でアクターに着せることもできます。
+- 塗り用の 4 つのフィールドはすべてのバックエンドに届き、書き込むパラメータ名は動いている
+  ゲームから読み取ったものです。色が変わるところはまだ誰も見ていません。
+- `setColor` と `detach` はアクターをたどり、どのバックエンドも両方を実装しています。
+- 実行中に例外は飛びません。`attachTo` と `setColor` と `detach` は `false` と理由を返し、
+  ログに残します。
 
 次は [Pal](/docs/api/pal) を読むとメッシュを着るクリーチャーを出せます。[Building](/docs/api/building)
 を読むとメッシュを着る建物を置けます。

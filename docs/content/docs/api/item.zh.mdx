@@ -9,6 +9,7 @@ description: 往玩家背包里放道具、再取回来，并在道具被拾取�
 - 从自己的代码往玩家背包里加道具，也能再取出来
 - 在玩家捡到东西的那一刻运行你自己的代码
 - 在玩家吃下或用掉东西的那一刻运行你自己的代码
+- 在机器合成出它、或者玩家把它丢掉的那一刻运行你自己的代码
 - 给游戏里的道具写上自己的名字、说明和配方数值
 
 道具就是待在背包里的东西：材料、食物、装备、弹药。写 `Item{ ... }` 描述一个道具。你会拿回一个**句柄** —— 一个带着这个道具各种操作的小对象，比如 `:give`。
@@ -48,12 +49,13 @@ local items = require("palforge.native.items")
 
 items.CATALOG            -- every DT_ItemDataTable_Common row id, as a list of strings
 items.get("Arrow_Fire")  -- a lazily built, cached handle for any catalog id; nil if unknown
+items.publish("Arrow_Fire")  -- 可选：把这个句柄注册进去，好让事件能找到它
 items.Wood               -- curated handles, defined at load; Wood and Berries carry hooks
 items.Berries
 items.Arrow
 ```
 
-一开始就描述好的道具有三个：`Wood`、`Berries` 和 `Arrow`。其他所有目录 ID 会在你第一次用 `items.get(id)` 询问时变成句柄，这个句柄会留着下次用。
+一开始就描述好的道具有三个：`Wood`、`Berries` 和 `Arrow`。这三个在加载时就注册了，因为它们声明了处理函数，而没有注册的定义永远收不到分发。其他所有目录 ID 会在你第一次用 `items.get(id)` 询问时变成句柄，而那个句柄不会注册任何东西 —— 读目录就只是读。把它放进注册表的是需要你主动调用的 `items.publish(id)`。
 
 ## 字段
 
@@ -86,8 +88,8 @@ items.Arrow
       default: '1',
     },
     icon: {
-      description: '备用图标，在图标 DataTable 查不到时使用。任意值，原样返回。',
-      type: 'any',
+      description: '图标 DataTable 里没有这个 id 的行时使用的 /Game/... 贴图路径。是字符串，因为真正的查找也只能给出这一种值。',
+      type: 'string',
     },
     recipe: {
       description: '生产这个道具的配方。形状见 Item.Spec.Recipe。',
@@ -176,16 +178,37 @@ print(r.materials.Wood)       -- 2
 ```
 
 <Callout type="warn">
-配方只是一条记录，不是真的合成。PalForge 不会把它注册进游戏的合成系统，能把它读回来的只有 `Handle:recipeOf()`。写了配方并不会让这个道具在游戏里可以合成，它只是给你自己的代码一个存放数值的地方。
+配方只是一条记录，不是真的合成。PalForge 不会把它注册进游戏的合成系统，能把它读回来的只有 `Handle:recipeOf()`。写了配方并不会让这个道具在游戏里可以合成，它只是给你自己的代码一个存放数值的地方。游戏真正会跑的配方是 `DT_ItemRecipeDataTable` 里的一行，而 Lua 写不了那一行 —— 真正的配方用 PalSchema 的 JSON 声明，这里的字段是把同一件事讲给你自己的代码和工具听。
 </Callout>
+
+`recipeOf()` 读回来的只有你声明过的东西，它**不读游戏那张表**。所以即使游戏里确实有这一行，原版 ID 得到的也是 `nil`：`DT_ItemRecipeDataTable_Common` 加载在 `/Game/Pal/DataTable/Item/` 下，共 1414 行，按道具 ID 做键，列有 `Product_Count`、`Material1_Id` 到 `Material5_Id`、`WorkAmount` 以及另外九个。还不清楚的是：能不能直接从 `FindRow` 返回的结构体上按名字取出一个标量或 FName 列。这里唯一读到过的行值是一个 `TSoftObjectPtr`，它没法从 Lua 打开，图标查找绕道去整列读文本正是因为这个。按列去读今天就能用，一张表十三次调用、只做一次、缓存起来。这个问题由 `pf_hook item-datatable-row-read` 来测，它需要 `env.debug` 和一个已加载的世界。
+
+### 第二个参数
+
+`Item{ ... }` 在 spec 之后还接受一个可选的选项表。不写它时的行为和以前完全一样。
+
+```lua
+-- 只构造句柄，不做任何注册：给那种不该写进注册表的“读取”用
+local probe = Item({ id = "Wood" }, { register = false })
+
+-- 归属到某个内容包再注册，这就是让冲突有“谁”的那一步
+Item({ id = "example:Potion" }, { pack = "mypack" })
+
+-- 不用每次调用都传，也能得到同样的归属
+local api = PalForge.pack("mypack")
+api.Item{ id = "example:Potion" }
+```
+
+只接受 `register` 和 `pack`，写错的选项会报错而不是被悄悄忽略。两个内容包注册同一个 id 时，这次替换会连同两个包名一起写进日志；两个解析到同一行的 id 也一样。
 
 ### 校验
 
-你的表里每一个问题都会报错，所以调用不会做到一半就算成功。消息以 `PalForge: ` 开头，并指出它停在哪个字段。
+你的表里每一个问题都会报错，所以调用不会做到一半就算成功。消息以 `PalForge: ` 开头，并指出它停在哪个字段。id 本身也在其中：带命名空间的 id 冒号两边都只能是字母、数字和 `_`，因为 PalSchema 为 `"pack:Potion"` 写入的行是 `pack_Potion`。解析不出来的 id 会在这里被拒绝，而不是先注册下来、再永远匹配不到任何东西。
 
 ```text
 PalForge: Item: unknown field "maxStackSize" (did you mean "maxStack"?). Valid fields: id, name, description, category, maxStack, icon, recipe, events, data
 PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
+PalForge: Item: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Potion' (letters/digits/_ only)
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
 PalForge: Item: field "maxStack" expects number, got string
 PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials" is required ({ <itemId> = <count> } consumed by one craft)
@@ -217,40 +240,44 @@ schema.get("Item.Spec").fields             -- the same as a table, for tooling
       type: 'fun(self: Item.Handle, ctx: table)',
     },
     onCraft: {
-      description: '可以声明，但目前没有任何地方发出 item.craft，所以它永远不会运行。',
+      description: 'LIVE。某台合成机器做完了这个道具。带 ctx.recipeId 和 ctx.via；ctx.count 是 nil。',
       type: 'fun(self: Item.Handle, ctx: table)',
     },
     onDiscard: {
-      description: '可以声明，但目前没有任何地方发出 item.discard，所以它永远不会运行。',
+      description: 'LIVE。道具被丢在地上或被销毁。带 ctx.count 和 ctx.reason（"drop" 或 "dispose"）。',
       type: 'fun(self: Item.Handle, ctx: table)',
     },
   }}
 />
 
-游戏自身的三个调用会汇进这些处理函数。其中两个报告拾取，一个报告使用：
+游戏自身的七个调用会汇进这四个处理函数，而且四个频道都已在真实存档里被看到运送过事件：
 
 ```mermaid
 flowchart LR
   A["AddItemGetLog_ToClient"] --> B["item.obtain"]
   G["AddItem_ServerInternal"] --> B
   C["UseItemToCharacter_ServerInternal"] --> D["item.use"]
+  H["OnFinishWorkInServer x2"] --> I["item.craft"]
+  J["RequestDrop / RequestDispose"] --> K["item.discard"]
   B --> E["resolve by ctx.itemId"]
   D --> E
+  I --> E
+  K --> E
   E --> F[your handler]
 ```
 
-PalForge 不会追踪世界里每一份道具。它从事件里取出游戏的道具 ID，再去找归档在这个 ID 下的定义。如果那里什么都没有，它就把你描述过的道具走一遍，取解析后名字对得上的那一个。你从没描述过的原版道具对不上任何东西，处理函数也就不会运行。
+PalForge 不会追踪世界里每一份道具。它从事件里取出游戏的道具 ID，先找归档在这个 ID 下的定义，再找那个“解析之后正好是它”的带命名空间 ID。你从没描述过的原版道具对不上任何东西，处理函数也就不会运行。
 
 ### 带命名空间的 ID
 
-你写成 `"example:Potion"` 的道具会按这个写法原样归档，而游戏报告的是数据行名 `example_Potion`。这个差距由 PalForge 替你补上：精确查找落空时，它把你注册过的每个 ID 都解析一遍，返回对得上的那个。你的内容包照样能收到事件。
+你写成 `"example:Potion"` 的道具会按这个写法原样归档，而游戏报告的是数据行名 `example_Potion`。这个差距由 PalForge 替你补上：每一次注册也会按解析后的形式建索引，所以落空时只多一次表查找，你的内容包照样能收到事件。
 
 ```mermaid
 flowchart LR
   A["ctx.itemId is example_Potion"] --> B[exact lookup]
   B -->|hit| C[call the hook]
-  B -->|miss| D[resolve every registered id]
-  D --> E["example:Potion resolves to example_Potion"]
+  B -->|miss| D["解析后 id 的索引"]
+  D --> E["example:Potion 已按 example_Potion 建了索引"]
   E --> C
 ```
 
@@ -276,7 +303,7 @@ Item{
 Item.get("example:Potion"):give(1)   -- resolves to example_Potion for the engine
 ```
 
-这个搜索走的是已注册道具的一份快照，顺序不定，返回第一个匹配，所以两个解析后行名相同的 ID 是有歧义的。请让内容包里的 ID 保持唯一。帕鲁也是用同样的方式匹配的，按蓝图类名。
+两个解析后行名相同的 ID 仍然会冲突：索引对每个解析形式只留一条，后注册的那个占住它。但这已经不是分发时的碰运气，而是定义时一条指名两个 ID 的警告。请让内容包里的 ID 保持唯一。帕鲁也是用同样的方式匹配的，按蓝图类名。
 
 ### onObtain
 
@@ -318,7 +345,7 @@ Item{
 | `ctx.processor` | any | 执行这次使用的 `PalItemUseProcessor`。 |
 
 <Callout type="warn">
-`ctx.actor` 是“使用”道具的角色。只有食物、药水这类玩家用在自己身上的东西，它才等于“被用上”的那个角色。喂帕鲁时，帕鲁在 `ctx.targetId` 里，是一个原始实例 ID，这里没有任何东西会把它变成 actor。在专用服务器上，`ctx.actor` 是第一个被找到的玩家 pawn，不一定就是动手的那个人。把它当成一个可以作用的玩家 pawn，而不是谁动手的证据。
+`ctx.actor` 是“使用”道具的角色。只有食物、药水这类玩家用在自己身上的东西，它才等于“被用上”的那个角色。喂帕鲁时，帕鲁在 `ctx.targetId` 里，是一个原始实例 ID，这里没有任何东西会把它变成 actor。这个值是靠寻找本地玩家 pawn 得到的，所以它是第一个被找到的 pawn，而不是谁动手的证据。把它当成一个可以作用的玩家 pawn。PalForge 面向的是单人 Palworld，背后没有复制层；只要场上不止一个玩家，这个问题它就回答不了。
 </Callout>
 
 ```lua
@@ -338,10 +365,34 @@ Item{
 
 为了找出道具 ID，PalForge 会读第一个参数上的 `ID` 字段 —— 游戏里只见过这一种形状 —— 读不到就依次退到 `Id`、`StaticId` 和后面三个参数，所以签名偏移了也还能解析出来。如果找不到 ID，就什么都不报告，处理函数也不运行。
 
-### onCraft 和 onDiscard
+### onCraft
+
+`onCraft` 在一台机器做完这个道具时运行。带道具 ID 的工作模型有两个，都钩在 `OnFinishWorkInServer` 上：配方工作台和熔炉那一类的 `PalMapObjectConvertItemModel`，以及产出固定的生产机 `PalMapObjectProductItemModel`。在真实机器上合成时，这个频道被看到运送了它的第一个事件。
+
+| ctx 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `ctx.itemId` | string | 机器产出的道具。 |
+| `ctx.recipeId` | string | 同一个值，只是用 convert 那条路径的叫法。Palworld 的配方表是按产物道具 ID 做键的，所以对原版配方来说这两者确实是同一个字符串。 |
+| `ctx.count` | nil | 按设计永远是 `nil`。 |
+| `ctx.via` | string | `"convert"` 或 `"product"`。 |
+| `ctx.model`、`ctx.work` | any | 工作模型和工作对象，留给想再往里看的处理函数。 |
+
+<Callout type="info">
+`ctx.count` 是 `nil`，而且会一直是 `nil`。每次合成的产出数量写在配方行的 `Product_Count` 里，而钩子里不是读 DataTable 的地方 —— 一个没人测过的 `1` 比一个诚实的 `nil` 更糟。需要数量就在前后自己读 `:count()`。
+</Callout>
+
+### onDiscard
+
+`onDiscard` 在玩家把这个道具丢掉时运行。两个来源都是 `UPalNetworkItemComponent` 上的 RPC：丢到地上的 `RequestDrop_ToServer`，以及从背包界面销毁一叠的 `RequestDispose_ToServer`。丢弃**不会**走成负数的 `AddItem_ServerInternal` —— 那个钩子挂上之后，两个会话里一次都没触发过，因为移除住在隔壁那个网络组件上。
+
+| ctx 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `ctx.itemId` | string | 请求所指的那个格子里此刻装着的道具 ID。 |
+| `ctx.count` | number \| nil | 离开背包的数量 —— 是这一条自己的数字，不是整格的堆叠数。 |
+| `ctx.reason` | string | `"drop"` 或 `"dispose"`。 |
 
 <Callout type="warn">
-`onCraft` 和 `onDiscard` 永远不会运行。`item.craft` 和 `item.discard` 这两个频道存在，你的处理函数也接上去了，但游戏里目前没有任何地方报告这两件事：合成是通过工作流程完成的，不走获得道具日志；丢弃的调用则还没找到。声明它们不会报错，想留着代码就留着 —— 但今天真正要做的事，放进 `onObtain`、`onUse` 或你自己的代码里。
+这些 RPC 带的是**格子 ID**，不是道具 ID，所以必须赶在服务器清空之前从格子里把 ID 读出来。那就得先找到容器：玩家自己的背包助手还不够 —— 第一次真实丢弃报告的是“玩家的 6 个容器没有一个对得上” —— 所以容器集合来自一次全世界扫描，并按 GUID 精确匹配。当某个格子解析不出来时，这里什么都不发，而不是发一个猜出来的 ID，并按不同原因各写一次日志说明卡在哪一步。只有那种形状的丢弃是无声的，频道本身是活的。
 </Callout>
 
 ### 关于处理函数还要知道的
@@ -385,8 +436,8 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 | `:count()` | number \| nil | 本地玩家现在身上带着多少个。`nil` 的意思是读不出来，绝不是“一个都没有”。 |
 | `:give(count)` | boolean | 往本地玩家的背包里加 `count` 个（默认 1）。只有观察到背包数量确实上升时才是 `true`。 |
 | `:take(count)` | boolean | 从本地玩家的背包里消耗 `count` 个（默认 1）；`count` 按绝对值处理。只有观察到数量确实下降时才是 `true`。 |
-| `:recipeOf()` | table \| nil | 声明过的配方；没有配方时为 `nil`。 |
-| `:iconOf()` | any \| nil | 道具图标 DataTable 里的贴图引用，查不到就用声明的 `icon`。 |
+| `:recipeOf()` | table \| nil | 你声明过的配方；没有就是 `nil`。它不读游戏的配方表。 |
+| `:iconOf()` | string \| nil | 从道具图标 DataTable 得到的 `/Game/...` 路径，查不到就用声明的 `icon`。 |
 | `:name()` | string | 声明的名字，没有就用 ID。 |
 | `:description()` | string \| nil | 声明的说明。 |
 | `:category()` | string | 声明的分类，没有就是 `"material"`。 |
@@ -420,10 +471,12 @@ end
 这个布尔值是实测结果，不是“调用成功了没有”。`false` 表示没有观察到东西到位，原因可能有好几个：背包当场拒绝、背包放不下、事后读不出数量。背包自己会给出一个理由，日志会把它带上，所以布尔值分不出来的情况，日志能分出来：
 
 ```text
-[PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
+[PalForge.items][info] give Wood x3: 140 -> 143 [evidence declared]
 [PalForge.items][warn] give Wood x10: AddItem_ServerInternal answered Success but the count did not rise (135 -> 135). Weight is now 300.0 of 300.0
 [PalForge.items][err] give Wood x10 failed: the player's inventory could not be reached
 ```
+
+上面第一行是从真实存档里抄下来的真日志：`give Wood x3: 140 -> 143`，旁边游戏自己的拾取事件也一起触发了。
 
 行尾的 `[evidence ...]` 记的是 PalForge 在发出调用之前，是怎么拿正在运行的游戏核对过的。你不需要为它做什么；它只是让一个出乎意料的 `false` 变得看得懂。
 
@@ -438,7 +491,7 @@ end
 `:take` 是同一套实测，方向相反：前后各读一次数量，`true` 表示看到数量**下降**了。道具是被消耗掉的 —— 不会掉在玩家脚边让人捡回去 —— 所以整合包可以真正收取一份代价。
 
 <Callout type="warn" title="take 需要玩家身上装备着东西">
-这次消耗是通过玩家带着的武器完成的。身上什么都没装备的玩家没有可走的通道，所以 `:take` 返回 `false`，并在日志里把这件事说清楚。这是设计时要绕开的唯一一点：如果你的建筑物要收代价，一个空着手站在那里的玩家是付不了的。
+走的是游戏自己的消耗调用 `APalWeaponBase:RequestConsumeItem`，通过玩家的装备组件找到它 —— 而它是**武器 actor 上的方法**，所以身上什么都没装备的玩家根本没有这条路，`:take` 会返回 `false` 并把这件事说清楚。装备任何一样东西就够了：武器只要被生成出来即可，不必拿在手上；而且它消耗的是交给它的那个 ID，不是它自己的弹药。这是设计时要绕开的唯一一点：如果你的建筑物要收代价，一个空着手站在那里的玩家是付不了的。背包本身完全没有移除手段：它整条类链上没有任何做减法的声明，而“给添加接口传负数”这个设想也已被实测为会被接受但什么都不做。
 </Callout>
 
 ```mermaid
@@ -458,13 +511,15 @@ else
 end
 ```
 
-要的比玩家带着的多，不算错误：请求会被夹到背包实际持有的数量。一个都没有时，这个调用干脆就不发出去。两种情况都会写进日志，所以布尔值分不出来的情况，日志能分出来：
+要的比玩家带着的多，不算错误：请求会被夹到背包实际持有的数量。一个都没有时，这个调用干脆就不发出去，并返回 `false`。两种情况都会写进日志，所以布尔值分不出来的情况，日志能分出来：
 
 ```text
 [PalForge.items][info] take Wood x3: 164 -> 161 [evidence declared]
-[PalForge.items][warn] take Wood x5: the inventory holds only 2, taking that many
-[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is taken
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, removing that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is removed
 ```
+
+第一行同样是真日志，来自证明 `:give` 的那同一次操作。
 
 <Callout type="warn">
 被夹过的移除照样返回 `true` —— 上面第二行要 5 个、只拿走了 2 个，返回的仍是 `true`。`true` 的意思是“看到数量下降了”，不是“正好走了 `count` 个”。数量必须精确时，自己在前后各读一次 `:count()`。
@@ -485,9 +540,9 @@ print(wood:maxStack())    -- 9999 for the curated definition, 1 for a bare handl
 local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 ```
 
-`count` 是背包这边唯一能用的操作。它问游戏本地玩家带着多少个这个 ID，返回一个普通数字。`nil` 表示根本读不出来（世界还没加载、找不到玩家），而不是“一个都没有”，所以比较之前先判断 `nil`。
+`count` 通过游戏自己的 `CountItemNum` 去问本地玩家带着多少个这个 ID，返回一个普通数字 —— 在一个已加载的存档里，它给 Wood 的答案是 135。`nil` 表示根本读不出来（世界还没加载、找不到玩家），而不是“一个都没有”，所以比较之前先判断 `nil`。`:give` 和 `:take` 的判定也建立在这次读取上：把它读两遍而已。
 
-`iconOf` 会去 `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` 里查这个 ID，读出那一行上的贴图，所以原版 ID 拿到的就是游戏本身给这个道具用的美术资源。每一步都是容错的：表、行或列缺了任何一个，返回的就是你声明的 `icon`（没设过就是 `nil`）。你自己带命名空间的 ID 没有对应的行，所以总是走回退。
+`iconOf` 会去 `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` 里查这个 ID，把那一行上的贴图作为 `/Game/...` 路径字符串返回，所以原版 ID 拿到的就是游戏本身给这个道具用的美术资源。这次读取是可用的：在真实存档里，这张表 1207 行中有 1183 行给出了路径，剩下 24 行本来就没有图标。每一步都是容错的，任何一次查不到都会返回你声明的 `icon`（没设过就是 `nil`）。带命名空间的 ID 会先被解析，所以 `Item{ id = "example:Potion" }:iconOf()` 是拿 PalSchema 写入的行名 `example_Potion` 去问的；只要你的内容包建过那一行，它就能读到真正的行。
 
 ### 枚举
 
@@ -656,21 +711,23 @@ Building{
 
 **你没法创建新道具。** Lua 没法往 `DT_ItemDataTable_Common` 里加一行。`Item{ ... }` 是把行为和信息挂到一个 ID 上，创建那一行的是 PalSchema。没人创建过的 ID，游戏就不会显示。
 
-**`onCraft` 和 `onDiscard` 永远不会运行。** 频道和接线都在，但游戏里没有任何地方报告这两件事。
+**`onCraft` 不会带来数量**，而 `onDiscard` 对那种解析不出道具 ID 的丢弃是无声的。两个频道都是活的，也都被看到触发过；这两处缺口是诚实的边界，不是停摆。
 
-**带命名空间的 ID 是靠兜底搜索匹配到的。** 事件带的是游戏的数据行名，所以注册成 `"example:Potion"` 的道具精确查找找不到，是在你注册过的 ID 上做的搜索找到它的。这个搜索读的是一份快照，顺序不定，返回第一个匹配的 ID，所以两个解析后行名相同的内容包 ID 是有歧义的。
+**`recipeOf` 不读游戏的配方表。** 它返回的是你声明过的配方；即使游戏里确实有那一行，原版 ID 得到的也是 `nil`。
 
-**拿走道具需要玩家装备着东西。** 这次消耗是通过玩家带着的武器完成的，所以什么都没拿的玩家没有通道，`:take` 返回 `false`。道具本身是被消耗掉的，不是掉在地上。
+**带命名空间的 ID 是靠解析后 id 的索引匹配到的。** 事件带的是游戏的数据行名，所以注册成 `"example:Potion"` 的道具精确查找找不到，是第二次按解析形式做的查找找到它的。每个解析形式只对应一条注册，所以两个解析到同一行名的内容包 ID 仍然会冲突 —— 但注册第二个时会发出一条指名两者的警告。
+
+**拿走道具需要玩家装备着东西。** 这次消耗调用是玩家所带武器 actor 上的方法，所以什么都没拿的玩家没有通道，`:take` 返回 `false`。道具本身是被消耗掉的，不是掉在地上。
 
 **`onUse` 不会直接告诉你目标是谁。** `ctx.actor` 是本地玩家的 pawn，也就是使用道具的那个。被用上的角色在 `ctx.targetId` 里，是一个原始实例 ID，这里没有东西会把它变成 actor。食物和药水两者相同，喂帕鲁时就不同。
 
-**`category`、`maxStack`、`icon` 和 `recipe` 是 PalForge 自己的记录。** 你通过句柄和自己的代码把它们读回来。没有任何东西会把它们写进游戏的道具表，所以 `maxStack = 9999` 不会改变游戏怎么堆叠这个道具。
+**`category`、`maxStack` 和 `recipe` 是 PalForge 自己的记录。** 你通过句柄和自己的代码把它们读回来。没有任何东西会把它们写进游戏的道具表，所以 `maxStack = 9999` 不会改变游戏怎么堆叠这个道具。`icon` 只在一个方向上是例外：先读真正的表，你声明的路径是它的备用。
 
 **道具保存不了数据。** 存档 `state` 和 `:save()` 是建筑物的东西，所以处理函数数出来的东西只在本次游玩里有效。想要它回来，自己写进文件。
 
 **处理函数的错误只写日志，不抛出。** 失败会通过 `utils.log` 报告，带上频道名和钩子名，例如 `item.use -> onUse handler failed: ...`。你的处理函数还是拦不住事件。
 
-**`give`、`take` 和 `count` 只作用于本地玩家。** 它们找到 `PalPlayerCharacter` 并作用在那个背包上，所以在共享服务器上，它们回答的是第一个被找到的玩家 pawn。`count` 返回 `nil` 表示读取失败，不是背包空了。
+**`give`、`take` 和 `count` 只作用于本地玩家。** 它们找到 `PalPlayerCharacter` 并作用在那个背包上，背后没有复制层，是客户端权威的操作 —— PalForge 面向的是单人 Palworld。`count` 返回 `nil` 表示读取失败，不是背包空了。
 
 **`give` 走的是背包自己的写入。** 它既报告数量的变化，也报告背包本身答了什么，所以 `false` 的原因在日志里看得见。
 
@@ -680,11 +737,11 @@ Building{
 
 ## 小结
 
-- 写 `Item{ ... }` 描述一个道具。只有 `id` 是必须的，而且这个 ID 必须是游戏里已经有的。
+- 写 `Item{ ... }` 描述一个道具。只有 `id` 是必须的，这个 ID 必须是游戏里已经有的，而且解析不出行名的 ID 会当场被拒绝。
 - `Item.get("Wood")` 会给你任意道具的句柄。`:count()` 读出玩家现在带着多少，`:give` 往里加，`:take` 消耗掉 —— 三者返回的都是“实测到了什么”，而不是“试着做了什么”。`:take` 需要玩家身上装备着东西。
-- 把你的代码放进 `events`。`onObtain` 在拾取时运行，`onUse` 在道具被使用时运行。`onCraft` 和 `onDiscard` 还不会运行。
+- 把你的代码放进 `events`，四个处理函数都会运行：`onObtain` 在拾取时，`onUse` 在使用时，`onCraft` 在机器做完时，`onDiscard` 在丢弃或销毁时。
 - 在 `onUse` 里，`ctx.actor` 是使用道具的玩家 —— 食物和药水要作用的正是他。
-- `category`、`maxStack`、`icon` 和 `recipe` 是给你自己代码用的记录。游戏不会读它们。
+- `category`、`maxStack` 和 `recipe` 是给你自己代码用的记录，游戏不会读它们，`recipeOf` 也不读游戏的配方表。`icon` 只是那次真正能读到游戏图标行的查找的备用。
 - 道具保存不了数据。把累计放在 Lua 变量里，或者用 `palforge.utils.file` 自己写出去。
 
 接下来读 [Effect](/docs/api/effect)，做一个用掉之后还会持续起作用的道具 —— 或者读 [Lifecycle](/docs/concepts/lifecycle) 了解完整的事件流程，以及 [Pal](/docs/api/pal) 和 [Building](/docs/api/building) 了解上面用到的两个领域。

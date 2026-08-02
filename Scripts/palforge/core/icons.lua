@@ -1,7 +1,9 @@
 -- PalForge core.icons: runtime icon resolution from Palworld's icon DataTables. Every
 -- domain's iconOf() (item / pal / skill / building) comes through here: given an icon-table
 -- descriptor and a content id, find the live UDataTable, read the row keyed by that id, and
--- hand back the texture ref that row carries. Only palforge.utils.log is required.
+-- hand back the texture ref that row carries. Besides palforge.utils.log it requires only the
+-- two shared string/identity modules — core.assetpath for the `<package>.<object>` rule and
+-- core.uobject for liveness — neither of which touches the engine on its own.
 --
 -- WHAT IS PROVEN HERE AND WHAT IS NOT — read this before trusting a return value:
 --   * The TABLE NAMES are real. Every one below, `_Common` siblings included, exists in the
@@ -19,16 +21,22 @@
 --   * The /Game PACKAGE PATHS are now PROVEN. dumps/reflection/01_datatables.txt printed
 --     GetFullName() for all 391 loaded DataTables in a real session, and every one of the
 --     seven names below appeared under the directory PACKAGE_DIRS already guessed. They stay
---     a last-resort fallback (discovery is cheaper), written in the "Package.Object" form
---     LoadAsset wants — the convention that works in core/sound/native.lua.
+--     a last-resort fallback (discovery is cheaper), written in the "<package>.<object>" form
+--     LoadAsset wants — completed by core.assetpath.normalize, the one implementation of that
+--     rule that the mesh and sound loaders now share.
 --   * The ICON COLUMN of each table is now MEASURED, not inferred — see ICON_COLUMNS_BY_TABLE.
 --   * READING THE VALUE reads the whole COLUMN as strings and zips it against the row names,
 --     rather than reading a row and indexing it. The row route works — UE4SS binds FindRow onto
 --     UDataTable itself and it returns the row with the measured column on it — but the value
 --     in that column is a TSoftObjectPtr userdata that answers none of the nineteen member
 --     names a soft pointer could plausibly expose, so it cannot be unwrapped from Lua at all.
---     The reasoning, and the list, is above iconMap. NOT observed answering yet: a nil still
---     means "the read did not fire", never "there is no such row".
+--     The reasoning, and the list, is above iconMap.
+--   * READING IS OBSERVED WORKING, 2026-07-26, on every icon table at once in a live save:
+--     674/674 pal, 1183/1207 item, 567/571 building, 311/311 partner skill (the item table's
+--     24 blanks are rows that genuinely carry no icon). This sentence used to say "NOT observed
+--     answering yet"; that is what the run above overturned. A nil can still mean either "the
+--     read did not fire" or "there is no such row", so the log line iconMap writes — N of M rows
+--     carry an icon — is the one that tells them apart.
 --
 -- Strictly fail-soft. Every engine call is inside a pcall, any miss at any step returns nil,
 -- and each domain's iconOf() then falls back to the declared `icon`. Nothing throws when the
@@ -37,10 +45,24 @@
 --   local icons = require("palforge.core.icons")
 --   local tex = icons.resolve(icons.TABLES.item, "Wood")   -- texture ref | nil
 --
--- Row keys are the vanilla ids spelled EXACTLY as the table spells them ("Sheepball",
--- "Workbench") and matching is case-sensitive; carrying the DataTable spelling alongside the
--- blueprint one is the native catalogs' job, not this module's.
-local log = require("palforge.utils.log").scope("icons")
+-- CASE SENSITIVITY IS DECIDED BY WHAT AN ID NAMES, NOT BY WHICH LAYER YOU ARE IN. The audit
+-- found the rule to be consistent and nowhere written down, so it is written down here, at the
+-- layer where it bites hardest:
+--
+--   * An id that names an ENGINE ENUM is case-INSENSITIVE. core/status.lua:101-110 and
+--     core/character.lua:381-391 both build lowered maps of the enum's own names, so
+--     `Effect{ nativeStatus = "poison" }` and `Skill.get("fireblast"):teach(pal)` both work.
+--   * An id that names a DATATABLE ROW or a REGISTRY KEY is case-SENSITIVE. The row map below
+--     is indexed by the exact string the table carries, and om.get is a raw table index. So
+--     "Sheepball" hits and "SheepBall" does not — and both spellings are real, because the
+--     BLUEPRINT id and the DATATABLE row id of one creature genuinely differ
+--     (native/pals.lua:238 carries both, native/buildings.lua:165 has the same
+--     WorkBench/Workbench split). Carrying the DataTable spelling alongside the blueprint one
+--     is the native catalogs' job, not this module's; this module will not guess between them,
+--     because a guess that hits the wrong row hands back a confidently wrong icon.
+local log       = require("palforge.utils.log").scope("icons")
+local assetpath = require("palforge.core.assetpath")
+local uo        = require("palforge.core.uobject")
 
 local M = {}
 
@@ -146,15 +168,20 @@ local function now()
     return (ok and type(t) == "number") and t or 0
 end
 
--- IsValid when the object exposes it; an object that does not is assumed usable.
-local function isValid(o)
-    if o == nil then return false end
-    local ok, v = pcall(function()
-        if o.IsValid then return o:IsValid() end
-        return true
-    end)
-    return ok and v ~= false
-end
+-- LIVENESS IS core.uobject's NOW (uo.live), and the private isValid this module used to carry
+-- is gone. It was one of three near-identical copies (core/mesh/assets.lua, core/sound/native.lua
+-- and this one), and keeping them apart is how the sound loader ended up without the class check
+-- the mesh loader has.
+--
+-- One behaviour did change and it is the right direction: the old copy answered TRUE for an
+-- object that does not expose IsValid at all ("assumed usable"), where uo.live answers false
+-- unless IsValid is there and says true. Every object this module asks about is a UDataTable or
+-- a /Script CDO handed over by FindObject / FindAllOf / LoadAsset / StaticFindObject, and all of
+-- those answer IsValid — so nothing real changes, while a plain Lua table can no longer pass
+-- itself off as a live table. `UObject:IsValid()` on this UE4SS is a genuine liveness check
+-- (is_object_in_global_unreal_object_map && !IsUnreachable), which is what makes the cached
+-- table survive world.ready -> quit-to-title -> load-another-save; the residual risk is ABA, not
+-- plain staleness.
 
 -- Object name. GetFName():ToString() is reliably bound; GetName() is not (calling an unbound
 -- GetName() throws and silently killed the old dump), so it is tried second. Same shape as
@@ -190,7 +217,7 @@ end
 local function findObjectByName(name)
     if type(FindObject) ~= "function" then return nil end
     local ok, o = pcall(FindObject, "DataTable", name)
-    if ok and isValid(o) then return o end
+    if ok and uo.live(o) then return o end
     return nil
 end
 
@@ -224,7 +251,7 @@ local function sweep(target)
     if not ok or type(all) ~= "table" then return end
     local want = wantedNames(target)
     for _, dt in ipairs(all) do
-        if isValid(dt) then
+        if uo.live(dt) then
             local name = objName(dt)
             if name and want[name] and tableCache[name] == nil then
                 noteTable(name, dt, "sweep")
@@ -234,20 +261,26 @@ local function sweep(target)
 end
 
 -- Last resort: ask the loader for the asset by path, LoadAsset first and StaticFindObject
--- second — the sequence proven for /Game assets in core/sound/native.lua:29-38, in the
--- "Package.Object" form it needs. The DIRECTORY is still a guess (see PACKAGE_DIRS), so a nil
--- here says nothing about whether the table exists.
+-- second — the sequence every /Game resolve in this tree uses (core/mesh/assets.load,
+-- core/sound/native.loadAsset), in the "<package>.<object>" form LoadAsset needs. The DIRECTORY
+-- is still a guess (see PACKAGE_DIRS), so a nil here says nothing about whether the table exists.
+--
+-- The tail comes from core.assetpath.normalize now, not from `dir .. name .. "." .. name` spelled
+-- out here. It is the same string for these seven names — every icon table's package and object
+-- halves match — but the rule had been written three times in this tree (mesh assets, here, and
+-- MISSING from the sound loader, where its absence made the documented soundPath example
+-- unplayable), and one implementation is what makes that impossible to repeat.
 local function loadTable(name)
     local dir = PACKAGE_DIRS[name]
     if not dir then return nil end
-    local path = dir .. name .. "." .. name
+    local path = assetpath.normalize(dir .. name)
     local a
     pcall(function() if type(LoadAsset) == "function" then a = LoadAsset(path) end end)
-    if not isValid(a) then
+    if not uo.live(a) then
         a = nil
         pcall(function() if type(StaticFindObject) == "function" then a = StaticFindObject(path) end end)
     end
-    if isValid(a) then return a end
+    if uo.live(a) then return a end
     return nil
 end
 
@@ -258,7 +291,7 @@ local function findTable(name)
     if type(name) ~= "string" or #name == 0 then return nil end
     local cached = tableCache[name]
     if cached ~= nil then
-        if isValid(cached) then return cached end
+        if uo.live(cached) then return cached end
         tableCache[name] = nil
     end
     local t = now()
@@ -309,6 +342,13 @@ end
 -- "also try FName" is exactly what this route does not want: FindRow is a UE4SS binding taking
 -- a Lua string, and a marshalled Palworld UFunction taking an FName is a different thing that
 -- lives elsewhere. Do not merge them.
+--
+-- It has NO CALLER at the moment, and that is a consequence of the column-zip route below
+-- replacing the row route rather than a sign the rule stopped mattering: M.resolve indexes the
+-- built map with the id directly. It stays as the written-down form of the rule, so the next
+-- person to reach for FindRow reads it before adding an FName fallback that would silently
+-- change which row is found (and see the case-sensitivity note in the header: a row id is
+-- matched exactly, in both routes).
 local function rowKey(id)
     return (type(id) == "string" and #id > 0) and id or nil
 end
@@ -341,15 +381,48 @@ end
 -- from the table itself now.
 local signature = require("palforge.core.signature")
 
--- The DataTableFunctionLibrary CDO, resolved once. false records a failed resolve so the lookup
--- is not repeated for every icon.
-local dtLib = nil
+-- The DataTableFunctionLibrary CDO. POSITIVES ONLY, RATE-LIMITED RETRY — the same discipline
+-- tableCache above uses, and it used to be the exception.
+--
+-- What it did before: a failed resolve stored `false` and was never attempted again for the rest
+-- of the session, which made one early miss permanent for every icon in every table. That is a
+-- real window rather than a theoretical one — this module is reachable from a domain's iconOf()
+-- at any time, including before the engine is up, and the audit named it as one of two caches in
+-- the asset layer that latch a failure (the other is renderer.lua's kismetRendering). A /Script
+-- CDO is very likely to be there, which is exactly why the cost of getting it wrong was invisible.
+--
+-- What it does now: a live CDO is kept for the session (it is a CDO — it does not move), a miss
+-- is retried no more often than RETRY_COOLDOWN, and the failure is said ONCE so a log reader can
+-- tell "the column read never ran" from "the column read ran and found nothing". With no os.time
+-- now() is 0 forever and this degrades to a single attempt, which is the documented degradation
+-- for every other retry in the file: it never spins.
+local dtLib     = nil   -- the live CDO, once seen
+local dtLibTry  = nil   -- when the last resolve was attempted
+local dtLibSaid = false -- has the failure been reported this session
 local function library()
-    if dtLib == nil then
-        local ok, lib = pcall(StaticFindObject, "/Script/Engine.Default__DataTableFunctionLibrary")
-        dtLib = (ok and lib) or false
+    if uo.live(dtLib) then return dtLib end
+    dtLib = nil
+
+    local t = now()
+    if dtLibTry and (t - dtLibTry) < RETRY_COOLDOWN then return nil end
+    dtLibTry = t
+
+    local lib
+    pcall(function()
+        if type(StaticFindObject) == "function" then
+            lib = StaticFindObject("/Script/Engine.Default__DataTableFunctionLibrary")
+        end
+    end)
+    if uo.live(lib) then
+        dtLib = lib
+        return dtLib
     end
-    return dtLib or nil
+    if not dtLibSaid then
+        dtLibSaid = true
+        log.warn("icons: /Script/Engine.Default__DataTableFunctionLibrary did not resolve, so the "
+            .. "column read cannot run yet - it is retried, not given up on (said once)")
+    end
+    return nil
 end
 
 -- Flatten a UE4SS TArray (or a plain Lua array) into a list of strings. UE4SS hands arrays back
@@ -410,7 +483,17 @@ end
 -- tables are fixed assets once loaded (PalSchema injects its rows before play), so a successful
 -- build is reusable. A FAILED build is not cached, so a call made before the table finished
 -- loading is simply retried on the next one.
-local iconMaps = setmetatable({}, { __mode = "k" })
+--
+-- KEYED ON core.uobject.key (the table's GetFullName) WITH THE TABLE HANDLE IN THE RECORD —
+-- contract C1, not on the handle. This one was not a silent wrong answer the way the mesh and
+-- effect tables were: findTable caches the UDataTable under its NAME, so within one session
+-- the same wrapper came back every call and the map cache hit. What the handle key bought was
+-- invalidation — a new wrapper after a world teardown meant a rebuilt map — and that is what
+-- the stored handle now buys instead, explicitly: a record whose table is no longer live is
+-- dropped and the map is rebuilt from the reloaded table. `__mode = "k"` went with the handle
+-- key; a string key is not collectable, so weak keys would only have made the table immortal,
+-- and there are at most seven of these records (one per icon table) for the session.
+local iconMaps = {}
 local sampled  = {}   -- one raw-shape sample per table, so a busy log stays readable
 
 -- OBSERVED WORKING, 2026-07-26, on a live save — every icon table at once:
@@ -428,8 +511,16 @@ local sampled  = {}   -- one raw-shape sample per table, so a busy log stays rea
 -- string column that replaces it delivers its elements wrapped in RemoteUnrealParam, which is
 -- what made the array read the right LENGTH with nothing in it.
 local function iconMap(tbl, tableName)
-    local cached = iconMaps[tbl]
-    if cached then return cached end
+    -- The record is re-validated against the handle it was built from, so a map built before a
+    -- world teardown is rebuilt from the reloaded table rather than handed back. A table that
+    -- will not answer its own name gets no cache entry at all — the map is still built and
+    -- returned, only not kept, which is the same shape every other C1 store takes.
+    local mapKey = uo.key(tbl)
+    local rec = mapKey and iconMaps[mapKey]
+    if rec then
+        if uo.live(rec.tbl) then return rec.map end
+        iconMaps[mapKey] = nil
+    end
 
     local names = rowNames(tbl)
     if #names == 0 then
@@ -437,10 +528,18 @@ local function iconMap(tbl, tableName)
         return nil
     end
 
+    -- Resolve the function library ONCE per attempt, and stop here when it is not there. Calling
+    -- signature.call with a nil owner would log "refused GetDataTableColumnAsString: it is not
+    -- declared on this build" once per candidate column per table — a sentence that blames the
+    -- live build for a CDO we simply have not found yet. library() already says the true thing,
+    -- once. Nothing is cached on this path, so the next call retries.
+    local lib = library()
+    if not lib then return nil end
+
     for _, col in ipairs(columnsFor(tableName)) do
         local key; pcall(function() key = FName(col) end)
         if key then
-            local ok, values, level = signature.call(library(), "GetDataTableColumnAsString",
+            local ok, values, level = signature.call(lib, "GetDataTableColumnAsString",
                 { "ObjectProperty", "NameProperty" }, tbl, key)
             if ok then
                 -- SAMPLE THE RAW ARRAY, once per table. The first run of this route answered
@@ -487,7 +586,7 @@ local function iconMap(tbl, tableName)
                     end
                     log.info(string.format("icons: %s column %s read — %d of %d rows carry an icon [%s]",
                         tableName, col, carried, #names, tostring(level)))
-                    iconMaps[tbl] = map
+                    if mapKey then iconMaps[mapKey] = { tbl = tbl, map = map } end
                     return map
                 end
                 log.warn(string.format("icons: %s column %s returned %d values for %d rows — not "

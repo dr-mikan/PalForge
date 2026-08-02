@@ -4,20 +4,33 @@
 -- that may or may not exist in the shipping build, a UFunction's real parameter list, a row
 -- struct's real column names. One press answers all of them at once.
 --
--- ONE OF THEM IS THE WHOLE POINT OF THE NEXT RUN, because a public capability is dead until it
--- is answered and nothing else in the tree can answer it:
---   item-additem-signature      -- :give and :take, and every recipe and cost that needs them
--- It is one printed parameter list away, and its block calls nothing. It had a companion until
--- 2026-07-26 — pal-spawnmonster-signature, ":spawn; nothing has ever spawned through this tree"
--- — and that one is CLOSED: a live run spawned two pals and placed both on their exact
--- coordinate, so the capability was never dead, only mis-measured (core/spawn.lua's header has
--- the log). Its block was retargeted at what the close left open, pal-spawn-at-location.
+-- MOST OF WHAT THIS FILE PRINTS IS NOW EVIDENCE FOR A SETTLED ANSWER, not a question, and that
+-- is worth knowing before reading 27 blocks looking for the live one. Only FOUR of its blocks
+-- carry an id that is still OPEN in plan/TODO.md:
+--
+--   audio-custom-file-loader   -- Audio{ soundFile = ... }: is there any loader route at all
+--   item-datatable-row-read    -- :recipeOf; the :iconOf half closed with icons-row-read
+--   pal-skills-equip           -- :teach / :forget / :teachAll, the ACTIVE-move half
+--   ui-update-event            -- UI.Handle:autoRefresh; polling is the only driver today
+--
+-- Every other block names a CLOSED item and is a REGRESSION read: it re-asks the live build the
+-- question the close was measured on, so a game patch that moves the answer shows up as a
+-- contradiction rather than as a capability quietly going dead. Two of them are worth naming
+-- because the history is misleading. item-additem-signature was the reason to press this key at
+-- all — ":give and :take, and every recipe and cost that needs them" — and it CLOSED on
+-- 2026-07-26 with `give Wood x3: 140 -> 143` in a real save; its five-argument declaration is
+-- printed here so a patch that changes it is caught. pal-spawnmonster-signature closed the same
+-- day (a live run spawned two pals and placed both on their exact coordinate; the capability was
+-- never dead, only mis-measured — core/spawn.lua's header has the log), and its block was
+-- retargeted at a question neither close answered, under the PROPOSED id pal-spawn-at-location:
+-- is there a spawn declaration that takes a LOCATION. That id has never been filed, the block
+-- says so in its own first line, and see the long note above it.
 --
 -- The ids this covers, in the order they are printed: audio-akevent-play-signature,
 -- audio-bus-volume, audio-custom-file-loader, item-remove-call, item-additem-signature,
 -- item-inventory-count-readback, item-datatable-row-read, icons-row-read, icons-row-column,
--- pal-icon-row, skill-icon-key, pal-spawn-at-location, spawn-actor-conventions,
--- spatial-saveid, mesh-static-setstaticmesh, mesh-texture-import,
+-- pal-icon-row, skill-icon-key, pal-spawn-at-location (PROPOSED, unfiled),
+-- spawn-actor-conventions, spatial-saveid, mesh-static-setstaticmesh, mesh-texture-import,
 -- mesh-detach-destroycomponent, mesh-base-material, building-leftclick, building-break,
 -- building-break-source, skill-activate-source, skill-passive-source, effect-native-status,
 -- pal-skills-equip, ui-host-paths, ui-update-event. WHAT YOU NEED ON SCREEN: a loaded save
@@ -37,6 +50,15 @@
 -- PalSoundUtility, GameplayStatics, PalPlayerInventoryData, UDataTable, ...). Everything else
 -- is greped against a needle list — and a grep ALWAYS prints the total alongside the match
 -- count, so "182 total, 0 matching {destroy dismantl ...}" is a finding, not a gap.
+--
+-- STILL A PROBE, NOT A TEST — it prints what the build IS and stops, asserting nothing and
+-- reporting no pass or fail. The game-required MEASUREMENTS for the four open ids above are
+-- moving to declared hooks under Scripts/palforge/test/hooks/, one per plan/TODO.md item id and
+-- run by name: `pf_hook audio-custom-file-loader`, `pf_hook item-datatable-row-read`,
+-- `pf_hook pal-skills-equip`, `pf_hook ui-update-event` (`pf_hooks` lists what is declared and
+-- why each would skip). A hook asserts and answers; this file is where you look when a hook says
+-- something unexpected and you need the raw declaration it was reading. They are deliberately
+-- kept apart and neither replaces the other.
 local probe   = require("palforge.test.probe")
 local support = require("palforge.test.support")
 
@@ -908,15 +930,30 @@ end
 -- covers 21 /Script/Pal.* classes and this is not one of them), so a spawn name nobody has tried
 -- may be sitting in it — and UPalCharacterManager::SpawnNewCharacter, the C++ bridge call that
 -- took a SpawnParameter struct, is the shape to look for.
--- ⚠️ THE ID BELOW IS A PROPOSAL, not a filed one: plan/TODO.md knows pal-spawnmonster-signature,
--- which is closed. Whoever files it owns the name.
+-- ⚠️ THE ID BELOW IS A PROPOSAL, NOT A FILED ITEM, and it is KEPT rather than renamed. The two
+-- candidate names that already exist are both CLOSED and neither asks this question:
+-- pal-spawnmonster-signature is "does the call work" (yes, observed, 2026-07-26) and
+-- pal-spawn-placement is "does the spawn-then-teleport chase land on the coordinate" (yes,
+-- observed end to end twice in one press, off by 0 cm). This block asks the thing those two
+-- closes LEFT: is there a declaration that takes a place, so the chase could be dropped
+-- altogether. Renaming it onto either closed id would make the probe emit a block for a settled
+-- item — noise that costs a reader a lookup and invites the close to be reopened by accident —
+-- so the id stays and its PROPOSAL status is now printed INSIDE the block, where a reader
+-- pasting a log into plan/TODO.md will see it. Whoever files it owns the name.
 --
 -- It calls NOTHING, and that has not changed. Every line below finds an object, lists names, or
 -- reads a declaration. Calling a UFunction with a guessed argument list is what closed the game
 -- on the first run, and the one call named in the closing notes is for a human in a throwaway
 -- world, not for this file.
 local function pal_spawn_at_location()
-    probe.begin("pal-spawn-at-location")
+    probe.begin("pal-spawn-at-location",
+        "⚠️ PROPOSAL — plan/TODO.md has NEVER carried this id. It is not an Open item and pasting "
+        .. "this block does not close one. The two spawn ids that DO exist are both Closed and "
+        .. "ask different questions (pal-spawnmonster-signature: does the call work — yes, "
+        .. "observed 2026-07-26; pal-spawn-placement: does the chase land on the coordinate — yes, "
+        .. "off by 0 cm, twice). What follows is the question they left: is there a declaration "
+        .. "that takes a LOCATION. File it under a name of your choosing before treating anything "
+        .. "below as an answer to something.")
 
     -- Three ways to the object, in the order core/spawn.cheatManager itself tries them. Any one
     -- that answers is enough; all three are printed so a failure names which link broke.
@@ -1546,46 +1583,56 @@ end
 -- run
 --=============================================================================
 
--- Every section, in plan/TODO.md order EXCEPT the first, which is the reason to press the key
--- at all: item-additem-signature is now the ONLY unknown here with a dead public capability
--- behind it (:give / :take), and a run that ends early for any reason must not be the run that
--- loses it. It goes first. It used to be one of two — pal-spawnmonster-signature sat beside it
--- because :spawn was believed dead — and that item is closed: the spawn works and always did
--- (core/spawn.lua's header carries the log). Its block lives on, retargeted, as
--- pal-spawn-at-location, and it has no dead capability behind it, so it takes its turn.
+-- Every section, in plan/TODO.md order EXCEPT the first, which is here for history: the run
+-- used to lead with the two blocks that had a dead public capability behind them, so a run that
+-- ended early for any reason would not be the run that lost them. Both have since CLOSED —
+-- item-additem-signature on 2026-07-26 with `give Wood x3: 140 -> 143` in a real save, and
+-- pal-spawnmonster-signature the same day (the spawn works and always did; core/spawn.lua's
+-- header carries the log). The order is left as it was rather than reshuffled: nothing depends
+-- on it, and the two leading blocks are still the ones whose declarations a patch would break
+-- most expensively. The second one lives on retargeted, under the PROPOSED and never-filed id
+-- pal-spawn-at-location.
+--
+-- THE THIRD COLUMN IS THE ITEM'S STATE in plan/TODO.md, checked on 2026-08-02, and it is not
+-- decoration. It is printed as an index before the run, so a reader working through UE4SS.log
+-- knows without a lookup whether the block in front of them is an open question (four of them),
+-- a REGRESSION read that re-asks the live build what a close was measured on (twenty-two), or a
+-- proposal that has never been filed at all (one). A block for a closed item is not noise as
+-- long as it says which it is — it is how a game patch that moves a settled answer gets noticed
+-- instead of silently killing a capability.
 --
 -- Each one is pcall-guarded in M.run so a section that raises (a stale pointer, a class that
 -- answers strangely) cannot cost the other twenty-six their block. A pcall cannot save a run
 -- from a native marshalling fault, which is why no section here calls a UFunction whose
 -- parameter types it has not printed first.
 local SECTIONS = {
-    { "item-additem-signature",         item_additem_signature },
-    { "pal-spawn-at-location",          pal_spawn_at_location },
-    { "audio-akevent-play-signature",   audio_akevent_play_signature },
-    { "audio-bus-volume",               audio_bus_volume },
-    { "audio-custom-file-loader",       audio_custom_file_loader },
-    { "item-remove-call",               item_remove_call },
-    { "item-inventory-count-readback",  item_inventory_count_readback },
-    { "item-datatable-row-read",        item_datatable_row_read },
-    { "icons-row-read",                 icons_row_read },
-    { "icons-row-column",               icons_row_column },
-    { "pal-icon-row",                   pal_icon_row },
-    { "skill-icon-key",                 skill_icon_key },
-    { "spawn-actor-conventions",        spawn_actor_conventions },
-    { "spatial-saveid",                 spatial_saveid },
-    { "mesh-static-setstaticmesh",      mesh_static_setstaticmesh },
-    { "mesh-texture-import",            mesh_texture_import },
-    { "mesh-detach-destroycomponent",   mesh_detach_destroycomponent },
-    { "mesh-base-material",             mesh_base_material },
-    { "building-leftclick",             building_leftclick },
-    { "building-break",                 building_break },
-    { "building-break-source",          building_break_source },
-    { "skill-activate-source",          skill_activate_source },
-    { "skill-passive-source",           skill_passive_source },
-    { "effect-native-status",           effect_native_status },
-    { "pal-skills-equip",               pal_skills_equip },
-    { "ui-host-paths",                  ui_host_paths },
-    { "ui-update-event",                ui_update_event },
+    { "item-additem-signature",         item_additem_signature,         "CLOSED" },
+    { "pal-spawn-at-location",          pal_spawn_at_location,          "PROPOSED" },
+    { "audio-akevent-play-signature",   audio_akevent_play_signature,   "CLOSED" },
+    { "audio-bus-volume",               audio_bus_volume,               "CLOSED" },
+    { "audio-custom-file-loader",       audio_custom_file_loader,       "OPEN" },
+    { "item-remove-call",               item_remove_call,               "CLOSED" },
+    { "item-inventory-count-readback",  item_inventory_count_readback,  "CLOSED" },
+    { "item-datatable-row-read",        item_datatable_row_read,        "OPEN" },
+    { "icons-row-read",                 icons_row_read,                 "CLOSED" },
+    { "icons-row-column",               icons_row_column,               "CLOSED" },
+    { "pal-icon-row",                   pal_icon_row,                   "CLOSED" },
+    { "skill-icon-key",                 skill_icon_key,                 "CLOSED" },
+    { "spawn-actor-conventions",        spawn_actor_conventions,        "CLOSED" },
+    { "spatial-saveid",                 spatial_saveid,                 "CLOSED" },
+    { "mesh-static-setstaticmesh",      mesh_static_setstaticmesh,      "CLOSED" },
+    { "mesh-texture-import",            mesh_texture_import,            "CLOSED" },
+    { "mesh-detach-destroycomponent",   mesh_detach_destroycomponent,   "CLOSED" },
+    { "mesh-base-material",             mesh_base_material,             "CLOSED" },
+    { "building-leftclick",             building_leftclick,             "CLOSED" },
+    { "building-break",                 building_break,                 "CLOSED" },
+    { "building-break-source",          building_break_source,          "CLOSED" },
+    { "skill-activate-source",          skill_activate_source,          "CLOSED" },
+    { "skill-passive-source",           skill_passive_source,           "CLOSED" },
+    { "effect-native-status",           effect_native_status,           "CLOSED" },
+    { "pal-skills-equip",               pal_skills_equip,               "OPEN" },
+    { "ui-host-paths",                  ui_host_paths,                  "CLOSED" },
+    { "ui-update-event",                ui_update_event,                "OPEN" },
 }
 
 ---Run every section. Returns the number that ran.
@@ -1605,8 +1652,25 @@ function M.run()
     probe.line("#### reflect.lua — %d section(s), read-only (nothing below writes, spawns, plays or hooks)", #SECTIONS)
     support.announce("probe: reflect (" .. #SECTIONS .. " sections) -> UE4SS.log")
 
+    -- The summary of what the run is about to print. Twenty-two of these twenty-seven blocks
+    -- carry the id of a CLOSED item, and a reader who does not know that pays a plan/TODO.md
+    -- lookup per block to find out that the answer was already written down.
+    local counts = { OPEN = 0, CLOSED = 0, PROPOSED = 0 }
+    for _, s in ipairs(SECTIONS) do
+        counts[s[3]] = (counts[s[3]] or 0) + 1
+    end
+    probe.line("#### INDEX %d block(s) for OPEN plan/TODO.md items, %d REGRESSION read(s) for "
+        .. "CLOSED ones, %d PROPOSED and unfiled. Paste an OPEN block into its item; paste a "
+        .. "CLOSED one back only if it CONTRADICTS what closed it.",
+        counts.OPEN, counts.CLOSED, counts.PROPOSED)
+
     local ran = 0
     for _, s in ipairs(SECTIONS) do
+        -- One state line IMMEDIATELY above each "#### BEGIN <id>", rather than one index table
+        -- at the top of the run. Blocks get copied out of UE4SS.log one at a time, and an index
+        -- forty lines further up does not travel with the block that was copied; this line does.
+        -- Prefixed INDEX and not BEGIN, so `grep '#### BEGIN'` still lifts out only the blocks.
+        probe.line("#### INDEX %-9s %s", s[3], s[1])
         local ok, err = pcall(s[2])
         if ok then
             ran = ran + 1

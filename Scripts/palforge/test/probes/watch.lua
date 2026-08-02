@@ -1,17 +1,37 @@
 -- palforge/test/probes/watch.lua — arms the live hooks and watches while YOU play (the F8 probe).
 --
--- Closes seven plan/TODO.md items that no amount of reflection can settle, because each one asks
--- "does the game CALL this when a human does that": item-craft-source, item-discard-source,
--- pal-spawned-hook, pal-spawned-fresh, skill-activate-source, skill-hit-source and
--- skill-passive-source. The eighth section, pal-spawn-placement, now runs as a REGRESSION check:
--- that item closed on 2026-07-26 when the spawn was observed placing a pal on its exact
--- coordinate, and this is where a build that breaks it, or a machine slower than the one it was
--- measured on, would show up. It needs a LOADED SAVE with a workbench, a stack of Wood, a
--- Berries and a pal in the box within reach: the probe arms hooks, prints a numbered list of
--- actions, and then only YOU can make the game fire them. Budget about 60 s of play.
+-- Eight sections, each one asking the question no amount of reflection can settle: "does the game
+-- CALL this when a human does that". SIX OF THE EIGHT HAVE ANSWERED and are now REGRESSION
+-- checks; TWO are still open. Checked against plan/TODO.md on 2026-08-02:
 --
--- WHAT CHANGED ON 2026-07-26, and it changes what this file is for. Every one of those seven
--- questions used to be "which function, if any" — so the sections REFLECTED first and armed
+--   OPEN    pal-spawned-fresh     -- does a spawn source fire for a genuinely NEW pal
+--   OPEN    skill-hit-source      -- nothing has ever carried a skill.hit event
+--   CLOSED  item-craft-source     -- observed live 2026-07-26, crafting at a real machine
+--   CLOSED  item-discard-source   -- observed live 2026-07-26, slot resolved to a real item id
+--   CLOSED  pal-spawned-hook      -- observed live 2026-07-26, from BOTH new sources
+--   CLOSED  skill-activate-source -- observed live 2026-07-26, in real combat
+--   CLOSED  skill-passive-source  -- observed live 2026-07-26, skill.equip carried its first event
+--   CLOSED  pal-spawn-placement   -- observed end to end 2026-07-26, off by 0 cm, twice
+--
+-- A closed section still runs because it arms the EXACT path core/event dispatches that channel
+-- from: a run where one of those six prints no HOOK line while you did the action beside it is a
+-- capability that has gone dead on this build, and it is the only warning anyone would get. The
+-- same is true of a machine slower than the one pal-spawn-placement was measured on. The run
+-- prints an INDEX of which is which, so nothing here costs a plan/TODO.md lookup.
+--
+-- It needs a LOADED SAVE with a workbench, a stack of Wood, a Berries and a pal in the box within
+-- reach: the probe arms hooks, prints a numbered list of actions, and then only YOU can make the
+-- game fire them. Budget about 60 s of play.
+--
+-- STILL A PROBE, NOT A TEST — it arms, prints and stops, asserting nothing. The game-required
+-- MEASUREMENTS for the two open ids are moving to declared hooks under
+-- Scripts/palforge/test/hooks/, one per plan/TODO.md item id, run by name:
+-- `pf_hook pal-spawned-fresh`, `pf_hook skill-hit-source` (`pf_hooks` lists what is declared and
+-- why each would skip). A hook asserts and answers; this file is where you look when a hook says
+-- something unexpected and you need to watch the raw firings while you play.
+--
+-- WHAT CHANGED ON 2026-07-26, and it changes what this file is for. Every one of those questions
+-- used to be "which function, if any" — so the sections REFLECTED first and armed
 -- whatever a name-match turned up. dumps/cxx/Pal.hpp answered the "which function" half for all
 -- of them, and core/event.lua now emits every channel from a named, declared native call. So
 -- these sections arm THOSE EXACT PATHS and ask the one remaining question: does it fire. A
@@ -32,6 +52,21 @@
 -- no way to unregister one — everything it arms stays armed until you quit the game. It also
 -- spawns ONE ChickenPal in front of you, because pal-spawn-placement is about OUR spawn path
 -- rather than a game hook. Nothing is written to the save.
+--
+-- AND F9 IS REFUSED FOR ~60 s AFTER THE PRESS, deliberately. This file arms the two longest-lived
+-- raw LoopAsync chains in the tree — a 12 s placement readback and the WINDOW_SEC window summary
+-- — and UE4SS holds a Lua registry reference to each of them, run from the engine-tick hook. An
+-- F9 landing inside that window clears package.loaded out from under those references, and UE4SS
+-- answers by REMOVING THE TICK HOOK: every keybind in this mod runs its body inside
+-- ExecuteInGameThread, the tick drains that queue, so all nine keys stop arriving while the game
+-- carries on normally, and only a restart brings them back. That has already happened once, from
+-- an F9 pressed a few seconds after an F1 that had left three spawn watches running. Both chains
+-- now register with core/reload's asyncBegin/asyncDone (see asyncGuard below), which is what
+-- makes the reload refuse with a named reason instead — it prints the chain's name and how long
+-- it has been outstanding, so "wait 12 s" and "wait 60 s" are told apart. The guard was written
+-- for exactly this failure and documented as the reason F9 refuses; it had NO caller anywhere in
+-- the tree until these two, so asyncPending() always answered 0 and the refusal branch was
+-- unreachable while the hazard was live.
 --
 -- Reading the result: every line is inside `#### BEGIN <id>` / `#### END <id>`, every hook line
 -- starts `HOOK <label>` and carries `t=+Ns` since arming, so the actions can be told apart by
@@ -145,6 +180,68 @@ local function grepFns(path, words, label)
     end
     if #names == 0 then probe.line("FN   <ForEachFunction returned nothing on this class>") end
     return cls, hits
+end
+
+---Register a raw LoopAsync chain with core/reload's async guard, and hand back the release.
+---
+---WHY THIS EXISTS, and it is the only reason: UE4SS holds a Lua registry reference to every
+---LoopAsync callback and runs it from the engine-tick hook. Pressing F9 while one is still
+---scheduled clears package.loaded out from under that reference, and UE4SS's answer is not to
+---skip the callback — it prints "[Lua::Registry::get_function_ref] Ref was not function,
+---removing hook!" and REMOVES THE TICK HOOK. Every keybind in this tree runs its body inside
+---ExecuteInGameThread, which the tick drains, so the whole mod's input dies while the game
+---carries on, and only a restart brings it back. That has happened once already, from an F9
+---pressed a few seconds after an F1 that had left three spawn watches running — the whole story
+---is in core/reload.lua's "WHY RELOADING MID-FLIGHT IS NOT SAFE" block, above asyncBegin.
+---
+---This file arms the two longest-lived raw chains in the tree — the 12 s placement readback and
+---the 60 s window summary — so between the F8 press and about a minute later, an F9 is exactly
+---the hazard the guard was written for. These two pairs are the guard's FIRST callers: it was
+---written with the failure documented and had none anywhere in the tree until 2026-08-02, so
+---asyncPending() always answered 0 and the refusal branch was unreachable while the hazard it
+---describes was live.
+---
+---`seconds` is passed through to asyncBegin, which uses three times it as the stale-entry cap —
+---so a chain of ours that dies between begin and done is dropped by the guard after 36 s or
+---180 s instead of refusing every reload for the rest of the session. The token asyncBegin
+---returns is handed back to asyncDone, which releases exactly THAT chain. The two this file arms
+---happen to finish in the order they were armed — the 12 s readback is scheduled by the last
+---section, the 60 s summary immediately after it, and 12 < 60 — so the no-token form (release
+---the oldest) would be correct today. The token is passed anyway, because that coincidence is
+---a property of two constants and neither the section order nor WINDOW_SEC is load-bearing.
+---
+---core.reload is required LAZILY, inside the call, for two reasons: this probe file is loaded
+---at startup and must not pull the reload machinery in with it, and reload.lua is itself one of
+---the modules F9 drops — a reference captured at load time would be to the previous copy.
+---
+---The returned function is idempotent and never raises, so it is safe to call on every exit
+---path: the scheduling failure path, the normal one-shot completion, and a body that raised.
+---Missing one exit leaves the chain outstanding until its cap expires, which refuses F9 for up
+---to three minutes — the escape hatch, from the Lua console, is
+---`require('palforge.core.reload').asyncReset()`.
+local function asyncGuard(what, seconds)
+    local reload
+    local got = pcall(function() reload = require("palforge.core.reload") end)
+    if not got or type(reload) ~= "table" or type(reload.asyncBegin) ~= "function"
+        or type(reload.asyncDone) ~= "function" then
+        -- No guard available (an older core/reload, or a partially loaded tree). Say so once
+        -- rather than silently running unguarded — an F9 in the next minute is then a known
+        -- risk instead of a mystery.
+        probe.line("NOTE core.reload's async guard is unavailable, so the '%s' chain runs "
+            .. "UNGUARDED: do NOT press F9 until it has printed.", tostring(what))
+        return function() end
+    end
+    -- The token is whatever asyncBegin answers, and it is not required to answer anything: a
+    -- build of core/reload that predates the token form returns nil, asyncDone(nil) releases the
+    -- oldest outstanding chain, and that is still correct as long as the pair is balanced.
+    local token
+    pcall(function() token = reload.asyncBegin(what, seconds) end)
+    local released = false
+    return function()
+        if released then return end
+        released = true
+        pcall(reload.asyncDone, token)
+    end
 end
 
 ---Arm a hook with a caller-supplied body. probe.watch is the standard tool and is used for every
@@ -411,7 +508,7 @@ local function pal_spawned_fresh()
         .. "BroadcastOnCompleteInitializeParameter fire for a pal born AFTER the load storm, and "
         .. "is `self` then the NEW pal's actor. It is armed once, in the pal-spawned-hook section "
         .. "above — read its 'HOOK pal.init' lines for this item too. This section arms only the "
-        .. "FALLBACKS the TODO names, so nothing is hooked twice.")
+        .. "FALLBACKS pal-spawned-fresh's own item names, so nothing is hooked twice.")
 
     probe.section("candidate 1: the PLAYER's delegate target")
     -- THE point of this run. BroadcastOnCompleteInitializeParameter is the thing that CALLS the
@@ -874,25 +971,48 @@ local function pal_spawn_placement()
     -- ExecuteInGameThread stretch under load, so the real wait is longer, never shorter.
     local READBACK_MS = 12000
     if type(LoopAsync) == "function" then
-        LoopAsync(READBACK_MS, function()
-            local body = function()
-                pcall(function()
-                    local near = support.nearestPal(target)
-                    if near then
-                        probe.line("LATE pal-spawn-placement: %d s later the nearest PalCharacter to "
-                            .. "(%.0f,%.0f,%.0f) is %.0f cm away (%d pals live). Under ~100 means "
-                            .. "the coordinate route WORKED here too; ~600 is probably just you.",
-                            READBACK_MS // 1000, target.x, target.y, target.z, near.dist, near.count)
-                    else
-                        probe.line("LATE pal-spawn-placement: %d s later no PalCharacter could be "
-                            .. "enumerated at all", READBACK_MS // 1000)
-                    end
-                end)
-            end
-            if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(body) else body() end
-            return true   -- one shot
+        -- Declared to core/reload BEFORE the chain is scheduled, so an F9 pressed during the
+        -- 12 s is refused with a named reason instead of dropping the engine-tick hook and
+        -- killing every keybind until the game is restarted. See asyncGuard above.
+        local release = asyncGuard("watch pal-spawn-placement 12 s readback", READBACK_MS / 1000)
+        local scheduled = pcall(function()
+            LoopAsync(READBACK_MS, function()
+                local body = function()
+                    pcall(function()
+                        local near = support.nearestPal(target)
+                        if near then
+                            probe.line("LATE pal-spawn-placement: %d s later the nearest PalCharacter to "
+                                .. "(%.0f,%.0f,%.0f) is %.0f cm away (%d pals live). Under ~100 means "
+                                .. "the coordinate route WORKED here too; ~600 is probably just you.",
+                                READBACK_MS // 1000, target.x, target.y, target.z, near.dist, near.count)
+                        else
+                            probe.line("LATE pal-spawn-placement: %d s later no PalCharacter could be "
+                                .. "enumerated at all", READBACK_MS // 1000)
+                        end
+                    end)
+                    -- Released at the END of the deferred body rather than when the LoopAsync
+                    -- callback returns: ExecuteInGameThread queues `body` for a later tick, so
+                    -- UE4SS is still holding a callback reference until it has actually run.
+                    release()
+                end
+                if type(ExecuteInGameThread) == "function" then
+                    -- A raise inside ExecuteInGameThread would mean `body` never runs and the
+                    -- guard never clears, so the queueing call is itself guarded.
+                    if not pcall(ExecuteInGameThread, body) then release() end
+                else
+                    body()
+                end
+                return true   -- one shot
+            end)
         end)
-        probe.note("a LATE readback line prints ~12 s from now, AFTER this block's #### END.")
+        if not scheduled then
+            release()
+            probe.note("LoopAsync raised while scheduling the readback — no LATE line will print, "
+                .. "and the reload guard was released again so F9 stays available.")
+        end
+        probe.note("a LATE readback line prints ~12 s from now, AFTER this block's #### END. "
+            .. "F9 is REFUSED until it has printed — that refusal is deliberate, and its message "
+            .. "names this chain.")
     else
         probe.note("LoopAsync is unavailable this session, so no readback is scheduled — read the "
             .. "[PalForge.spawn] LATE lines instead.")
@@ -935,7 +1055,14 @@ local function announcePlan()
     }
     for _, line in ipairs(screen) do support.announce(line) end
 
+    -- "watch" and "watch-summary" are the only two block names in this file that are NOT
+    -- plan/TODO.md item ids: they bracket the run itself. Said here so nobody goes looking for
+    -- an item by those names, and so `grep '#### BEGIN'` has an explanation for the two extra
+    -- blocks it returns.
     probe.line("#### BEGIN watch")
+    probe.line("NOTE 'watch' is this probe's own framing block, not a plan/TODO.md item id — the "
+        .. "same goes for 'watch-summary' at the end. The item blocks are the eight named in the "
+        .. "INDEX lines below.")
     probe.line("NOTE this probe ARMS NATIVE HOOKS. UE4SS cannot unregister a hook: every hook "
         .. "armed below stays armed until you quit the game. Nothing is written to your save.")
     probe.line("NOTE it also SPAWNS ONE ChickenPal in front of you (pal-spawn-placement is about "
@@ -949,7 +1076,7 @@ local function announcePlan()
     probe.line("NOTE   6. make your pal USE A MOVE                 -> grep 'HOOK skill.activate'")
     probe.line("NOTE   7. hit a pal with a NAMED move, then melee  -> grep 'HOOK skill.hit'")
     probe.line("NOTE   8. capture ONE wild pal                     -> grep 'HOOK skill.equip'")
-    probe.line("NOTE every hook line carries t=+Ns since arming, so the six actions are told "
+    probe.line("NOTE every hook line carries t=+Ns since arming, so the eight actions are told "
         .. "apart by their timestamps; type 'pf_mark <text>' in the UE4SS console between "
         .. "actions if you want explicit separators.")
     probe.line("#### END watch")
@@ -975,27 +1102,47 @@ local function closeWindowLater()
             .. "armed regardless and keep logging.")
         return false
     end
-    LoopAsync(WINDOW_SEC * 1000, function()
-        pcall(function()
-            probe.line("#### BEGIN watch-summary")
-            probe.line("NOTE the %d s window is up. Hooks armed by this probe are STILL ARMED and "
-                .. "keep logging until you quit the game.", WINDOW_SEC)
-            local any = false
-            for label, n in pairs(M.counts) do
-                any = true
-                probe.line("NOTE fired: %-12s %d time(s)", label, n)
-            end
-            if not any then probe.line("NOTE no self-counted hook fired") end
-            probe.line("NOTE for the rest, grep 'HOOK craft', 'HOOK pal.init', 'HOOK pal.beginplay' "
-                .. "and 'HOOK pal.spawner'. NO LINE IS AN ANSWER: it closes that candidate.")
-            probe.line("NOTE now copy every '#### BEGIN <id>' .. '#### END <id>' block plus any "
-                .. "LATE / HOOK / MARKER lines below them, and paste them into the matching "
-                .. "plan/TODO.md item.")
-            probe.line("#### END watch-summary")
+    -- The longest-lived raw chain in the tree: a full WINDOW_SEC (60 s) between the F8 press and
+    -- this callback, and that whole minute is a window in which an F9 would drop the engine-tick
+    -- hook. Declared to core/reload so the reload is refused instead. See asyncGuard above.
+    local release = asyncGuard(string.format("watch %d s window summary", WINDOW_SEC), WINDOW_SEC)
+    local scheduled = pcall(function()
+        LoopAsync(WINDOW_SEC * 1000, function()
+            pcall(function()
+                probe.line("#### BEGIN watch-summary")
+                probe.line("NOTE the %d s window is up. Hooks armed by this probe are STILL ARMED "
+                    .. "and keep logging until you quit the game.", WINDOW_SEC)
+                local any = false
+                for label, n in pairs(M.counts) do
+                    any = true
+                    probe.line("NOTE fired: %-12s %d time(s)", label, n)
+                end
+                if not any then probe.line("NOTE no self-counted hook fired") end
+                probe.line("NOTE for the rest, grep 'HOOK craft', 'HOOK pal.init', "
+                    .. "'HOOK pal.beginplay' and 'HOOK pal.spawner'. NO LINE IS AN ANSWER: it "
+                    .. "closes that candidate.")
+                probe.line("NOTE now copy every '#### BEGIN <id>' .. '#### END <id>' block plus any "
+                    .. "LATE / HOOK / MARKER lines below them, and paste them into the matching "
+                    .. "plan/TODO.md item.")
+                probe.line("#### END watch-summary")
+            end)
+            support.announce("watch: " .. WINDOW_SEC .. " s window closed - copy UE4SS.log")
+            -- Last statement before the one-shot return, and after every pcall above, so the
+            -- guard clears on the normal path AND on a summary that raised inside its own pcall.
+            -- Missing this would refuse every F9 for the rest of the session.
+            release()
+            return true   -- one shot
         end)
-        support.announce("watch: " .. WINDOW_SEC .. " s window closed - copy UE4SS.log")
-        return true   -- one shot
     end)
+    if not scheduled then
+        release()
+        probe.line("NOTE LoopAsync raised while scheduling the closing summary — no summary will "
+            .. "print, and the reload guard was released again so F9 stays available.")
+        return false
+    end
+    probe.line("NOTE F9 is REFUSED for the next %d s, by design: core/reload has been told this "
+        .. "chain is outstanding, because a reload landing on it removes UE4SS's engine-tick "
+        .. "hook and every PalForge key stops arriving until the game is restarted.", WINDOW_SEC)
     return true
 end
 
@@ -1012,32 +1159,53 @@ function M.run()
     announcePlan()
     installMarker()
 
+    -- The third column is the item's state in plan/TODO.md, checked on 2026-08-02, and one line
+    -- of it is printed immediately above each block. TWO of the eight are still open questions;
+    -- the other six closed between 2026-07-26 and 2026-07-27 and their sections are REGRESSION
+    -- checks — they arm the exact source core/event dispatches from, so a game patch that moves
+    -- it shows up as a channel that stopped announcing rather than as a pack's handler quietly
+    -- never running. Saying which is which in the log is what stops a reader looking eight ids
+    -- up by hand, and putting it against each block rather than in a list at the top is what
+    -- makes it survive a block being copied out of the log on its own.
     local sections = {
-        { "item-craft-source",     item_craft_source },
-        { "item-discard-source",   item_discard_source },
-        { "pal-spawned-hook",      pal_spawned_hook },
-        { "pal-spawned-fresh",     pal_spawned_fresh },
-        { "skill-activate-source", skill_activate_source },
-        { "skill-hit-source",      skill_hit_source },
-        { "skill-passive-source",  skill_passive_source },
-        { "pal-spawn-placement",   pal_spawn_placement },
+        { "item-craft-source",     item_craft_source,     "CLOSED" },
+        { "item-discard-source",   item_discard_source,   "CLOSED" },
+        { "pal-spawned-hook",      pal_spawned_hook,      "CLOSED" },
+        { "pal-spawned-fresh",     pal_spawned_fresh,     "OPEN" },
+        { "skill-activate-source", skill_activate_source, "CLOSED" },
+        { "skill-hit-source",      skill_hit_source,      "OPEN" },
+        { "skill-passive-source",  skill_passive_source,  "CLOSED" },
+        { "pal-spawn-placement",   pal_spawn_placement,   "CLOSED" },
     }
+
+    local open = 0
+    for _, s in ipairs(sections) do
+        if s[3] == "OPEN" then open = open + 1 end
+    end
+    probe.line("NOTE each block below is preceded by an INDEX line naming its state in "
+        .. "plan/TODO.md. OPEN means this run may answer it — paste that block into the item. "
+        .. "CLOSED means it is a regression check whose expected answer is already written down, "
+        .. "and is worth pasting back only if it CONTRADICTS the close: i.e. the hook never fired "
+        .. "while you did the action beside it. %d of the %d sections here are OPEN.",
+        open, #sections)
 
     local ran = 0
     for _, s in ipairs(sections) do
+        probe.line("NOTE INDEX %-7s %s", s[3], s[1])
         local ok, err = pcall(s[2])
         if ok then
             ran = ran + 1
         else
             -- A section that raises still counts as a section that reported: say which one and
-            -- why, rather than letting one bad call take the other five down with it.
+            -- why, rather than letting one bad call take the other seven down with it.
             probe.line("NOTE section %s RAISED: %s (its block may be unterminated)", s[1], tostring(err))
             probe.finish()
         end
     end
 
     closeWindowLater()
-    probe.line("NOTE watch: %d of %d section(s) ran; now go do the six actions.", ran, #sections)
+    probe.line("NOTE watch: %d of %d section(s) ran; now go do the eight numbered actions.",
+        ran, #sections)
     support.announce("watch: " .. ran .. " section(s) armed - go act")
     return ran
 end

@@ -1,45 +1,56 @@
 ---
 title: テスト
-description: ゲーム内で F1 を押して、PalForge と自分のコンテンツが動いているかを確かめ、結果を読み、自分のチェックを足す
+description: ゲーム内で F1 を押して PalForge と自分のコンテンツが動いているかを確かめ、結果を読み、ゲームがないと測れないものを実行し、自分のチェックを足す
 ---
 
 ## このページでできるようになること
 
 - PalForge がゲームで読み込まれて動いているかを、数秒で確かめる
-- 遊びながら画面に出る「成功・失敗」の 1 行を読む
+- 遊びながら画面に出る「成功・失敗・スキップ」の 1 行を読む
+- なぜ 1 回の押下ではすべてのチェックを走らせられないのか、残りはどこで押せば埋まるのかを知る
 - 全部ではなく、気になる部分だけを実行する
-- 自分のコンテンツをキーに割り当てて、ゲームを離れずに試す
+- 動いている Palworld でしか答えられない計測を、名前を指定して 1 つずつ実行する
+- ゲームがまだ取っていないキーに、自分のコンテンツを割り当てる
 - 自分のチェックを足して、壊れたパックをプレイヤーより先に見つける
 
-## F1 を押す
+## F1 を 2 回押す
 
-ゲーム中に **F1** を押します。少しすると、画面に次の 1 行が出ます。
+ゲーム中に **F1** を押します。少しすると、画面に 2 行出ます。
 
 ```text
-[PalForge] tests: 276 passed, 0 failed, 18 skipped
+[PalForge] tests: running 14 suite(s)
+[PalForge] tests: 450 passed, 0 failed, 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
 ```
 
-この 1 行が「自分の環境は動いているか」への答えです。`0 failed` なら、PalForge は読み込まれ、
-あなたが書く api は api ページの説明どおりに動き、ゲームもその呼び出しを受け付けています。
-0 以外の数字が出たときは、壊れている場所が画面とログに名指しで出ます。
+`0 failed` が「自分の環境は動いているか」への答えです。PalForge は読み込まれ、あなたが書く api は
+api ページの説明どおりに動き、ゲームもその呼び出しを受け付けています。0 以外の数字が出たときは、
+壊れている場所が画面とログに名指しで出ます。
 
-タイトル画面でもセーブデータ内でも押せます。どちらも役に立ちます。ワールドが必要なチェックは
-タイトル画面では脇に退き、失敗ではなく**スキップ**として数えられます。上の `18 skipped` が
-それです。
+**1 回の押下ですべてのチェックが走ることはありません。サマリはそれを言葉で言います。** 28 件は
+ロード済みのセーブを必要とし、タイトル画面ではスキップされます。さらに 10 件は逆向きで、*拒否*の
+経路（閉じたままの ready ゲート、描画先のオーナーがないウィジェット、ポーンのない
+`Player.coordinate()`）を確かめるものなので、成功しうるものが何もない場所でしか走れず、ワールドが
+立ち上がるとスキップされます。この 2 群が 1 回の押下で両方走ることはありません。タイトル画面で
+1 回、セーブデータ内で 1 回押してください。緑の実行結果とは 2 回分の実行のことです。
+
+上の数字は 2026-08-02 に、エンジンのない素の `lua5.4` プロセスでスイート全体を実行した実測値です。
+ゲーム内ではワールド依存の 28 件が代わりに走り、`could not be answered by this session` の 2 件も
+なくなります。どちらも、素の Lua プロセスには `LoopAsync` も UE4SS の `Key` テーブルもないという
+理由だけで出ているものです。
 
 ```mermaid
 flowchart TD
-  A["require palforge.test"] --> B["load 13 case files"]
+  A["require palforge.test"] --> B["load 14 case files"]
   B --> C["bind F1"]
   C --> D["F1 pressed"]
   D --> E["test.run picks the suites"]
   E --> F["unittests runs each suite in order"]
-  F --> G["world tests skip outside a save"]
-  F --> H["world tests run inside a save"]
+  F --> G["world-gated checks skip outside a save"]
+  F --> H["inverse-gated checks skip inside a save"]
   G --> I["support.sweep removes the palforge_test ids"]
   H --> I
-  I --> J["summary to UE4SS.log"]
-  I --> K["pass and fail lines on screen"]
+  I --> J["summary and skip directions to UE4SS.log"]
+  I --> K["the same summary on screen"]
 ```
 
 チェックの読み込みと F1 への割り当ては、ゲーム起動時に一度だけ行われます。`F1 pressed` から
@@ -52,16 +63,25 @@ flowchart TD
 `ExecuteInGameThread` と `pcall` で包まれます。チェックが例外を投げても、キーボード入力まで
 巻き添えにすることはありません。
 
-F1 が割り当てられるのは dev モードのときだけで、PalForge は dev モードで起動します。パックを
-配布するときは `registry.initialize()` の前に切ってください。
+F1 があるのは dev セッションだけで、`env.dev` は `false` の状態で配布されます。`env.debug` も
+同じです。フレームワークの側でこれらを自分で有効にするものはありません。dev セッションでは
+任意モジュール `Scripts/palforge_dev.lua` で有効にします。このファイルは `tools/deploy.sh` が
+既定モードで書き出し、`--release` では削除し、gitignore されているのでリポジトリ経由で
+プレイヤーに届くことはありません。
 
-```lua
-local env = require("palforge.env")
-env.dev = false     -- set this BEFORE registry.initialize()
+```lua title="Scripts/palforge_dev.lua"
+local env   = require("palforge.env")
+env.dev     = true
+env.debug   = true
+-- Per-hook opt-in for the hooks that write into a real save.
+-- env.debugHooks["pal-skills-equip"] = true
 ```
 
-`dev = false` なら PalForge はコンテンツカタログだけを読み込みます。dev キーバインドも、
-カタログダンパーも、チェックも、F1 もありません。
+`dev = false` なら PalForge はコンテンツカタログだけを読み込みます。dev キーバインド（F4 は
+ロード中のセーブの全テクノロジーを解放します）も、F1 のスイートも、F9 リロードも、カタログ
+ダンパーも、ヘッドレス束も、テストフックもありません。起動ログは読み込んだものと読み込まなかった
+ものを 1 つずつ名前で記録するので、「キーが効かない」と「キーが割り当てられていない」は別々の行に
+なります。
 
 <Callout type="warn">
 `reg.register` はフェイルソフトです。そのセッションで `RegisterKeyBind` または UE4SS の `Key`
@@ -72,28 +92,34 @@ env.dev = false     -- set this BEFORE registry.initialize()
 
 ## 何がチェックされるのか
 
-チェックは全部で **294 件**あり、13 個の**スイート**に分かれています。スイートとは api の
+チェックは全部で **481 件**あり、**14 個**の**スイート**に分かれています。スイートとは api の
 1 領域を受け持つチェックのまとまりで、それぞれ `Scripts/palforge/test/cases/` の 1 ファイル
 です。チェックはあなたのセッションの実際のゲームに対して走ります。
 
-| スイート | テスト数 | ワールドを必要とするテスト数 |
-| --- | --- | --- |
-| `schema` | 28 | 0 |
-| `registry` | 23 | 0 |
-| `definitions` | 14 | 0 |
-| `pal` | 30 | 5 |
-| `item` | 21 | 1 |
-| `building` | 26 | 2 |
-| `skill` | 23 | 1 |
-| `effect` | 35 | 1 |
-| `audio` | 17 | 2 |
-| `mesh` | 21 | 1 |
-| `ui` | 32 | 1 |
-| `player` | 10 | 4 |
-| `events` | 14 | 0 |
+| スイート | チェック数 | セーブ内でしか走らない | タイトル画面でしか走らない |
+| --- | --- | --- | --- |
+| `schema` | 28 | 0 | 0 |
+| `registry` | 42 | 0 | 0 |
+| `definitions` | 23 | 0 | 0 |
+| `native` | 26 | 0 | 0 |
+| `pal` | 34 | 5 | 0 |
+| `item` | 23 | 3 | 0 |
+| `building` | 32 | 3 | 1 |
+| `skill` | 34 | 3 | 0 |
+| `effect` | 40 | 2 | 0 |
+| `audio` | 24 | 4 | 1 |
+| `mesh` | 46 | 3 | 0 |
+| `ui` | 105 | 1 | 6 |
+| `player` | 10 | 4 | 1 |
+| `events` | 14 | 0 | 1 |
 
-表の並びがそのまま実行順です。Lua だけで完結するスイートを先に走らせるので、基礎部分の破損は
-セーブデータに触れる前に報告されます。
+表の並びがそのまま実行順で、その実体は `Scripts/palforge/test/init.lua` の `M.CASES` です。F1 が
+どのスイートを走らせるかについて、権威はそのリストだけです。Lua だけで完結するスイートを先に
+走らせるので、基礎部分の破損はセーブデータに触れる前に報告されます。
+
+`pal` の 1 件はどちらの列にも入りません。`teachAll` の書き込み側は生きたパルを必要とし、実際の
+セーブを書き換えるため、F1 ではなく宣言済みフックが計測します。そのスキップ行には、計測を行う
+フックの名前が付きます。
 
 ## 出力を読む
 
@@ -101,37 +127,46 @@ env.dev = false     -- set this BEFORE registry.initialize()
 `[PalForge.unittests]`（フレームワーク）です。
 
 ```text
-[PalForge.test][info] running 13 suite(s): schema, registry, definitions, pal, ...
-[PalForge.unittests][info] SKIP [pal] spawns at a coordinate: no world loaded
-[PalForge.unittests][info] tests: 276 passed, 0 failed, 18 skipped (294 total)
-[PalForge.test][info] swept 217 test definition(s)
+[PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 14 suite(s): schema, registry, definitions, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
+[PalForge.unittests][info] SKIP [player] coordinate returns the local player's position as numeric x, y, z (world): no world loaded
+[PalForge.unittests][info] tests: 450 passed, 0 failed, 31 skipped (481 total)
+[PalForge.unittests][info] tests: 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge.unittests][info] tests: 28 check(s) were not measured because there is no world - load a save and press the key again.
+[PalForge.unittests][info] tests: 1 check(s) can only be measured by a declared hook - `pf_hooks` lists them with the reason each one would skip, and each SKIP line above names the action that runs its own.
+[PalForge.test][info] swept 123 test definition(s)
 ```
 
-行は 4 種類として読みます。
+行は 5 種類として読みます。
 
-- `running N suite(s)` — この押下がこれから何をするのか。
-- `SKIP [suite] test: reason` — スキップされたテスト 1 件につき 1 行、欠けていた前提条件付き。
+- 出所の行。`tools/deploy.sh` が書いたビルドスタンプ、2 つのスイッチ、すべての機能を計測した
+  Palworld のビルドと動いているゲームが報告するビルド、そしてこの押下がこれから何をするのか。
+  読み込み済みの Lua は読み込まれたままなので、スタンプが直前のデプロイより古ければ F9 が
+  押されていないということであり、その下の内容はいま書いたコードの証拠になりません。
+  `unstamped (not deployed by tools/deploy.sh)` は手でコピーしたツリーです。
+- `SKIP [suite] test (direction): reason` — スキップされたチェック 1 件につき 1 行。どの状態なら
+  走ったのかを併記します（`world` / `no-world` / `hook` / `opt-in` / `setup` / `session`）。
   スキップは異常ではないので `info` レベルです。
 - `FAIL [suite] test: message` — アサーションのメッセージ付きで `err` レベルに記録されます。
 - `tests: P passed, F failed, S skipped (T total)` — 最初に見るべき 1 行。
+- その下の内訳。上の行を読めるものにしているのはこれです。どの状態を待っているスキップが何件あるか、
+  そして両方向が待っている場合には「1 回の実行ではすべては測れない」という文が出ます。
 
-同じサマリは `SendSystemAnnounce` で画面にも出て、先頭に `[PalForge]` が付きます。緑だったかどうかを
-知るために alt-tab する必要はありません。
+サマリは `SendSystemAnnounce` で画面にも出ます。先頭に `[PalForge]` が付き、内訳の節も同じものが
+付くので、実際に何が測れたのかを知るために alt-tab する必要はありません。
 
 ```text
-[PalForge] tests: running 13 suite(s)
-[PalForge] tests: 276 passed, 0 failed, 18 skipped
-[PalForge] FAIL [item] give adds to the live inventory and take drops it back out, both measured: the Wood count must RISE across a give (135 -> 135)
+[PalForge] tests: running 14 suite(s)
+[PalForge] tests: 450 passed, 0 failed, 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge] FAIL [item] give really adds to the live inventory, measured both ways: the Wood count must RISE across a give (135 -> 135)
 ```
 
 失敗はすべて 1 件ずつ画面に繰り返されます。`3 failed` としか言わないサマリでは、結局ログに戻る
 ことになるからです。
 
 <Callout type="info">
-上の 18 件のスキップは、タイトル画面でのワールド依存チェックです。セーブデータ内ではこの数は減り、
-代わりに*別の*いくつかのチェックがスキップされます。ワールドがない場合の経路を確かめるチェックは、
-ワールドが存在すると脇に退くためです。パス数もそれに連動して動きます。ゼロのままでなければ
-ならないのは `failed` です。
+素の `N skipped` では、ほぼすべてを測れた実行と、ほとんど測れなかった実行を見分けられません。
+だからスキップは方向を持ちます。`28 need a world` は行動に移せる 1 文ですが、`31 skipped` は
+そうではありません。
 </Callout>
 
 ## 1 つのスイートだけ実行する
@@ -152,14 +187,15 @@ test.run({ "pal", "item" })       -- several
 local results = test.run("item")
 
 print(results.passed, results.failed, results.skipped, results.total)
+for direction, n in pairs(results.needs) do print(direction, n) end   -- world, no-world, hook, ...
 for _, suite in ipairs(results.suites) do
     print(suite.name, suite.passed, suite.failed, suite.skipped)
     for _, f in ipairs(suite.failures) do print("FAIL", f.test, f.msg) end
-    for _, s in ipairs(suite.skips)    do print("SKIP", s.test, s.msg) end
+    for _, s in ipairs(suite.skips)    do print("SKIP", s.test, s.needs, s.msg) end
 end
 ```
 
-引数なしの `test.run()` が実行するのは、この 13 スイートだけです。PalForge は起動時に Lua だけで
+引数なしの `test.run()` が実行するのは、この 14 スイートだけです。PalForge は起動時に Lua だけで
 完結する小さなチェック（`palforge.tests`）も走らせます。それらも同じ一覧に登録されていますが、
 F1 は手を出しません。登録済みのすべてに届かせたいときは、1 段下を使います。
 
@@ -169,8 +205,12 @@ local T = require("palforge.core.unittests")
 T.names()            -- every registered suite name, sorted
 T.byName("pal")      -- one suite, or nil
 T.run()              -- EVERY registered suite, including the headless bundle
-T.reset()            -- drop all registrations (tooling; you rarely want this)
+T.NEEDS              -- the seven skip directions, as the summary spells them
 ```
+
+その登録簿を空にする手段は意図的に用意されていません。スイート一覧はプロセスと同じ寿命を持ち、
+本当に白紙が必要になる場面 —— 編集したケースファイルの読み直し —— は F9 が担当します。F9 は
+`palforge.*` のモジュールをすべて落として、一覧をゼロから組み直します。
 
 `palforge.test` は自分自身についても報告します。
 
@@ -178,8 +218,67 @@ T.reset()            -- drop all registrations (tooling; you rarely want this)
 test.CASES       -- the case names, in run order
 test.loaded      -- case name -> suite, or false when the file failed to load
 test.suites()    -- the names that actually loaded, in run order
-test.bindings()  -- { "F1   tests: all suites", "F4   ?" }
+test.ACTIONS     -- name -> function, every pf_* command this module owns
+test.bindings()  -- one line per PalForge key, with what the GAME has on the same key
 ```
+
+`test.bindings()` はキーボードレジストリ自身のレポートに委譲します。各行の後半こそ読む価値の
+ある部分です。
+
+```text
+keyboard: F1                   palforge tests: all suites                        game: nothing
+keyboard: F5                   unknown  probe reflect (reflection dump: classes, functions, parameters, DataTable rows) - needs a loaded save game: the game's key config has not been read
+```
+
+起動時の `unknown` は壊れているのではなく正しい状態です。ゲームのキー設定はワールドサブシステム上に
+あり、mod の読み込み時点ではワールドがありません。`world.ready` 以降に埋まっていき、`pf_keys` は
+必要なときに表全体を出力します。
+
+## 入口は 3 つ: キー、コンソール、autorun.txt
+
+入力経路は実機で 3 つ続けて失敗しました。そのたびに仕事の中身は問題なく、入口だけが欠けていました。
+そこで、すべてのコマンドは 1 つのテーブル `test.ACTIONS` に置かれ、3 つの経路がそこへ届きます。
+
+**UE4SS のコンソール。** すべてのアクションがコンソールコマンドとして登録され、その一覧は起動の
+たびにソートして出力されます。説明対象のテーブルから生成されるので、ずれようがありません。
+
+```text
+[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  pf_hook_audio_setvolume_audible  pf_hook_building_unlock  pf_hook_game_build_live  pf_hook_item_datatable_row_read  pf_hook_mesh_actor_identity  pf_hook_mesh_color_change  pf_hook_pal_skills_equip  pf_hook_pal_spawned_fresh  pf_hook_skill_hit_source  pf_hook_ui_backhandler  pf_hook_ui_host_layer  pf_hook_ui_update_event  pf_hooks  pf_hooks_all  pf_keys  pf_mesh  pf_native  pf_pal  pf_reflect  pf_spawn  pf_teach  pf_tests  pf_title  pf_uidecl  pf_uievents  pf_uiroute  pf_uislot  pf_uiz  pf_watch
+```
+
+**コマンドを登録できることと、コマンドを打てることは同じではありません。** UE4SS はコンソールを
+切った状態で配布されており、ハンドラは存在しないウィンドウに対して問題なく登録されます。ログは
+`console commands: ...` と言い、置き場所はどこにもありません。`ue4ss/UE4SS-settings.ini` で有効に
+してからゲームを再起動してください。
+
+```ini title="ue4ss/UE4SS-settings.ini"
+ConsoleEnabled = 1
+GuiConsoleEnabled = 1
+GuiConsoleVisible = 1
+```
+
+PalForge はそのファイルを読めないので、起動ログも同じことをチェックではなく注記として言います。
+`if you cannot type those, UE4SS's console is off`。
+
+**キー。** F1 がスイートを実行し、6 つの探索プローブがそれぞれのキーに乗っています。それ以外に
+キーを予約するものはツリー内にありません。キーは PalForge が予約してよいものではないからです。
+
+**`Scripts/palforge/autorun.txt`。** 入力をまったく必要としない経路です。アクション名を並べた
+テキストファイルで、ワールドのロードごとに 1 回読まれ、`world.ready` で実行されます。1 行は
+`[delay] name` で、delay はワールドが ready になってからの秒数です。
+
+```text title="Scripts/palforge/autorun.txt"
+# comments and blank lines are ignored
+pf_keys                       # as soon as the world is ready
+12 pf_hook_item_datatable_row_read   # 12 seconds later
+```
+
+この遅延は見た目より重要です。パルの到着には 4〜8 秒かかるので、近くにパルが必要なアクションを、
+それを生むスポーンと同じ息で走らせることはできません。このファイル自体は表を持たず、名前はすべて
+`test.ACTIONS` から引かれ、無い名前は報告されてスキップされます。読むのは名前の一覧であって
+コードではないので、キー押下でできないことがこのファイルからできるようになることはありません。
+セーブに書き込むフックは、その上にさらに独自の関門を持ちます。1 行は引数を運べないので、各フックには
+生成された専用のアクション名も用意されています。
 
 ## 独自のキーを割り当てる
 
@@ -189,9 +288,9 @@ test.bindings()  -- { "F1   tests: all suites", "F4   ?" }
 local test = require("palforge.test")
 
 test.bind("F1")                              -- everything (installed by default)
-test.bind("F2", "pal")                       -- one suite
-test.bind("F3", { "item", "effect" })        -- several
-test.bind("F5", function()                   -- anything at all
+test.bind("F11", "pal")                      -- one suite
+test.bind("F12", { "item", "effect" })       -- several
+test.bind("INS", function()                  -- anything at all
     Pal.get("ChickenPal"):spawn(Player.coordinate())
 end, { desc = "spawn a chicken" })
 ```
@@ -202,6 +301,44 @@ end, { desc = "spawn a chicken" })
 `opts` はキーバインドレジストリへそのまま渡されます。`desc` は `test.bindings()` が表示する文字列で、
 省略した場合は `bind` が代わりに書きます（`tests: pal`、`tests: all suites`、または `custom`）。
 
+**まだ誰も持っていないキーを選んでください。** dev セッションはファンクションキーの最初の 10 個の
+うち 9 個を握っています。F1 がスイート、F2・F3・F5・F6・F8・F10 が 6 つのプローブ、F4 が全テクノロジー
+解放、F9 がリロードです。残る 1 つが F7 で、F7 は Palworld 自身の音量キーです。ゲームは UE4SS より
+下でこのキーを取るので、そこに割り当てたプローブは一度も押されることがなく、`RegisterKeyBind` は
+正常に返り、ログには何も出ませんでした。外から見れば、届かないキーと「走ったが何も見つからなかった
+プローブ」は同じ沈黙です。
+
+いまその問いは 1 回の参照で済みます。`pf_keys` は動いているゲームから Palworld 自身のキー設定
+（オプション画面が編集するのと同じ構造体）と、プロジェクト同梱の `DefaultInput.ini` の既定値を読み、
+UE4SS が割り当てられるすべての名前と PalForge が保持しているものと突き合わせて、名前ごとに 1 行
+出力します。
+
+```text
+keymap: UE4SS NAME           UNREAL FKEY        STATUS   WHAT HAS IT
+keymap: F1                   F1                 palforge tests: all suites
+keymap: W                    W                  game     MoveForward [project/axis]
+keymap: ESCAPE               Escape             refused  Esc is not a KEY on this build ...
+keymap: 64 free, 24 taken by the game, 9 held by PalForge, 1 refused outright, 67 unanswerable
+```
+
+- `free` — ゲームのキー設定でこのキーを使っているアクションはありません。このキーについて言える
+  最も強い言明ですが、押下が届く保証ではありません。Steam オーバーレイ、OS、UE 自身のコンソール
+  キーはその設定の外にあります。「free なのに届かなかった」は、いまや別の何かについての報告可能な
+  発見であって、読み取れないゼロではありません。
+- `game` — Palworld がアクションを持っており、その**名前が出ます**。両方が発火するか、押下が
+  そもそも UE4SS に届かないかのどちらかです。
+- `palforge` — この mod がすでに持っています。最後の列がどのバインドかを言います。
+- `refused` — Esc、そして Esc だけです。PalForge のどこからも割り当てられません。プレイヤーは
+  常にゲーム自身のメニューを閉じられなければならないからです。Esc が欲しいパネルは代わりに
+  `UI{ backHandler = true }` を宣言します。
+- `unknown` — 設定が読めなかった（まだワールドがない）か、その UE4SS 名に対応する Unreal の
+  `FKey` 名が無いかです。これを free と見なしてはいけません。
+
+キー設定はワールドサブシステム上にあるので、ロード済みのセーブが必要です。プロパティを辿るだけで
+`UFunction` は 1 つも呼ばず、設定にもセーブにも何も書かず、1 秒ほどで終わります。実機の実行では
+プロジェクト側のマッピング 107 件、プレイヤー側の設定は空（Palworld はキー設定を上書きとして
+保存するので、誰も再割り当てしていないセーブは正当に空です）、名前引きは 0 回でした。
+
 呼び出しは起動時に走る場所ならどこに置いても構いません。専用の置き場は
 `palforge/core/keyboard/functions/` 以下のファイルで、`reg.load()` がディレクトリを走査して
 拾い上げます。
@@ -209,11 +346,14 @@ end, { desc = "spawn a chicken" })
 ```lua title="Scripts/palforge/core/keyboard/functions/beacon_tests.lua"
 local test = require("palforge.test")
 
-test.bind("F6", { "building", "skill" }, { desc = "tests: beacon domains" })
+test.bind("F11", { "building", "skill" }, { desc = "tests: beacon domains" })
 ```
 
 キーの再割り当ては**その場で挙動を差し替えます**。レジストリはキーごとにエンジンバインドを 1 つだけ
-保持し、その裏の関数を交換するので、F1 にハンドラが 2 つ乗ることはありません。
+保持し、その裏の関数を交換するので、F1 にハンドラが 2 つ乗ることはありません。しかも差し替えは
+両方の説明文を挙げた警告として記録されるので、誰も意図していない置き換えは、F1 を押して他人の
+パネルが出て初めて気付くのではなく、ログに現れます。もう 1 つの入口 `reg.claim(key, fn, opts)` は
+同じ問いを立てたうえで、置き換える代わりに拒否します。
 
 <Callout type="warn">
 `functions/` のファイルから `reg.register` で F1 を奪わないでください。`reg.load()` は
@@ -223,11 +363,91 @@ require すればその場で読み込まれ、`palforge.test` 自身の `bind("
 勝ちます。
 </Callout>
 
+## ゲームが動いていないと測れないもの
+
+テキストエディタからは問えない問いがあります。アクティブ技の書き込みは実際のパルに載るのか、
+そしてゲームは生き延びるのか。色は画面上で変わるのか。`setVolume` は聴こえる変化を起こすのか。
+どの UI 関数が、どの順で発火するのか。それらは `Scripts/palforge/test/hooks/` 以下に**宣言済みの
+フック**として置かれています。1 計測 1 ファイルで、画面上に何が必要か、セーブに書き込むか、
+出力が何を意味するかを、それぞれが名指しで書いています。
+
+名前で呼ばれない限り何も走りませんし、`env.debug` が true でなければフックのファイルは
+1 つも読み込まれません。
+
+```lua
+-- from the UE4SS console
+pf_hooks                      -- list every hook, its gate state, and the sentence that opens it
+pf_hook pal-skills-equip      -- run one by its id
+pf_hooks_all                  -- run every hook whose gate is open, read-only ones first
+
+-- from autorun.txt, which cannot carry an argument, one generated name per hook
+pf_hook_pal_skills_equip
+```
+
+関門は 3 つあり、閉じている関門は黙って見過ごされるのではなく必ず出力されます。
+
+1. `env.debug` —— これが無ければフックのファイルは 1 つも読み込まれません。`dev` はキーとスイートを
+   与え、`debug` はこのディレクトリを与えます。
+2. `needs = { world, player, pal, title }` —— 動いているゲーム側で成り立っていなければならない条件。
+   拒否は関門の名前と、それを開ける文を出します。「スキップしました」ではなく「近くにパルがいないので
+   スキップしました。パルを笛で呼ぶか `pf_spawn` を実行してください」です。
+3. `writes = true` —— セーブを書き換えるフックには、`env.debugHooks["<id>"] = true` という
+   フックごとの 2 つめの同意が要ります。`debug` はセッション全体のスイッチであり、書き込みは
+   使い捨てのセーブで下す実験ごとの判断だからです。
+
+宣言済みの 13 個のフックを、`pf_hooks_all` が実行する順（読み取り専用が先。途中で落ちても、書き込みに
+至る前に出せるものはすべて出ているように）で並べます。
+
+| フック | 必要なもの | 何を決着させるか |
+| --- | --- | --- |
+| `game-build-live` | world | `GetBuildVersion` / `GetEngineVersion` / `GetGameName` の生の文字列。宣言したビルドと動いているビルドを実際に比較するため |
+| `mesh-actor-identity` | world | UE4SS のアクターハンドルをキーにしたテーブルが、後のスイープでも当たるのか —— アクター単位の再キー化全体が乗っている計測 |
+| `item-datatable-row-read` | world | `dt:FindRow(id)` が返す構造体からスカラや FName の列を直接引けるのか、それともレシピは列ごとに組み立てるしかないのか |
+| `audio-custom-file-loader` | world | 製品ビルドに、ディスク上の `.wav` を再生可能なものへ変える手段が 1 つでもあるのか |
+| `ui-update-event` | world | 4 つの UI クラスの Open/Show/Construct/Refresh/Update/Setup 関数をすべて仕掛け、どれがどの順で発火するかを報告する |
+| `pal-spawned-fresh` | world | `pal.spawned` の発火をすべて `world.ready` からの時刻で記録し、新規スポーンをロード直後の嵐と区別する |
+| `skill-hit-source` | world | ダメージ経路に技 id を運ぶものが無いことを確認し、発動とダメージの相関付けがなぜ誤りかを数値で示す |
+| `ui-host-layer` | world | Palworld 自身の CommonUI レイヤーにパネルを積み、ゲームが受け入れたかどうかを報告する |
+| `ui-backhandler` | world | CommonUI の back アクションを主張するパネルをマウントし、そのとき Esc が何をするかを確かめる |
+| `mesh-color-change` | world, player, **書き込み** | 色を付けたメッシュをプレイヤーの前に置き、色を 2 回変える |
+| `audio-setvolume-audible` | world, player | 1 つの音を 4 段階の出力バス音量で鳴らし、`setVolume` に聴こえる効果があるかを人が判断できるようにする |
+| `building-unlock` | world, player, **書き込み** | `Building.Handle:unlock` について確認できる事実をすべて記録し、確認できない半分は操作者に渡す |
+| `pal-skills-equip` | world, pal, **書き込み** | アクティブ技の書き込みが実際のパルに載るのか、そしてゲームが生き延びるのか |
+
+13 個のうち 3 個が `writes = true` を宣言します。`audio-setvolume-audible` は意図的に宣言しません。
+音は鳴りますが、変えたものはセッションを越えず、ファイルにも届きません。`writes` は「何かが起きる」
+ではなく「セーブが書き換わる」という意味だからです。
+
+出力は探索プローブとまったく同じ形で囲まれるので、`UE4SS.log` からブロックを切り出して報告に
+そのまま貼れます。
+
+```text
+#### BEGIN item-datatable-row-read
+NOTE can a scalar / FName column be indexed off the struct dt:FindRow(id) returns ...
+NOTE build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103)
+VALUE row.Rank                          = 3
+PASS  a scalar column reads straight off the struct
+NOTE item-datatable-row-read finished: 4 pass, 0 fail
+#### END item-datatable-row-read
+```
+
+本体が返ったあとも観測を続けるフックは、`#### BEGIN <id>-1`、`-2` と自前のブロックをさらに出力し、
+返る前にそのことを自分の言葉で言います。そうしたウォッチャが生きている間、**F9 のリロードは拒否
+されます**。どの処理が残っていて何秒経っているかを名指しで告げます。UE4SS のコールバックがまだ
+掴んでいるモジュールを落とすリロードは、このツリーが過去にクラッシュした原因そのものです。
+先にデプロイし、それからフックを実行してください。逆ではありません。
+
+<Callout type="info">
+F1 スイートの「これはゲームが必要」というスキップは、すべて計測を行うフックの名前を挙げます。
+つまりスキップは常に、実際に実行できる何かへ辿れます。`pf_hooks` は 13 個すべてを、いま
+スキップされる理由付きで一覧にします。
+</Callout>
+
 ## ワールドゲート
 
-api のほとんどはロード済みのワールドを必要とします。ワールドに触れるテストは最初の 1 行で
+api のほとんどはロード済みのワールドを必要とします。ワールドに触れるチェックは最初の 1 行で
 `support.needWorld(t)` を呼びます。プレイヤーポーン（いまゲームがあなたのために動かしている
-キャラクター）がなければ、そのテストを**失敗ではなくスキップ**します。
+キャラクター）がなければ、そのチェックを**失敗ではなくスキップ**します。
 
 ```lua
 s:test(":give hands the player three Wood", function(t)
@@ -237,62 +457,59 @@ s:test(":give hands the player three Wood", function(t)
 end)
 ```
 
-そのおかげで、どちらの場所でも 1 回押す価値があります。タイトル画面では残り 276 件のチェックが
-spec、レジストリ、ディスパッチ、そしてすべてのフェイルソフトな戻り値を確かめ、セーブデータ内では
-そこに 18 件のワールドチェックが加わります。ワールドにいなかったという理由だけで赤くなることは
-ありません。
-
-`needWorld` はポーンを返すので、`local pawn = support.needWorld(t)` は通常の取得のように読めます。
-ゲートだけが欲しいなら戻り値は捨てます。
+その逆が `support.needNoWorld(t)` で、ワールドが**ある**ときにスキップします。確かめる対象が拒否
+—— ポーンがない、コントローラがない、オーナーがないために通る経路 —— であり、ワールドがあると
+その拒否がプレイヤーのセッションに対する実際の動作に置き換わってしまう場合に呼びます。両者は同じ
+問いを立てるので、対になったゲートはちょうど相補的です。2 つの半分のうち必ず一方が走り、両方が
+走ることはありません。
 
 ```lua
-support.needWorld(t)
-```
-
-隣にはさらに 2 つのゲートがあります。
-
-```lua
+support.needWorld(t)      -- skip unless a world is loaded; returns the pawn
+support.needNoWorld(t)    -- skip when a world IS loaded
 support.player()          -- the local PalPlayerCharacter, or nil; never throws
 support.worldReady()      -- core/event's gate, falling back to the pawn check
+support.nearbyPal()       -- the nearest PalMonsterCharacter and its class, or nil
 support.needGlobal(t, "FindAllOf")   -- skip unless that engine global is a function
 ```
 
 `support.worldReady()` はまず `core/event.isWorldReady()` に尋ねます（このゲートは ready ウォッチが
 5 回連続でポーンを見つけて初めて開きます）。そしてウォッチが落ち着く前の瞬間のために、素のポーン
-チェックへフォールバックします。`needGlobal` は UE4SS のグローバルをすべて公開しないセッションや
-ホストに備えるものです。同梱のケースではまだ必要になっていませんが、`LoopAsync` や `FindAllOf` に
-直接手を伸ばすケースを書くなら使うべきです。
+チェックへフォールバックします。`needNoWorld` が意図的にこれを使わないのは、`LoopAsync` が無いとき
+そのゲートは*開いた側*に倒れるからです。エンジンのないセッションこそ、ワールド無し側の半分だけが
+走れる状況です。`needGlobal` は UE4SS のグローバルをすべて公開しないセッションやホストに備えます。
 
-テストは自分の判断で、どの深さからでも、前提条件が揃っていないと分かった時点でスキップできます。
+`nearbyPal` が `PalCharacter` ではなく `PalMonsterCharacter` を探すのには理由があります。階層は
+`APalMonsterCharacter : APalNPC : APalCharacter` なので、広い方の名前は村人や商人にも当たり、
+そのどれも装備技を持ちません。そうした相手に対する読み取りは「技 0 件」を報告し、壊れた読み取りと
+見分けが付かなくなります。
+
+チェックは自分の判断で、どの深さからでも、前提条件が揃っていないと分かった時点でスキップできます。
+どの状態なら走ったのかを述べれば、サマリがそれを数えられます。
 
 ```lua
 s:test("a coordinate spawn is issued and the world can be enumerated", function(t)
     support.needWorld(t)
     local coord = support.inFront(600.0, 50.0)
-    if not coord then t:skip("no player location to spawn in front of") end
+    if not coord then t:skipUnanswerable("no player location to spawn in front of") end
 
     local ok = Pal.get("ChickenPal"):spawn(coord)
     t:eq(ok, true, "the spawn call was issued")
 
     -- The pal is seconds away, so there is nothing to assert about arrival here.
     local near = support.nearestPal(coord)
-    if not near then t:skip("the world could not be enumerated") end
+    if not near then t:skipUnanswerable("the world could not be enumerated") end
     t:type(near.dist, "number", "and the world can be measured around the point asked for")
 end)
 ```
 
-この形は真似する価値があります。スポーンは非同期なので、クリーチャーが到着したことをテストでは
+この形は真似する価値があります。スポーンは非同期なので、クリーチャーが到着したことをチェックでは
 主張できません。チェックは証拠のあるところで終わり、到着はログに残ります。呼び出しが本当に答えられる
 ことだけを主張し、答えられないことは、それを見られる側に任せてください。
 
-スキップは双方向に働きます。*ワールドがない*場合の経路を確かめるチェック（閉じたままの ready ゲート、
-オーナーのないウィジェットの `:screen()`）がいくつかあり、それらはワールドを見つけると
-`t:skip("a world is loaded")` を呼びます。
-
 ## アサーション
 
-各テスト本体に渡される `t` は 10 個のメソッドを持ちます。どれも末尾の `msg` は省略可能で、省略すると
-フレームワークが読みやすい既定文を書きます。
+各テスト本体に渡される `t` は 9 個のアサーションを持ちます。どれも末尾の `msg` は省略可能で、
+省略するとフレームワークが読みやすい既定文を書きます。
 
 | 呼び出し | 成功する条件 |
 | --- | --- |
@@ -304,8 +521,25 @@ end)
 | `t:type(v, want, msg)` | `type(v) == want` |
 | `t:near(a, b, eps, msg)` | 両方が数値で `math.abs(a - b) <= eps` |
 | `t:errors(fn, pattern, msg)` | `fn` が raise し、そのメッセージが `pattern` を含む |
-| `t:fail(msg)` | 成功しない — その場でテストを失敗させます |
-| `t:skip(reason)` | 成功しない — 失敗させずにテストを止めます |
+| `t:fail(msg)` | 成功しない —— その場でテストを失敗させます |
+
+その隣に、失敗させずにチェックを止める 7 つの方法があります。どれも方向を記録し、サマリはそれを
+数えます。
+
+| 呼び出し | 意味 |
+| --- | --- |
+| `t:skipNeedsWorld(why)` | セーブを読み込んでもう一度キーを押してください |
+| `t:skipNeedsNoWorld(why)` | タイトル画面に戻ってもう一度キーを押してください |
+| `t:skipNeedsHook(id, why)` | `test/hooks/<id>` でしか測れません。理由文に `pf_hook_<id>` が入ります |
+| `t:skipOptIn(why)` | 意図的に無効。実行するとテスターのセーブに書き込むためです |
+| `t:skipNeedsSetup(why)` | ワールドはあるが、このチェックが必要とする状態ではありません |
+| `t:skipUnanswerable(why)` | このセッションでは答えられませんでした。それ自体が発見です |
+| `t:skip(why)` | 分類なし。数えられはしますが「方向を述べなかった」として報告されます |
+
+7 つのいずれでもない方向は、スキップではなくチェックの失敗になります。綴りを間違えた方向は、
+そうしなければチェックを再び見えなくしてしまい、それこそがこの api が取り除くために存在する欠陥
+だからです。`skipNeedsHook` がフック id を必須にするのも同じ理由で、何も名指ししないスキップは
+辿れません。
 
 `eq` は素の `==` です。テーブルの深い比較はありません。2 つのテーブルが等しいのは同一のテーブルで
 あるときだけで、これは `t:neq(Player.coordinate(), c, "every call returns a new table")` のような
@@ -337,9 +571,9 @@ s:test("an unknown field is rejected at define time", function(t)
 end)
 ```
 
-失敗したアサーションは raise します。ランナーはそれを捕まえ、そのテスト 1 件を失敗として記録し、
-次のテストへ進みます。1 件の不良テストがスイートを止めることはありません。予期しない Lua エラーも
-同じように捕まえられ、生のメッセージ付きの失敗として報告されます。別枠で数えられるのは `t:skip`
+失敗したアサーションは raise します。ランナーはそれを捕まえ、そのチェック 1 件を失敗として記録し、
+次へ進みます。1 件の不良チェックがスイートを止めることはありません。予期しない Lua エラーも
+同じように捕まえられ、生のメッセージ付きの失敗として報告されます。別枠で数えられるのはスキップ
 だけです。
 
 ## ケースを書く
@@ -351,13 +585,13 @@ end)
 ### ファイルを作る
 
 ケースファイルは `Scripts/palforge/test/cases/` に、領域ごとに 1 つ置きます。フレームワークと
-ヘルパーを require し、スイートを作り、テストを追加し、スイートを返します。
+ヘルパーを require し、スイートを作り、チェックを追加し、スイートを返します。
 
 ```lua title="Scripts/palforge/test/cases/beacon.lua"
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 
-local s = T.suite("beacon")
+local s = support.sweepAfter(T.suite("beacon"))
 
 s:test("a beacon registers under the id it was declared with", function(t)
     local id = support.id("building")
@@ -370,9 +604,9 @@ end)
 s:test("a beacon pays out wood when it is interacted with", function(t)
     support.needWorld(t)
 
-    local wood = Item.get("Wood")
+    local wood   = Item.get("Wood")
     local before = wood:count()
-    if before == nil then t:skip("the inventory count could not be read") end
+    if before == nil then t:skipUnanswerable("the inventory count could not be read") end
 
     t:eq(wood:give(3), true, "give answers the before/after delta, so true means the count rose")
 
@@ -383,7 +617,13 @@ end)
 return s
 ```
 
+ゲームが許す範囲では、型チェックではなく実測にしてください。`:give`、`:take`、`:count` はいずれも
+引き算できる数値を返すので、チェックは「ブール値が返ってきた」ではなく実際に何がどれだけ動いたかを
+言えます。そう書かれたチェックは、数字が変わった日にも意味を持ち続けます。
+
 `Suite:test` はチェイン可能なので、好みに応じて `s:test(...):test(...)` と書けます。
+`support.sweepAfter(suite)` は `Suite:after` を通してスイートに専用の後始末を与えるので、使い捨ての
+定義は実行の最後ではなく、そのスイートが終わった時点で出ていきます。
 
 </Step>
 
@@ -399,6 +639,7 @@ M.CASES = {
     "schema",
     "registry",
     "definitions",
+    "native",
     "beacon",
     "pal",
     -- ...
@@ -413,7 +654,7 @@ M.CASES = {
 
 `M.load()` は各名前を `palforge.test.cases.` の下から require し、結果を `test.loaded` に記録します。
 読み込みに失敗したファイルが実行を止めることはありません。`err` レベルに記録され、
-`test.suites()` から外れるだけで、残る 12 件はそのまま走ります。
+`test.suites()` から外れるだけで、残る 13 件はそのまま走ります。
 
 ```text
 [PalForge.test][err] case 'beacon' failed to load: ...cases/beacon.lua:12: attempt to index a nil value
@@ -426,7 +667,7 @@ M.CASES = {
 <Callout type="warn">
 スイートの名前は、誰も使っていないものにしてください。`T.suite(name)` は、その名前がすでに
 登録されている場合、2 つめを作らずに**既存の**スイートを返します。そのため、埋まっている名前を
-選んだケースファイルは、自分のテストを他人のスイートに追記することになります。`M.load()` は
+選んだケースファイルは、自分のチェックを他人のスイートに追記することになります。`M.load()` は
 それに気付いて警告します。
 `case 'pal' shares its suite name with an already registered suite; the two are now merged`
 </Callout>
@@ -437,7 +678,7 @@ M.CASES = {
 スキャンのたびにライブレジストリを辿ります。ですから、使い捨てのコンテンツを定義した実行は、
 それを自分で取り除く必要があります。そうしないと、キーを 10 回押せば 10 回分が残ります。
 
-そのため、テストが作る id はすべて `support.id` から来ます。これは実行ごとのカウンタを混ぜ込みます。
+そのため、チェックが作る id はすべて `support.id` から来ます。これは実行ごとのカウンタを混ぜ込みます。
 
 ```lua
 support.id("pal")                          -- "palforge_test:pal_1"
@@ -449,11 +690,14 @@ support.isTestId("ChickenPal")             -- false
 
 カウンタはセッション中リセットされないので、スイートを 10 回走らせても自分自身と衝突しません。
 
-最後のスイートが終わると、`test.run` は `support.sweep()` を呼びます。これは
-`object_manager.TYPES` のすべてを走査し、`isTestId` を通った id を登録解除して、その件数を返します。
+`support.sweep()` は `object_manager.TYPES` のすべてを走査し、`isTestId` を通った id を
+`object_manager.unregister` で登録解除して、その件数を返します。`test.run` は最後のスイートの
+あとにこれを呼び、定義を多く作る `schema`・`pal`・`item`・`skill`・`effect` は自分の後始末としても
+呼ぶので、レジストリが 1 スイート分より多くを抱えることはありません。
 
-```lua
-local removed = support.sweep()   -- 217
+```text
+[PalForge.test][info] swept 95 test definition(s) after [pal]
+[PalForge.test][info] swept 123 test definition(s)
 ```
 
 判定が `palforge_test:` の前方一致であるため、スイープが実コンテンツに触れることはありません。
@@ -462,8 +706,10 @@ local removed = support.sweep()   -- 217
 
 ## support のヘルパー
 
-`test/support.lua` はすべてのケースファイルが require するもので、ゲーム内で動くスイートに必要な
-道具を持っています。
+`test/support.lua` は、ゲーム内で動くスイートに必要な道具を持っています。ケースファイルはすべて
+これを require します。例外は `test/cases/native.lua` だけで、こちらはワールドを必要とせず、
+自前の id も作りません。カーネルがすでに読み込んだカタログを読み、実在するゲームの行に対する
+ハンドルを作るだけだからです。
 
 レポート:
 
@@ -482,9 +728,10 @@ support.player()             -- the local pawn, or nil
 support.location(actor)      -- { x, y, z }, or nil
 support.inFront(600.0, 50.0) -- a point 600cm ahead of the player and 50cm up, or nil
 support.nearestPal(coord)    -- { actor, pos, dist, count }, or nil
+support.nearbyPal()          -- the nearest PalMonsterCharacter, and its class name
 ```
 
-`inFront` は、スポーンテストが対象を自分の中ではなく目に見える前方に置くために使います。ポーンの
+`inFront` は、スポーンのチェックが対象を自分の中ではなく目に見える前方に置くために使います。ポーンの
 前方ベクトルが読めないときは +X 軸へフォールバックします。`nearestPal` は `PalCharacter` を列挙し、
 ある座標に最も近い 1 体を距離と総数付きで報告します。スポーンのチェックはこれを使って、要求した
 地点のまわりでゲームがキャラクターを列挙できることを確かめます。
@@ -511,21 +758,23 @@ support.GAME = {
 
 ## 実行が残すもの
 
-スイープが登録解除するのは定義です。ライブテストがセーブデータに対して行ったことは元に戻せません。
-ワールドテストはそれを踏まえて書かれていますが、すべてが可逆というわけではありません。
+スイープが登録解除するのは定義です。ライブチェックがセーブデータに対して行ったことは元に戻せません。
+ワールド側のチェックはそれを踏まえて書かれていますが、すべてが可逆というわけではありません。
 
-- **スポーンしたパルは残ります。** `pal` はライブテスト 3 件で `ChickenPal` を要求し、どれも実行が
+- **スポーンしたパルは残ります。** `pal` はライブチェック 3 件で `ChickenPal` を要求し、どれも実行が
   終わった数秒後に現れます。ツリー内にパルをデスポーンさせるものはありません。
 - **渡した Wood はそのまま返されます。** `item` は `Wood` を 3 個渡し、同じ 3 個を消費するので、
   問題なく走ればインベントリは元のままです。give が成立して take が成立しなかった場合は（何も装備
   していないプレイヤーは取り出せません）、その 3 個が鞄に残ります。
-- **設置も装着も建築もしません。** メッシュと pal のレンダリングテストは、意図的にロードできない
+- **設置も装着も建築もしません。** メッシュと pal のレンダリングのチェックは、意図的にロードできない
   モデルパスを指すので、バックエンドはプレイヤーのメッシュコンポーネントに触れる前に降ります。
   building スイートはすでに建てられているものに対する読み取り専用で、`inst:save()` は決して
   呼びません。UI スイートは `PalPlayerController` が存在するときはウィジェットの構築手前で止まります。
-- **エフェクトは自分で後始末します。** ライブの effect テストは 1 件だけで、`pcall` の下でポーンに
+- **エフェクトは自分で後始末します。** ライブの effect チェックは 1 件だけで、`pcall` の下でポーンに
   適用してから外します。`nativeStatus` を宣言していないのでゲーム本体の状態異常は点灯しません。
   宣言しているエフェクトなら、外れるときに一緒に消えます。
+- **スイートが意図してセーブに書き込むことはありません。** 書き込むものはすべて宣言済みフックで、
+  `env.debugHooks` の後ろにあり、F1 スイートはその半分をフック名付きでスキップします。
 
 <Callout type="warn">
 ワールドに触れるスイートは、大事なセーブではなく使い捨てのセーブで実行してください。チキン 3 羽は
@@ -541,7 +790,7 @@ support.GAME = {
   パルはその 4〜8 秒後に現れるので、ここでのどの主張も到着についてのものにはなりません。到着が
   記録されるのはログです。
 - `Audio.Handle:setVolume` はアクター単位です。呼び出したサウンド 1 つではなく、そのアクターが
-  出しているものすべての音量を変えるので、テストもアクターの性質として扱います。
+  出しているものすべての音量を変えるので、チェックもアクターの性質として扱います。
 - `Audio.Handle:stop` もアクター単位です。`StopSoundByActor` を発行するので、呼び出した対象の音 1 つ
   ではなくそのアクター上のすべてを止めます。一度も定義されたことのない id のハンドルでも、同じように
   アクターを黙らせます。個別に止めたい音は、別々のアクター上で鳴らしてください。
@@ -549,10 +798,18 @@ support.GAME = {
 ## まとめ
 
 - ゲーム中に **F1** を押します。画面の行が `0 failed` なら、あなたの環境は動いています。
-- スキップは問題ありません。ワールド用のチェックはタイトル画面でスキップされます。ゼロであるべきなのは `failed` だけです。
-- `test.run("pal")` で 1 スイートだけ実行でき、`test.bind("F5", fn)` で好きな処理をキーに置けます。
+- 2 回押してください。タイトル画面で 1 回、セーブデータ内で 1 回です。28 件はセーブ内でしか走らず、
+  10 件はワールドが無いときしか走らないので、1 回の押下ではすべては測れません。サマリがどちらかを言います。
+- スキップは方向を持ちます。ゼロのままでなければならないのは `failed` だけです。
+- `test.run("pal")` で 1 スイートだけ実行でき、`test.bind("F11", fn)` で好きな処理をキーに置けます。
+  ただし `pf_keys` でそのキーが空いていることを確かめてから。
+- 動いている Palworld が要る計測は `test/hooks/` の宣言済みフックです。`env.debug` のときだけ
+  読み込まれ、`pf_hooks` / `pf_hook <id>` / `pf_hooks_all` で名前を指定して実行し、セーブに書き込む
+  3 つはさらに `env.debugHooks[id] = true` を必要とします。
+- どのコマンドにも入口が 3 つあります。UE4SS のコンソール（既定で切られています）、キー、または
+  `world.ready` で走る `Scripts/palforge/autorun.txt` の 1 行です。
 - ワールドが必要なチェックは `support.needWorld(t)` で始めます。失敗ではなくスキップになります。
-- テスト内で作る id は必ず `support.id(...)` から取ります。あとでスイープが片付けます。
+- チェック内で作る id は必ず `support.id(...)` から取ります。あとでスイープが片付けます。
 - ワールドに触れるスイートは使い捨てのセーブで実行します。ライブチェックが出したパルはワールドに
   残り、しかも実行が終わったあとに到着します。
 

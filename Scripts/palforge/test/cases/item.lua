@@ -26,6 +26,10 @@ local event   = require("palforge.core.event")
 
 local s = T.suite("item")
 
+-- Throwaway definitions go back out as soon as this suite finishes; defining is permanent
+-- and every id below is namespaced test content.
+support.sweepAfter(s)
+
 -- The item.* channels only reach a definition once core/event's DISPATCH is installed.
 -- start() is idempotent and the kernel has already called it in game (registry.initialize
 -- runs it before this suite is even loaded); headless it wires stubbed sources, which is
@@ -305,7 +309,15 @@ s:test("give really adds to the live inventory, measured both ways", function(t)
     local COUNT = 3
     local wood  = Item.get(support.GAME.item)
     local before = wood:count()
-    if before == nil then t:skip("the inventory count could not be read, so nothing here is measurable") end
+    if before == nil then
+        -- A pawn exists (needWorld passed) and the inventory still would not answer, so this
+        -- is not something another run in another state fixes: the [PalForge.items] line
+        -- naming the failed lookup is the finding, and the check is counted as unanswered
+        -- rather than quietly folded into the green count.
+        t:skipUnanswerable("the inventory count could not be read on this pawn, so the "
+            .. "before/after that give and take are measured with does not exist — see the "
+            .. "[PalForge.items] log line naming which lookup failed")
+    end
 
     -- give writes through the inventory's own AddItem_ServerInternal and reports what the count
     -- DID, not that a call ran. Observed in game: "give Wood x3: 140 -> 143", with the game's own
@@ -380,8 +392,14 @@ s:test("a vanilla item's icon comes back from the game's own table", function(t)
 
     local tex = wood:iconOf()
     if tex == nil then
-        t:skip("no icon came back — look for the [PalForge.icons] warn line naming the column's "
-            .. "shape; the row read itself is proven, so a nil here means the last unwrap from "
+        -- A nil here is not "not measured yet", it is a question about the COLUMN, and there
+        -- is a declared hook that asks it properly: item-datatable-row-read walks the struct
+        -- dt:FindRow(id) hands back and prints what each column type unwraps to. Naming it is
+        -- the point of the direction — the reader is one action away from the answer instead
+        -- of one grep away from the log line that hints at it.
+        t:skipNeedsHook("item-datatable-row-read",
+            "no icon came back — the [PalForge.icons] warn line names the column's shape, and "
+            .. "the row read itself is proven, so a nil here means the last unwrap from "
             .. "soft-object-pointer to path is what is missing")
     end
     t:type(tex, "string", "an icon resolves to an asset path")

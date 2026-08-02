@@ -137,10 +137,41 @@ It is a **mirror, not a replacement**. The ailment runs on the game's rules and 
 set how strong it is. What PalForge decides is *when*: your `duration` is what takes it off
 again.
 
-The names are the game's own spelling, and upper and lower case do not matter. The ones a pack
-usually reaches for are `Poison`, `Stun`, `Sleep`, `Burn`, `Freeze`, `Electrical`, `Darkness`,
-`Wetness`, `AttackUp` and `DefenseUp`. There are 38 in all, and
-`require("palforge.core.status").names()` hands back the whole list, sorted.
+<Callout type="info">
+**This was observed working**, in a loaded save, and it is worth saying what "working" covered.
+The route is `PalCharacter.StatusComponent` — a property every character carries — to
+`UPalStatusComponent:AddStatus(EPalStatusID)`, one integer argument, no struct and no `FName`.
+`status.add` put `AttackUp` (`EPalStatusID` 26) on a character, the game read the ailment back as
+present through `GetExecutionStatus`, `status.remove` took it off, and the game read it back as
+gone. The signatures came from a dump generated one game patch before the installed binary, and
+the live class agreed with all three; every call still goes through `core/signature`, which
+refuses one unless the live class declares it. A `false` therefore means *the call did not fire*,
+never *the target is immune*.
+</Callout>
+
+The names are the game's own spelling. The ones a pack usually reaches for are `Poison`, `Stun`,
+`Sleep`, `Burn`, `Freeze`, `Electrical`, `Darkness`, `Wetness`, `AttackUp` and `DefenseUp`. There
+are 38 in all, and `require("palforge.core.status").names()` hands back the whole list, sorted.
+
+### Case, and which layer you are on
+
+`nativeStatus` is **case-insensitive**: `"poison"` finds `EPalStatusID` 5 exactly as `"Poison"`
+does, because `core/status` keeps a lowered map beside the real one. That is safe here for a
+reason that does not generalise — the vocabulary is fixed, closed and shipped in full, so folding
+case costs one table and spares you the game's own capitalisation.
+
+The other layer is **case-sensitive** and nothing can soften it. An id naming a DataTable row or
+an `object_manager` registry key — `"pack_Potion"`, `Item.get`, the icon row lookup — has to be
+spelled exactly, because that name set belongs to the game and PalForge holds no map of it to fold
+against.
+
+| What the name is | Example | Case |
+| --- | --- | --- |
+| an engine enum | `nativeStatus = "poison"`, a skill's `EPalWazaID` | insensitive |
+| a DataTable row or a registry id | `Item.get("Wood")`, `"mypack:Potion"` | sensitive |
+
+No status name is ever a row id, so nothing inside `Effect` crosses that boundary — but your pack
+will, the moment it puts an `Item` id next to a `nativeStatus`.
 
 A name the game does not have is refused **the moment you write the definition**, rather than
 quietly at some later point, and the message carries every name you could have meant:
@@ -240,13 +271,20 @@ Everything after that is on the grid.
 
 ### Targets, and what counts as alive
 
-One target can carry one application of each effect id. The table holding them uses
-**weak keys**: an application never keeps a pawn alive, and a target that is cleaned up by
-Lua takes its applications with it.
+One target can carry one application of each effect id, and the table holding them is keyed on
+the target's `GetFullName()` — not on the handle you passed. UE4SS mints a fresh userdata wrapper
+per lookup, so two references to one pawn are not the same Lua value, and a table indexed by
+handle would file your application under whichever wrapper the caller happened to hold. A plain
+Lua table target is identity-stable and keys on itself; an object that will not answer its own
+name falls back to the handle.
 
 A target counts as alive when it is a plain Lua table, or when it is engine data whose
-`IsValid()` still returns true. Once a pawn goes invalid, the next heartbeat ends its
-applications with `reason = "target_gone"`.
+`IsValid()` still returns true. Every heartbeat checks every live application, so once a pawn goes
+invalid the next beat ends its applications with `reason = "target_gone"` and drops the emptied
+bucket. That sweep is what keeps the table bounded now that its keys are strings: a string key is
+not collectable, so there is no garbage collector to lean on — and the sweep is the stronger
+guarantee anyway, because it fires on the beat the pawn despawns rather than whenever Lua next
+collects.
 
 `:apply()` with no target is allowed. Applications with a `nil` target go into a single
 world-wide bucket, and their handlers get `target = nil`.
@@ -644,8 +682,7 @@ anything else has to be yours.
 `data` is not the place for it. It is stored on the **definition**, so one table is shared
 by every target the effect touches, and `Effect.Handle` has no method that reads it back.
 
-Keep your own table instead, keyed by target, with weak keys, and clear the entry in
-`onExpire`:
+Keep your own table instead, keyed by target, and clear the entry in `onExpire`:
 
 ```lua
 local state = setmetatable({}, { __mode = "k" })   -- target -> your table
@@ -672,10 +709,21 @@ local Bleed = Effect{
 }
 ```
 
-Weak keys matter here for the same reason the runtime uses them: a normal reference from
-your table would keep a despawned pawn alive. A world-wide application is keyed on `nil`,
-which a Lua table cannot hold, so use a marker object of your own if you need state for
-that case.
+Weak keys keep that table from holding a despawned pawn alive. What they do not give you is a
+stable key: a table indexed by a UE4SS handle is indexed by userdata identity, and the handle in
+`onApply` need not be the same Lua value as the one in a later `onTick` — `:apply` refreshes the
+application's stored handle from the caller's every time it is re-applied. If your bookkeeping has
+to survive a re-apply, key it on the name instead, which is what the runtime does:
+
+```lua
+local uo = require("palforge.core.uobject")
+
+local key = uo.key(target) or target   -- GetFullName, or the value itself for a plain table
+state[key] = { total = 0 }
+```
+
+A world-wide application is keyed on `nil`, which a Lua table cannot hold, so use a marker object
+of your own if you need state for that case.
 
 ## Recipes
 
@@ -948,9 +996,12 @@ despawn and the effect ends on its own within a heartbeat, with `reason = "targe
 - `duration` is how long it lasts, `interval` is how often `onTick` runs. Both in seconds, both rounded to the 0.5 s heartbeat.
 - `:apply(target)` starts it and `:remove(target)` ends it early. `:isActive`, `:timeLeft` and `:stacksOn` tell you where it is.
 - Applying it again refreshes the timer, and adds a stack when you set both `stackable` and `maxStacks`.
-- `nativeStatus` switches one of the game's own ailments on while your effect runs; what the
-  effect *does* beyond that is your code, inside `onApply`, `onTick` and `onExpire`.
-- Anything you want to remember per target goes in your own weak-keyed table, cleared in `onExpire`.
+- `nativeStatus` switches one of the game's own ailments on while your effect runs — observed
+  working through `PalCharacter.StatusComponent` — and its 38 names ignore case, unlike an item id
+  or a registry key. What the effect *does* beyond that is your code, inside `onApply`, `onTick`
+  and `onExpire`.
+- Anything you want to remember per target goes in your own table, cleared in `onExpire`. Key it
+  on `uo.key(target)` if it has to survive a re-apply.
 
 Next, read [Skill](/docs/api/skill) to trigger an ability yourself and put an effect on
 whatever it hits.

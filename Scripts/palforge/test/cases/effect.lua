@@ -8,8 +8,17 @@
 -- real time these tests emit core/event's "tick" channel themselves and count the handler
 -- calls; the same trick drives the "world.left" release. Only the last test touches the
 -- game (it applies to the real player pawn to exercise the userdata path) and it skips
--- when there is no world. Nothing here toggles a native ailment because nothing in
--- api/effect does — that seam is still a TODO in native/effects.lua.
+-- when there is no world.
+--
+-- The pure half toggles no native ailment, because an Effect only reaches the game's own
+-- status system when it DECLARES `nativeStatus`; the last test in this file is the one that
+-- does, against a buff chosen so that a leak is harmless. This paragraph used to end by calling
+-- that seam an open marker in native/effects.lua. It is not: native/effects.lua is fully
+-- implemented and carries no marker at all, so the cross-reference pointed at nothing.
+-- It also did a second kind of damage, and avoiding that is why this sentence is worded the way
+-- it is: the reference was spelled in the tree's own marker syntax — the word, an open bracket,
+-- an item id — so every sweep for open markers matched THIS comment and reported an item that
+-- had never existed. A comment ABOUT markers must not be written in the shape of one.
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local Effect  = require("palforge.api.effect")
@@ -18,6 +27,10 @@ local event   = require("palforge.core.event")
 local om      = require("palforge.core.object_manager")
 
 local s = T.suite("effect")
+
+-- Every Effect{ } below is namespaced throwaway content and defining is permanent, so the
+-- suite gives them back the moment it finishes.
+support.sweepAfter(s)
 
 -- Seconds one heartbeat advances an application. Read from event.TICK_MS rather than
 -- hard-coded, because that is exactly what the runtime does when it installs its driver.
@@ -306,6 +319,68 @@ s:test("apply with no target is a world-global application, separate from any ta
     t:eq(#Effect.activeOn(target), 0)
 
     t:eq(h:remove(), true, "and remove with no target ends it")
+end)
+
+--=============================================================================
+-- A-1 / contract C1 — an application is filed under the target's NAME, not its handle
+--
+-- THE PROPERTY THIS SUITE WAS STRUCTURALLY BLIND TO, and for the same reason the mesh suite
+-- was: every target above is a plain Lua table, and a plain Lua table IS identity-stable, so
+-- a table keyed on the target looked up correctly here while missing on every second lookup
+-- in a world — UE4SS mints a fresh userdata wrapper per lookup, and Lua indexes a table by
+-- userdata identity. `apps` was that table. :isActive / :stacksOn / :timeLeft / :remove
+-- called with a pawn from a later FindAllOf answered false / 0 / 0 / false, and a second
+-- :apply on the SAME pawn started a SECOND independent application: onApply again instead of
+-- onStack, stacks back to 1, and core.status.add run twice on a target already carrying the
+-- ailment. Nothing raised, so nothing here failed.
+--
+-- The stand-in is the mesh suite's: two Lua values that answer ONE GetFullName are exactly
+-- what two references to one pawn are.
+--=============================================================================
+
+local function stubTarget(name)
+    return { IsValid = function() return true end, GetFullName = function() return name end }
+end
+
+s:test("two handles onto one target reach one application: the runtime keys on the full name", function(t)
+    local NAME = "BP_ChickenPal_C /Game/Test/Level:PersistentLevel.BP_ChickenPal_C_11"
+    local a1, a2 = stubTarget(NAME), stubTarget(NAME)
+    t:neq(a1, a2, "two DIFFERENT Lua values, which is what UE4SS really hands out")
+
+    local applies, stacks = 0, 0
+    local h = Effect{ id = support.id("effect"), stackable = true, maxStacks = 3, duration = 10.0,
+        events = { onApply = function() applies = applies + 1 end,
+                   onStack = function() stacks  = stacks  + 1 end } }
+
+    t:eq(h:apply(a1), true)
+    -- THE ASSERTIONS THE OLD KEY COULD NOT PASS: every query below is made through the
+    -- SECOND handle, which is what a caller reached by an event ctx actually holds.
+    t:eq(h:isActive(a2), true, "the application is visible through a different handle")
+    t:eq(h:stacksOn(a2), 1, "and it is the same application, at one stack")
+    t:eq(h:timeLeft(a2), 10.0, "carrying the duration the first handle started")
+
+    h:apply(a2)
+    t:eq(applies, 1, "the second apply did NOT start a second application")
+    t:eq(stacks, 1, "it stacked the first one, which is what onStack means")
+    t:eq(h:stacksOn(a1), 2, "and the stack count is shared by both handles")
+
+    local ids = Effect.activeOn(a2)
+    t:eq(#ids, 1, "Effect.activeOn reads the same bucket through either handle")
+    t:eq(ids[1], h.id)
+
+    t:eq(h:remove(a2), true, "and the removal reaches it through the second handle")
+    t:eq(h:isActive(a1), false, "so it is gone for BOTH handles")
+end)
+
+s:test("a target that will not answer its own name still gets an application", function(t)
+    -- uo.key is nil for it, and `t[nil]` raises — so the fallback is the handle itself, which
+    -- is the pre-C1 behaviour for that one object and still lets the caller that holds it
+    -- reach its own application. What must never happen is a raise.
+    local mute = { IsValid = function() return true end }
+    local h = Effect{ id = support.id("effect") }
+    t:eq(h:apply(mute), true, "the apply lands")
+    t:eq(h:isActive(mute), true, "and the same value reads it back")
+    t:eq(h:remove(mute), true)
 end)
 
 --=============================================================================
@@ -607,10 +682,13 @@ s:test("a nativeStatus effect toggles the game's own ailment on the live pawn", 
     -- a build that will not answer is not a defect in the effect layer.
     local before = status.isActive(pawn, STATUS)
     if before == nil then
-        t:skip("the status component could not be read on this pawn — see the [signature] log line "
-            .. "for which lookup failed; that line IS the finding")
+        t:skipUnanswerable("the status component could not be read on this pawn — see the "
+            .. "[signature] log line for which lookup failed; that line IS the finding")
     end
-    if before then t:skip("the pawn already has " .. STATUS .. "; a clean before/after is not possible") end
+    if before then
+        t:skipNeedsSetup("the pawn already has " .. STATUS .. "; a clean before/after is not "
+            .. "possible — wait for it to run out and press the key again")
+    end
 
     local h = Effect{ id = support.id("effect"), duration = 60.0, nativeStatus = STATUS }
 

@@ -15,6 +15,36 @@ you want, and PalForge puts it in the world.
 - Give a placed structure its own memory that is still there the next time you play.
 - Find the page for the exact thing you want to make.
 
+## What this targets
+
+<Callout type="warn">
+PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not
+supported and are not tested: there is no replication layer, and the item, spawn and event
+routes are all client-authoritative. A pack may appear to work for the host and do nothing
+for anyone else.
+</Callout>
+
+That is a deliberate scope decision rather than an oversight, and the reasons are structural
+rather than incidental. `core/spawn` builds a `PalCheatManager` off the **local** player
+controller. Spending an item goes through a locally spawned
+`APalWeaponBase::RequestConsumeItem`. Every event source in `core/event` is a local
+`RegisterHook`. None of it has ever been run against a dedicated server or a co-op guest, and
+none of it would be expected to behave. Server support would be a new subsystem — authority
+checks on every write, an RPC seam, a decision about who owns pack state — not a fix to any one
+item. The same sentence is printed in the log at every startup, so nobody has to find it here
+first.
+
+Everything PalForge reports as working was measured against **Palworld v1.0.2.101103**: watched
+in a real save, or read off the installed binary's own declarations. That number is `gameBuild`
+in `Scripts/palforge/env.lua`, and it is in the startup line, because a framework that does not
+say which build it was measured on gives its users no way to tell *"PalForge is broken"* from
+*"the game moved"*. This tree has already been bitten by exactly that gap: `AddItem` turned out
+to declare five parameters where the header dump had four, because the dump predated the
+installed binary by a single patch. At startup PalForge also asks the running game what build it
+is and records the answer in `env.gameBuildLive`. When the two disagree it says so once, in one
+line naming both. When the game cannot answer — which is ordinary at mod load, so the read is
+retried once at the first world load — the startup line reads `unknown` rather than a guess.
+
 ## Your first building
 
 This is a whole content file. It gives the game's own campfire a new behaviour: right-click
@@ -215,6 +245,10 @@ om.resolve("Wood")             --> "Wood"        (literal game id, passed throug
 om.resolve("bad pack:Potion")  --> nil, "invalid pack id 'bad pack' (letters/digits/_ only)"
 ```
 
+The same rule is enforced at **define** time, not only when something asks for the resolved
+name. `Building{ id = "my-pack:Bench" }` — a hyphen — raises where you typed it and names the
+rule, instead of registering an id that could never reach a row in the game.
+
 <Callout type="warn">
 You can give an id the game already has new behaviour and new metadata. Adding a brand-new
 row to the game's own tables — a new item, a new creature, a new build object — needs a
@@ -265,46 +299,76 @@ flowchart LR
   FIND --> RUN["your onPlace code runs"]
 ```
 
-How much of that happens by itself depends on the domain:
+How much of that happens by itself differs per domain, and so does how strong the evidence is.
+Each api module's header states which of its events are live and what measured them:
 
 - **Building** — the fullest one. `onPlace`, `onLoad`, `onRightClick`, `onRemove`,
-  `onTick`, `onWorldReady` and `onWorldLeft` all run on the live structure. `onBuild` runs
-  too, the moment a build finishes; it arrives before the structure exists, so it is handed
-  the definition rather than a live structure. A structure that streams in on a later pass
-  misses `onWorldReady`, so per-structure startup work belongs in `onLoad`.
+  `onTick`, `onWorldReady` and `onWorldLeft` all run on the live structure, which is a real
+  per-structure instance with its own persisted state. `onBuild` runs too, the moment a build
+  finishes; it arrives before the structure exists, so it is handed the definition rather than a
+  live structure. A structure that streams in on a later pass misses `onWorldReady`, so
+  per-structure startup work belongs in `onLoad`. `onLeftClick` and `onBreak` are the two that
+  never fire, and that is settled rather than pending — see the callout below.
+- **Item** — all four run. `onObtain` and `onUse` off the inventory and use paths; `onCraft`
+  off `OnFinishWorkInServer` on the two map-object models; `onDiscard` off
+  `RequestDrop_ToServer` / `RequestDispose_ToServer`. Both of the last two were observed live
+  while crafting at a real machine and dropping from a real slot. `:give`, `:take` and `:count`
+  each read the inventory back afterwards, so what they return is a measurement rather than a
+  hope. `:recipeOf` is the one that still answers nil.
 - **Pal** — all five run. `onCaptured`, `onDamaged` and `onDeath` come from confirmed game
-  calls. `onSpawned` rides a candidate hook that has not been proven to mean a fresh spawn
-  rather than a re-initialisation, so keep that handler safe to run twice. `onTick` is
-  driven by a sweep over the pals in the world, roughly every three seconds.
-- **Item** — `onObtain` and `onUse` run, with `ctx.itemId`, `ctx.count` and `ctx.actor`.
+  calls. `onSpawned` rides `PalNPC:OnCompletedInitParam` and
+  `PalPlayerCharacter:OnCompleteInitializeParameter`, both observed firing — but every firing so
+  far landed in the same second as the world load, so it is unshown that one means a pal that
+  did not exist a moment ago. Keep that handler safe to run twice. `onTick` is driven by a sweep
+  over the pals in the world, roughly every three seconds. A declared `mesh` is attached for you
+  on that same spawn channel: you do not call `renderOn` yourself.
+- **Skill** — three of the four run. `onActivate` was observed in real combat, carried by
+  `PalActionBase:OnBeginAction`; `onEquip` and `onUnequip` from `AddPassiveSkill` /
+  `RemovePassiveSkill`. `onHit` is the one that does not, and manual `:hit(target)` is the only
+  route to it. `:activate` enforces the cooldown in Lua and returns `false` while it is cooling.
 - **Effect** — `onApply`, `onTick`, `onStack` and `onExpire` all run. PalForge keeps the
-  clock itself, off its own half-second heartbeat. A `nativeStatus` on the definition switches
-  one of the game's own ailments on while the effect runs; whatever else happens to the target,
-  your handlers do.
-- **Audio, Mesh and UI** — no lifecycle events at all. You play a sound, a mesh is worn, and
-  a UI element is mounted, refreshed and unmounted by you. `Audio.Handle:stop(actor)` is not
-  per-sound: it silences everything playing on that actor.
+  clock itself, off its own half-second heartbeat. A `nativeStatus` switches one of the game's
+  own ailments on for the target while the effect runs, and that route was watched working in a
+  loaded save, with the game reading the ailment back as present and then as gone. The ailment
+  runs on the game's rules; PalForge does not control its strength.
+- **Audio** — no lifecycle events; you play a sound. A name on its own is enough: the
+  1957-entry AkAudioEvent catalog resolves it to the asset path that actually plays.
+  `Audio.Handle:stop(actor)` is not per-sound — it silences everything on that actor — and
+  `:setVolume` is actor-wide for the same reason.
+- **Mesh** — no lifecycle events. Vanilla `/Game/...` static and skeletal meshes work and are
+  class-checked before the engine is handed them, and `.obj` geometry loads from disk. The
+  custom-texture import is wired with the right declared signature and has never once been
+  called, and nobody has yet watched a colour change happen in game.
+- **UI** — no lifecycle events, and no native "the UI changed" signal has been confirmed
+  firing, so nothing refreshes an element for you. Building widgets out of Palworld's own UMG
+  kit and mounting them into the game's own in-game UI root is confirmed live.
+- **Player** — `Player.character()`, `Player.coordinate()` and
+  `Player.coordinateOffset(dx, dy, dz)`. No events; it answers where the player is.
 
-<Callout type="error" title="One thing this version cannot do">
-**A sound of your own cannot be played.** Pointing an `Audio` definition at an audio file you
-made is accepted and then does nothing. Only sounds the game already ships can be played, and
-there are thousands of them — [Audio](/docs/api/audio) has the catalog.
+<Callout type="error" title="One thing this version refuses outright">
+**A sound file of your own cannot be played, and `Audio.Spec.soundFile` is a hard error at
+define time.** The engine-native half is closed — `USoundWave` declares no importer — and the
+Wwise half rebinds a cooked media cookie rather than reading a `.wav` off your disk. The field
+stays declared so the error can name it and name the open item, `audio-custom-file-loader`. Only
+sounds the game already ships can be played, and there are 1957 of them —
+[Audio](/docs/api/audio) has the catalog.
 
 Everything else on this page runs today, with one habit worth forming: a call that touches the
 game answers what it measured, so check the boolean rather than assuming.
 </Callout>
 
 <Callout type="warn">
-These are declarable, so your code stays valid, but nothing runs them today. Put the work
+Three things are declarable, so your code stays valid, and nothing runs them. Put the work
 somewhere that does run:
 
-- Building `onLeftClick` and `onBreak` — use `onRightClick` and `onRemove`.
-- Item `onCraft` and `onDiscard` — use `onObtain` or `onUse`.
-- Skill handlers — nothing in the game fires a skill. Call `:activate(owner)`,
-  `:hit(target)`, `:equip(owner)` or `:unequip(owner)` from your own code, such as a pal's
-  handler, a building's `onRightClick` or a keybind. The cooldown is counted in Lua, and
-  `:activate` returns `false` while it is still cooling down.
-- A `soundFile` of your own resolves but plays nothing. Name a game sound id instead.
+- Building `onLeftClick` and `onBreak` — settled negatively rather than pending. The complete
+  function lists of every class that could own such a hook were read, and there is none: no
+  click entry on `PalBuildObject`, and destruction exists only as delegate fields, which
+  `RegisterHook` cannot address by path. Use `onRightClick`, and `onRemove`, which reports
+  disappearance as `reason = "missing"`.
+- Skill `onHit` — both of its candidate sources are measured silent from both sides. Call
+  `:hit(target)` from your own code, such as a pal's handler, a building's `onRightClick` or a
+  keybind.
 - Nothing refreshes a UI element for you. Call `:refresh()` when your state changes, or
   `:autoRefresh(ms)` to poll.
 </Callout>
@@ -343,8 +407,8 @@ local WellFed = Effect{
     },
 }
 
--- 3. A skill. Nothing in the game fires one, so it is invoked below by hand;
---    the cooldown is enforced in Lua by :activate.
+-- 3. A skill. onActivate has a live source in real combat; this one is fired by hand
+--    from the building below, and the cooldown is enforced in Lua by :activate.
 local Whistle = Skill{
     id       = "example:Whistle",
     name     = "Whistle",
@@ -449,9 +513,11 @@ comes with PalForge replaces that registration.
   to: the live structure for a building, that definition's Handle everywhere else.
 - A building remembers whatever you put in `state`, once you call `self:save()`.
 - A wrong field name stops the call with a message starting `PalForge: ` that suggests the
-  right one.
-- Skills never fire on their own, and Item `onCraft` / `onDiscard` and Building
-  `onLeftClick` / `onBreak` never run — put that work in a handler that does.
+  right one, and a malformed id stops it at the line you wrote.
+- Three handlers never fire: Building `onLeftClick` and `onBreak`, settled negatively, and
+  Skill `onHit`. Everything else declared on this page has a live source.
+- PalForge is single-player only, and every capability it claims was measured against
+  Palworld v1.0.2.101103.
 
 Next, read [Getting started](/docs/getting-started) to install PalForge and get your file
 loading.

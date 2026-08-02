@@ -9,16 +9,24 @@
 -- DISPATCH resolves the class by the game item id carried on the event and calls
 -- cls:onXxx(ctx) with the class as self.
 --
---   WIRED (live, confirmed native hooks — see core/event installItemSource):
+--   WIRED (live, confirmed native hooks — see core/event installItemSource). All four fire.
+--   This list used to carry a "NOT WIRED YET" section naming onCraft and onDiscard as having
+--   no native source; both were closed on 2026-07-26 and are described in full below:
 --     onObtain  <- PalPlayerState:AddItemGetLog_ToClient, plus the inventory add path
 --                  (ctx.itemId, ctx.count, ctx.via = "getlog" | "additem")
 --     onUse     <- PalItemUseProcessor:UseItemToCharacter_ServerInternal
 --                  (ctx.itemId; ctx.actor = the LOCAL player pawn — the character who used
 --                   the item, which is the one used ON only for self-use; ctx.itemData and
 --                   ctx.targetId carry the raw params)
---   NOT WIRED YET (channel + dispatch exist, no native source found):
---     onCraft / onDiscard — nothing emits item.craft / item.discard, so these never fire.
---     They stay declarable so a pack's code is future-proof.
+--     onCraft   <- PalMapObjectConvertItemModel / PalMapObjectProductItemModel:
+--                  OnFinishWorkInServer (ctx.itemId, ctx.recipeId, ctx.via = "convert" |
+--                  "product"). Closed as item-craft-source: crafting at a real machine was
+--                  seen carrying the channel's first event. ctx.count is nil BY DESIGN — the
+--                  per-craft count lives in the recipe row and a hook is no place for a
+--                  DataTable read.
+--     onDiscard <- PalNetworkItemComponent:RequestDrop_ToServer / RequestDispose_ToServer
+--                  (ctx.itemId, ctx.count, ctx.reason = "drop" | "dispose"). Closed as
+--                  item-discard-source, observed live; the source is core/event.lua:1955-2114.
 --
 -- ACTIONS — read this before planning anything around :give or :take.
 --   * :count WORKS and is measured. It reads the live inventory through the game's own
@@ -58,9 +66,11 @@
 --     PalSmith/packs/ExamplePack/items/example_items.jsonc, where MaxStackCount and the
 --     Recipe block are declared as JSON). Defining gives an EXISTING item id behaviour; it
 --     does not create inventory content and it does not re-balance it.
---   * :iconOf goes to the live icon DataTable through core.icons, but no artifact in this
---     tree has ever read a DataTable row VALUE, so in practice it returns the icon you
---     declared. See the marker on Class:iconOf.
+--   * :iconOf goes to the live icon DataTable through core.icons AND THE READ WORKS: on
+--     2026-07-26 core/icons read DT_ItemIconDataTable in a live save and 1183 of its 1207
+--     rows handed back an icon path (icons-row-read, Closed). So a vanilla item id answers
+--     with the game's own artwork and the declared `icon` really is the fallback it was
+--     always described as. :recipeOf is the half that is still declarative — see its marker.
 --
 --   Item{
 --       id = "Berries", name = "Red Berries", category = "consumable",
@@ -110,25 +120,41 @@ local Events = schema.define("Item.Spec.Events", {
                    doc = "LIVE - entered the inventory (ctx.count, ctx.via)" },
     { "onUse",     type = "function", sig = "fun(self: Item.Handle, ctx: table)",
                    doc = "LIVE - used / consumed (ctx.actor = the local player pawn)" },
-    -- OBSERVED LIVE, 2026-07-26. Crafting at a real machine fires this: core/event hooks
-    -- OnFinishWorkInServer on the two work models that carry an item id, and the channel was
-    -- seen carrying its first event in a real save. `ctx.count` is nil by design — the count
-    -- lives in the recipe row and a hook is no place for a DataTable read.
+    -- OBSERVED LIVE, 2026-07-26, and closed as item-craft-source. Crafting at a real machine
+    -- fires this: core/event hooks OnFinishWorkInServer on the two work models that carry an
+    -- item id — PalMapObjectConvertItemModel (the recipe benches and furnaces) and
+    -- PalMapObjectProductItemModel (the fixed-output producers) — and the channel was seen
+    -- carrying its first event in a real save. The doc string below still read "(unverified in
+    -- game)" when the 2026-07-31 audit went through, which is worse than saying nothing: it is
+    -- what an author reads out of schema.help("Item.Spec.Events") and out of the generated
+    -- types.lua tooltip, and it talks people out of a channel that works.
+    -- `ctx.count` is nil BY DESIGN and stays nil: the per-craft count lives in the recipe row
+    -- (DT_ItemRecipeDataTable's Product_Count) and a hook is no place for a DataTable read.
     { "onCraft",   type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "fires when a crafting machine finishes an item (unverified in game)" },
-    -- OBSERVED LIVE, 2026-07-26, with the slot resolving to a real item id. Two things had to
-    -- be right. A drop does NOT go through AddItem_ServerInternal — that hook was armed and
-    -- fired zero times across two sessions, because dropping goes through
-    -- UPalNetworkItemComponent, one class over from everywhere the search had looked. And the
-    -- container holding the dropped slot is not necessarily one of the inventory helper's, so
-    -- the container set comes from a world sweep matched on an exact GUID.
+                   doc = "LIVE - a crafting machine finished it (ctx.recipeId, ctx.via; ctx.count is nil)" },
+    -- OBSERVED LIVE, 2026-07-26, with the slot resolving to a real item id, and closed as
+    -- item-discard-source. The source is core/event.lua:1955-2114 (the hooks themselves at :2106 and :2112). Two things had to be right. A
+    -- drop does NOT go through AddItem_ServerInternal — that hook was armed and fired zero
+    -- times across two sessions, because dropping goes through UPalNetworkItemComponent, one
+    -- class over from everywhere the search had looked. And the container holding the dropped
+    -- slot is not necessarily one of the inventory helper's, so the container set comes from a
+    -- world sweep matched on an exact GUID.
+    -- The doc string below still said "NO native source exists" at the 2026-07-31 audit, five
+    -- days after the firing, and this is the one place a pack author looks: it is what
+    -- schema.help("Item.Spec.Events") prints and what types.lua shows in the editor.
+    -- ONE HONEST LIMIT: a drop whose slot cannot be resolved to an item id emits NOTHING
+    -- rather than an event with a guessed id, and core/event says so once per distinct reason.
     { "onDiscard", type = "function", sig = "fun(self: Item.Handle, ctx: table)",
-                   doc = "declarable; NO native source exists — fires only on a manual emit" },
+                   doc = "LIVE - dropped or trashed (ctx.count, ctx.reason = \"drop\" | \"dispose\")" },
 })
 
 ---What you pass to Item{ ... }. `id` is the only required field.
+-- `id` carries schema.validId, not schema.nonEmpty: a namespaced id has to survive
+-- object_manager.resolve to reach the game at all ("pack:Potion" -> the row spelling
+-- "pack_Potion"), so an id that cannot — "my-pack:Potion", a hyphen — is refused HERE rather
+-- than registering and being silently inert. The rule is written once, in core/schema.lua.
 local Spec = schema.define("Item.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "item id: a game ItemId (\"Wood\") or \"pack:name\"" },
     { "name",        type = "string",
                      doc = "display name for YOUR ui/tooling; not the in-game name (defaults to id)" },
@@ -138,7 +164,15 @@ local Spec = schema.define("Item.Spec", {
                      doc = "what kind of inventory content this is (PalForge's own classification)" },
     { "maxStack",    type = "number", default = 1,
                      doc = "stack ceiling you declare; the GAME's ceiling is a DataTable column" },
-    { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
+    -- ONE KIND OF THING, declared. `icon` used to carry no `type =` at all, while the live
+    -- lookup beside it answers a /Game/... asset PATH as a plain string (core/icons reads the
+    -- icon column as text — the TSoftObjectPtr in the row cannot be unwrapped from Lua, so
+    -- the string is not a convenience, it is the only value that route can produce). An
+    -- accessor that returns "a string path, or whatever you happened to declare" is one every
+    -- caller has to branch on, and native/ui/tree.lua does exactly that today. So the
+    -- declared fallback is a string path too, and :iconOf answers string|nil, always.
+    { "icon",        type = "string",
+                     doc = "/Game/... texture path used when the icon DataTable has no row for this id" },
     { "recipe",      type = "table", of = Recipe,
                      doc = "the recipe that produces THIS item (metadata; see Item.Spec.Recipe)" },
     { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
@@ -164,30 +198,48 @@ function Class:onDiscard(ctx) end
 
 -- This item's DECLARED recipe, or nil when none was declared. Override to build one
 -- dynamically. It never reads the game: a vanilla id answers nil even though
--- DT_ItemRecipeDataTable_Common has a row for it, because reading a row VALUE is the same
--- unsolved capability :iconOf is waiting on (see the marker there).
+-- DT_ItemRecipeDataTable_Common has a row for it. That is now the ONLY half of
+-- item-datatable-row-read still open — see the marker on :iconOf, which no longer waits on
+-- anything itself.
 function Class:recipeOf() return self.recipe end
 
--- The inventory icon. core.icons finds the live DT_ItemIconDataTable for real (the
--- FindAllOf sweep that dumped the 390-table catalog), but the last step — reading the row —
--- has never been observed to work from Lua on this build, so this falls back to the declared
--- self.icon and that is what you get in practice.
--- TODO(item-datatable-row-read): unknown which row-VALUE accessor a UDataTable exposes to
--- UE4SS Lua here (GetDataTableRowFromName / FindRow / something else) and what it hands back.
--- That accessor is now the ONLY missing piece for both :iconOf and :recipeOf. Everything
--- around it is measured, in dumps/reflection/01_datatables.txt, from a real session:
---   * the tables are loaded — DT_ItemIconDataTable (1207 rows) and
---     DT_ItemRecipeDataTable_Common (1414 rows on disk), both under /Game/Pal/DataTable/Item/;
---   * the row keys are the item ids ("Stone", "Wood", ...);
---   * the columns are no longer a guess. The icon column is `Icon` — NOT the IconName /
---     SoftIcon this comment used to claim, neither of which is a column of that table (see
---     core/icons ICON_COLUMNS_BY_TABLE). The recipe row struct carries Product_Id,
---     Product_Count, Material1_Id..Material5_Id, Material1_Count..Material5_Count, WorkAmount,
---     CraftExpRate, EnergyType, EnergyAmount, UnlockItemID, WorkableAttribute, DenyRecipeChain.
--- What the 2026-07 dumps cannot settle: the accessor itself. 02_reflection.txt covers 21
--- /Script/Pal.* classes only, so UDataTable / UDataTableFunctionLibrary are absent from it.
+-- The inventory icon, and THE ROW READ WORKS. This comment used to say that reading a
+-- DataTable row "has never been observed to work from Lua on this build"; that was true when
+-- it was written and stopped being true on 2026-07-26, when icons-row-read read
+-- DT_ItemIconDataTable in a live save and 1183 of its 1207 rows handed back an icon path
+-- (the other 24 are rows that genuinely carry none). So a vanilla item id resolves to the
+-- game's own artwork here and self.icon is the fallback it was always described as.
+--
+-- HOW it is read, because two obvious routes are dead ends and core/icons.lua:284-345 carries
+-- the full write-up: the row accessors are NOT UFunctions and not on UDataTable — UE4SS binds
+-- FindRow / GetRowNames / GetRowMap / GetAllRows / ForEachRow onto UDataTable itself, which is
+-- why every reflection sweep missed them (dumps/cxx/Engine.hpp shows UDataTable declaring five
+-- properties and ZERO functions). FindRow then works and the measured column IS on the row —
+-- but its value is a TSoftObjectPtr userdata that answers none of the nineteen member names a
+-- soft pointer could plausibly expose, so the struct cannot be opened from Lua. What is read
+-- instead is the whole column as text, via UDataTableFunctionLibrary::GetDataTableColumnAsString,
+-- zipped against dt:GetRowNames() — two calls per table, cached.
+--
+-- TODO(item-datatable-row-read): THE RECIPE HALF ONLY. :recipeOf still answers the declared
+-- recipe and never the game's, and what is unknown is no longer the accessor — it is whether a
+-- scalar / FName column can be indexed off the struct FindRow hands back. That was never tried:
+-- the TSoftObjectPtr failure that forced the column detour does not apply to an int32 or an
+-- FName. If the struct route stays shut, a recipe is assembled the way icons are, with one
+-- GetDataTableColumnAsString call per column — thirteen calls per table, once, cached, which is
+-- perfectly affordable. Everything around it is measured (dumps/reflection/01_datatables.txt,
+-- a real session): DT_ItemRecipeDataTable_Common is loaded under /Game/Pal/DataTable/Item/ with
+-- 1414 rows, the row keys are the item ids, and the row struct carries Product_Id,
+-- Product_Count, Material1_Id..Material5_Id, Material1_Count..Material5_Count, WorkAmount,
+-- CraftExpRate, EnergyType, EnergyAmount, UnlockItemID, WorkableAttribute, DenyRecipeChain.
+--
+-- THE ID IS RESOLVED FIRST (F-3/C5). The live table is keyed by the row spelling PalSchema
+-- writes, so `Item{ id = "pack:Potion" }:iconOf()` has to ask for "pack_Potion"; handing
+-- icons.resolve the raw "pack:Potion" could never hit a row, and every namespaced item silently
+-- looked like an item whose icon simply was not in the table. `or self.id` is the rule at every
+-- engine boundary: an id that fails to resolve falls back to the LITERAL, never to nothing.
 function Class:iconOf()
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, self.id) end)
+    local id = om.resolve(self.id) or self.id
+    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, id) end)
     if ok and tex ~= nil then return tex end
     return self.icon
 end
@@ -198,16 +250,26 @@ end
 
 ---The item domain. CALL it to define an item; the two named functions look existing ones up.
 ---@class palforge.item
----@overload fun(spec: Item.Spec): Item.Handle
+---@overload fun(spec: Item.Spec, opts: table?): Item.Handle
 local Item = {}
 
 local wrap  -- forward decl; the Item.Handle wrapper is defined in the BOTTOM section
 
 ---Define an item (give an item id behaviour + metadata) and register it.
 ---`spec` is validated against Item.Spec: `id` is required, unknown fields are an error.
+---
+---`opts` is optional and omitting it behaves exactly as it always has:
+---  { register = false }   build and return the handle, register NOTHING. This is what a
+---                         native catalog uses to fabricate a definition for a READ, so that
+---                         reading `native.items.Wood` stops writing to the registry.
+---  { pack = "mypack" }    register attributed to that pack, which is what gives a collision
+---                         a "who" (see object_manager.register). PalForge.pack("mypack").Item
+---                         is the same thing without passing it per call.
 ---@param spec Item.Spec
+---@param opts table?
 ---@return Item.Handle
-local function define(spec)
+local function define(spec, opts)
+    local register, pack = schema.defineOpts(opts, "Item")
     spec = Spec:validate(spec, "Item")
     local cls = setmetatable({
         id          = spec.id,
@@ -227,12 +289,16 @@ local function define(spec)
     for name, handler in pairs(spec.events or {}) do           -- onUse, ...
         cls[name] = function(_, ...) return handler(handle, ...) end
     end
-    pcall(function() om.register("item", spec.id, cls) end)  -- so core/event + get() find it
+    -- so core/event + get() find it — unless the caller asked for a definition that stays out
+    -- of the registry (opts.register == false), which is a build, not a define.
+    if register then
+        pcall(function() om.register("item", spec.id, cls, { pack = pack }) end)
+    end
     return handle
 end
 
 -- Calling the module IS defining:  Item{ id = "Berries", ... }
-setmetatable(Item, { __call = function(_, spec) return define(spec) end })
+setmetatable(Item, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get an EXISTING item by id: a previously-defined one, else a thin definition over any
 ---game ItemId (so vanilla items are actionable too). Never nil.
@@ -324,7 +390,9 @@ function Handle:onDiscard(ctx) if self._cls.onDiscard then return self._cls:onDi
 
 ---@return Item.Spec.Recipe?
 function Handle:recipeOf() return self._cls:recipeOf() end
----@return any?  # texture ref from the icon DataTable, else the declared icon
+---The icon as a /Game/... asset path: the live DataTable's row for this id, else the declared
+---`icon`, else nil. One kind of value, never an engine object — see the Item.Spec `icon` note.
+---@return string?
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
 function Handle:name() return self._cls.name or self.id end

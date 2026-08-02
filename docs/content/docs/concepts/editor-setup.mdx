@@ -103,11 +103,12 @@ _G.Pal = Pal
 ```
 
 The `---@overload` line on each module is what makes the braces complete — it tells the editor
-that `Pal{ ... }` takes a `Pal.Spec` and hands back a `Pal.Handle`:
+that `Pal{ ... }` takes a `Pal.Spec`, an optional second `opts` table
+(`{ register = false, pack = "mypack" }`), and hands back a `Pal.Handle`:
 
 ```lua title="Scripts/palforge/api/pal.lua"
 ---@class palforge.pal
----@overload fun(spec: Pal.Spec): Pal.Handle
+---@overload fun(spec: Pal.Spec, opts: table?): Pal.Handle
 local Pal = {}
 ```
 
@@ -130,11 +131,11 @@ Pal{
     name         string?                 shown in UI (defaults to id)
     description  string?                 one-line description, for UI and tooling
     skills       string[]?               skill ids this pal owns (see Skill)
-    mesh         Mesh.Spec|Mesh.Handle?  the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+    mesh         Mesh.Spec|Mesh.Handle?  the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
     material     Pal.Spec.Material?      material override applied to that mesh
     color        table?                  base tint { r, g, b, a } (shorthand for material.color)
     texture      string?                 png path applied to the mesh (shorthand for material.texture)
-    icon         any?                    fallback icon used when the DataTable lookup misses
+    icon         string?                 /Game/... texture path used when the icon DataTable has no row for this id
     events       Pal.Spec.Events?        lifecycle handlers (grouped)
     data         table?                  free-form payload of your own, carried onto the definition
 }
@@ -143,12 +144,15 @@ Pal{
 You get four things at once:
 
 - **Every field with its description.** The text after `#` in a `---@field` line is the
-  `doc =` string from the spec declaration, so hovering `maxStack` shows *inventory stack
-  ceiling (default 1)* — the default value included.
+  `doc =` string from the spec declaration, so hovering `maxStack` shows *stack ceiling you
+  declare; the GAME's ceiling is a DataTable column (default 1)* — the default value
+  included.
 - **A short menu where only a few values are allowed.** A field with a `values` list gets its
-  own named type. There are five: `Mesh.Spec.Kind`, `Item.Spec.Category`,
-  `Building.Spec.Mesh.Kind`, `Skill.Spec.Kind` and `Audio.Spec.Kind`.
-  Typing a quote after `kind =` offers exactly
+  own named type, and there are **30** of them. Five come from the domain specs —
+  `Mesh.Spec.Kind`, `Item.Spec.Category`, `Building.Spec.Mesh.Kind`, `Skill.Spec.Kind`,
+  `Audio.Spec.Kind` — and the other 25 from `api/ui.lua`: `UI.Spec.Input`,
+  `UI.Node.Button.LabelAlign`, `UI.Node.Sprite.From`, and an `HAlign` / `VAlign` pair on each
+  of the eleven node constructors. Typing a quote after `kind =` in a mesh offers exactly
   `"procedural"`, `"static"`, `"skeletal"`, `"obj"` and nothing else.
 - **Nested shapes, written either way.** `mesh` is typed `Mesh.Spec|Mesh.Handle`, because you
   can write the mesh inline *or* pass what a `Mesh{ ... }` call gave you back.
@@ -205,20 +209,33 @@ file describes types rather than real code, and nothing in the framework loads i
 --
 -- Regenerate with:  lua5.4 tools/gen-types.lua
 -- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
+--
+-- Annotations only: nothing requires this file at runtime. It exists so an editor
+-- (LuaLS / lua-language-server) can complete the fields of every X{ ... } call,
+-- show each field's meaning, and jump from a spec name to its field list.
 ---@meta
 
 ---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
 ---@class Mesh.Spec
 ---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
 ---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # USkeletalMesh / UStaticMesh asset path
+---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ```
 
-The file holds 18 classes, one per declared shape: `Pal.Spec`, `Pal.Spec.Events`,
-`Pal.Spec.Material`, `Item.Spec`, `Item.Spec.Recipe`, `Item.Spec.Events`, `Building.Spec`,
-`Building.Spec.Mesh`, `Building.Spec.Material`, `Building.Spec.Events`, `Skill.Spec`,
-`Skill.Spec.Events`, `Effect.Spec`, `Effect.Spec.Events`, `Audio.Spec`, `UI.Spec`,
-`Mesh.Spec` and `Coord`.
+The file holds **37 classes and 30 aliases**, and it is long: the generator reports 8752
+lines. Thirty of the classes are the declared shapes, one per name `schema.all()` returns —
+`Mesh.Spec`, `Pal.Spec` with its `Events` and `Material`, `Item.Spec` with its `Recipe` and
+`Events`, the four `Building.Spec.*`, `Skill.Spec` and its `Events`, `Effect.Spec` and its
+`Events`, `Audio.Spec`, the eleven `UI.Node.*` node shapes, `UI.Spec` and `UI.Spec.Host`,
+and `Coord`.
+
+The remaining seven, and almost all of the length, are the **native content catalogs**:
+`palforge.native.buildings`, `.items`, `.pals`, `.skills`, `.effects`, `.audio` and the
+`palforge.native` table that holds them. `native.items.Arrow_Fire` is served at runtime by
+a metatable `__index` (`native/_catalog.lua`), and an editor cannot see through a
+metatable, so the generator enumerates the names from the catalogs themselves — 8293 of
+them on this build. That is what makes a native id something you can discover by typing
+rather than something you have to already know.
 
 <Callout type="info">
 Deleting `types.lua` breaks completion and nothing else. The game does not read it, and
@@ -228,28 +245,40 @@ declarations in `Scripts/palforge/api/*.lua`, which is also where the file comes
 
 ## Regenerating types.lua
 
-Run the generator whenever a spec changes. It is a dev tool, and it runs on a plain Lua
-interpreter with the game closed:
+Run the generator whenever a spec changes. It is a dev tool, it runs on a plain Lua
+interpreter with the game closed, and it needs nothing but the repo:
 
 ```bash
 cd /path/to/PalForge
 lua5.4 tools/gen-types.lua
 ```
 
+It prints one line, and that line is the whole result:
+
 ```text
-wrote ./Scripts/palforge/types.lua (18 classes, 223 lines)
+wrote ./Scripts/palforge/types.lua (37 classes, 8752 lines, 8293 native catalog names)
 ```
 
-It writes `Scripts/palforge/types.lua` under whichever root you give it, defaulting to the
-folder you are standing in, so you can also run it from elsewhere:
+`classes` counts the `---@class` lines it wrote, `lines` is the length of the file it
+wrote, and `native catalog names` is how many `native.*` fields it enumerated out of the
+catalogs. The file is overwritten whole every run.
+
+The argument is the repo ROOT, not the output path. Given none it uses the folder you are
+standing in, so it always writes `<root>/Scripts/palforge/types.lua`:
 
 ```bash
 lua5.4 tools/gen-types.lua /path/to/PalForge
 ```
 
+It reaches the specs by `require`-ing `palforge.api`, which is what puts every shape into
+the schema registry, and then walks `schema.all()`. A catalog it cannot load is skipped
+with a `gen-types: skipping <module>` line on stderr rather than aborting the run, so a
+short `native catalog names` count is the sign that something failed to load.
+
 Re-run it whenever a `schema.define` or `schema.derive` call changes: a new field, a new
-allowed value, a changed default, a reworded description. `types.lua` is committed to the
-repo, so the regenerated file belongs in the same commit as the spec change.
+allowed value, a changed default, a reworded description — and whenever a native catalog is
+regenerated. `types.lua` is committed to the repo, so the regenerated file belongs in the
+same commit as the change that moved it.
 
 <Callout type="warn">
 Do not edit `types.lua` by hand. The next run of the generator rewrites the whole file.
@@ -286,7 +315,7 @@ the line the generator writes:
 | `mapOf = "number"` | `table<string, number>` |
 | `sig = "fun(self: Pal.Handle, ctx: table)"` | that signature verbatim |
 | `doc = "..."` | the text after `#` |
-| `check = schema.nonEmpty` | nothing — a check runs at define time only |
+| `check = schema.validId` | nothing — a check runs at define time only |
 | no `type` | `any` |
 
 Two things worth knowing:
@@ -297,7 +326,7 @@ Two things worth knowing:
   emits `Building.Spec.Mesh.Kind` with the same four values and a different stated default.
 - Classes come out in declaration order, grouped by the first part of the shape's name. That
   is why `Mesh.Spec` sits under a `Mesh` banner, and `Coord`, which has no domain prefix,
-  lands under `Common`.
+  lands under `Common`. The native catalog classes come last, after every declared shape.
 
 ## The names UE4SS adds while the game runs
 
@@ -347,11 +376,11 @@ Pal.Spec {
   name          string     shown in UI (defaults to id)
   description   string     one-line description, for UI and tooling
   skills        table      (string[]) skill ids this pal owns (see Skill)
-  mesh          table      (Mesh.Spec) the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+  mesh          table      (Mesh.Spec) the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
   material      table      (Pal.Spec.Material) material override applied to that mesh
   color         table      base tint { r, g, b, a } (shorthand for material.color)
   texture       string     png path applied to the mesh (shorthand for material.texture)
-  icon          any        fallback icon used when the DataTable lookup misses
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Pal.Spec.Events) lifecycle handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
 }
@@ -360,7 +389,7 @@ Pal.Spec {
 Ask for a name that was never declared and you get the list of names that were:
 
 ```text
-PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
+PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Node.Border, UI.Node.Button, UI.Node.Frame, UI.Node.GameWidget, UI.Node.HBox, UI.Node.Label, UI.Node.Overlay, UI.Node.ScrollBox, UI.Node.SizeBox, UI.Node.Sprite, UI.Node.VBox, UI.Spec, UI.Spec.Host
 ```
 
 The errors themselves are the third place the same information shows up. Every problem stops
@@ -371,7 +400,8 @@ all was spelled correctly:
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 PalForge: Pal: field "id" is required (pal id: a game CharacterID ("ChickenPal") or "pack:name")
 PalForge: Pal: field "mesh" (Mesh.Spec): field "kind" must be one of { "procedural", "static", "skeletal", "obj" }, got "voxel"
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
+PalForge: Pal: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Boss' (letters/digits/_ only)
 ```
 
 ## Recipes
@@ -445,7 +475,7 @@ shape:
 
 ```lua title="Scripts/palforge/api/skill.lua"
 local Spec = schema.define("Skill.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "skill id: a game row id or \"pack:name\"" },
     { "name",        type = "string", doc = "shown in skill lists (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
@@ -473,10 +503,10 @@ Classes come out in declaration order, so the new line lands last, and `range` i
 ---@field name? string # shown in skill lists (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field kind? Skill.Spec.Kind # an active skill is fired; a passive one is equipped (default active)
----@field element? string # attribute / element (fire, water, ...)
+---@field element? string # attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing
 ---@field cooldown? number # seconds between activations (enforced by :activate)
----@field power? number # base power / magnitude
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field power? number # base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Skill.Spec.Events # behaviour handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 ---@field range? number # metres the skill reaches

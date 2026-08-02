@@ -52,46 +52,38 @@
 --     live actors, which is where the pal <-> ABP pairing comes from.
 -- Anything derived from a naming CONVENTION rather than measured is behind palMesh() /
 -- palAnim(), which say so in their own docs. Nothing invented sits in the tables.
+--
+-- WHERE THE IDENTITY AND STRING HELPERS WENT. `live`, `classChain`, `isA`, `describe`,
+-- `isObjectPath` and `normalize` were all implemented HERE, and three of them were also
+-- implemented, differently, in core/sound/native.lua and core/icons.lua. That divergence had
+-- a live consequence in each direction: the sound loader shipped without the class check
+-- this file's header argues for, and this file's own `loadClass` parsed a path by a rule
+-- `normalize` did not use. So the bodies now live in core/uobject.lua (objects) and
+-- core/assetpath.lua (strings) and the six names below are THIN DELEGATIONS kept because
+-- public callers spell them `Mesh.assets.<name>` — api/mesh re-exports this whole table, and
+-- test/cases/mesh.lua asserts on four of them.
+
+local uo       = require("palforge.core.uobject")
+local assetpath = require("palforge.core.assetpath")
 
 local M = {}
 
 --=============================================================================
--- object identity
+-- object identity — delegations to core.uobject (see the header)
 --=============================================================================
 
 -- Is `o` a live UObject? Every IsValid in this file goes through here: a stale handle can
--- raise on the call itself and no caller may let that escape.
-local function live(o)
-    local ok, v = pcall(function() return o ~= nil and o.IsValid ~= nil and o:IsValid() end)
-    return ok and v == true
-end
+-- raise on the call itself and no caller may let that escape. core.uobject.live is that
+-- implementation now, and it carries the measurement that IsValid on this UE4SS is a real
+-- liveness check rather than a null check.
+local live = uo.live
 M.live = live
 
 ---An object's class chain as short class names, leaf first — for a USkeletalMesh:
 ---{ "SkeletalMesh", "SkinnedAsset", "StreamableRenderAsset", "Object" }.
----
----This is the GetSuperStruct walk core/signature.lua:116 already uses to find a UFunction on
----a native ancestor, and test/cases/player.lua:32 records it as proved in game. Bounded at 12
----so a cycle cannot hang the caller; fail-soft, so whatever was readable before a step failed
----is what comes back and an engine that answers nothing returns an empty list.
 ---@param obj any
 ---@return string[]
-function M.classChain(obj)
-    local out = {}
-    if not live(obj) then return out end
-    local k; pcall(function() k = obj:GetClass() end)
-    local depth = 0
-    while live(k) and depth < 12 do
-        local ok, name = pcall(function() return k:GetFName():ToString() end)
-        if not (ok and type(name) == "string" and #name > 0) then break end
-        out[#out + 1] = name
-        local parent
-        pcall(function() parent = k:GetSuperStruct() end)
-        if not live(parent) then pcall(function() parent = k.SuperStruct end) end
-        k, depth = parent, depth + 1
-    end
-    return out
-end
+function M.classChain(obj) return uo.classChain(obj) end
 
 ---Is `obj` an instance of `className` (or of anything deriving from it)? `className` is the
 ---SHORT UE name with no U/A prefix: "StaticMesh", "SkinnedAsset", "AnimBlueprintGeneratedClass".
@@ -102,25 +94,15 @@ end
 ---@param obj any
 ---@param className string
 ---@return boolean
-function M.isA(obj, className)
-    for _, name in ipairs(M.classChain(obj)) do
-        if name == className then return true end
-    end
-    return false
-end
+function M.isA(obj, className) return uo.isA(obj, className) end
 
 ---A one-line description of a live object for a log: "SkeletalMesh /Game/.../SK_PinkCat.SK_PinkCat".
 ---@param obj any
 ---@return string
-function M.describe(obj)
-    if not live(obj) then return "(nothing)" end
-    local chain = M.classChain(obj)
-    local full; pcall(function() full = obj:GetFullName() end)
-    return string.format("%s %s", chain[1] or "?", tostring(full or "?"))
-end
+function M.describe(obj) return uo.describe(obj) end
 
 --=============================================================================
--- paths
+-- paths — delegations to core.assetpath (see the header)
 --=============================================================================
 
 ---Is `path` a UE OBJECT path rather than a file on disk? Object paths are rooted at a mount
@@ -129,9 +111,7 @@ end
 ---lets a backend say which one it was handed.
 ---@param path any
 ---@return boolean
-function M.isObjectPath(path)
-    return type(path) == "string" and path:sub(1, 1) == "/"
-end
+function M.isObjectPath(path) return assetpath.isObjectPath(path) end
 
 ---Complete a package-only path to a full `<package>.<object>` object path, and leave an
 ---already-complete one alone. `/Game/A/SK_X` -> `/Game/A/SK_X.SK_X`.
@@ -146,12 +126,7 @@ end
 ---@param path string
 ---@param suffix string?
 ---@return string
-function M.normalize(path, suffix)
-    if type(path) ~= "string" or #path == 0 then return path end
-    local last = path:match("([^/]+)$")
-    if not last or last:find(".", 1, true) then return path end
-    return path .. "." .. last .. (suffix or "")
-end
+function M.normalize(path, suffix) return assetpath.normalize(path, suffix) end
 
 --=============================================================================
 -- resolve
@@ -159,8 +134,15 @@ end
 
 -- Successfully resolved objects, by the EXACT string that resolved them. Only successes are
 -- cached: a miss is usually "the package has not streamed in yet", and caching that would
--- keep a mesh unresolvable for the rest of the session. Weak VALUES, so an asset the engine
--- unloads does not stay pinned by this table alone.
+-- keep a mesh unresolvable for the rest of the session.
+--
+-- WEAK VALUES, and the reason is NOT the one this comment used to give ("so an asset the
+-- engine unloads does not stay pinned by this table alone"). Nothing PalForge holds has ever
+-- pinned a UObject: there is no AddToRoot and no FGCObject anywhere in UE4SS's Lua layer, so
+-- a strong reference here would not have kept an asset alive and a weak one does not let it
+-- die any sooner. What __mode = "v" actually buys is that the ENTRY can evaporate for
+-- unrelated reasons, which is harmless precisely because every hit is re-checked with
+-- live() below and a vanished entry simply resolves again.
 local cache = setmetatable({}, { __mode = "v" })
 
 ---Resolve `path` to a live UObject, LOADING it if it is not in memory yet.
@@ -203,8 +185,41 @@ function M.load(path, opts)
     -- the world is currently rendering).
     if not live(obj) then obj = nil; pcall(function() obj = StaticFindObject(full) end) end
     if not live(obj) then
-        return nil, string.format("%s did not resolve (LoadAsset ran and StaticFindObject "
-            .. "found nothing under that name - check the <package>.<object> tail)", full)
+        -- FOUR SITUATIONS PRODUCE THIS AND ONLY TWO OF THEM CAN BE TOLD APART FROM INSIDE
+        -- THE PROCESS. Saying so is the point: the single sentence this used to return
+        -- ("check the tail") sent an author looking for a typo when the likeliest cause was
+        -- that the package had not streamed in.
+        --   1. There is no LoadAsset at all — a headless run, or a UE4SS that does not
+        --      expose it. Distinguishable, and it is not the author's mistake.
+        --   2. The PACKAGE is in memory but carries no object under the tail we asked for.
+        --      Distinguishable, and it IS a tail typo — the case where naming the
+        --      <package>.<object> shape is the right advice, because the two halves are not
+        --      always the same word (/Game/Pal/Model/Prop/Mug/Sm_Mug.SM_Mug).
+        --   3/4. Nothing of that name is in memory and LoadAsset did not bring one in. The
+        --      path may be wrong, the asset may not be cooked into this build, or its
+        --      package may simply not have streamed in yet — and NOTHING readable from here
+        --      separates those three. The message says that rather than picking one.
+        if type(LoadAsset) ~= "function" then
+            return nil, string.format("%s did not resolve: this environment has no LoadAsset "
+                .. "(a headless run, or a UE4SS build that does not expose it), so nothing "
+                .. "could be brought into memory to look up", full)
+        end
+        local pkgPath = assetpath.packageOf(full)
+        if pkgPath ~= full then
+            local pkg; pcall(function() pkg = StaticFindObject(pkgPath) end)
+            if live(pkg) then
+                return nil, string.format("%s did not resolve, but its package %s IS in "
+                    .. "memory - so the <package>.<object> tail is wrong rather than the "
+                    .. "path (the two halves are not always the same word: "
+                    .. "/Game/Pal/Model/Prop/Mug/Sm_Mug.SM_Mug)", full, pkgPath)
+            end
+        end
+        return nil, string.format("%s did not resolve: LoadAsset ran and StaticFindObject "
+            .. "found nothing under that name, and its package is not in memory either. "
+            .. "Three causes are indistinguishable from here - the path is wrong, the asset "
+            .. "is not cooked into this build, or it has not streamed in yet. A path that "
+            .. "resolved earlier in the session and not now is the streaming case; "
+            .. "Mesh.assets carries paths measured off this build to compare against", full)
     end
 
     if opts.class and not M.isA(obj, opts.class) then
@@ -228,6 +243,16 @@ end
 ---`opts.class` defaults to "AnimBlueprintGeneratedClass", which is the class name
 ---dumps/reflection/04_live_objects.txt:15 printed when it read AnimClass off a live pawn.
 ---Returns cls, or nil + reason.
+---
+---THE PATH SPLIT IS core.assetpath's NOW, AND THAT FIXED TWO REAL DIVERGENCES. This function
+---used to parse a path by rules `normalize` did not share, and both were wrong in a way that
+---produced a plausible-looking string rather than an error:
+---  * it tested `find(".", 1, true)` over the WHOLE path, so a directory containing a dot
+---    ("/Game/My.Pack/ABP_X") was read as already carrying an object half and the class path
+---    came out package-only ("/Game/My.Pack/ABP_X_C"), which resolves to nothing;
+---  * it ran `gsub("_C$", "")` over the whole path, so a PACKAGE whose own name legitimately
+---    ends in _C ("/Game/A/Thing_C") had its asset path mangled to "/Game/A/Thing_C.Thing".
+---Only the last segment is inspected now, and the _C is stripped from the OBJECT half only.
 ---@param path string
 ---@param opts table?
 ---@return any cls, string? err
@@ -237,19 +262,23 @@ function M.loadClass(path, opts)
     if not M.isObjectPath(path) then
         return nil, string.format("%q is not a /Game/... object path", path)
     end
-    -- The ASSET path: whatever the caller wrote, minus any _C. Loading this is what puts the
-    -- generated class in memory; there is nothing else that will.
-    local asset = M.normalize(path)
-    asset = asset:gsub("_C$", "")
-    pcall(function() if type(LoadAsset) == "function" then LoadAsset(asset) end end)
-
-    -- The CLASS path: the same package, object half suffixed _C.
-    local classPath = path
-    if not classPath:find(".", 1, true) then
-        classPath = M.normalize(path, "_C")
-    elseif not classPath:find("_C$") then
-        classPath = classPath .. "_C"
+    -- Both spellings a pack might write reach the same two strings:
+    --   "/Game/.../ABP_X"                -> asset "/Game/.../ABP_X.ABP_X",  class "…ABP_X_C"
+    --   "/Game/.../ABP_X.ABP_X_C"        -> the same pair, named explicitly
+    local asset, classPath
+    local objHalf = assetpath.objectOf(path)
+    if objHalf then
+        local pkg  = assetpath.packageOf(path)
+        local bare = objHalf:gsub("_C$", "")
+        asset      = pkg .. "." .. bare
+        classPath  = pkg .. "." .. bare .. "_C"
+    else
+        asset     = assetpath.normalize(path)
+        classPath = assetpath.normalize(path, "_C")
     end
+    -- The ASSET path is what gets LOADED: loading it is what puts the generated class in
+    -- memory, and there is nothing else that will.
+    pcall(function() if type(LoadAsset) == "function" then LoadAsset(asset) end end)
 
     local cls
     pcall(function() cls = StaticFindObject(classPath) end)

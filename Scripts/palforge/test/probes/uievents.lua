@@ -13,7 +13,7 @@
 -- defers world.ready until the first completed scan). So from a SINGLE world load this
 -- measurement cannot be taken, and no amount of code changes that.
 --
--- What does change it is the sentence core/event.lua:779-782 already writes down:
+-- What does change it is the sentence core/event.lua:33 and :2161 both already write down:
 --
 --     "UE4SS has no unregister. On a SECOND world load in the same session the hook is still
 --      armed and will fire during that storm."
@@ -32,6 +32,22 @@
 --
 -- WHAT IT STILL COSTS, stated plainly: UE4SS cannot unregister a hook. Once armed, these four
 -- stay armed for the life of the process. Nothing removes them but quitting the game.
+--
+-- BOTH BLOCKS THIS FILE EMITS NAME `ui-update-event`, which is still OPEN in plan/TODO.md and
+-- still marked in api/ui.lua at Handle:autoRefresh (:1570) — so pasting either one into that item
+-- is exactly the right thing to do with it, unlike the closed-item blocks the other probes carry.
+--
+-- STILL A PROBE, NOT A TEST — it counts, prints and stops, asserting nothing. The game-required
+-- MEASUREMENT is moving to a declared hook under Scripts/palforge/test/hooks/, named after this
+-- same item id and run by name: `pf_hook ui-update-event`. Note what a hook CANNOT take here,
+-- because it is the whole difficulty of this item: the number that matters is only produced by
+-- quitting to the title and loading a save again, which is two menu actions across two world
+-- loads and nothing a single run of anything can perform. A hook can report what these counters
+-- hold; only this probe, armed and left alone, can fill them.
+--
+-- NO RAW TIMER. The sampler rides core/poll's single heartbeat (poll.every), so this file never
+-- creates a LoopAsync of its own and therefore never has to declare one to core/reload's async
+-- guard the way probes/watch.lua does. That is the migration core/poll.lua:18-36 exists for.
 local probe   = require("palforge.test.probe")
 local poll    = require("palforge.core.poll")
 local event   = require("palforge.core.event")

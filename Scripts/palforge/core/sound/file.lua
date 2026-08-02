@@ -1,6 +1,19 @@
 -- PalForge core.sound.file: FileSource — a custom audio file (spec.path). TODO SEAM.
 --
--- Reached by an Audio definition that sets `soundFile`. Palworld routes ALL of its audio through
+-- NO DEFINITION REACHES THIS ANY MORE, BY CONSTRUCTION. `Audio.Spec.soundFile` is a HARD ERROR
+-- at define time (api/audio.lua): the field is still declared, so the error can name it and say
+-- what to use instead, but no Audio{ ... } call can carry one. The reason is the one thing in
+-- this seam that was not honest — soundFile took PRECEDENCE over soundId/soundPath, so adding
+-- it beside a working soundId SILENCED a sound that had been playing, and :play then returned
+-- the false that came from here. A field that makes working audio silent is worse than a field
+-- that does not exist, so it refuses at the point where the author can still see it.
+--
+-- The two ways left in are both deliberate: a definition's own `source` override returning
+-- `{ kind = "file", path = ... }`, and a direct `core.sound.resolve{ kind = "file", ... }`. Both
+-- are code someone wrote on purpose, and both still land on the `return false` below.
+--
+-- Everything from here down is the evidence for WHY it is false, and it is what will have to be
+-- overturned before soundFile can be accepted again. Palworld routes ALL of its audio through
 -- Wwise (every shipped sound is an AkAudioEvent asset, see native/audio.lua), so playing a .wav
 -- off disk needs either an engine USoundWave/USoundBase importer that survives in a shipping
 -- build, or a Wwise external-source entry point. dumps/cxx answered BOTH halves, and only one of
@@ -56,6 +69,12 @@ local SoundSource = require("palforge.core.sound.base.source")
 local FileSource = SoundSource:extend("FileSource")
 
 -- Play a custom audio file on `actor`. Fail-soft no-op: returns false, never throws.
+--
+-- It stays `return false` rather than becoming an error, because the two callers that can still
+-- reach it (see the header) are code that opted in, and the SoundSource contract this class
+-- implements is that a source which could not reach the engine reports false. There is nothing
+-- to call: dumps/cxx closed the UE-native half outright and the Wwise half takes cooked media
+-- rather than a file, so a `true` here would be a lie in the one place a caller checks.
 function FileSource:play(actor)
     return false
 end

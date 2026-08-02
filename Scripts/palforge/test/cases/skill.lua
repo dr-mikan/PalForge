@@ -17,6 +17,10 @@ local character = require("palforge.core.character")
 
 local s = T.suite("skill")
 
+-- Hand every namespaced definition this file registers back to the registry as soon as the
+-- suite finishes; object_manager has no expiry, so nothing else would.
+support.sweepAfter(s)
+
 -- Long enough that a second :activate in the same test can never fall outside it, so no
 -- test ever waits on a clock. Nothing here sleeps.
 local LONG_CD = 60.0
@@ -173,6 +177,17 @@ s:test("emitting a skill channel reaches the DEFINED skill with the right subjec
     -- This is the half of the 導線 a test can own. The other half — whether the game calls
     -- PlayActionByWazaID / MakeDamageInfoByWazaType / Add|RemovePassiveSkill — is what F8's
     -- watch probe is for, and no assertion here can stand in for it.
+    --
+    -- The four skill.* channels only reach a definition once core/event's DISPATCH is
+    -- installed. In game the kernel has already done it — registry.initialize() calls
+    -- event.start() long before F1 loads this file — so this line is a no-op there; start() is
+    -- idempotent. It is here because a HEADLESS run has no kernel, and the suites are loaded in
+    -- registration order: skill comes before item, which is the one file that was ensuring
+    -- this (test/cases/item.lua's dispatchReady, for the identical reason on the item.*
+    -- channels), so every assertion below failed for want of a subscriber rather than for
+    -- anything about skills. Same fact, same fix, stated in both places.
+    pcall(function() event.start() end)
+
     local id = support.id("skill")
     local seen = {}
     local sk = Skill{ id = id, events = {
@@ -292,6 +307,50 @@ s:test("the cooldown is per owner, so two pals fire the same skill independently
     t:eq(sk:cooldownLeft(), 0, "the ownerless bucket is untouched by any owner")
     t:eq(sk:activate(), true, "the ownerless activate fires")
     t:eq(sk:activate(), false, "and then cools down like any other")
+end)
+
+-- A-1 / contract C1. Every owner above is a plain Lua table, and a plain Lua table IS
+-- identity-stable — so the cooldown table looked up correctly here while doing NOTHING in a
+-- world: UE4SS mints a fresh userdata wrapper per lookup, Lua indexes a table by userdata
+-- identity, and `lastFire` was keyed on the owner handle. :activate(pawn) stamped the clock
+-- under whichever wrapper the caller held, and the next :activate — reached through a pawn
+-- from a later FindAllOf, or from an event's ctx.owner — found an empty bucket and fired
+-- immediately. A declared cooldown was simply ignored, silently, for every engine owner.
+-- The stand-in is the mesh suite's: two Lua values answering ONE GetFullName are exactly
+-- what two references to one pawn are.
+local function stubOwner(name)
+    return { IsValid = function() return true end, GetFullName = function() return name end }
+end
+
+s:test("two handles onto one owner share one cooldown: the clock is stamped under the full name", function(t)
+    local NAME = "BP_ChickenPal_C /Game/Test/Level:PersistentLevel.BP_ChickenPal_C_4"
+    local a1, a2 = stubOwner(NAME), stubOwner(NAME)
+    t:neq(a1, a2, "two DIFFERENT Lua values, which is what UE4SS really hands out")
+
+    local calls = 0
+    local sk = Skill{ id = support.id("skill"), cooldown = LONG_CD,
+        events = { onActivate = function() calls = calls + 1 end } }
+
+    t:eq(sk:activate(a1), true, "the first activate fires")
+    -- THE ASSERTIONS THE OLD KEY COULD NOT PASS.
+    t:eq(sk:activate(a2), false, "the second is refused through a DIFFERENT handle onto the "
+        .. "same pal, which is the only shape a live caller ever has")
+    t:eq(calls, 1, "so the handler really ran once, not twice")
+    t:assert(sk:cooldownLeft(a2) > 0, "and cooldownLeft reports the remainder through it too")
+
+    -- A different pal is still a different bucket: the fix must not collapse every owner
+    -- into one clock, which a naive "just use one key" would.
+    local other = stubOwner("BP_ChickenPal_C /Game/Test/Level:PersistentLevel.BP_ChickenPal_C_5")
+    t:eq(sk:activate(other), true, "another pal is not blocked by this one's cooldown")
+end)
+
+s:test("an owner that will not answer its own name still gets a cooldown bucket", function(t)
+    -- uo.key is nil for it and `t[nil]` raises, so the fallback is the handle itself — the
+    -- pre-C1 behaviour for that one object, which still works for the caller holding it.
+    local mute = { IsValid = function() return true end }
+    local sk = Skill{ id = support.id("skill"), cooldown = LONG_CD }
+    t:eq(sk:activate(mute), true, "the first activate fires")
+    t:eq(sk:activate(mute), false, "and the same value is refused the second time")
 end)
 
 s:test("two handles over the same definition share one cooldown", function(t)
@@ -470,8 +529,8 @@ s:test("the live pawn's own skill lists are readable -- TODO(pal-skills-equip)",
     -- getters. If this works and a write below does not, the problem is authority, not reach.
     local skills = character.skillsOn(pawn)
     if skills == nil then
-        t:skip("the character parameters could not be read on this pawn — the [signature] log line "
-            .. "names which lookup failed, and that line IS the finding")
+        t:skipUnanswerable("the character parameters could not be read on this pawn — the "
+            .. "[signature] log line names which lookup failed, and that line IS the finding")
     end
     t:type(skills.active, "table", "the active-skill list comes back as a list")
     t:type(skills.passive, "table", "and so does the passive one")
@@ -513,8 +572,11 @@ end)
 -- into a character in the player's real save, and F1 is a key they press constantly. A test that
 -- MIGHT take the game down is not worth running unattended for a question that can wait.
 --
--- To run it deliberately, set the flag from the UE4SS console and press F1:
---     _G.PALFORGE_TEST_WRITE_WAZA = true
+-- To run it deliberately, arm the opt-in and press F1. EITHER SPELLING WORKS:
+--     env.debugHooks["pal-skills-equip"] = true   -- in Scripts/palforge_dev.lua (the canonical
+--                                                 -- one; tools/deploy.sh writes that file and
+--                                                 -- the same switch arms the declared hook)
+--     _G.PALFORGE_TEST_WRITE_WAZA = true          -- from the UE4SS console (the older one)
 -- Do that on a throwaway save, with a pal you do not mind losing.
 --
 -- The read half above still runs every time and is where the useful signal now is: if a real
@@ -522,9 +584,27 @@ end)
 -- better lead than any write result.
 s:test("an active skill can be taught to a live PAL and taken back off -- TODO(pal-skills-equip)", function(t)
     support.needWorld(t)
-    if not _G.PALFORGE_TEST_WRITE_WAZA then
-        t:skip("writing a move to a live pal is opt-in: it correlates with a crash and has never "
-            .. "been seen to land. Set _G.PALFORGE_TEST_WRITE_WAZA = true on a throwaway save to run it")
+    -- THE OPT-IN HAS TWO SPELLINGS AND THE QUESTION IS ASKED WHERE BOTH ARE KNOWN.
+    -- `env.debugHooks["pal-skills-equip"]` is the canonical switch (env.lua, and what
+    -- tools/deploy.sh writes into Scripts/palforge_dev.lua); `_G.PALFORGE_TEST_WRITE_WAZA` is
+    -- the older one that plan/TODO.md, core/character.lua:86 and the comment above all name.
+    -- test/hooks/init.lua's writeAllowed() is the single place that honours both, so it is
+    -- asked rather than re-implemented here: a tester who armed the canonical switch and then
+    -- watched F1 skip anyway would have no way to tell that from the write being refused for a
+    -- real reason, and "the switch was on and nothing happened" is precisely the failure shape
+    -- this whole explicit-skip regime exists to abolish. Requiring that module is safe with
+    -- env.debug off — writeAllowed reads a table and a global and declares nothing.
+    local armed = false
+    pcall(function() armed = require("palforge.test.hooks").writeAllowed("pal-skills-equip") end)
+    if not armed then
+        -- Named as a HOOK rather than a bare skip, because "off by default" has to stay
+        -- traceable to something that can actually be run. test/hooks/pal-skills-equip is the
+        -- declared, gated route for exactly this write (C7: needs a world and a pal, writes,
+        -- so it also wants env.debugHooks["pal-skills-equip"]).
+        t:skipNeedsHook("pal-skills-equip",
+            "writing a move to a live pal is opt-in: it correlates with a crash and has never "
+            .. "been seen to land. Set env.debugHooks[\"pal-skills-equip\"] = true (or the older "
+            .. "_G.PALFORGE_TEST_WRITE_WAZA = true) on a throwaway save to run it from F1 instead")
     end
 
     -- ON A PAL, NOT ON THE PLAYER, and that distinction is a finding rather than a preference.
@@ -535,11 +615,15 @@ s:test("an active skill can be taught to a live PAL and taken back off -- TODO(p
     -- meaningless on that target, and testing it there could never tell the two apart.
     local pal, palClass = support.nearbyPal()
     if not pal then
-        t:skip("no pal near the player — whistle one out and run this again; the player pawn is "
-            .. "the wrong target for equipped moves and would not answer the question")
+        t:skipNeedsSetup("no pal near the player — whistle one out and run this again; the "
+            .. "player pawn is the wrong target for equipped moves and would not answer the "
+            .. "question")
     end
     support.log("skills: teaching against a " .. tostring(palClass))
-    if character.skillsOn(pal) == nil then t:skip("character parameters unreadable on that pal") end
+    if character.skillsOn(pal) == nil then
+        t:skipUnanswerable("character parameters unreadable on that pal — the [signature] line "
+            .. "names the lookup that failed")
+    end
 
     -- Human_Punch is chosen deliberately: it is the plainest move in the game, so a run that
     -- somehow leaves it behind changes nothing anyone would notice. Nothing in this suite may
@@ -549,7 +633,10 @@ s:test("an active skill can be taught to a live PAL and taken back off -- TODO(p
     local pawn = pal
     local had = false
     for _, n in ipairs(character.skillsOn(pal).active) do if n == SKILL then had = true end end
-    if had then t:skip("that pal already has " .. SKILL .. "; a clean before/after is not possible") end
+    if had then
+        t:skipNeedsSetup("that pal already has " .. SKILL
+            .. "; a clean before/after is not possible — run it against a different pal")
+    end
 
     -- Under pcall so the skill is always taken back off, including when an assertion raises.
     local ok, err = pcall(function()

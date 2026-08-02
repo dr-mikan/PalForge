@@ -2,28 +2,61 @@
 -- through api/building the same way a pack declares its own.
 --
 --   local buildings = require("palforge.native.buildings")
---   buildings.PalBoxV2:instances()      -- a NAMED handle for every row the game has
+--   buildings.PalBoxV2:iconOf()         -- a NAMED handle for every row the game has
 --   buildings.get("PalBoxV2")           -- the same handle, by id string
 --   buildings.WorkBench:unlock()        -- curated: carries a mesh and a display name
+--   buildings.publish("PalBoxV2")       -- opt in to TRACKING (and to persistence) — see below
 --
 --   (a) M.CATALOG  — every DT_BuildObjectDataTable_Common row id, 498 of them.
 --   (b) M.<Name>   — a Building handle per row, built on first read. native/_catalog.lua owns
 --                    the naming rule; for this table it is the identity, because every one of
 --                    the 498 ids is already a Lua identifier.
 --   (c) M.get(id)  — the same handles by id string; nil for anything not in the catalog.
---   (d) CURATED    — a few hand-written definitions (mesh + display name).
+--   (d) M.publish(id) — register that handle as a live building definition. THE ONLY THING IN
+--                    THIS FILE THAT MAKES PALFORGE WRITE TO A SAVE.
+--   (e) CURATED    — a few hand-written definitions (mesh + display name).
 --
--- Only the CURATED definitions call Building{ ... } at load, so only they self-register into
--- object_manager at mod start; a named field and get(id) both define on demand. That is why
--- requiring this file never registers the hundreds of catalog ids.
+-- NOTHING IN THIS FILE REGISTERS ANYTHING AT LOAD, AND A READ REGISTERS NOTHING EITHER. That is
+-- a deliberate change (2026-08-02) and it is the one item in this file with a save file on the
+-- other end of it, so the measurement is written out rather than summarised:
+--
+--   * core/event.lua's refreshDefs walks object_manager.all("building") before each
+--     500 ms scan. Every registered def is matched against the live actors, every match becomes
+--     a TRACKED instance, and a newly tracked instance is PERSISTED immediately
+--     (core/event.lua's scan -> persist(), which writes a record into the per-world
+--     entities_<saveid> JSON). Nothing DELETES those records: the orphan pass added with F-7
+--     quarantines a record whose build id no definition claims any more — it moves to the
+--     file's `orphans` section, is logged, and moves back the moment something claims the id
+--     again — so un-publishing a building later does not undo the writing, it relabels it.
+--     Deliberately: quarantine is conservative because a pack that is merely not loaded today
+--     must not cost the player their structures' state. The only thing that ever removes a
+--     record is the ORPHAN_MAX cap, oldest first. So "do not write it in the first place" is
+--     still the whole of the defence, which is what this file does.
+--   * So `buildings.Stone_Foundation` used to be enough — one field read, in a tooltip — to
+--     start writing a record for every stone foundation in the base, and walking M.CATALOG to
+--     fill a picker registered all 498 and persisted the whole base.
+--   * Worse, two of them did it with nobody reading anything: M.WorkBench and M.PalBox were
+--     unconditional `Building{...}` calls at module load, so every install wrote a JSON record
+--     for every workbench and pal box in every save, for content no pack had asked for. A
+--     framework may not leave a growing file in a player's install as the price of being
+--     installed.
+--
+-- The handles are unchanged; only their REGISTRATION is now opt-in. M.get / the named fields
+-- build with `{ register = false }` (contract C2), and M.publish(id) hands the very same cached
+-- handle to object_manager when a pack decides it wants the tracking.
 --
 -- WHAT A LAZY NATIVE HANDLE HONESTLY DOES, because a Building handle carries more actions than
 -- a bare vanilla id can back:
---   * :instances() / :unlock() / the lifecycle handlers are REAL for every id here. Each one is
---     a build-object row, so core/event's building runtime resolves placed actors to it and the
---     technology row unlock takes the same id.
+--   * :unlock() and :iconOf() are REAL for every id here and need no registration at all: both
+--     are id-driven table reads, and each id is a real build-object row.
+--   * :instances() — and with it the lifecycle handlers, the deferred mesh attach and the
+--     persisted record — answers EMPTY until you call M.publish(id) (or define your own
+--     Building{ id = <the same id> }). It is core/event's registry-driven scan that fills it,
+--     and an unregistered def is not in that registry. This is the publish gate above, stated
+--     from the caller's side: tracking is a real capability with a real cost, so it is asked
+--     for rather than assumed.
 --   * :render() returns 0 and that is correct, not a failure. Building.Handle:render attaches
---     PalForge's OWN declared mesh to the live actors (api/building.lua:284) and a lazy handle
+--     PalForge's OWN declared mesh to the live actors (api/building.lua:295) and a lazy handle
 --     declares none — the game is already drawing the structure's real mesh. Only the curated
 --     entries below, and a definition of your own, have a mesh to attach.
 --   * :iconOf() DOES answer for real: core/icons reads DT_BuildObjectIconDataTable keyed by
@@ -32,6 +65,29 @@
 --   * :name() answers the id, not the in-game name. The localised one is a DT_BuildObjectNameText
 --     row VALUE, and reading a row value from Lua is still unsolved on this build (the
 --     item-datatable-row-read marker in api/item.lua). A curated entry names itself by hand.
+--
+-- ONE STRUCTURE, TWO SPELLINGS, AND WHAT THAT COSTS YOU. The game itself spells the primitive
+-- workbench two ways and this catalog carries both, because both are real:
+--
+--   "WorkBench"  — the BLUEPRINT id (live actor BP_BuildObject_WorkBench_C). It is what the
+--                  building runtime keys on, so it is the id the curated definition below uses
+--                  and the id M.publish("WorkBench") makes track real workbenches.
+--   "Workbench"  — the DT_BuildObjectDataTable_Common row FName (lowercase b), and therefore
+--                  the key DT_BuildObjectIconDataTable answers to.
+--
+-- The consequence is not theoretical and it is not a typo to be fixed: `buildings.WorkBench` and
+-- `buildings.Workbench` are TWO HANDLES for ONE structure with DIFFERENT capabilities.
+-- `buildings.WorkBench:iconOf()` MISSES (there is no row of that spelling) and
+-- `buildings.Workbench:iconOf()` HITS; conversely it is the "WorkBench" spelling that tracking
+-- keys on, per the dump note on the curated definition below, so that is the one to publish.
+-- native/pals.lua has exactly the same split for SheepBall / Sheepball, for the same reason.
+--
+-- What is done about it here, given that neither spelling can be dropped: the alternate is
+-- carried as DATA in M.ROW_ID, and M.iconOf(id) follows it — so `buildings.iconOf("WorkBench")`
+-- answers the game's own artwork while `buildings.WorkBench:iconOf()` still misses. Handle:iconOf
+-- cannot consult it: it is api/building.lua's method and it reads self.id and self.icon only. A
+-- Building.Spec field for the icon-table spelling (`iconId`) would close the gap on the handle
+-- itself; until it exists this module's iconOf is the whole of it.
 
 local Building = require("palforge.api.building")
 local catalog  = require("palforge.native._catalog")
@@ -144,25 +200,89 @@ M.ALIASES = aliases
 M.UNNAMED = unnamed
 
 -- get(id): a Building wrapper for ANY real catalog id, built on first use + cached.
--- Returns nil if id is not a known build-object row. defining sets .id and registers
--- the class into object_manager. NOT called eagerly — nothing walks the whole catalog,
--- and neither does reading a named field, which comes through here.
+-- Returns nil if id is not a known build-object row. NOT called eagerly — nothing walks the
+-- whole catalog, and neither does reading a named field, which comes through here.
+--
+-- `{ register = false }` (contract C2) is the publish gate, and for THIS domain it is the
+-- difference between a read and a write to the player's save: a registered building def is
+-- picked up by core/event's refreshDefs on the next 500 ms scan and every matching actor in the
+-- world becomes a tracked, persisted instance. See the header. The handle is fully built and
+-- fully cached — only object_manager is left out of it, until M.publish(id) says otherwise.
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Building{ id = id }
+    local h = Building({ id = id }, { register = false, pack = catalog.PACK })
     cache[id] = h
     return h
 end
 
--- ---- CURATED wrappers (real dump ids, with mesh + lifecycle) ----
+---Publish this catalog's handle for `id` as a LIVE building definition: register it with
+---object_manager so core/event's scan starts resolving placed actors to it. That is what turns
+---:instances(), the lifecycle handlers, the deferred mesh attach and the persisted record on —
+---and it is also what starts writing to the save, which is why it is a call and not a read.
+---
+---Idempotent, and it publishes the SAME handle the named field hands back, so a curated entry
+---keeps its mesh and its display name. Returns nil for an id this catalog does not have.
+---
+---   local buildings = require("palforge.native.buildings")
+---   buildings.publish("WorkBench")            -- now workbenches are tracked and persisted
+---   for _, inst in ipairs(buildings.WorkBench:instances()) do ... end
+---
+---@param id string
+---@return Building.Handle?
+function M.publish(id)
+    local h = M.get(id)
+    if not h then return nil end
+    catalog.publish("building", h, "native.buildings")
+    return h
+end
 
--- WorkBench — the vanilla primitive workbench, bound to Palworld's OWN build object.
--- Real dispatch/build id "WorkBench" (live actor BP_BuildObject_WorkBench_C,
--- dump/04_live_objects + 06_events). The DT_BuildObjectDataTable row FName is spelled
--- "Workbench" (lowercase b); the runtime keys off the BP id, so we define under
--- "WorkBench" — which is therefore NOT itself a CATALOG member (pre-seeded below).
-M.WorkBench = Building{
+---The DataTable row spelling for an id whose BLUEPRINT spelling differs — the two-spellings
+---note in the header. Published as data so the mismatch is readable at runtime rather than
+---folklore, and consumed by M.iconOf below.
+M.ROW_ID = { WorkBench = "Workbench" }
+
+---This structure's icon, resolved through BOTH spellings: the id as given, then the row
+---spelling M.ROW_ID knows it by. `buildings.WorkBench:iconOf()` misses because the icon table
+---is keyed by the DataTable row FName and "WorkBench" is not one; this function is the way in
+---that does not make the caller know that.
+---@param id string
+---@return any?  # texture ref from DT_BuildObjectIconDataTable, else nil
+function M.iconOf(id)
+    local h = M.get(id)
+    local tex = h and h:iconOf()
+    if tex ~= nil then return tex end
+    local row = id and M.ROW_ID[id]
+    local rh = row and M.get(row)
+    return rh and rh:iconOf() or nil
+end
+
+-- ---- CURATED wrappers (real dump ids, with mesh + display name) ----
+--
+-- THESE TWO USED TO REGISTER THEMSELVES AT MODULE LOAD, and that is the defect this file was
+-- opened for. `require("palforge.native.buildings")` happens at mod start for every install
+-- (core/registry.lua:30), so an unconditional Building{...} here meant core/event tracked and
+-- PERSISTED every workbench and every pal box in every save from the first scan onwards, for
+-- content nobody had asked for, into a file that only ever grows — the orphan pass added since
+-- (core/event.lua's pruneOrphans) QUARANTINES a record nothing claims rather than deleting it,
+-- by design, so removing the definition afterwards would not have undone the write.
+--
+-- They are still declared here, in full, with their meshes — a pack can read them, unlock them,
+-- ask them for an icon, and take their mesh spec. What changed is that the declaration is no
+-- longer a REGISTRATION: `{ register = false }` builds and returns the handle and stops there.
+-- Everything registration bought is one call away and is now attributable to whoever made it:
+--
+--   require("palforge.native.buildings").publish("WorkBench")
+--
+-- and a pack that wants its own behaviour on the same structure keeps doing what it always did,
+-- which is to declare Building{ id = "WorkBench", events = { ... } } and be registered by it.
+
+M.WorkBench = Building({
+    -- WorkBench — the vanilla primitive workbench, bound to Palworld's OWN build object.
+    -- Real dispatch/build id "WorkBench" (live actor BP_BuildObject_WorkBench_C,
+    -- dump/04_live_objects + 06_events). The DT_BuildObjectDataTable row FName is spelled
+    -- "Workbench" (lowercase b); the runtime keys off the BP id, so we define under
+    -- "WorkBench" — which is therefore NOT itself a CATALOG member (pre-seeded below).
     id          = "WorkBench",
     name        = "Workbench",
     gridCm      = 100,
@@ -170,11 +290,11 @@ M.WorkBench = Building{
         kind  = "static",
         model = "/Game/Pal/Model/Prop/Architecture/WorkBenchPrimitive/SM_WorkBenchPrimitive.SM_WorkBenchPrimitive",
     },
-}
+}, { register = false, pack = catalog.PACK })
 
--- PalBox — the base-camp Pal storage box. Real build id "PalBoxV2" (live actor
--- BP_BuildObject_PalBoxV2_C; DT row FName also "PalBoxV2", a CATALOG member).
-M.PalBox = Building{
+M.PalBox = Building({
+    -- PalBox — the base-camp Pal storage box. Real build id "PalBoxV2" (live actor
+    -- BP_BuildObject_PalBoxV2_C; DT row FName also "PalBoxV2", a CATALOG member).
     id          = "PalBoxV2",
     name        = "Pal Box",
     gridCm      = 100,
@@ -182,7 +302,7 @@ M.PalBox = Building{
         kind  = "static",
         model = "/Game/Pal/Model/Other/PalBox/SM_PalBox.SM_PalBox",
     },
-}
+}, { register = false, pack = catalog.PACK })
 
 -- Pre-seed curated into the get() set + cache so get(id) returns the curated handle
 -- (mesh/lifecycle intact) rather than a bare one, and so get("WorkBench") resolves even
@@ -191,9 +311,11 @@ M.PalBox = Building{
 -- NOTE what this makes of the named fields, because the two spellings are BOTH real and mean
 -- different things. `buildings.WorkBench` is the curated handle on the blueprint id the runtime
 -- dispatches by; `buildings.Workbench` is the DataTable row, whose lazy handle is what the icon
--- table answers to. Neither is a typo for the other and neither is hidden. The same holds for
--- M.PalBox, which is a nickname rather than an id — `buildings.PalBoxV2` is the row's own name
--- and resolves to this very handle through the cache below.
+-- table answers to. Neither is a typo for the other and neither is hidden — the split is written
+-- out in the header and carried as data in M.ROW_ID, and M.iconOf(id) is the one call that
+-- follows it. The same holds for M.PalBox, which is a nickname rather than an id —
+-- `buildings.PalBoxV2` is the row's own name and resolves to this very handle through the cache
+-- below.
 for _, h in ipairs({ M.WorkBench, M.PalBox }) do
     set[h.id] = true
     cache[h.id] = h

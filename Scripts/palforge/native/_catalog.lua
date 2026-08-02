@@ -27,10 +27,14 @@
 --     FName row keys of a UDataTable, which cannot repeat. Two distinct ids therefore cannot
 --     want the same field, and no tie-breaking is needed because no tie can occur.
 --
---     MEASURED, over the five catalogs this file serves (dumps/catalog/datatables/, 2026-07):
---     8259 of 8261 ids take this branch — all 498 build-object ids, all 2466 item ids, all 753
---     pal ids, all 1957 AkAudioEvent names, all 38 EPalStatusID names, and 2585 of the 2587
---     skill rows.
+--     MEASURED, over the six catalogs this file serves (dumps/catalog/datatables/, 2026-07;
+--     re-derived from the loaded modules 2026-08-02): 8297 of 8299 ids take this branch — all
+--     498 build-object ids, all 2466 item ids, all 753 pal ids, all 1957 AkAudioEvent names,
+--     all 38 EPalStatusID names, and 2585 of the 2587 skill rows.
+--
+--     This used to read "8259 of 8261, over the five catalogs", which listed native.effects'
+--     38 EPalStatusID names in the breakdown and then left them out of both the total and the
+--     count of catalogs. The breakdown was right; the totals were 38 and one short.
 --
 -- (2) NORMALISATION. Anything else becomes an identifier: every byte outside [A-Za-z0-9_] is
 --     replaced by "_", a result that starts with a digit gets a "_" in front of it, an empty
@@ -62,7 +66,7 @@
 --
 --     Rule (1) cannot participate in a collision, so this can only ever be provoked by rule
 --     (2) — i.e. by ids the game spells with punctuation. Today that is two ids and they do
---     not collide with anything, so M.UNNAMED is empty in all five catalogs.
+--     not collide with anything, so M.UNNAMED is empty in all six catalogs.
 --
 -- (4) THE MODULE'S OWN SURFACE WINS, AND SAYS SO. Named fields are served by a metatable
 --     __index, which fires only for keys the module does not really have — so an id spelled
@@ -74,20 +78,29 @@
 --     A CURATED field that stands for its own id is not a conflict and is not reported:
 --     `buildings.WorkBench` is a Building handle whose .id is "WorkBench", so the field and the
 --     lazy lookup would have produced the same thing — the field just gets there first, with
---     the hand-written mesh on it. Measured: no id in any of the five catalogs collides with
---     any module field, and the three that share a name with a curated field (items.Wood /
---     Berries / Arrow) are all of the harmless kind.
+--     the hand-written mesh on it. Measured 2026-08-02, by walking each loaded module against
+--     its own membership set: no id in any of the six catalogs is really shadowed, and the
+--     EIGHT module fields whose name is also a member id are all of the harmless kind —
+--     items.Wood / Berries / Arrow, effects.Poison / Burn / Freeze, buildings.WorkBench and
+--     pals.SheepBall, each a curated field whose .id IS the key. (The count used to say
+--     "three": it named the items and stopped there.) skills.FlameThrower is not among them
+--     because its module field is the NICKNAME M.Fireball.
 --
 --=============================================================================
 -- WHY THE NAMED FIELDS ARE LAZY, AND WHY THEY ARE NOT CACHED ONTO THE MODULE
 --=============================================================================
 --
--- 8261 eager definition calls would put 8261 classes into object_manager at mod load — content
+-- 8299 eager definition calls would put 8299 classes into object_manager at mod load — content
 -- nobody asked for, in the registry that core/event walks — for a catalog whose whole point is
 -- that most of it is never touched. So a named field is a metatable __index that resolves to
 -- the module's own get(id), which already builds on first use and caches. That is a legitimate
 -- use of __index and this comment is the paperwork for it: the fields do not exist until they
 -- are read, and reading one costs one table lookup plus whatever get(id) costs the first time.
+--
+-- Laziness bounds that cost by ACCESS COUNT, which is the wrong quantity on its own: a picker
+-- that walks a whole CATALOG is one legitimate feature away, and it would have paid the full
+-- 8299 anyway. That is why laziness is now only half of it — see THE PUBLISH GATE below, which
+-- makes the per-read cost zero rows in the registry rather than one.
 --
 -- __index deliberately does NOT rawset the handle onto the module afterwards. get(id) already
 -- caches, so the second read is a table lookup either way, and NOT writing keeps `pairs(module)`
@@ -98,13 +111,57 @@
 --   local buildings = require("palforge.native.buildings")
 --   buildings.PalBoxV2:instances()     -- built on this line, not at load
 --   buildings.get("PalBoxV2")          -- the same handle; get(id) is the cache
+--
+--=============================================================================
+-- THE PUBLISH GATE: BUILDING A HANDLE IS NOT PUBLISHING A DEFINITION
+--=============================================================================
+--
+-- Laziness alone was never enough, and the reason is specific rather than tidiness. Until
+-- 2026-08-02 every accessor in this directory built its handle with a plain `X{ id = id }`,
+-- which REGISTERS the definition into object_manager. For five of the six domains that is
+-- merely content nobody asked for sitting in a table. For BUILDINGS it is not inert:
+-- core/event.lua's refreshDefs walks object_manager.all("building") before every 500 ms scan,
+-- so a registered def makes every matching actor in the world a TRACKED instance, and a newly
+-- tracked instance is PERSISTED on the spot (scanOnce's instance-creation branch calls
+-- persist(), which writes into the per-world entities_<save> JSON). Named by FUNCTION rather
+-- than by line: core/event.lua is 2700 lines and every line number quoted into this file has
+-- already gone stale once.
+--
+-- So `buildings.Stone_Foundation` — one field read, in a tooltip — used to start writing a
+-- record for every stone foundation in the base, and a pack that walked
+-- native.buildings.CATALOG to fill a picker registered all 498 and persisted the whole base.
+-- Nothing DELETES those records (F-7 quarantines rather than deletes, on purpose: a pack that
+-- is merely not loaded today must not cost the player their state), so the file only ever grew,
+-- in every install, for content no pack requested.
+--
+-- The rule this directory now follows, and the reason both halves are needed:
+--
+--   * A READ NEVER REGISTERS. Every accessor passes `{ register = false }` to its domain
+--     constructor (contract C2), so a handle is built and cached and object_manager does not
+--     hear about it. Everything a handle can do without being in the registry still works:
+--     :give / :spawn / :play / :unlock / :iconOf / :mesh / :kind are all id-driven.
+--   * PUBLISHING IS A CALL YOU MAKE. `<catalog>.publish(id)` registers the very handle the
+--     catalog already cached — M.publish below — so the two things registration is actually
+--     for come back on request and only on request: core/event tracking a building's live
+--     instances (:instances(), the deferred mesh attach, persistence) and a lookup through
+--     the domain's own X.get / X.get_all finding the catalog's handle rather than fabricating
+--     a fresh one. Defining your own X{ id = <the same id>, ... } does the same thing and
+--     replaces it, which is the documented way to attach handlers.
+--
+-- Publishing is what has a cost, so publishing is what a pack asks for by name.
 
 local log = require("palforge.utils.log").scope("native")
+local om  = require("palforge.core.object_manager")
 
 local M = {}
 
+---The pack id the FRAMEWORK's own definitions register under (contract C3). Every native
+---catalog publishes with it, so an id that ends up owned by two definitions can name who
+---replaced whom instead of leaving "palforge or a pack?" to be guessed from the id alone.
+M.PACK = "palforge"
+
 -- Lua's reserved words. See rule (2): a field named after one cannot be written with a dot at
--- all. None of the 8261 ids in this build is one; the rule handles the case anyway, because the
+-- all. None of the 8299 ids in this build is one; the rule handles the case anyway, because the
 -- next game patch is under no obligation to keep it that way.
 local KEYWORDS = {
     ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
@@ -238,6 +295,42 @@ function M.expose(module, opts)
         end,
     })
     return unnamed
+end
+
+---Publish an already-built native handle into object_manager: the opt-in half of the publish
+---gate above. The handle is registered AS IT IS — the class the catalog cached is the class
+---that goes into the registry — so `<catalog>.publish(id)` and a later `<catalog>.<Name>` are
+---one definition, with whatever mesh, kind or handlers the curated entry declared still on it.
+---Rebuilding it through the constructor instead would leave the module's own curated field
+---pointing at the older, unregistered twin.
+---
+---Reaches into the handle's private `_cls` on purpose: every domain wraps its class the same
+---way (`{ id = cls.id, _cls = cls }`, api/item.lua:331 and its five siblings) and there is no
+---public accessor for it. If one is ever added this is the single call site to move.
+---
+---Fail-soft like everything else in this layer, and NOISY about it — object_manager.register
+---returns nil + a reason rather than raising, and a silent refusal here would look exactly
+---like a successful publish that later tracks nothing.
+---
+---@param otype string       # object_manager type: "building" | "item" | "pal" | ...
+---@param handle table|nil   # the handle the catalog cached (nil is a no-op, returns false)
+---@param label string|nil   # module name for the log line, e.g. "native.buildings"
+---@return boolean ok
+---@return string? why       # why it was refused, when it was
+function M.publish(otype, handle, label)
+    local cls = (type(handle) == "table") and rawget(handle, "_cls") or nil
+    if cls == nil then
+        return false, "no handle to publish (the id is not in this catalog)"
+    end
+    local id = cls.id or handle.id
+    local ok, err = om.register(otype, id, cls, { pack = M.PACK })
+    if not ok then
+        err = err or "object_manager.register refused it"
+        log.warn(string.format("%s: refused to publish %q as a %s definition: %s",
+            label or "native catalog", tostring(id), tostring(otype), err))
+        return false, err
+    end
+    return true
 end
 
 return M

@@ -31,7 +31,33 @@
 --   local ch = require("palforge.core.character")
 --   ch.addSkill(pawn, "FireBlast")            -- an EPalWazaID name: an active skill
 --   ch.addSkill(pawn, "Legend")               -- not one: treated as a passive skill FName
---   ch.skillsOn(pawn)                         -- { active = {...}, passive = {...} }
+--   ch.skillsOn(pawn)                         -- { active, passive, equipable, mastered }
+--
+-- IDS ARE RESOLVED WHERE THEY CROSS INTO THE ENGINE, and that boundary is the passive write.
+-- A PalForge id may be namespaced ("pack:Legend") and the GAME only ever knows the DataTable row
+-- spelling PalSchema wrote ("pack_Legend") — FName("pack:Legend") matches no row at all, so
+-- AddPassiveSkill used to be silently inert for exactly the ids a content pack defines. Every
+-- FName built here therefore goes through object_manager.resolve first, which is the one id model
+-- in this tree (core/spawn does it before SpawnMonster, utils/items before AddItem_ServerInternal),
+-- and an id whose SHAPE resolve refuses falls through as itself so the engine receives what the
+-- caller asked for and the miss reads as a write that did nothing rather than as a Lua error.
+--
+-- CASE SENSITIVITY IS A PROPERTY OF THE LAYER, NOT OF THE FRAMEWORK, and both layers meet in this
+-- one file, which is why it is written down here rather than assumed:
+--   * an id naming an ENGINE ENUM is case-INsensitive. wazaId() falls back to a lowered map, so
+--     ch.addSkill(pawn, "fireblast") finds EPalWazaID 40 exactly as "FireBlast" does. The enum is
+--     a fixed vocabulary this file ships in full, so folding case costs nothing and spares every
+--     caller the game's own capitalisation. core/status.lua does the same for EPalStatusID's 38
+--     names, for the same reason and in the same words.
+--   * an id naming a DATATABLE ROW or a REGISTRY KEY is case-SENSITIVE. A passive skill is a row
+--     FName, so "legend" is not "Legend" and the game will not find it; object_manager.get is a
+--     raw table index, and core/icons.lua looks a row up by its exact name. Nothing folds those,
+--     because the row set belongs to the GAME and this tree holds no map of it to fold against.
+-- The consequence worth remembering is that ONE call spans both: M.addSkill asks the enum first
+-- (case-insensitive) and falls through to a row name (case-sensitive). So the read-backs below
+-- compare an active skill against the enum's CANONICAL spelling and a passive against the RESOLVED
+-- row — never against the string the caller happened to type, which is what used to make a landed
+-- write report "not in the read-back".
 --
 -- SERVER AUTHORITY is the thing to suspect first if a live run reports false with evidence
 -- "declared". APalPlayerController carries AddEquipWaza_ToServer(FPalInstanceID, EPalWazaID)
@@ -50,16 +76,23 @@
 -- merchants too, and an NPC has no equipped move. Asking one of those reported zeros that looked
 -- exactly like a broken reader. Ask PalMonsterCharacter.
 --
--- TODO(pal-skills-equip): unknown whether the WRITES land. AddEquipWaza fires with evidence
--- "declared" and the read-back did not show the move — but that read-back came from an NPC, so
--- it proved nothing either way and the question is open again on its own terms. Note the same
--- correction applies to the crash: the one run that performed a write was followed by the game
--- closing 1.4 s later, and that write also went to a probably-NPC target. Putting an equipped
--- MOVE on a villager is a far more plausible way to destabilise the game than putting one on a
--- pal. The write test is opt-in behind _G.PALFORGE_TEST_WRITE_WAZA until someone chooses to
--- spend a throwaway save on it.
-local log       = require("palforge.utils.log").scope("character")
-local signature = require("palforge.core.signature")
+-- TODO(pal-skills-equip): unknown whether the ACTIVE writes land — AddEquipWaza, RemoveEquipWaza
+-- and ClearEquipWaza. AddEquipWaza fires with evidence "declared" and the read-back did not show
+-- the move, but that read-back came from an NPC, so it proved nothing either way and the question
+-- is open again on its own terms. Note the same correction applies to the crash: the one run that
+-- performed a write was followed by the game closing 1.4 s later, and that write also went to a
+-- probably-NPC target. Putting an equipped MOVE on a villager is a far more plausible way to
+-- destabilise the game than putting one on a pal. The write test is opt-in behind
+-- _G.PALFORGE_TEST_WRITE_WAZA until someone chooses to spend a throwaway save on it, and
+-- test/hooks/pal-skills-equip is where that run belongs (writes = true, so it is gated on
+-- env.debugHooks["pal-skills-equip"] as well).
+-- THE PASSIVE HALF IS NO LONGER PART OF THIS. Closing skill-passive-source needed M.addSkill to
+-- put a passive on a live BP_ChickenPal_C and read it back, and it did: "skill.equip carried its
+-- first event from source AddPassiveSkill". So AddPassiveSkill LANDS on this build, measured, and
+-- what is left open is the EPalWazaID trio above.
+local log            = require("palforge.utils.log").scope("character")
+local object_manager = require("palforge.core.object_manager")
+local signature      = require("palforge.core.signature")
 
 local M = {}
 
@@ -378,6 +411,9 @@ M.WAZA = {
     ["Unique_BlueThunderHorse_Tossin"] = 309,
 }
 
+-- An id -> EPalWazaID integer. CASE-INSENSITIVE, deliberately: this is the enum layer, the
+-- vocabulary is fixed and shipped above, and "fireblast" is what a pack author actually types.
+-- See the header for why the passive layer beside it is case-SENSITIVE.
 local loweredWaza = nil
 local function wazaId(id)
     if type(id) == "number" then return id end
@@ -388,6 +424,31 @@ local function wazaId(id)
         for k, v in pairs(M.WAZA) do loweredWaza[k:lower()] = v end
     end
     return loweredWaza[id:lower()]
+end
+
+-- An EPalWazaID integer -> the game's own spelling, or nil for a value this build does not name.
+--
+-- THE READ-BACK IS COMPARED AGAINST THIS, never against the caller's string, and the reason is
+-- the case-insensitive lookup above: GetEquipWaza answers integers, readList maps them back
+-- through M.WAZA, so the list always carries the CANONICAL name. Comparing "fireblast" against
+-- it reported "not in the read-back" for a write that had landed, and an integer id reported it
+-- every time (the old check handed contains() a nil for a number). One reverse map serves both
+-- this and readList; there used to be two, built from the same table.
+local wazaNameById = nil
+local function wazaName(waza)
+    if not wazaNameById then
+        wazaNameById = {}
+        for k, v in pairs(M.WAZA) do wazaNameById[v] = k end
+    end
+    return wazaNameById[waza]
+end
+
+-- The FName a PASSIVE skill id reaches the game as: "pack:Legend" -> "pack_Legend", a literal id
+-- unchanged. This is the F-3 boundary in this file — see the header. An id resolve REFUSES (a
+-- hyphen in the namespace, say) falls through as itself rather than as nothing, which is the
+-- fallback every other engine boundary in this tree takes.
+local function passiveName(id)
+    return tostring(object_manager.resolve(id) or id)
 end
 
 ---Is `id` one of the game's active skills (an EPalWazaID)? Anything else is treated as a
@@ -446,13 +507,8 @@ end
 -- passive" was: not a pal with no moves, and not a write that failed, but a read that could not
 -- see what it was holding. The identical bug was found and fixed in core/icons.lua the same
 -- afternoon, where it read as "0 of 1207 rows carry an icon".
-local nameOfWaza = nil
 local function readList(arr, asWaza)
     if arr == nil then return {} end
-    if not nameOfWaza then
-        nameOfWaza = {}
-        for k, v in pairs(M.WAZA) do nameOfWaza[v] = k end
-    end
     local out = {}
     local function unwrap(v)
         if type(v) ~= "userdata" then return v end
@@ -465,7 +521,7 @@ local function readList(arr, asWaza)
     local function push(v)
         v = unwrap(v)
         if type(v) == "number" then
-            out[#out + 1] = (asWaza and nameOfWaza[v]) or v
+            out[#out + 1] = (asWaza and wazaName(v)) or v
         elseif type(v) == "string" then
             out[#out + 1] = v
         elseif type(v) == "userdata" then
@@ -487,9 +543,63 @@ end
 -- reading
 --=============================================================================
 
----The skills `actor` currently carries: { active = { <waza names> }, passive = { <FNames> } }.
+-- A getter this build may or may not declare, asked ONCE. Answers a list, or nil for "this build
+-- does not have it" — which is UNKNOWN, never "the character has none".
+--
+-- TWO THINGS MADE THIS NECESSARY, and both are visible in the header's declaration list above.
+--   * GetMasteredWaza IS NOT IN IT. UPalIndividualCharacterParameter declares
+--     `bool HasMasteredWaza(EPalWazaID WazaID)` — a question about ONE move — and no list getter
+--     beside it. GetEquipableWaza is declared and is measured working (3 equipable off a live
+--     BP_SheepBall_C). So one of the two calls skillsOn makes here is expected to be refused on
+--     this build, and enumerating mastery through HasMasteredWaza instead would be 309 guarded
+--     calls per read, which is not a read anyone should pay for in a tooltip.
+--   * A REFUSAL WAS PRINTING AS AN EMPTY LIST AND AS AN ERROR, on every single read. skillsOn is
+--     called twice per write (before and after), so "0 mastered" was indistinguishable from "no
+--     such getter", and core/signature's refusal line was repeating at err level for a fact that
+--     cannot change during a session.
+-- Hence: nil for a refused getter, and the refusal recorded once per function name, at warn,
+-- naming what it means. Only an "absent" level is memoized — that is a property of the class.
+-- Every consumer in the tree already spells these two `#(s.equipable or {})`.
+local absentGetter = {}
+local function optionalList(p, fnName)
+    if absentGetter[fnName] then return nil end
+    local ok, arr, level = signature.call(p, fnName, {})
+    if not ok then
+        if level == "absent" then
+            absentGetter[fnName] = true
+            log.warn(string.format("%s is not declared on this build, so skillsOn answers nil for "
+                .. "that list — UNKNOWN, not 'the character has none'. Asked once per session",
+                fnName))
+        end
+        return nil
+    end
+    return readList(arr, true)
+end
+
+---The skills `actor` currently carries. FOUR lists, and the header of api/skill.lua documents the
+---same four (it used to name only the first two, which is the gap this doc closes):
+---
+---    active    = { <EPalWazaID names> }   the up-to-four moves equipped right now
+---    passive   = { <row FNames> }         the passive skills, as the game spells them
+---    equipable = { <EPalWazaID names> }   moves this individual COULD equip, or nil
+---    mastered  = { <EPalWazaID names> }   moves it has learned, or nil
+---
+---The last two are `nil` when this build does not declare that getter — UNKNOWN, never "none";
+---see optionalList, where the reason `mastered` in particular is expected to be nil is written
+---out. Read them as `#(s.equipable or {})`, which is what every consumer in the tree does.
+---
+---Active names come back in the game's own capitalisation (the enum's), passives in the row
+---spelling the game stored — a namespaced id reads back as "pack_Legend", never as "pack:Legend".
 ---An empty list means the read worked and found none; nil for the whole table means the
 ---parameter object could not be reached at all.
+---
+---Confirmed on a live BP_SheepBall_C, 2026-07-26: 3 active, 1 passive, 3 equipable, 0 mastered.
+---(That 0 is consistent with a real zero AND with a getter this build does not declare, which is
+---why the mastered list is now nil in the second case instead of an empty one — the log says
+---which, once, and the next run in a world settles it.)
+---Ask a PalMonsterCharacter — APalMonsterCharacter : APalNPC : APalCharacter, so a PalCharacter
+---search also returns villagers and merchants, and an NPC's four empty lists look exactly like a
+---broken reader.
 ---@return table?
 function M.skillsOn(actor)
     local p = M.paramsOf(actor)
@@ -502,13 +612,11 @@ function M.skillsOn(actor)
     -- equipped right now — so an empty `active` on a wild pal may be perfectly correct rather
     -- than a read that missed. These two are read for that reason alone; they cost one call
     -- each and they are what distinguishes "nothing equipped" from "nothing reachable".
-    local _, equipable = signature.call(p, "GetEquipableWaza", {})
-    local _, mastered  = signature.call(p, "GetMasteredWaza", {})
     return {
         active    = readList(equip, true),
         passive   = readList(passive, false),
-        equipable = readList(equipable, true),
-        mastered  = readList(mastered, true),
+        equipable = optionalList(p, "GetEquipableWaza"),
+        mastered  = optionalList(p, "GetMasteredWaza"),
     }
 end
 
@@ -539,10 +647,19 @@ function M.addSkill(actor, id)
 
     local waza = wazaId(id)
     if waza then
-        local ok, _, level = signature.call(p, "AddEquipWaza", { "ByteProperty" }, waza)
+        -- EnumProperty, not ByteProperty. EPalWazaID is an `enum class`, so the live UFunction
+        -- declares WazaID:EnumProperty where the dump's C++ reads as a byte — and that spelling
+        -- alone refused three correct calls on the first F1 run. core/signature treats the two as
+        -- equivalent now (they marshal identically); what is written here is what the running
+        -- build actually declares, so a future reader is not sent back to the same dead end.
+        local ok, _, level = signature.call(p, "AddEquipWaza", { "EnumProperty" }, waza)
         if not ok then return false end
         local after = M.skillsOn(actor)
-        local landed = after and contains(after.active, type(id) == "string" and id or nil)
+        -- Against the CANONICAL name, never against `id`: see wazaName. An integer id and a
+        -- lower-cased one both used to report a landed write as missing. An enum value this
+        -- build does not NAME falls back to the integer, which is exactly what readList leaves
+        -- in the list for one — so the two sides always compare like with like.
+        local landed = after and contains(after.active, wazaName(waza) or waza)
         log.info(string.format("addSkill %s (EPalWazaID %d) [%s] -> %s",
             tostring(id), waza, level, landed and "equipped" or "not in the read-back"))
         return landed == true
@@ -551,39 +668,69 @@ function M.addSkill(actor, id)
     -- A passive takes TWO FNames: the skill to add, and the one it replaces. Passing an empty
     -- FName for the second is how "add without replacing" is expressed — there is no one-argument
     -- overload, and omitting it would be marshalled as zero, which is a different call.
+    -- The first FName is the RESOLVED row id (F-3): the game knows "pack_Legend" and has never
+    -- heard of "pack:Legend".
+    local row = passiveName(id)
     local ok, _, level = signature.call(p, "AddPassiveSkill",
-        { "NameProperty", "NameProperty" }, FName(tostring(id)), FName(""))
+        { "NameProperty", "NameProperty" }, FName(row), FName(""))
     if not ok then return false end
     local after = M.skillsOn(actor)
-    local landed = after and contains(after.passive, tostring(id))
-    log.info(string.format("addSkill %s (passive) [%s] -> %s",
-        tostring(id), level, landed and "added" or "not in the read-back"))
+    local landed = after and contains(after.passive, row)
+    log.info(string.format("addSkill %s (passive%s) [%s] -> %s",
+        tostring(id), row ~= tostring(id) and (" as " .. row) or "", level,
+        landed and "added" or "not in the read-back"))
     return landed == true
 end
 
----Take the skill `id` back off `actor`. Routes the same way addSkill does.
+---Take the skill `id` back off `actor`. Routes the same way addSkill does, resolves the passive
+---id the same way (RemovePassiveSkill is the second F-3 boundary in this file), and checks the
+---same read-back — true only when the skill is GONE afterwards.
 ---@return boolean ok
 function M.removeSkill(actor, id)
     local p = M.paramsOf(actor)
     if not p then return false end
 
     local waza = wazaId(id)
-    local ok
+    local ok, row, what
     if waza then
-        ok = signature.call(p, "RemoveEquipWaza", { "ByteProperty" }, waza)
+        -- EnumProperty for the same measured reason as AddEquipWaza above.
+        ok = signature.call(p, "RemoveEquipWaza", { "EnumProperty" }, waza)
+        what = string.format("EPalWazaID %d", waza)
     else
-        ok = signature.call(p, "RemovePassiveSkill", { "NameProperty" }, FName(tostring(id)))
+        row = passiveName(id)
+        ok = signature.call(p, "RemovePassiveSkill", { "NameProperty" }, FName(row))
+        what = "passive" .. (row ~= tostring(id) and (" as " .. row) or "")
     end
     if not ok then return false end
 
     local after = M.skillsOn(actor)
     if not after then return false end
-    local still = contains(after.active, id) or contains(after.passive, tostring(id))
+    -- Only the list the write went to is consulted, and each is consulted in the spelling the
+    -- GAME answers in: the canonical enum name, or the resolved row.
+    local still
+    if waza then
+        still = contains(after.active, wazaName(waza) or waza)
+    else
+        still = contains(after.passive, row)
+    end
+    -- Removal had no log line at all, which made a false from here indistinguishable from a call
+    -- that was never made. It says which read-back it consulted, exactly as addSkill does.
+    log.info(string.format("removeSkill %s (%s) -> %s",
+        tostring(id), what, still and "still in the read-back" or "gone"))
     return not still
 end
 
 ---Clear every ACTIVE skill from `actor`. Passives are untouched — the game has no equivalent
 ---bulk call for them, and inventing one out of a loop would hide a partial failure.
+---
+---⚠️ TODO(pal-skills-equip): NO CALLER, NO CHECK, NEVER RUN. Nothing in this tree calls this and
+---no test covers it, so it is in the same unverified-write class as AddEquipWaza — one wrap of
+---ClearEquipWaza with a read-back that has never been read. It is kept rather than deleted
+---because it is the only bulk clear the game declares and because deleting it would lose the
+---read-back shape; it is marked so nobody reads the read-back as evidence. The run that settles
+---it is test/hooks/pal-skills-equip (needs = { world, pal }, writes = true — so it is gated on
+---env.debugHooks["pal-skills-equip"] and on a throwaway save), which should clear a live pal's
+---moves and assert `#skillsOn(pal).active == 0` afterwards.
 ---@return boolean ok
 function M.clearSkills(actor)
     local p = M.paramsOf(actor)
@@ -591,7 +738,11 @@ function M.clearSkills(actor)
     local ok = signature.call(p, "ClearEquipWaza", {})
     if not ok then return false end
     local after = M.skillsOn(actor)
-    return after ~= nil and #after.active == 0
+    local cleared = after ~= nil and #after.active == 0
+    log.info(string.format("clearSkills: ClearEquipWaza ran -> %s", cleared
+        and "the read-back shows no active skills"
+        or "the read-back still shows active skills (or could not be taken)"))
+    return cleared
 end
 
 return M

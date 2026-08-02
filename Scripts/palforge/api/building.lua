@@ -30,10 +30,15 @@
 --     onWorldReady / onWorldLeft <- the world-load watch, fired on every live instance
 --     onBuild      <- PalPlayerRecordData:OnCompleteBuild_ServerInternal (ctx.buildId,
 --                     ctx.model) — DEFINITION-dispatched and armed late; see the next paragraph
---   NOT WIRED: onLeftClick / onBreak. No native candidate has ever been found for either
---     (the only proven click hook in the tree is a UMG widget button, and destruction is
---     covered by the scan's miss sweep -> onRemove), so nothing emits them. They stay
---     declarable so a pack's code is future-proof; they never fire.
+--   NOT WIRED: onLeftClick / onBreak. Not "not found yet" — SETTLED NEGATIVELY, by reading
+--     the complete function lists of every class that could own one (building-leftclick,
+--     building-break, building-break-source). There is no click/hit/strike entry on
+--     PalBuildObject's 22 functions, the one damage-shaped entry is the deterioration timer
+--     firing every 12-13 s per structure with no player involved, and destruction exists only
+--     as delegate FIELDS, which RegisterHook cannot address by path. The only proven click
+--     hook in the tree is a UMG widget button, and disappearance is covered by the scan's miss
+--     sweep -> onRemove(reason = "missing"). They stay declarable so a pack's own emit works
+--     and so a future source has somewhere to arrive; nothing emits them today.
 --
 -- THE VISUAL LAYER, HONESTLY. A structure's `mesh` really is attached: core/mesh's static
 -- backend adds a UStaticMeshComponent and confirms the asset landed on it before claiming
@@ -77,6 +82,12 @@
 --           onTick       = function(self, ctx) end,
 --       },
 --   }
+--
+-- The call takes an optional SECOND argument, `opts`, which controls registration and nothing
+-- else: `Building(spec, { register = false })` builds and returns the Handle without putting
+-- the definition in the registry, and `{ pack = "mypack" }` records who owns the id. Omitting
+-- it behaves exactly as it always has. In this domain `register = false` is the difference
+-- between a read and a write — see `define` below for why registering a building is not inert.
 
 local om      = require("palforge.core.object_manager")
 local icons   = require("palforge.core.icons")
@@ -139,9 +150,9 @@ local Events = schema.define("Building.Spec.Events", {
     { "onBuild",      type = "function", sig = "fun(self: Building.Definition, ctx: table)",
                       doc = "LIVE - build completed; nothing is placed yet, so `self` is the DEFINITION (ctx.buildId, ctx.model)" },
     { "onLeftClick",  type = "function", sig = "fun(self: Building.Instance, ctx: table)",
-                      doc = "declarable; no native source exists yet" },
+                      doc = "declarable, never fires - measured: PalBuildObject has no click/hit function, and its OnDamage is the deterioration timer" },
     { "onBreak",      type = "function", sig = "fun(self: Building.Instance, ctx: table)",
-                      doc = "declarable; no native source exists yet" },
+                      doc = "declarable, never fires - measured: destruction exists only as delegate FIELDS; a dismantle arrives as onRemove(reason=\"missing\")" },
 })
 
 ---What you pass to Building{ ... }. `id` is the only required field.
@@ -325,13 +336,20 @@ end
 --       for _, n in ipairs(self:neighbors(350)) do ... end   -- everything within 3.5 m
 --   end }
 --
--- This is the api-level consumer of core.spatial's hash-grid index. The building runtime
--- keeps that index in step on place / load / remove (core/event.lua:277, 293, 516) but
--- refreshes a tracked instance's position IN PLACE on every scan without re-bucketing it
--- (core/event.lua:383), so a structure that ever moves would keep a stale bucket and could
--- be missed at a bucket boundary. Re-bucketing the live registry first is core.spatial's
--- own documented caller-side remedy: O(tracked structures), pure Lua, no engine call, and
--- it touches a bucket only for the entries whose cell really changed.
+-- This is the api-level consumer of core.spatial's hash-grid index. The building runtime keeps
+-- that index in step: addInstance / removeInstance bucket and un-bucket, and the scan's fast
+-- path re-buckets a tracked instance whose position changed (core/event.lua's scanOnce calls
+-- spatial.indexUpdate right after `bound.pos = p`). This paragraph used to say the opposite —
+-- that the scan refreshed the position IN PLACE and never re-bucketed, so a structure that
+-- moved kept a stale bucket — and that was true in effect but not for the reason given: the
+-- indexUpdate call was already written, and the actor lookup ABOVE it was keyed on the UE4SS
+-- handle, so the whole fast path missed on every sweep and the re-bucket never ran (contract
+-- C1, core/spatial.lua's own header carries the account).
+--
+-- The reindexAll below stays anyway, and not out of caution: instances a pack indexes itself
+-- have no driver at all, and the pass is O(tracked structures) of pure Lua with no engine call
+-- that touches a bucket only for the entries whose cell really changed — cheaper than reasoning
+-- about whether the last scan has run yet.
 ---@param radiusCm number  # search radius in centimetres
 ---@return Building.Instance[]
 function Class:neighbors(radiusCm)
@@ -346,8 +364,19 @@ end
 
 -- The build-menu icon: look the id up in the build-object icon DataTable, falling back
 -- to the declared self.icon on any miss.
+--
+-- THE ID IS RESOLVED FIRST, and it was not until 2026-08-02. A DataTable row FName is the
+-- RESOLVED form — "example:Bench" is the row "example_Bench" — so passing the declared id raw
+-- meant every namespaced definition missed the lookup and returned its declared fallback icon.
+-- That looks identical to "this build has no icon for that row", which is exactly the shape of
+-- a missing call rather than a measured limit: DT_BuildObjectIconDataTable read 567 of 571 rows
+-- in a live save (icons-row-read), so the lookup works and it was the argument that was wrong.
+-- `resolve(x) or x`, never `resolve(x)` alone — an id that cannot resolve falls back to the
+-- LITERAL so a malformed id still asks the game the only question it can.
+-- Handle:unlock (below) has always spelled it this way; the two now agree.
 function Class:iconOf()
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.building, self.id) end)
+    local id = om.resolve(self.id) or self.id
+    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.building, id) end)
     if ok and tex ~= nil then return tex end
     return self.icon
 end
@@ -358,7 +387,7 @@ end
 
 ---The building domain. CALL it to define one; the two named functions look existing ones up.
 ---@class palforge.building
----@overload fun(spec: Building.Spec): Building.Handle
+---@overload fun(spec: Building.Spec, opts: table?): Building.Handle
 local Building = {}
 
 local wrap  -- forward decl; the Building.Handle wrapper is defined in the BOTTOM section
@@ -366,10 +395,36 @@ local wrap  -- forward decl; the Building.Handle wrapper is defined in the BOTTO
 ---Define a building and register it. core/event picks the definition up on its next
 ---scan, so a building defined AFTER startup is still tracked.
 ---`spec` is validated against Building.Spec: `id` is required, unknown fields are an error.
+---
+---`opts` is optional and controls REGISTRATION only, never the definition itself:
+---
+---    Building(spec)                            -- define and register (what everything did)
+---    Building(spec, { register = false })      -- build the Handle, register NOTHING
+---    Building(spec, { pack = "mypack" })       -- register with that pack as the owner
+---
+---`register = false` matters more here than in any other domain, because registering a
+---building is NOT inert: core/event's ~500 ms reconstruction scan picks the new definition up,
+---and every matching actor already standing in the world becomes a tracked instance that is
+---PERSISTED to the save's entity file. So `native.buildings.Foundation` — a read, in a tooltip
+---— used to make PalForge start writing a record for every foundation in the base, and a pack
+---iterating the 498-id CATALOG to fill a picker persisted the whole base. A read asks for
+---`{ register = false }`; a definition the author actually wants in the world does not.
 ---@param spec Building.Spec
+---@param opts table?  # { register = boolean, pack = string }
 ---@return Building.Handle
-local function define(spec)
+local function define(spec, opts)
     spec = Spec:validate(spec, "Building")
+    -- The id SHAPE is checked here, at define time, and it is not the same check as the
+    -- schema's nonEmpty. An id whose halves are not [%w_]+ ("my-pack:Bench") registers
+    -- perfectly and is then dead at every engine boundary: om.resolve refuses it, so the
+    -- DataTable row name it needs cannot be built, and the definition sits in the registry
+    -- looking healthy while its icon lookup, its technology unlock and its build-id match all
+    -- miss. Failing at the define call is the only place an author can see it happen.
+    local okId, whyId = om.validId(spec.id)
+    if not okId then
+        error(string.format("PalForge: Building: field %q is invalid: %s", "id",
+            whyId or "not a usable id"), 0)
+    end
     local cls = setmetatable({
         id           = spec.id,
         name         = spec.name or spec.id,
@@ -391,12 +446,22 @@ local function define(spec)
         -- which is the object the event happened to (.actor / .pos / .state / :save()).
         for name, handler in pairs(spec.events) do cls[name] = handler end  -- onPlace, ...
     end
-    pcall(function() om.register("building", spec.id, cls) end)  -- so core/event + get() find it
+    -- Registration is best-effort (pcall) so a registry hiccup cannot break a definition that
+    -- is otherwise fine — the class is built and returned either way. `register = false` skips
+    -- it entirely: the Handle works, core/event never sees the definition, and nothing is
+    -- persisted for it.
+    if not (type(opts) == "table" and opts.register == false) then
+        local packOpts = (type(opts) == "table" and opts.pack) and { pack = opts.pack } or nil
+        pcall(function() om.register("building", spec.id, cls, packOpts) end)  -- core/event + get() find it
+    end
     return wrap(cls)
 end
 
 -- Calling the module IS defining:  Building{ id = "example:Bench", ... }
-setmetatable(Building, { __call = function(_, spec) return define(spec) end })
+-- The second argument is the optional `opts` above; omitting it behaves exactly as it always
+-- has. A scoped surface (PalForge.pack("mypack").Building) is the same call with opts.pack
+-- filled in for you.
+setmetatable(Building, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get an EXISTING building by id: a previously-defined one, else a thin definition over
 ---any game BuildObjectId. Never nil.
@@ -435,8 +500,27 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 ---Unlock this building's technology so it appears in the BUILD menu. Modded buildings
 ---get a DT_TechnologyRecipeUnlock row named after their resolved id; this unlocks it.
----@return boolean ok
+---
+---⚠️ NEVER OBSERVED WORKING, AND UNVERIFIABLE BY CONSTRUCTION — say so before a pack leans on
+---it. `true` here does NOT mean the technology is unlocked. It means two things that CAN be
+---read: the CheatManager call `UnlockOneTechnology(FName)` was issued without raising, and a
+---technology row of that resolved name really exists in the live DT_TechnologyRecipeUnlock
+---(only 115 of the 501 vanilla build ids have one, so that check is what stops the cheat
+---"succeeding" for a building that has nothing to unlock). What cannot be read is the result:
+---UnlockOneTechnology returns nothing and no "is this technology unlocked" accessor exists
+---anywhere on this build — not in the CheatManager surface, not in dumps/cxx, not in the C++
+---bridge (utils/items/init.lua, the technology row set). And it rides the same cheat-manager
+---route that `pal-spawnmonster-signature` measured as accepting a call and silently doing
+---nothing, which is the failure mode this cannot distinguish itself from.
+---
+---So the only way to settle it is to press it in a save and LOOK at the build menu. That is
+---the declared hook `test/hooks/building-unlock` (needs a world and a player, writes = true —
+---it mutates the player's technology state), not a unit check.
+---@return boolean issued  # the call ran AND a technology row of that name exists; NOT "unlocked"
 function Handle:unlock()
+    -- `resolve(x) or x`: a DataTable row FName is the resolved form, and an id that cannot
+    -- resolve still asks the game about the literal rather than about nothing. Class:iconOf
+    -- spells it the same way; the two used to disagree, with iconOf passing the id raw.
     return items.unlockTech(om.resolve(self.id) or self.id)
 end
 

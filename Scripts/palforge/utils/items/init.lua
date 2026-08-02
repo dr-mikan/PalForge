@@ -54,6 +54,7 @@ local log            = require("palforge.utils.log").scope("items")
 local object_manager = require("palforge.core.object_manager")
 local poll           = require("palforge.core.poll")
 local sig            = require("palforge.core.signature")
+local uo             = require("palforge.core.uobject")
 
 local M = {}
 
@@ -65,15 +66,20 @@ local M = {}
 -- and printed a real object at every step — PalUtility CDO -> BP_Player_Female_C ->
 -- BP_PalPlayerState_C -> BP_PalPlayerInventoryData_C. The inventory object is reachable; what
 -- is broken further down is one specific write call, not this resolve.
+--
+-- Liveness at every step is core.uobject.live, not a hand-rolled `x and x:IsValid()`. Same
+-- question, one implementation, and it cannot raise from inside the guard itself — a stale handle
+-- can throw on the IsValid call, which is exactly the shape an assert message would then blame on
+-- the wrong step.
 local function playerInventory()
     local util = StaticFindObject("/Script/Pal.Default__PalUtility")
-    assert(util and util:IsValid(), "PalUtility CDO not found")
+    assert(uo.live(util), "PalUtility CDO not found")
     local player = FindFirstOf("PalPlayerCharacter")
-    assert(player and player:IsValid(), "no PalPlayerCharacter")
+    assert(uo.live(player), "no PalPlayerCharacter")
     local ps = util:GetPlayerStateByPlayer(player)
-    assert(ps and ps:IsValid(), "no PlayerState")
+    assert(uo.live(ps), "no PlayerState")
     local inv = ps:GetInventoryData()
-    assert(inv and inv:IsValid(), "no InventoryData")
+    assert(uo.live(inv), "no InventoryData")
     return inv
 end
 
@@ -100,8 +106,7 @@ local function firstLiveElement(arr)
             arr:ForEach(function(_, elem)
                 if found == nil then
                     local e = unwrap(elem)
-                    local ok, live = pcall(function() return e ~= nil and e.IsValid and e:IsValid() end)
-                    if ok and live == true then found = e end
+                    if uo.live(e) then found = e end
                 end
             end)
         end
@@ -114,8 +119,7 @@ local function firstLiveElement(arr)
         local e
         pcall(function() e = unwrap(arr[i]) end)
         if e == nil then pcall(function() e = unwrap(arr:Get(i - 1)) end) end
-        local ok, live = pcall(function() return e ~= nil and e.IsValid and e:IsValid() end)
-        if ok and live == true then return e end
+        if uo.live(e) then return e end
     end
     return nil
 end
@@ -140,10 +144,10 @@ end
 -- component, ownership is structural rather than checked.
 local function playerWeapon()
     local player = FindFirstOf("PalPlayerCharacter")
-    assert(player and player:IsValid(), "no PalPlayerCharacter")
+    assert(uo.live(player), "no PalPlayerCharacter")
     local loadout
     pcall(function() loadout = player.LoadoutSelectorComponent end)
-    assert(loadout and loadout:IsValid(), "the player pawn carries no LoadoutSelectorComponent")
+    assert(uo.live(loadout), "the player pawn carries no LoadoutSelectorComponent")
     local arr
     pcall(function() arr = loadout.spawnedWeaponsArray end)
     local weapon = firstLiveElement(arr)
@@ -285,6 +289,39 @@ local CONSUME_ITEM_PARAMS = { "NameProperty", "IntProperty" }
 -- five arguments and a return, where dumps/cxx/Pal.hpp has four and no bNotifyLog at all. UE4SS
 -- counts the return as a slot, which is where "expected 6 parameters, received 4" came from.
 
+-- Which cheat manager we are holding, and what it is outered to. Logged ONCE PER SESSION, from
+-- the resolve itself, because "the call ran and nothing happened" cannot distinguish a wrong
+-- object from a full inventory and the two need opposite fixes.
+--
+-- IT USED TO SAY "on the give path" AND HAD NO CALLER AT ALL. give stopped going through the
+-- cheat manager the day AddItem_ServerInternal's real declaration was read, and this diagnostic
+-- was left behind pointing at a route that no longer existed — so the one line that could have
+-- named a wrong-outer cheat manager had quietly stopped printing. It hangs off the resolve now,
+-- which is the one thing every remaining cheat route in this file has in common (unlockTech,
+-- unlockAllTech, describeRemoval).
+local describedCM = false
+local function describeCheatManager(cm)
+    if describedCM then return end
+    describedCM = true
+    local outer, ctrlCM
+    pcall(function() outer = cm:GetOuter() end)
+    pcall(function() ctrlCM = FindFirstOf("PalPlayerController").CheatManager end)
+    -- Compare by FULL NAME, not by rawequal: UE4SS hands out a fresh userdata wrapper per
+    -- lookup, so two references to the same UObject are not the same Lua value. The first run
+    -- of this line printed "is the controller's own: false" for a cheat manager whose own path
+    -- was nested under that very controller, which is a diagnostic lying about its subject.
+    --
+    -- THAT MEASUREMENT IS NOW THE FRAMEWORK'S, not this file's. It is one of the two runs behind
+    -- core/uobject.lua, whose whole reason for existing is written at its top — so the comparison
+    -- goes through uo.same and the names through uo.fullName rather than through a private copy
+    -- that happens to agree with them. The same measurement is why uo.key exists and why no table
+    -- in this tree may be keyed on a handle; nothing here keeps a per-object table, so this file
+    -- needs the comparison half only.
+    log.info(string.format("items: cheat manager %s | outer %s | is the controller's own: %s",
+        uo.fullName(cm) or "?", uo.fullName(outer) or "?",
+        tostring(uo.same(ctrlCM, cm))))
+end
+
 -- The cheat manager (admin API). Two-step resolve ported from core/spawn: the singleton
 -- first, then the local PlayerController's own CheatManager — which is where it lives in
 -- the case FindFirstOf misses, because a dedicated server never gets the singleton (the
@@ -300,48 +337,45 @@ local CONSUME_ITEM_PARAMS = { "NameProperty", "IntProperty" }
 -- so an instance that is not this controller's can execute a world cheat perfectly (SpawnMonster
 -- puts a pal in the world and demonstrably works) while an inventory cheat quietly reaches
 -- nobody. That is the exact shape of the open give() failure, so ask the controller first.
+--
+-- ⚠️ THIS ONE ASKS AND GIVES UP; core/spawn's same-named local ASKS AND THEN BUILDS. The two
+-- are deliberately different and the difference is worth stating, because "PalForge needs the
+-- CheatManagerEnabler mod" is a framework-wide claim that is FALSE and was believed for a while:
+-- core/spawn.lua:190-217 constructs a cheat manager itself with the enabler's own
+-- StaticConstructObject(pc.CheatClass, pc) recipe, so a world spawn only needs a player
+-- controller. Nothing on THIS path does that yet, so every message below is honest about this
+-- helper and must not be read as a statement about the framework.
+--
+-- Why it has not simply been given the same fallback: this helper asks the CONTROLLER first on
+-- purpose (see the note above about the outer), core/spawn's constructor is a file-local, and
+-- promoting it is a shared-module change rather than a comment fix. Doing it would make an
+-- inventory cheat reachable in the one session shape where it currently is not — a controller
+-- that exists with no cheat manager attached and no enabler present.
 local function cheatManager()
     local cm
     pcall(function() cm = FindFirstOf("PalPlayerController").CheatManager end)
-    if cm and cm:IsValid() then return cm end
-    cm = nil
-    pcall(function() cm = FindFirstOf("PalCheatManager") end)
-    assert(cm and cm:IsValid(), "PalCheatManager not available (needs CheatManagerEnabler)")
+    if not uo.live(cm) then
+        cm = nil
+        pcall(function() cm = FindFirstOf("PalCheatManager") end)
+        assert(uo.live(cm), "PalCheatManager not available to utils.items — this helper does "
+            .. "not construct one (core/spawn does); install CheatManagerEnabler or load a save")
+    end
+    -- Never allowed to cost the caller its cheat manager: the description is a log line.
+    pcall(describeCheatManager, cm)
     return cm
 end
 
--- Read the count again a second later, and log what it says. This does NOT change what give()
--- returns; it exists to answer one question the synchronous check cannot.
---
--- THE PRECEDENT IS THIS SESSION'S OWN. Pal spawning was declared broken on a build where it
--- worked perfectly: the call is asynchronous, the pal arrives about four seconds later, and
--- every check was taken immediately and reported the miss as a property of the game. The header
--- of this file has flagged the same possibility for give all along — AddItem_ServerInternal
--- declares a LogDelay, so the inventory-data path has a delay concept in it — and it has never
--- been tested. An add that lands after the second reading looks exactly like an add that never
--- happened.
--- Which cheat manager we are holding, and what it is outered to. Logged once per session on the
--- give path, because "the call ran and nothing happened" cannot distinguish a wrong object from
--- a full inventory, and the two need opposite fixes.
-local describedCM = false
-local function describeCheatManager(cm)
-    if describedCM then return end
-    describedCM = true
-    local function nameOf(o)
-        local ok, n = pcall(function() return o:GetFullName() end)
-        return ok and tostring(n) or "?"
-    end
-    local outer, ctrlCM
-    pcall(function() outer = cm:GetOuter() end)
-    pcall(function() ctrlCM = FindFirstOf("PalPlayerController").CheatManager end)
-    -- Compare by FULL NAME, not by rawequal: UE4SS hands out a fresh userdata wrapper per
-    -- lookup, so two references to the same UObject are not the same Lua value. The first run
-    -- of this line printed "is the controller's own: false" for a cheat manager whose own path
-    -- was nested under that very controller, which is a diagnostic lying about its subject.
-    log.info(string.format("items: cheat manager %s | outer %s | is the controller's own: %s",
-        nameOf(cm), outer and nameOf(outer) or "?",
-        tostring(ctrlCM ~= nil and nameOf(ctrlCM) == nameOf(cm))))
-end
+-- NO LATE READ-BACK ON THE GIVE PATH, and this is where the note that argued for one used to sit,
+-- orphaned above a function that had been deleted out from under it. What it recorded is worth
+-- keeping: pal spawning was declared broken on a build where it worked, because the call is
+-- asynchronous, the pal arrives about four seconds later, and every check was taken immediately —
+-- so a write measured too early looks exactly like a write that never happened. The reason give
+-- needs no such pass ANY MORE is that its route changed and was then measured: it goes through
+-- AddItem_ServerInternal, which ANSWERS with a named EPalItemOperationResult rather than void,
+-- and the count was seen to rise inside the same call on 2026-07-26 ("give Wood x3: 161 -> 164").
+-- LogDelay is still a parameter on that write, so if a live save ever shows an add landing late,
+-- watchLateFall below is the shape to copy. take keeps its own late pass because its call returns
+-- void and the count is its only witness.
 
 -- The live count of `itemId` in the local player's inventory, or nil when it cannot be read
 -- (no world, no player — see countOf). nil is UNKNOWN, not zero. Namespaced ids resolve like
@@ -371,8 +405,10 @@ end
 -- nothing. So CountItemNum is read before and after (the one inventory read PROVEN on this
 -- build — 135 Wood out of a live save), and true means the count was seen to RISE. false means
 -- one of these, each logged distinctly:
---   * nothing was called — no PalCheatManager (needs CheatManagerEnabler), or core.signature
---     refused because this build does not declare GetItem the way the dump does;
+--   * nothing was called — this module's cheatManager() found none and does not build one
+--     (core/spawn does, so this is not a framework-wide requirement — see that local's header),
+--     or core.signature refused because this build does not declare GetItem the way the dump
+--     does;
 --   * the cheat ran and the count could not be read (no world, no player). An unreadable count
 --     is UNKNOWN, never zero, and deliberately NOT a success: a helper that claims a write it
 --     could not see is exactly what hid the AddItem_ServerInternal outage for so long;
@@ -650,7 +686,7 @@ function M.describeRemoval()
         out.InitInventory = sig.describe(cm, "InitInventory")
     else
         log.warn("describeRemoval: no cheat manager, so InitInventory's declaration is unread "
-            .. "(it needs CheatManagerEnabler)")
+            .. "(this module finds one, it does not construct one — core/spawn does)")
     end
 
     local weapon
@@ -676,6 +712,20 @@ end
 -- the name is a technology row at all. Most build ids are not — only 115 of the 501
 -- vanilla DT_BuildObjectDataTable ids have a matching technology row — so without this
 -- check the cheat "succeeds" for buildings that have nothing to unlock.
+--
+-- THIS IS THE WHOLE REASON Building.Handle:unlock() IS UNVERIFIABLE BY CONSTRUCTION, and the
+-- api/building doc quotes this block for it. Nothing that can be written in Lua closes that gap:
+-- the missing piece is an accessor the build does not have. What is real evidence, and what this
+-- file can still be trusted for, is the PRECONDITION above plus one measured caution — the cheat
+-- manager is an object that can execute a call perfectly and reach nothing. UPalCheatManager
+-- ::GetItem is the case: declared, called on the player's OWN instance, on an inventory with room
+-- for an id that inventory could count, evidence "declared", and the count never moved (five
+-- in-game runs). It returns void, so it could never say why. A silent cheat plus no read-back is
+-- exactly the pair that produced that, which is why a true from unlockTech is worded as narrowly
+-- as it is at M.unlockTech.
+-- (The other half of that pattern has been RETIRED and must not be quoted with it any more:
+-- SpawnMonster, the cheat that "ran and did nothing", turned out to work — it is asynchronous by
+-- about six seconds and every check had been taken immediately. See core/spawn.lua's header.)
 --
 -- The table is fetched with UE4SS's TARGETED FindObject("DataTable", name) (lua-api
 -- global, overload #1: class short name + object short name). Deliberately not the
@@ -765,6 +815,12 @@ local function technologyRows()
     for _, tableName in ipairs(TECH_TABLES) do
         local ok, dt = pcall(FindObject, "DataTable", tableName)
         if ok and dt then
+            -- Deliberately NOT uo.live here, and it is the one place in this file that is not.
+            -- uo.live answers false for an object that does not expose IsValid, which is a
+            -- correct answer for an ACTOR and the wrong one for an asset: what FindObject hands
+            -- back for a UDataTable on this build need not carry the member at all, and treating
+            -- "no IsValid" as "dead" would lose every technology row. So: consult IsValid when it
+            -- is there, and otherwise trust the find that just answered.
             local okv, valid = pcall(function()
                 if dt.IsValid then return dt:IsValid() end
                 return true
@@ -817,7 +873,9 @@ end
 -- return value is the CHECK, not the call. true means: the name was confirmed to be a row
 -- of the live technology table AND the cheat executed without raising. false means one of
 -- three things, each logged distinctly:
---   * the call itself failed (usually: no PalCheatManager — needs CheatManagerEnabler);
+--   * the call itself failed (usually: this module's cheatManager() found no PalCheatManager
+--     and, unlike core/spawn's, does not construct one — so CheatManagerEnabler or a loaded
+--     save closes it. That is a statement about THIS helper, not about PalForge);
 --   * the technology table could not be read, so the unlock is unverifiable;
 --   * the name is no technology row, so there was nothing there to unlock — which is the
 --     normal answer for most vanilla build ids (Building.get("PalBoxV2"):unlock()).

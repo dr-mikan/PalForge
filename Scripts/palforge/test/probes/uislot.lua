@@ -1,12 +1,26 @@
 -- palforge/test/probes/uislot.lua — the SAME question probes/title.lua asks, asked from a
 -- LOADED WORLD instead of the title screen.
 --
--- Closes plan/TODO.md `ui-menubutton-inner-slot` (marked in native/ui/_widget.lua at
--- leftAlignButtonContent). What is owed is one line off a real WBP_Title_MenuButton: does a
--- widget named `HorizontalBox_0` exist in its tree at all — the class declares five widget
--- members and it is not one of them (dumps/cxx/WBP_Title_MenuButton.hpp:11-15) — and if it does,
--- which slot class does it occupy, because that decides whether SetHorizontalAlignment is even
--- declared on it.
+-- IT CLOSED plan/TODO.md `ui-menubutton-inner-slot`, on 2026-07-27, and the answer was negative.
+-- One line off a real WBP_Title_MenuButton settled it:
+--
+--   HorizontalBox_0 IS in a WBP_Title_MenuButton and its slot is a CanvasPanelSlot.
+--
+-- The name was never stale — it is in the designer tree with its "Is Variable" box unchecked, so
+-- it has no class member (dumps/cxx/WBP_Title_MenuButton.hpp:11-15 lists five and this is not one
+-- of them) and only a tree walk reaches it. What settled the item is the SLOT: a CanvasPanelSlot
+-- is the one slot class in UMG that declares no SetHorizontalAlignment (UMG.hpp:350-374, where
+-- the other five do), so core/signature refused the call every time — correctly — and the label
+-- has always stayed centred. The alignment a CanvasPanelSlot does declare, SetAlignment, takes an
+-- FVector2D, and a struct argument is the shape that faults inside UE4SS marshalling where pcall
+-- cannot see it; the struct-free alternative is SetAutoSize plus an offset write, which is a lot
+-- of machinery and a new failure mode for a cosmetic nobody asked for.
+--
+-- So `leftAlignButtonContent` was DELETED from native/ui/_widget.lua rather than left to be
+-- refused on every button build, and there is no marker anywhere to go and remove: the evidence
+-- lives at native/ui/_widget.lua:755-771 and in plan/TODO.md's Closed list. This probe is now a
+-- REGRESSION check — a build that puts HorizontalBox_0 in a box or overlay slot would make the
+-- setter available and REOPEN the item, and the verdict below says so in those words.
 --
 -- WHY A SECOND PROBE INSTEAD OF PRESSING F2. probes/title.lua needs the game sitting on the
 -- title screen and there is no way to make that happen from core/autorun, which runs on
@@ -27,15 +41,21 @@
 -- WBP_Title_WorldSettings_ListButton_C, but NOT WBP_Title_MenuButton_C. Hence LoadAsset, in the
 -- "Package.Object" form core/sound/native.lua:53-65 proved for /Game assets, before the read.
 --
--- READ-ONLY, with one exception the TODO's own recipe asks for. Sections 1, 2 and 4 call
--- nothing: StaticFindObject / LoadAsset / GetClass / GetFName / GetFullName / GetChildrenCount /
--- GetChildAt / GetContent and property reads, which is the same set probes/title.lua walks with.
--- Section 3 creates ONE orphan WBP_Title_MenuButton exactly as _widget.menuButton would, never
--- shows it and never parents it — and it runs LAST, deliberately, so the class-tree answer is
--- already in the log before anything is constructed.
+-- READ-ONLY, with one deliberate exception. Sections 1, 2 and 4 call nothing: StaticFindObject /
+-- LoadAsset / GetClass / GetFName / GetFullName / GetChildrenCount / GetChildAt / GetContent and
+-- property reads, which is the same set probes/title.lua walks with. Section 3 creates ONE orphan
+-- WBP_Title_MenuButton exactly as _widget.menuButton would, never shows it and never parents it —
+-- and it runs LAST, deliberately, so the class-tree answer is already in the log before anything
+-- is constructed.
 --
 -- No UFunction is called with an argument. The one declaration that matters is read through
 -- core/signature's describe(), which walks the live parameter list and logs it WITHOUT calling.
+--
+-- STILL A PROBE, NOT A TEST. It prints what the button's tree IS and stops; it asserts nothing.
+-- The game-required MEASUREMENTS are moving to declared hooks under Scripts/palforge/test/hooks/,
+-- named after their plan/TODO.md item id and run by name (`pf_hook <id>`); nothing here duplicates
+-- one today, because this file's remaining question is a closed item's regression rather than an
+-- open item's measurement.
 local probe   = require("palforge.test.probe")
 local support = require("palforge.test.support")
 local sig     = require("palforge.core.signature")
@@ -175,10 +195,11 @@ local function walk(root, label, wanted)
     return hits, total
 end
 
----Print one widget's Slot class the way the TODO asks for it, and then ask that slot's class
----whether it declares the call leftAlignButtonContent makes. sig.describe walks the LIVE
----parameter list and logs it; it calls nothing, which is the only way to ask this question
----safely (a struct argument on an unread declaration faults where pcall cannot see it).
+---Print one widget's Slot class, and then ask that slot's class whether it declares the call the
+---deleted leftAlignButtonContent used to make. An "absent" answer here is the POSITIVE evidence
+---this item closed on, not a gap. sig.describe walks the LIVE parameter list and logs it; it
+---calls nothing, which is the only way to ask this question safely (a struct argument on an
+---unread declaration faults where pcall cannot see it).
 ---Returns the slot class name, or nil when there is no slot to read.
 local function reportSlot(w, tag)
     if not probe.valid(w) then
@@ -345,8 +366,11 @@ end
 
 local function ui_menubutton_inner_slot()
     probe.begin("ui-menubutton-inner-slot",
-        "asked from a LOADED WORLD: WBP_Title_MenuButton_C's template WidgetTree, then a "
-        .. "created instance, then what the in-game UI does with a HorizontalBox")
+        "CLOSED 2026-07-27, negatively — this block is now a REGRESSION check, not a question. "
+        .. "The expected answer is 'CanvasPanelSlot' with SetHorizontalAlignment absent; anything "
+        .. "else REOPENS the item. Asked from a LOADED WORLD: WBP_Title_MenuButton_C's template "
+        .. "WidgetTree, then a created instance, then what the in-game UI does with a "
+        .. "HorizontalBox.")
 
     local cls = resolveClass()
 
@@ -423,37 +447,48 @@ local function ui_menubutton_inner_slot()
 
     if slotClass then
         local isCanvas = slotClass:find("CanvasPanelSlot") ~= nil
-        probe.note("HIT: %s IS in a WBP_Title_MenuButton and its slot is a %s. %s",
-            INNER, slotClass,
-            isCanvas and ("A CanvasPanelSlot declares no SetHorizontalAlignment (UMG.hpp:350-374), "
-                    .. "so core/signature REFUSES leftAlignButtonContent's call and logs it: the "
-                    .. "label stays centred. The only struct-free alternative is SetAutoSize plus "
-                    .. "an offset write, which is not worth it for a cosmetic — DELETE "
-                    .. "leftAlignButtonContent and record this class in the note above it.")
-                or ("That slot class declares SetHorizontalAlignment (see the sig.describe and "
-                    .. "PARAM lines above), so the call LANDS and the label really is "
-                    .. "left-aligned. Record this class in native/ui/_widget.lua and drop the "
-                    .. "TODO(ui-menubutton-inner-slot) marker."))
+        if isCanvas then
+            probe.note("AS RECORDED: %s IS in a WBP_Title_MenuButton and its slot is a %s — the "
+                .. "same answer this probe produced on 2026-07-27, which is what closed the item. "
+                .. "A CanvasPanelSlot declares no SetHorizontalAlignment (UMG.hpp:350-374, where "
+                .. "the other five slot classes do), so the sig.describe line above reading absent "
+                .. "IS the evidence, not a gap: the label is centred and always was. Nothing to "
+                .. "do, and nothing to delete — leftAlignButtonContent is already gone from "
+                .. "native/ui/_widget.lua, and the reasoning is written out at :739. The two "
+                .. "setters this slot does declare both take an FVector2D, and a struct argument "
+                .. "is the shape that faults inside UE4SS marshalling.", INNER, slotClass)
+        else
+            probe.note("REOPEN ui-menubutton-inner-slot: %s sits in a %s, NOT the CanvasPanelSlot "
+                .. "this item closed on. If the sig.describe line above shows that class declaring "
+                .. "SetHorizontalAlignment, a left-aligned label became possible on this build and "
+                .. "the deleted leftAlignButtonContent (native/ui/_widget.lua:755) is worth "
+                .. "reinstating. Paste this whole block into plan/TODO.md — it contradicts a "
+                .. "measurement.", INNER, slotClass)
+        end
     elseif sawInner then
-        probe.note("PARTIAL: a widget named %s was found but it occupies no slot — which happens "
-            .. "when it is the TREE ROOT (a root widget has no parent to slot into). "
-            .. "leftAlignButtonContent can never do anything on this button, because there is no "
-            .. "slot to align. Delete it.", INNER)
+        probe.note("REOPEN, differently: a widget named %s was found but it occupies NO slot, "
+            .. "which happens when it is the TREE ROOT — a root widget has no parent to slot into. "
+            .. "That is not what was measured on 2026-07-27 (a CanvasPanelSlot was read, twice, "
+            .. "from the template tree and from a created instance), so either the button's tree "
+            .. "changed or this walk reached a different widget. Either way there is no slot to "
+            .. "align and nothing to reinstate; paste the NODE lines back.", INNER)
     elseif cls then
-        probe.note("MISS: WBP_Title_MenuButton_C resolved and %s is NOT in it. The class declares "
-            .. "five widget members and this is not one of them "
-            .. "(dumps/cxx/WBP_Title_MenuButton.hpp:11-15), and the tree walk above now agrees — "
-            .. "so the name is STALE. Delete leftAlignButtonContent and PATHS.menuButtonInner "
-            .. "with it. Check the 'template child' lines: if %s and %s resolved while %s did "
-            .. "not, that is the finding; if all three are MISSING the walk itself failed and "
-            .. "this concludes nothing.", INNER, LABEL, CLICK, INNER)
+        probe.note("REOPEN: WBP_Title_MenuButton_C resolved and %s is NOT in it. It was there on "
+            .. "2026-07-27 — in the designer tree, with no class member behind it, which is why "
+            .. "the class declaring only five widget members "
+            .. "(dumps/cxx/WBP_Title_MenuButton.hpp:11-15) never contradicted it. A tree walk that "
+            .. "now agrees with the member list means the name went stale in a patch, and "
+            .. "PATHS.menuButtonInner (native/ui/_widget.lua:92) is then dead and worth dropping. "
+            .. "Check the 'template child' lines first: if %s and %s resolved while %s did not, "
+            .. "that is the finding; if all three are MISSING the walk itself failed and this "
+            .. "concludes nothing.", INNER, LABEL, CLICK, INNER)
     else
-        probe.note("UNANSWERED: WBP_Title_MenuButton_C could not be loaded from a world, so "
-            .. "neither the template tree nor a created instance could be read. This is the one "
-            .. "outcome that leaves the item open — the fallback is probes/title.lua from the "
-            .. "main menu (pf_title), which needs the title screen. Read the histogram in "
-            .. "section 4 meanwhile: it says what slot class Palworld's own UI puts a "
-            .. "HorizontalBox in, which is the same population the title button belongs to.")
+        probe.note("NO ANSWER: WBP_Title_MenuButton_C could not be loaded from a world, so neither "
+            .. "the template tree nor a created instance could be read — this run measured "
+            .. "nothing, and it neither confirms nor contradicts the close. The fallback is "
+            .. "probes/title.lua from the main menu (pf_title), which needs the title screen. Read "
+            .. "the histogram in section 4 meanwhile: it says what slot class Palworld's own UI "
+            .. "puts a HorizontalBox in, which is the same population the title button belongs to.")
     end
 
     probe.finish()

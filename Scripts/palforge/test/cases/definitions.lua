@@ -9,7 +9,9 @@
 -- exceptions to that uniformity — Mesh.get RAISES where the other seven fall back, and a
 -- mesh has no name/description at all — plus the nesting rule that makes
 -- `Pal{ mesh = Mesh{ ... } }` work: the handle is unwrapped, validated like the inline
--- table, and stored as a COPY.
+-- table, and stored as a COPY. The last section covers the ninth way in, api.pack("id"),
+-- which is the same eight constructors wrapped so that what they register carries an
+-- OWNER — the thing a definition call otherwise cannot say about itself.
 --
 -- NOTHING HERE NEEDS A WORLD. Defining is registry bookkeeping and no test below spawns,
 -- gives, plays or mounts anything, so this suite passes in full at the title screen — no
@@ -124,6 +126,32 @@ s:test("calling a domain registers the definition in object_manager under that d
                     d.name .. " must not also register under \"" .. other.otype .. "\"")
             end
         end
+    end
+end)
+
+s:test("a definition made outside api.pack belongs to no pack, and that is not an error", function(t)
+    -- Pack identity is opt-in. A pack that never calls api.pack keeps exactly the old
+    -- behaviour: it defines, it registers, and the entry is attributed to nobody.
+    for _, d in ipairs(DOMAINS) do
+        local id = support.id(d.otype)
+        d.module(d.decl(id, "unowned"))
+        t:eq(om.owner(d.otype, id), nil, d.name .. " must not invent an owner")
+        t:eq(om.entry(d.otype, id).cls, om.get(d.otype, id),
+            d.name .. "'s entry must carry the same class get() returns")
+    end
+end)
+
+s:test("isRegistered answers the question X.get cannot, because get never returns nil", function(t)
+    -- F-1's detectability half, at the api surface: seven domains fabricate a thin
+    -- fallback rather than answer nil, so "is this id already taken?" cannot be asked of
+    -- get() at all. om.isRegistered is the public answer.
+    for _, d in ipairs(NEVER_NIL) do
+        local id = support.id("taken")
+        t:truthy(d.module.get(id), d.name .. ".get answers even for an unknown id")
+        t:eq(om.isRegistered(d.otype, id), false, "...but the id is NOT taken")
+
+        d.module(d.decl(id, "now taken"))
+        t:eq(om.isRegistered(d.otype, id), true, "and defining is what takes it")
     end
 end)
 
@@ -255,6 +283,127 @@ s:test("a Mesh handle nested as another definition's mesh validates exactly like
     -- the shared spec's default arrives through both spellings, which is the point of
     -- api/pal reusing Mesh.Spec rather than declaring a copy of it
     t:eq(a.kind, "skeletal", "Mesh.Spec's default kind must reach the pal both ways")
+end)
+
+--=============================================================================
+-- the scoped surface: api.pack("mypack")
+--
+-- A definition call carries no evidence of which mod made it, so pack identity has to be
+-- declared. api.pack is where it is declared, and it is the same api with the eight
+-- constructors wrapped — anything else (get, get_all, Player) is the module itself,
+-- reached through __index, so there is only ever one of each.
+--=============================================================================
+
+-- The pack id every scoped test uses. It is support's own namespace on purpose: the ids
+-- come from support.id(), so pack and namespace agree and no ownership warning is
+-- provoked by a test that is not about ownership.
+local PACK = support.NAMESPACE
+
+s:test("api.pack returns all nine members, with the eight constructors wrapped", function(t)
+    local scoped = api.pack(PACK)
+    t:type(scoped, "table", "api.pack must hand back an api")
+
+    for _, d in ipairs(DOMAINS) do
+        local mod = scoped[d.name]
+        t:truthy(mod, d.name .. " must be present on the scoped api")
+        t:neq(mod, d.module, d.name .. " must be a WRAPPER, not the bare module")
+        local mt = getmetatable(mod)
+        t:truthy(mt and mt.__call, d.name .. " must still be callable — calling IS defining")
+        -- everything that is not the constructor is the real module, reached by __index
+        t:eq(mod.get, d.module.get, d.name .. ".get must pass through, not be re-wrapped")
+        t:eq(mod.get_all, d.module.get_all, d.name .. ".get_all must pass through")
+    end
+
+    t:eq(scoped.Player, api.Player, "Player defines nothing, so it is passed through as-is")
+    t:type(scoped.pack, "function", "the scoped api can still scope again")
+    t:eq(api.pack(PACK), scoped, "a second call hands back the SAME table, not a new one")
+    t:neq(api.pack("palforge_test_other"), scoped, "a different pack id is a different api")
+end)
+
+s:test("defining through the scoped api attributes the registration to that pack", function(t)
+    local scoped = api.pack(PACK)
+    for _, d in ipairs(DOMAINS) do
+        local id = support.id(d.otype)
+        local h  = scoped[d.name](d.decl(id, "scoped"))
+
+        t:eq(h.id, id, d.name .. " must return the same handle it does unscoped")
+        t:eq(om.owner(d.otype, id), PACK, d.name .. " must register with pack = " .. PACK)
+        t:eq(om.get(d.otype, id), om.entry(d.otype, id).cls,
+            d.name .. " must register the same class either way")
+        t:eq(om.entry(d.otype, id).resolved, om.resolve(id),
+            d.name .. "'s entry must carry the row name the game will see")
+    end
+    t:eq(om.currentPack(), nil, "and the scope is gone again once the call returns")
+end)
+
+s:test("a domain's OTHER constructors are scoped too, not just the module call", function(t)
+    -- Audio.bgm / Audio.se are the only define routes in the tree that are not the module's
+    -- own __call: they pin `kind` and then run the same define, registration included. They
+    -- are reached through __index, so a wrapper that only wraps __call handed the raw function
+    -- back and PalForge.pack("mypack").Audio.bgm{...} registered with pack = nil — a hole that
+    -- was silent, because the sound still worked and only the attribution was lost.
+    local scoped = api.pack(PACK)
+    t:neq(scoped.Audio.bgm, api.Audio.bgm, "bgm must be wrapped, not passed through")
+    t:eq(scoped.Audio.bgm, scoped.Audio.bgm, "and wrapped once, so it is a stable value")
+
+    for _, kind in ipairs({ "bgm", "se" }) do
+        local id = support.id("audio")
+        local h  = scoped.Audio[kind]{ id = id }
+        t:eq(h.id, id, "Audio." .. kind .. " must return the handle it does unscoped")
+        t:eq(h:kind(), kind, "and it must still pin kind = " .. kind)
+        t:eq(om.owner("audio", id), PACK, "Audio." .. kind .. " must register with pack = " .. PACK)
+    end
+    t:eq(om.currentPack(), nil, "and the scope is gone again once the call returns")
+
+    -- The C2 second argument has to survive the wrapper as well, since it is forwarded whole.
+    local unreg = support.id("audio")
+    scoped.Audio.se({ id = unreg }, { register = false })
+    t:eq(om.isRegistered("audio", unreg), false,
+        "register = false must reach the real constructor through the wrapper")
+
+    t:eq(scoped.Audio.get, api.Audio.get, "the accessors are still passed through untouched")
+end)
+
+s:test("a define that raises still leaves the pack scope popped", function(t)
+    -- The scope is a module-level value, so a constructor that raises mid-define must not
+    -- leave every later definition in the tree attributed to whoever raised last.
+    local scoped = api.pack(PACK)
+    t:errors(function()
+        return scoped.Mesh{ id = support.id("mesh"), model = MODEL, name = "Body" }
+    end, "unknown field \"name\"", "the schema error must arrive unchanged through the wrapper")
+    t:eq(om.currentPack(), nil, "the scope is restored on the error path too")
+
+    local id = support.id("item")
+    api.Item{ id = id, name = "after" }
+    t:eq(om.owner("item", id), nil, "so the next unscoped define is still unattributed")
+end)
+
+s:test("the scoped api is a read-only view of the real one", function(t)
+    local scoped = api.pack(PACK)
+    t:errors(function() scoped.Item.get = function() end end, "read-only",
+        "writing through the view would silently diverge from the module everyone else has")
+end)
+
+s:test("api.pack refuses a pack id that could not be the first half of an id", function(t)
+    -- The pack id becomes the "packid" half of every "packid:name" the pack defines, so it
+    -- has to satisfy the same rule resolve applies to that half. Caught once, at the top of
+    -- a pack file, instead of once per definition later.
+    t:errors(function() return api.pack("my-pack") end, "pack id",
+        "a hyphen cannot survive resolve")
+    t:errors(function() return api.pack("") end, "pack id", "nor can an empty id")
+    t:errors(function() return api.pack("my pack") end, "pack id", "nor a space")
+    t:errors(function() return api.pack(nil) end, "pack id", "nor no id at all")
+    t:errors(function() return api.pack(42) end, "pack id", "nor a number")
+    t:truthy(api.pack("Mixed_Case_9"), "letters, digits and _ are what VALID allows")
+end)
+
+s:test("a pack's declared dependencies reach the import check", function(t)
+    local packId = "palforge_test_deps_api"
+    api.pack(packId, { depends = { "otherpack" }, recommends = { "thirdpack" } })
+    t:eq(om.checkImport("otherpack:Thing", packId), true, "a declared dependency is importable")
+    t:eq(om.checkImport("thirdpack:Thing", packId), true, "recommends counts too — deps ∪ recs")
+    t:eq(om.checkImport("fourthpack:Thing", packId), false, "and nothing else does")
+    om.declareDeps(packId, nil)
 end)
 
 s:test("the nested mesh is a copy, so nothing can reach the Mesh definition through it", function(t)

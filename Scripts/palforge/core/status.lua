@@ -25,10 +25,25 @@
 --   status.remove(pawn, "Poison")
 --   status.isActive(pawn, "Poison")
 --
--- NOT YET OBSERVED. The signatures are from a dump generated one game patch before the
--- installed binary, and no run has called any of these. Every call goes through core.signature,
--- which refuses it unless the live class declares it and logs which evidence it fired on. A
--- false here means "the call did not fire", never "the target is immune".
+-- CASE SENSITIVITY IS A PROPERTY OF THE LAYER, NOT OF THE FRAMEWORK, and this file sits entirely
+-- on the forgiving side of it. An id naming an ENGINE ENUM is case-INsensitive: idOf() below
+-- falls back to a lowered map, so `Effect{ nativeStatus = "poison" }` finds EPalStatusID 5 exactly
+-- as "Poison" does. That is safe here because the vocabulary is fixed, closed and shipped in full
+-- twenty lines down — folding case costs one table and spares every caller the game's own
+-- capitalisation. core/character.lua does the same for EPalWazaID's 309 names.
+-- The OTHER layer is case-SENSITIVE and nothing here can soften it: an id naming a DataTable row
+-- or an object_manager registry key ("pack_Potion", `om.get`, core/icons.lua's row lookup) must be
+-- spelled exactly, because that name set belongs to the GAME and this tree holds no map of it to
+-- fold against. Nothing in this file crosses that boundary — no status name is ever a row id — but
+-- a caller moving between the two will meet it, so it is stated in both module headers.
+--
+-- OBSERVED WORKING, 2026-07-26, in a loaded save — this header used to say "not yet observed"
+-- and that is no longer true. `status.add AttackUp (EPalStatusID 26) [declared]`, the game reading
+-- the ailment back as present through GetExecutionStatus, then `status.remove` and the game
+-- reading it back as gone. The signatures came from a dump generated one game patch before the
+-- installed binary; the live class agreed with all three. Every call still goes through
+-- core.signature, which refuses one unless the live class declares it and logs which evidence it
+-- fired on. A false here means "the call did not fire", never "the target is immune".
 local log       = require("palforge.utils.log").scope("status")
 local signature = require("palforge.core.signature")
 
@@ -97,7 +112,8 @@ local function componentOf(actor)
 end
 
 -- Resolve a status NAME to its integer. Names are the game's own spellings and matching is
--- case-insensitive, because "poison" is what a pack author will actually type.
+-- case-insensitive, because "poison" is what a pack author will actually type. This is the enum
+-- layer described in the header; a row id is not folded like this anywhere in the tree.
 local lowered = nil
 local function idOf(name)
     if type(name) == "number" then return name end
@@ -135,7 +151,9 @@ function M.known(name) return idOf(name) ~= nil end
 -- parameters are declared EnumProperty, not ByteProperty — an `enum class` rather than a legacy
 -- `enum` — and core/signature refused all three calls over the difference until it learned the
 -- two marshal identically. Read that as the pattern it is: every EPal* argument in this tree is
--- an enum class.
+-- an enum class. The expected lists below therefore SAY EnumProperty, which is what the running
+-- build declares; ByteProperty would still be accepted through the equivalence, but writing the
+-- spelling that was measured is what stops the next reader re-deriving it from the C++ dump.
 --
 -- Shared by add and remove: resolve the component and the id, then make one guarded call.
 -- EPalStatusID marshals as a plain integer, which is a scalar — no struct crosses this boundary.
@@ -152,11 +170,12 @@ local function invoke(actor, name, fnName, what)
             what, tostring(name)))
         return false
     end
-    local ok, _, level = signature.call(comp, fnName, { "ByteProperty" }, id)
+    local ok, _, level = signature.call(comp, fnName, { "EnumProperty" }, id)
     if not ok then
-        -- signature.call has already logged the refusal or the raise with its detail. An
-        -- EnumProperty build spells the parameter differently from a ByteProperty one, and that
-        -- is a real mismatch worth naming rather than retrying blind.
+        -- signature.call has already logged the refusal or the raise with its detail, naming what
+        -- the live class declares. Nothing is retried blind in its place: the one difference that
+        -- ever mattered here — EnumProperty against ByteProperty — is handled inside
+        -- core/signature's EQUIVALENT table, so a refusal that survives that is a real mismatch.
         return false
     end
     log.info(string.format("%s %s (EPalStatusID %d) [%s]", what, tostring(name), id, level))
@@ -179,7 +198,7 @@ function M.isActive(actor, name)
     local id = idOf(name)
     local comp = componentOf(actor)
     if not id or not comp then return nil end
-    local ok, ret = signature.call(comp, "GetExecutionStatus", { "ByteProperty" }, id)
+    local ok, ret = signature.call(comp, "GetExecutionStatus", { "EnumProperty" }, id)
     if not ok then return nil end
     if ret == nil then return false end
     local okv, valid = pcall(function() return ret.IsValid and ret:IsValid() end)

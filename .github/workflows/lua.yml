@@ -1,0 +1,48 @@
+name: Lua
+
+# Everything in this job runs under a plain lua5.4 with no engine and no game: the test
+# suite skips whatever needs a world (28 checks at the time of writing) and still measures
+# the rest, and tools/gen-types.lua stubs the UE4SS globals out. So there is no reason for
+# any of it to be a thing someone remembers to run.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Scripts/**'
+      - 'tools/**'
+      - 'package.json'
+      - '.github/workflows/lua.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The lua5.4 package carries both binaries: lua5.4 for the suite, luac5.4 -p for the
+      # syntax sweep.
+      - name: Install Lua 5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.4
+
+      # npm run, not the raw commands: the scripts are the definition, and a contributor
+      # running `npm run lint:lua` locally then gets exactly what CI got. None of these
+      # scripts has a dependency, so there is nothing to `npm ci`.
+      - name: Syntax sweep
+        run: npm run lint:lua
+
+      - name: Headless test suite
+        run: npm test
+
+      # types.lua is generated from the api specs; a spec change that skips the generator
+      # leaves the editor annotations describing a shape the code no longer accepts.
+      - name: types.lua matches the specs
+        run: npm run types:check
+
+      # The docs lint reads this tree (it checks the tool transcripts a page prints back at
+      # the reader against the code that produces them), so a Lua change is one of the ways
+      # a page goes stale. deploy-docs.yml only watches docs/**, which would not catch it.
+      - name: Docs content lint
+        run: npm run lint:docs

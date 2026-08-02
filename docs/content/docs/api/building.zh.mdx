@@ -34,7 +34,7 @@ local all   = Building.get_all()                                       -- every 
 Building{ id = "WorkBench" }
 ```
 
-这一次调用，就把这个 id 放进了 PalForge 的监视名单。在世界里寻找建筑物的那次扫描，只跟踪你定义过的 build id。对没人定义过的 id 调用 `Building.get(id)`，一样会给你一个能调方法的句柄，但不会把这个 id 加进名单，所以它的 `:instances()` 一直是空的。
+这一次调用，就把这个 id 放进了 PalForge 的监视名单。在世界里寻找建筑物的那次扫描，只从注册表里取定义、别的地方一概不取，所以它跟踪的正好是那些被定义调用**注册过**的 build id。对没人定义过的 id 调用 `Building.get(id)`，一样会给你一个能调方法的句柄，但它不注册任何东西，所以它的 `:instances()` 一直是空的。
 
 完整的定义就是一张表：
 
@@ -106,22 +106,36 @@ Building{ id = "example:Bench2", mesh = Mesh.get("example:bench_body") }
 定义不会往建造菜单里加新条目。只靠 Lua 没法往游戏的数据表里加一行，那是 PalSchema 的活。定义做的事，是给一个已经存在的 id 加上行为、存档数据、模型和信息。
 </Callout>
 
-同一个 id 定义两次，后一次会替换前一次。Palworld 自带的目录比你的内容包代码先加载，所以定义了 `WorkBench` 的内容包会接管 `native.buildings.WorkBench`，连 mesh 一起换掉 —— 还想保留的东西请重新写一遍。
+id 的**形状**是在你定义它的那一刻检查的，而不是等到后面有人去找这个建筑物的时候。只要出现冒号，就说明你想写的是带命名空间的形式，于是冒号两边都必须是字母、数字和下划线：
+
+```lua
+Building{ id = "my-pack:Bench" }
+-- PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
+一个连字符就让这个 id 解析不出来，而解析不出来的 id 无处可去：拼不出 DataTable 的行名，于是图标查询、科技解锁、build id 匹配全都落空，而这个定义还在注册表里看起来一切正常。唯一能让你亲眼看到这件事发生的地方就是定义调用，所以它在那里停下。
+
+`buildIds` 会在晚一步的引擎边界上被问同样的问题，而且更宽容：解析不出来的条目会被**按字面**使用，并有一条警告点出这个 id 和 resolve 给的理由。一个对不上任何真实 `BuildObjectId` 的字面值只是永远匹配不到 actor，那是一个你能追查的静默落空；而把 id 丢掉，则会得到一个注册成功、每次读取都有答案、实际上却已经死掉的定义。
+
+同一个 id 定义两次，后一次会替换前一次。`native.buildings` 不注册任何东西，所以定义了 `WorkBench` 的内容包就是它唯一的定义；但如果另一个内容包定义了同一个 id，它会替换掉你的，并且注册表会点名双方的所有者把这次冲突记进日志。
 
 ### 自带的目录
 
-`native/buildings.lua` 把 `DT_BuildObjectDataTable_Common` 的每一个行 id 都当作纯数据带着，另外还有两个现成的定义。
+`native/buildings.lua` 把 `DT_BuildObjectDataTable_Common` 的全部 498 个行 id 都当作纯数据带着，另外还有两个手写的定义，多带了 mesh 和显示名。
 
 ```lua
 local buildings = require("palforge.native.buildings")
 
-buildings.WorkBench          -- curated handle for "WorkBench" (BP_BuildObject_WorkBench_C)
-buildings.PalBox             -- curated handle for "PalBoxV2"
-buildings.get("ItemChest")   -- defines + registers on first use, then cached; nil for an unknown id
-buildings.CATALOG            -- the id list, as data
+buildings.WorkBench             -- curated handle for "WorkBench" (BP_BuildObject_WorkBench_C)
+buildings.PalBox                -- curated handle for "PalBoxV2"
+buildings.get("ItemChest")      -- a handle, built on first read and cached; nil for an unknown id
+buildings.publish("WorkBench")  -- opt IN to tracking, and with it to persistence
+buildings.CATALOG               -- the 498 ids, as data
 ```
 
-require 这个模块只会注册那两个。把目录里的 id 变成真正定义的是 `get(id)`，所以启动时不会一口气注册几百行。
+这个模块不注册任何东西，读一个字段也不会注册任何东西。这一点在这里比在其他任何领域都重要，因为注册一个建筑物**不是无害的**：扫描会拾起已注册的定义，世界里每一个已经立着的匹配 actor 都会变成被追踪的实例，而被追踪的实例会被写进存档的实体文件。否则，工具提示里读一下 `buildings.Stone_Foundation`，就会开始给基地里每一块石头地基写记录；一个遍历 `CATALOG` 的选择器则会把整个基地都持久化下来。
+
+所以从 `get(id)` 或具名字段拿到的句柄，`:unlock()` 和 `:iconOf()` 是真的能答的——两者都是以 id 为起点的表查询；而 `:instances()` 会一直是空的、什么也不写，直到你调用 `buildings.publish(id)`，或者自己声明 `Building{ id = <同一个 id> }`。
 
 ## Spec 字段
 
@@ -170,6 +184,20 @@ print(schema.help("Building.Spec"))
 print(schema.help("Building.Spec.Events"))
 schema.get("Building.Spec").fields   -- the same, as a table, for tooling
 ```
+
+### 第二个参数
+
+`Building(spec, opts)` 接受一个可选的第二张表。它只控制注册，别的什么都不管——两种写法造出来的定义是同一个：
+
+```lua
+Building(spec)                          -- define and register
+Building(spec, { register = false })    -- build the handle, register nothing
+Building(spec, { pack = "mypack" })     -- register with that pack recorded as the owner
+```
+
+出于上面说过的原因，`register = false` 在这个领域里就是「读」和「写」的分界线：注册过的定义会被追踪，被追踪的建筑物会被持久化。句柄照样能用，`core/event` 根本看不到这个定义，存档里也不会多出任何东西。
+
+`pack` 是给冲突补上「是谁」的那一项：所有者会记在这次注册上，两个内容包争同一个 id 时警告里会点名，并且写进每一条持久化记录。`PalForge.pack("mypack").Building` 会替你填上它。
 
 ### state —— 一张表，或者一个工厂函数
 
@@ -252,10 +280,14 @@ mesh = {
 },
 ```
 
-现成的 `WorkBench` 和 `PalBoxV2` 声明的都是 `static` mesh，所以它们会在第一次看到 actor 的那次扫描之后，下一次扫描时挂上。
+<Callout type="info">
+上面那个绝对 OBJ 路径只在一台机器上是对的。`Mesh.Spec` 会把相对的 `model` 或 `texture` 解析到调用方内容包自己的目录下，但这一步解析挂在 `Mesh.Spec:validate` 上，而 `Building.Spec.Mesh` 是一个自带 validate 的派生 spec —— 所以**写在内联 building mesh 里的相对路径仍然是相对的**，会带着你写的那个字符串在 `io.open` 处失败。请把 OBJ 声明成具名的 `Mesh{ ... }`，再把那个句柄嵌进来，那条路才带着解析好的路径。
+</Callout>
+
+现成的 `WorkBench` 和 `PalBoxV2` 声明的都是 `static` mesh。不过它们要先被注册（`buildings.publish(id)`，或者你自己的定义）才谈得上碰到放好的 actor，之后会在第一次看到 actor 的那次扫描之后，下一次扫描时挂上。
 
 <Callout type="warn">
-`skeletal` 换的是 pawn 自己那个 `Mesh` 组件上的资源。build object 没有这个组件，所以声明了 `kind = "skeletal"` 的建筑物什么都挂不上，它的 `render()` 返回 `false`。这个后端本身在游戏里也还没被确认过 —— 它报告的是哪个 setter 执行了，不是真的画出来了。
+`skeletal` 换的是 pawn 自己那个 `Mesh` 组件（`ACharacter::Mesh`）上的资源。build object 没有这个组件，所以声明了 `kind = "skeletal"` 的建筑物什么都挂不上，日志会写「这个 actor 多半不是 `APalCharacter`」，它的 `render()` 返回 `false`。这个后端本身在游戏里也还没被确认过：它会过实机的签名检查，设置之后还会把资源读回来比对，所以一个跑了却被忽略的 setter 得到的是 `false`，不是假装成功——但还没有人亲眼看到什么东西真的换了外形。
 </Callout>
 
 ## 运行中的实例
@@ -318,17 +350,19 @@ flowchart TD
 ### 实例的方法
 
 ```lua
-self:save()        -- stage state and write the json file now
-self:setDirty()    -- stage only; written by the next save or on world.left
-self:isValid()     -- is self.actor still a valid engine object
-self:render()      -- attach mesh + material once; false without a valid actor or a model
-self:update()      -- re-tint the live material from self:currentColor()
-self:mesh()        -- the declared mesh table
-self:material()    -- the declared material, or one built from color / texture
-self:iconOf()      -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
+self:save()             -- stage state and write the json file now
+self:setDirty()         -- stage only; written by the next save or on world.left
+self:isValid()          -- is self.actor still a valid engine object
+self:render()           -- attach mesh + material once; false without a valid actor or a model
+self:update()           -- re-tint the live material from self:currentColor()
+self:neighbors(cm)      -- every OTHER tracked structure within cm of this one
+self:mesh()             -- the declared mesh table
+self:material()         -- the declared material, or one built from color / texture
+self:currentColor()     -- the tint update() will write; override for a state-driven look
+self:iconOf()           -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
 ```
 
-`currentColor()` 返回 `self.color`，默认就是定义里的染色。想让外观跟着状态走，就在建筑物自己身上设这个字段，然后推上去：
+`currentColor()` 返回 `self.color`，默认就是定义里的染色。想让外观跟着状态走，就在建筑物自己身上设这个字段，然后推上去；如果颜色本来就是状态的函数，也可以在定义类上重写这个方法：
 
 ```lua
 onTick = function(self, ctx)
@@ -340,8 +374,22 @@ end,
 ```
 
 <Callout type="info">
-`update()` 走的是 `core/mesh`。`core/mesh` 记得每个 actor 是被哪个后端穿上的，会把重新染色发回同一个后端。只有 `procedural` 实现了这一步，它写的是挂上去时创建的那个材质实例。`static` 的 mesh 挂得上，但没有重新染色，所以在它上面 `update()` 返回 `false`。
+`update()` 走的是 `core/mesh`。`core/mesh` 记得每个 actor 是被哪个后端穿上的——键是 actor 的 `GetFullName()`，因为 UE4SS 的句柄每次查询都会新造一个——并把重新染色发回同一个后端。`static`、`procedural`、`skeletal` 三者都会响应：挂 mesh 时没有声明颜色的，共享材质层会当场把动态材质实例造出来。`true` 表示写入在一个真实的材质实例上**执行了**。它不是外观真的变了的证据：往一个 Palworld 材质并不带的参数名上写，是悄无声息的空操作，而且到目前为止没有人在游戏里亲眼看到染色生效。`false` 表示根本没有可写的对象——这个 actor 上没有我们挂的 mesh，或者没有颜色。
 </Callout>
+
+### neighbors
+
+`self:neighbors(radiusCm)` 返回这个半径内**其他**所有被追踪的建筑物——任何定义的都算，不只是自己这一种——形式是运行中的实例。它背后是 `core/spatial` 的哈希网格，而且这次调用会先把被追踪的实例重新分桶，所以移动过的建筑物也找得到。
+
+```lua
+onTick = function(self, ctx)
+    for _, n in ipairs(self:neighbors(350)) do    -- everything within 3.5 m
+        log.info(self.key .. " is next to " .. n.key)
+    end
+end,
+```
+
+在定义（而不是实例）上调用时返回空列表，因为那里没有 `self.pos`；半径不是正数时也返回空列表。索引里只有 PalForge 正在追踪的建筑物，所以一个满是未注册原版 id 的基地会答空。
 
 ### 保存状态
 
@@ -351,21 +399,32 @@ end,
 <UE4SS Mods>/PalForge/state/entities_<saveId>.json
 ```
 
-`saveId` 由 `core/spatial` 决定：取游戏实例的 `WorldGuid`、`WorldSaveName` 或 `SaveName`，把不是字母、数字、下划线的字符换成 `_`，再在前面加上 `w_`；三个都读不到时就是 `world`。文件里每个建筑物的键对应一条记录：
+`saveId` 由 `core/spatial` 决定：它从活着的 `PalGameInstance` 上读当前选中的存档，先试 `GetSelectedWorldSaveDirectoryName`，不行再试 `GetSelectedWorldName`，两者各自还有对应的支撑属性（`SelectedWorldSaveDirectoryName`、`SelectedWorldName`）作为第二次机会；拿到的名字里不是字母、数字、下划线的字符换成 `_`，前面再加上 `w_`，什么都读不到时就是 `world`。
+
+<Callout type="info">
+`WorldGuid`、`WorldSaveName` 和 `SaveName` 并不在那个类上。`PalGameInstance` 完整的 111 条属性清单里一个都没有，所以基于这三个名字的探测只可能落到 `world` 这个兜底值——这就是为什么每个存档共用同一个持久化文件，也是为什么真实会话留下来的唯一产物叫 `entities_world.json`。这里优先用存档目录名而不是显示名，是因为两个存档不可能共用同一个存档文件夹，而玩家自己敲的标签完全可能重名。
+</Callout>
+
+文件里每个建筑物的键对应一条记录，另外还有一个隔离区：
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "entities": {
     "WorkBench@1234,-56,78": {
+      "v": 2,
       "buildId": "WorkBench",
+      "def": "mypack:Bench",
+      "pack": "mypack",
       "pos": { "x": 123400.0, "y": -5600.0, "z": 7800.0 },
-      "state": { "uses": 3 },
-      "altKeys": {}
+      "state": { "uses": 3 }
     }
-  }
+  },
+  "orphans": {}
 }
 ```
+
+这个键是解析后的 **build** id 加一个单元格，所以它完全不指明所有者。于是所有者写在记录里面：`v` 是记录的形状，`def` 是认领它的定义 id，`pack` 是注册表能归因时的所属内容包 id。旧记录会在扫描第一次把它绑上时就地升级——这是一个所有内容包共用的单文件所能有的唯一迁移路径。
 
 记录里的 `state` 和 `inst.state` 是同一张表，所以就地改它，就足以改变将要写出的内容。但没有东西会自己去写：
 
@@ -376,6 +435,8 @@ end,
 重要的改动用 `save()`，高频循环里用 `setDirty()`；不然每个 tick 都 `save()`，就会每次心跳都写一遍文件。
 
 记录只在真的被拆除时才删。扫描连续六次没看到的建筑物 —— 按 500 ms 的节奏大约三秒 —— 会发出 `building.remove`，并连同它的记录一起被丢掉。
+
+而**本次会话里没有任何定义认领**其 build id 的记录不会被删掉，而是被隔离：原样搬进文件的 `orphans` 区，带着条数和它们所属的内容包写进日志，一旦有定义重新认领那个 build id，就立刻搬回来。这一趟检查会在世界打开后等大约 30 秒才跑，好让那些在 `world.ready` 时、或者懒加载时才定义建筑物的内容包来得及。隔离刻意保守：玩家只是把某个内容包关了一晚上，不该因此丢掉建筑物的状态。运行时里唯一会真的销毁记录的，是 4096 条的隔离上限，超过之后从最旧的开始丢，并在日志里写明丢了多少条、为什么。
 
 ```mermaid
 stateDiagram-v2
@@ -404,6 +465,8 @@ event.isWorldReady()                       -- has the world finished loading
 
 扫描跑起来之前 `:instances()` 都是空的，而扫描需要一个加载完的世界：一个监视每秒查一次有没有有效的 `PalPlayerCharacter`，连续成功五次之后才放行。
 
+这些东西都能挺过一次热重载。建筑物运行时把定义索引、运行中的实例、actor 索引和持久化缓存都放在 `_G` 上的一张表里，而 `core/reload` 在清空模块时会保留 `object_manager`，所以按下 F9 之后 `:instances()` 照样有答案，建筑物的钩子也照样在你已有的定义上触发。这两半必须一起在：一次把注册表丢掉的重载，在隔离检查看来就等于所有内容包同时被卸载——大约在按下之后 30 秒。
+
 ## 生命周期事件
 
 处理函数写在 `events` 下面。第一个参数就是事件发生在其上的那个建筑物，所以 `self.state`、`self.pos` 和 `self.actor` 直接就能用。唯一的例外是 `onBuild`，因为它触发时世界里还没有东西立着。
@@ -430,8 +493,18 @@ events = {
 | `onBreak` | — | 从不触发 | — |
 
 <Callout type="warn">
-`onLeftClick` 和 `onBreak` 可以写，但游戏里没有任何地方发出它们，所以它们永远不会运行。交互用 `onRightClick`，建筑物消失用 `onRemove`。
+`onLeftClick` 和 `onBreak` 可以写，但没有任何地方发出它们，所以它们永远不会运行。这是查清楚之后的否定结论，不是「还没找到」——见下面的 **不存在的东西**。交互用 `onRightClick`，建筑物消失用 `onRemove`。
 </Callout>
+
+### 不存在的东西，以及这是怎么查清楚的
+
+这两个缺席的钩子，是靠通读每一个可能拥有它的类的完整函数清单找出来的，所以这是一次测量，而不是一个还没填的坑。
+
+**`PalBuildObject` 上没有点击、命中或者敲打的条目。** 它反射出来的 22 个函数已经完整地躺在磁盘上。唯一像输入的条目是交互那一家子——`OnBeginInteractBuilding`、`OnTriggerInteractBuilding`、`OnStartTriggerInteractBuilding`、`OnEndTriggerInteractBuilding`——那是右键，而且已经是 `onRightClick` 了。唯一像伤害的条目 `OnDamage` 曾经是最被看好的候选，但它不是敲打：一次录制到的会话里，它**以每个建筑物 12–13 秒的严格节奏触发了 196 次**，全程没有任何玩家在附近。t=306.412 放下的工作台在 t=306.933 收到第一次，之后 2250 秒里又收到 180 次也没有坏掉。它是耐久劣化的计时器；把 `onLeftClick` 接到它上面，就等于让基地里每一个建筑物每十二秒调用一次你的处理函数，永远如此。
+
+**破坏只以委托「字段」的形式存在。** `PalBuildObject`（22 个函数）、`PalMapObjectModel`（18 个）、`PalMapObjectConcreteModelBase`（25 个）和 `PalNetworkPlayerComponent`（77 个）里，没有任何一个带 Destroy / Dismantle / Demolish / Deconstruct / Break 的函数。真正存在的是 `PalMapObjectModel:OnDestroyDelegate` 和 `:OnDisposeDelegateInServer`，而 `RegisterHook` 没法按路径挂一个委托字段。`PalBuildObject.OnChangeVisualForDismantle` 是拆除的*预览*显示，不是拆除完成。
+
+所以一个建筑物消失只有一条浮出水面的路：扫描的漏检清扫，表现为 `ctx.reason = "missing"` 的 `onRemove`。它分不清是被拆了还是流送出去了，而且晚六次扫描才到。这两个钩子仍然可以声明，是为了让你自己的 `emit` 能用，也为了将来真找到来源时有个落点；今天没有任何东西发出它们。转储唯一没覆盖到的地方是 `BP_BuildObject_<Id>_C` 子类里的图表事件——转储只覆盖 `/Script/Pal.*`。
 
 ### onPlace
 
@@ -594,7 +667,17 @@ box:iconOf()        --> a texture ref from DT_BuildObjectIconDataTable, else the
 Building.get("example:Bench"):unlock()
 ```
 
-通过 `PalCheatManager:UnlockOneTechnology`，解锁以解析后的 id（`example_Bench`）命名的科技行。由 PalSchema 注入的建筑物科技，就是这样进到建造菜单里的。拿不到作弊管理器时返回 `false` 并记日志。
+通过 `PalCheatManager:UnlockOneTechnology(FName)`，解锁以解析后的 id（`example_Bench`）命名的科技行。由 PalSchema 注入的建筑物科技，就是这样进到建造菜单里的。
+
+<Callout type="warn">
+**从来没有人观测到它起作用，而且它在结构上就无法验证。** `true` 并不表示科技解锁了。它表示两件读得到的事：作弊调用跑完了没有抛异常，并且在活着的 `DT_TechnologyRecipeUnlock` 里确实存在一行叫那个解析后名字的科技。后一项检查的作用，是不让作弊在一个根本没有科技可解锁的建筑物上「成功」，这也是 `Building.get("PalBoxV2"):unlock()` 返回 `false` 的原因（原版 501 个 build id 里只有 115 个有这样一行）。
+
+读不到的是结果。`UnlockOneTechnology` 什么都不返回，而这个版本上任何地方都没有「这个科技解锁了吗」的访问器——作弊管理器的接口上没有，头文件转储里没有，道具那条桥上也没有。而且它走的正是那条被测出「接受调用然后悄悄什么都不做」的作弊管理器路径，这个调用没法把自己和那种失败区分开。
+
+唯一能定论的办法，是在一个存档里按下去，然后去看建造菜单。那就是声明好的钩子 `pf_hook building-unlock`：它需要世界和玩家，并且算写操作，因为它会改动玩家的科技状态。
+</Callout>
+
+`false` 还有另外两种来源，各有各的日志行：科技表根本读不出来，以及压根没有可调用的作弊管理器——这条路径只用已经存在的那个，不会自己造一个。
 
 ### instances、render、update
 
@@ -753,16 +836,18 @@ return Building{
 ```
 
 那个 `if` 在生成调用发出去的当下就会执行它的内容，而帕鲁要好几秒之后才到 —— 所以计数和冷却先动，
-生物随后才来。在这里这个顺序是对的：这个台子已经把这次召唤定下来了。再定义一次 `PalBoxV2`，会替换掉
-`native/buildings.lua` 里现成的定义，所以这里把 mesh 重新写了一遍。原版的帕鲁盒子界面照常打开 —— 交互钩子只是看着这次调用，并不会把它吞掉。
+生物随后才来。在这里这个顺序是对的：这个台子已经把这次召唤定下来了。`native/buildings.lua` 不注册
+任何东西，所以这就是 `PalBoxV2` 唯一的定义；这里把 mesh 重新写了一遍，是因为一个定义只带它自己声明
+的东西。原版的帕鲁盒子界面照常打开 —— 交互钩子只是看着这次调用，并不会把它吞掉。
 
 ## 小结
 
 - 写 `Building{ ... }` 定义一个建筑物。只有 `id` 是必填的，而且它得是游戏里已经有的 id。
 - 想被记住的数据放进 `state`，就地改，然后调 `self:save()`。
 - 处理函数写在 `events` 里，第一个参数是放好的建筑物，所以 `self.state`、`self.pos` 和 `self.actor` 直接就能用。
-- `onPlace`、`onLoad`、`onRightClick`、`onRemove`、`onTick`、`onBuild`、`onWorldReady` 和 `onWorldLeft` 都会运行。`onLeftClick` 和 `onBreak` 永远不会。
-- 建筑物是靠取整后的世界坐标重新找到的，所以 `gridCm` 决定了两个建筑物能挨多近。
-- `Building.get(id):instances()` 会给你这个定义此刻立在世界里的全部建筑物。
+- `onPlace`、`onLoad`、`onRightClick`、`onRemove`、`onTick`、`onBuild`、`onWorldReady` 和 `onWorldLeft` 都会运行。`onLeftClick` 和 `onBreak` 永远不会，而这是测出来的，不是还没做。
+- 建筑物是靠取整后的世界坐标重新找到的，所以 `gridCm` 决定了两个建筑物能挨多近。那个键指向的记录里写着拥有它的定义和内容包。
+- 注册一个建筑物就是一次写入：只有注册过的定义会被追踪，只有被追踪的建筑物会被持久化。`native/buildings.lua` 在你 `publish` 之前不注册任何东西。
+- `Building.get(id):instances()` 会给你这个定义此刻立在世界里的全部建筑物，而 `self:neighbors(cm)` 会给某一个建筑物它周围的那些。
 
 接下来读 [Item](/docs/api/item)，了解 `:give` 和 `:take` —— 建筑物就是靠它们把东西交给玩家的。

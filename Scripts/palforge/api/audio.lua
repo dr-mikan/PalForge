@@ -8,7 +8,12 @@
 -- HOW IT INTEGRATES: Audio{ ... } registers the definition class in object_manager under
 -- ("audio", id) and lowers the declaration into a source spec that core.sound resolves:
 --   soundId / soundPath -> { kind = "native" }  -> core.sound.native  (WORKING)
---   soundFile           -> { kind = "file"   }  -> core.sound.file    (seam, no-op)
+--   soundFile           -> REFUSED at define time (see below)
+--
+-- Audio{ spec, opts } takes an optional second argument, like every other domain constructor:
+-- `opts.register == false` builds and returns the Handle WITHOUT registering it (a definition
+-- a pack wants to hold on to rather than publish), and `opts.pack = "mypackid"` records the
+-- owner. Omitting opts behaves exactly as it always did.
 --
 -- The native route is the game's own route: a catalog entry is a Wwise AkAudioEvent NAME with
 -- an asset PATH, played via LoadAsset(path) -> PalSoundUtility:PlayAkEventSoundByActor —
@@ -30,7 +35,7 @@
 -- that names nothing, or a world that has no player pawn, returns false rather than a
 -- reassuring true. It is still not a promise of audibility (the engine returns nothing).
 --
--- ONE THING HERE STILL DOES NOTHING, and says so rather than pretending.
+-- ONE THING HERE IS REFUSED OUTRIGHT, and refusing is the whole point.
 --
 -- Custom audio FILES are not playable. The in-game F5 harvest (dumps/f5-partial-run.txt) and
 -- then dumps/cxx narrowed it to a shape no call in this build can satisfy: the UE-native half is
@@ -38,8 +43,17 @@
 -- (Engine.hpp:21335 / :21371), so PlaySound2D survives with nothing to be handed — and the Wwise
 -- half exists but takes the wrong input: UWwiseExternalSourceStatics::SetExternalSourceMediaBy*
 -- (WwiseFileHandler.hpp:48-50) REBINDS a cooked external-source cookie to media the Wwise cook
--- already staged, which is not a .wav on a pack's disk. So a `soundFile` definition resolves and
--- then no-ops, and core/sound/file.lua carries the marker and the remaining question.
+-- already staged, which is not a .wav on a pack's disk. core/sound/file.lua carries the full
+-- evidence and the one question left open (audio-custom-file-loader in plan/TODO.md).
+--
+-- `soundFile` USED TO BE ACCEPTED AND THAT WAS THE WORST OF BOTH. It was validated, documented,
+-- and it took PRECEDENCE over soundId/soundPath in the lowering below — so a pack that added a
+-- soundFile beside a working soundId silenced a sound that had been playing, and :play handed
+-- back the false that came out of the file seam. Every other unfinished thing in this framework
+-- degrades honestly; that one made working audio silent. So it is now a HARD ERROR at define
+-- time, naming the open item and saying what to use instead. The field stays DECLARED in the
+-- spec so the error can name it and so tooling still lists it — a field that errors where you
+-- typed it costs you a minute; a field that silences your sound costs you an afternoon.
 --
 -- VOLUME IS NOW WIRED, and it is ACTOR-WIDE, not per sound. Handle:setVolume calls
 -- UAkGameplayStatics::SetOutputBusVolume(float, AActor*) (AkAudio.hpp:748) — Wwise's
@@ -52,11 +66,22 @@
 -- parameter list would have helped. TO MAKE ONE SOUND QUIETER THAN ANOTHER, PICK A QUIETER
 -- EVENT from the catalog — that is still the only per-sound control a pack has.
 --
---   local Theme = Audio.bgm{ id = "AKE_BGM_Title",
---                            soundId = "AKE_BGM_Title", soundPath = "/Game/.../AKE_BGM_Title" }
+--   local Theme = Audio.bgm{ id = "AKE_BGM_Title", soundId = "AKE_BGM_Title",
+--       soundPath = "/Game/Pal/Sound/Events/SE/UI/BGM_Title/AKE_BGM_Title.AKE_BGM_Title" }
 --   Theme:play()             -- on the player pawn
 --   Theme:stop()
 --   Audio.get("AKE_BGM_Title"):play(someActor)
+--
+-- THAT PATH IS THE CATALOG'S OWN (native/audio.lua:186), AND IT CARRIES ITS `.Object` TAIL.
+-- Neither was true of the example this header used to show. It wrote an abbreviated,
+-- package-only "/Game/.../AKE_BGM_Title" — which resolves to nothing and falls through to the
+-- silent SoundID branch, which returns true. So the module's documented example was the one
+-- form that does not play, while every generated catalog entry was the form that does.
+-- core/sound/native.lua completes a package-only path through core.assetpath now, so both forms
+-- reach the same asset; the example is written in full anyway, because that is the form to copy
+-- — and it is copied from the catalog, so it is a path this build actually has (the title BGM
+-- lives under Events/SE/UI/BGM_Title/, not under an Events/BGM/ directory, which is exactly the
+-- kind of thing an abbreviated example lets you assume).
 
 local om     = require("palforge.core.object_manager")
 local sound  = require("palforge.core.sound")
@@ -75,8 +100,13 @@ local schema = require("palforge.core.schema")
 
 ---What you pass to Audio{ ... } / Audio.bgm / Audio.se. `id` is required; a definition
 ---that names no sound falls back to its own id as the AkAudioEvent name.
+-- `id` carries schema.validId, not schema.nonEmpty: a namespaced id has to survive
+-- object_manager.resolve to reach the game at all ("pack:Theme" -> "pack_Theme"), and here it
+-- has a second reason — a definition that names no sound uses its own id AS the AkAudioEvent
+-- name, so an id that cannot resolve becomes a sound name that cannot resolve either. Refused
+-- HERE rather than registering and playing nothing. The rule is written once, in core/schema.lua.
 local Spec = schema.define("Audio.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "audio id: the AkAudioEvent name, or \"pack:name\"" },
     { "name",        type = "string", doc = "human label (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
@@ -84,7 +114,12 @@ local Spec = schema.define("Audio.Spec", {
                      doc = "descriptive only - the native play route is the same for both" },
     { "soundId",     type = "string", doc = "native AkAudioEvent name - its asset path is filled in from the native catalog when you do not pass one" },
     { "soundPath",   type = "string", doc = "native AkAudioEvent asset path (the route that actually plays); overrides the catalog lookup" },
-    { "soundFile",   type = "string", doc = "custom audio file path (seam - not playable yet)" },
+    -- DECLARED SO THE ERROR CAN NAME IT. Setting this is a hard error at define time (see
+    -- define() below and the header): it is not playable on this build AND it outranked
+    -- soundId/soundPath, so accepting it silenced sounds that worked. It stays in the spec
+    -- rather than being deleted so that `schema.help("Audio.Spec")`, the generated types and
+    -- the did-you-mean list all still know the name a pack author is about to type.
+    { "soundFile",   type = "string", doc = "REFUSED at define time: custom audio files do not play on this build (open item audio-custom-file-loader) - use soundId or soundPath" },
     { "source",      type = "function", sig = "fun(self: Audio.Definition): table|nil",
                      doc = "override that returns the core.sound spec yourself; `self` is the DEFINITION, not the handle" },
     { "data",        type = "table",  doc = "free-form payload of your own, carried onto the definition" },
@@ -120,19 +155,35 @@ local function catalogPath(name)
     return catalog and catalog[name] or nil
 end
 
--- Lower this declaration into a source spec for core.sound. Prefers a custom file over a
--- native id; returns nil when the definition names no sound. Override for full control.
+-- Lower this declaration into a source spec for core.sound. Returns nil when the definition
+-- names no sound. Override for full control.
 --
 -- A name WITHOUT a path is looked up in the AkAudioEvent catalog and given its real asset
 -- path: the path is the branch that produces sound, so a name-only definition that skipped
 -- this fell through to PlaySoundByActor and played nothing while still reporting true. A
 -- declared soundPath is never overwritten, and an unknown name still lowers to the id alone.
+--
+-- THE ID IS RESOLVED FIRST, and this is the engine boundary that needed it. A definition's id
+-- may be namespaced ("mypack:Theme"), and a namespaced id is not what anything downstream can
+-- use: the AkAudioEvent catalog is keyed on event names, and the SoundID fallback puts the id
+-- straight into FName(). The colon form matched neither, so a namespaced sound missed the
+-- catalog and then posted an FName nothing answers to — it played nothing, silently. `resolve`
+-- turns "mypack:Theme" into "mypack_Theme", which is the same transformation the DataTable rows
+-- get, and `or id` keeps the LITERAL when resolve refuses the shape, so an id is never dropped
+-- on the floor at a boundary (that fallback is the rule, not a local choice — see F-4).
+--
+-- The soundFile branch stays for the two callers that can still produce a file spec — a `source`
+-- override and a direct core.sound call — because Audio{ soundFile = ... } is now refused at
+-- define time and can no longer reach here. It is kept, rather than deleted, because a subclass
+-- of Audio.Class that sets soundFile itself is entitled to the documented lowering; what it is
+-- not entitled to is silence, and core/sound/file.lua returns false rather than pretending.
 function Class:source()
     if type(self.soundFile) == "string" and #self.soundFile > 0 then
         return { kind = "file", path = self.soundFile }
     end
     local id   = (type(self.soundId)   == "string" and #self.soundId   > 0) and self.soundId   or nil
     local path = (type(self.soundPath) == "string" and #self.soundPath > 0) and self.soundPath or nil
+    if id then id = om.resolve(id) or id end
     if id and not path then path = catalogPath(id) end
     if id or path then
         return { kind = "native", id = id, path = path }
@@ -154,22 +205,59 @@ end
 
 ---The audio domain. CALL it to define a sound; bgm / se pin `kind`, get looks one up.
 ---@class palforge.audio
----@overload fun(spec: Audio.Spec): Audio.Handle
+---@overload fun(spec: Audio.Spec, opts: table?): Audio.Handle
 local Audio = {}
 
 local wrap  -- forward decl; the Audio.Handle wrapper is defined in the BOTTOM section
 
+-- THE soundFile PUBLISH GATE. Declared, validated, documented — and refused, loudly, here.
+-- See the header for why this is an error rather than a warning: soundFile outranked
+-- soundId/soundPath in the lowering, so accepting it silenced sounds that were working, and it
+-- has never been playable on any build this tree has measured. The message names the open item
+-- (audio-custom-file-loader) so nobody has to guess whether it is a bug or a boundary, and it
+-- names the two fields that DO play so the fix is one line.
+local function refuseSoundFile(spec, who)
+    if spec.soundFile == nil then return end
+    error(string.format(
+        "PalForge: %s: soundFile is not accepted (id %q, soundFile %q). Custom audio files do "
+        .. "not play on this build: the UE-native route has no importer that survives shipping "
+        .. "(USoundWave declares none, USoundWaveProcedural declares nothing at all) and the "
+        .. "Wwise route rebinds media the cook already staged rather than reading a file. This "
+        .. "is the open item audio-custom-file-loader. It is an ERROR rather than a no-op "
+        .. "because soundFile used to OUTRANK soundId/soundPath, so setting it beside a working "
+        .. "soundId silenced a sound that was playing. Name a game sound instead: "
+        .. "soundId = \"AKE_UI_Common_Menu_Close\", or soundPath = the asset path from "
+        .. "PalForge.native.audio.CATALOG.",
+        who, tostring(spec.id), tostring(spec.soundFile)), 0)
+end
+
 ---Define a playable sound and register it.
 ---`spec` is validated against Audio.Spec: `id` is required, unknown fields are an error.
+---`opts` is the optional second argument every domain constructor takes:
+---
+---  { register = false }   build and return the handle, register NOTHING — a definition the
+---                         caller wants to hold rather than publish (registering is permanent;
+---                         object_manager has no expiry).
+---  { pack = "mypack" }    register attributed to that pack, which is what gives a collision
+---                         a "who". PalForge.pack("mypack").Audio fills it in for you.
 ---@param spec Audio.Spec
+---@param opts table?
 ---@return Audio.Handle
-local function define(spec)
+local function define(spec, opts, who)
+    who = who or "Audio"
+    local register, pack = schema.defineOpts(opts, who)
+    -- The SCHEMA errors stay labelled "Audio" whichever constructor was called: they name the
+    -- spec being validated, they are quoted verbatim in the docs, and Audio.bgm/Audio.se
+    -- validate against exactly the same one. The refusal below names the constructor instead,
+    -- because it is about the call the author made.
     spec = Spec:validate(spec, "Audio")
+    refuseSoundFile(spec, who)
     -- A definition that names no sound falls back to its own id as the AkAudioEvent name
     -- — the same thing Audio.get does for an id it has never seen, so the short form
     -- `Audio.bgm{ id = "AKE_BGM_Title" }` plays rather than resolving to nothing.
+    -- (soundFile is refused above, so it can no longer take part in this test.)
     local soundId = spec.soundId
-    if soundId == nil and spec.soundPath == nil and spec.soundFile == nil and spec.source == nil then
+    if soundId == nil and spec.soundPath == nil and spec.source == nil then
         soundId = spec.id
     end
     local cls = setmetatable({
@@ -179,21 +267,24 @@ local function define(spec)
         kind        = spec.kind,
         soundId     = soundId,
         soundPath   = spec.soundPath,
-        soundFile   = spec.soundFile,
         data        = spec.data,
     }, Class)
     cls.__index = cls
     if spec.source then cls.source = spec.source end
-    pcall(function() om.register("audio", spec.id, cls) end)
+    -- so get() finds it — unless the caller asked for a definition that stays out of the
+    -- registry (opts.register == false), which is a build, not a define.
+    if register then
+        pcall(function() om.register("audio", spec.id, cls, { pack = pack }) end)
+    end
     return wrap(cls)
 end
 
 -- Calling the module IS defining:  Audio{ id = "AKE_BGM_Title", ... }
-setmetatable(Audio, { __call = function(_, spec) return define(spec) end })
+setmetatable(Audio, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 -- Same definition with `kind` pinned. The caller's table is never mutated — a stray
 -- `kind` in it would be a contradiction, so it is rejected rather than overwritten.
-local function defineAs(kind, spec, who)
+local function defineAs(kind, spec, who, opts)
     if spec ~= nil and type(spec) ~= "table" then
         spec = Spec:validate(spec, who)   -- let the schema produce the type error
     end
@@ -204,18 +295,20 @@ local function defineAs(kind, spec, who)
             who, kind, tostring(copy.kind)), 0)
     end
     copy.kind = kind
-    return define(copy)
+    return define(copy, opts, who)
 end
 
 ---Define background music (kind = "bgm").
 ---@param spec Audio.Spec
+---@param opts table?
 ---@return Audio.Handle
-function Audio.bgm(spec) return defineAs("bgm", spec, "Audio.bgm") end
+function Audio.bgm(spec, opts) return defineAs("bgm", spec, "Audio.bgm", opts) end
 
 ---Define a one-shot sound effect (kind = "se").
 ---@param spec Audio.Spec
+---@param opts table?
 ---@return Audio.Handle
-function Audio.se(spec) return defineAs("se", spec, "Audio.se") end
+function Audio.se(spec, opts) return defineAs("se", spec, "Audio.se", opts) end
 
 ---Get an EXISTING sound by id: a previously-defined one, else a thin native definition keyed
 ---on that id. Lowering resolves the name against the AkAudioEvent catalog, so any catalogued
@@ -301,7 +394,12 @@ end
 ---
 ---Returns true only when the native call was ISSUED — there is no world, or no actor, or the
 ---live declaration disagreed with the dump's and core/signature refused, and you get false.
----True is not a promise that anything got quieter: nothing here has been heard in game.
+---True is not a promise that anything got quieter: nothing here has been heard in game. That is
+---not a shrug, it is the one thing left owed on this call, and it is owed as a named hook —
+---`test/hooks/audio-setvolume-audible`, which needs a loaded world and a person listening:
+---play a catalog event, set 0.2, play it again, say whether the second one was quieter. The log
+---line the call writes says ISSUED in those words so a reader never mistakes it for a
+---measurement (audio-bus-volume in plan/TODO.md closed on the DECLARATION, not on audibility).
 ---@param volume number   # linear multiplier, 1.0 = unchanged; negative is refused
 ---@param actor any?
 ---@return boolean ok

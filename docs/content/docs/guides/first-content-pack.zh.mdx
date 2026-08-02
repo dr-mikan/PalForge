@@ -74,10 +74,12 @@ PalForge 加载的最后一步，是把自己放到一个叫 `_G.PalForge` 的�
 
 ```lua
 _G.PalForge = {
-    env    = env,                       -- { dev, name, version }
+    env    = env,                       -- dev, debug, name, version, gameBuild, multiplayer
     api    = require("palforge.api"),   -- Pal, Item, Building, Skill, Effect, Audio, Mesh, UI, Player
+    pack   = api.pack,                  -- the SCOPED surface: PalForge.pack("beacon").Item{ ... }
     utils  = { log, json, file, items },
-    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons },
+    core   = { registry, event, object_manager, spawn, mesh, sound, player, spatial, icons,
+               uobject, assetpath },
     native = require("palforge.native"),
 }
 ```
@@ -85,6 +87,23 @@ _G.PalForge = {
 你的包读这张表，包需要从 PalForge 拿到的东西全在这里了。`api` 是你写内容时打交道的对象，
 `utils.log` 往游戏控制台打印，`core.event` 是事件总线，`native` 是把 Palworld 自己的内容列成
 目录，你可以在里面查 id。
+
+**请把你的包写在 `PalForge.pack("beacon")` 上，而不是直接写在 `api` 上。** 它交回来的是同样的
+九个成员，其中八个构造器被包了一层，凡是经由它们做出的定义都会把 `beacon` 记成拥有者。有没有这份
+归属信息，决定了一次 id 冲突是"悄悄覆盖"还是"一行点出两个包名字的日志"；而且这也是框架唯一能说出
+定义归谁的办法——定义调用就是一次普通的 Lua 调用，本身不带任何关于是谁调的证据。不用它，包照样能
+跑，只是它的内容会以"无主"的身份注册。
+
+```lua
+local api = _G.PalForge.pack("beacon", { depends = { "otherpack" } })
+local Item = api.Item
+
+Item{ id = "beacon:Potion" }        -- registered with pack = "beacon"
+```
+
+`depends`（以及 `recommends`）记录这个包可以在值里提到哪些命名空间，于是别人命名空间里的 id
+要么是声明过的，要么会被报出来。唯一没有被包起来的成员是 `Player`：它什么都不定义，也就没有
+可归属的东西。
 
 ```mermaid
 flowchart TD
@@ -205,7 +224,7 @@ return M
 
 ```lua title="Scripts/beacon/audio.lua"
 -- beacon.audio — the sounds this pack plays.
-local api   = _G.PalForge.api
+local api   = _G.PalForge.pack("beacon")
 local log   = _G.PalForge.utils.log.scope("beacon.audio")
 local Audio = api.Audio
 
@@ -233,10 +252,11 @@ return M
 同一个播放调用。
 
 <Callout type="warn">
-这里有两样东西和名字给人的印象不一样，请绕开它们。`soundFile`（你自己的音频文件）能被接受，然后
-什么也不做，所以请改用目录里游戏自带的 `AkAudioEvent`。另外 `Handle:stop` 和 `Handle:setVolume`
-都不是按单个声音来的：两者作用的都是那个 actor 上正在播放的一切，所以想让某一个声音更轻，就挑一个
-更轻的事件。
+`soundFile`（你自己的音频文件）在定义时就会被拒绝，错误里会点出未决项 `audio-custom-file-loader`。
+这个版本上自带音频放不出来：UE 原生那条路没有能活到发行版的导入器，Wwise 那条路是把打包时已经准备
+好的媒体重新绑一遍，而不是去读文件。请改成点名一个游戏自带的声音。另外 `Handle:stop` 和
+`Handle:setVolume` 都不是按单个声音来的：两者作用的都是那个 actor 上正在播放的一切，所以想让某一个
+声音更轻，就挑一个更轻的事件。
 </Callout>
 
 </Step>
@@ -250,7 +270,7 @@ return M
 
 ```lua title="Scripts/beacon/effects.lua"
 -- beacon.effects — the blessing the beacon hands out.
-local api    = _G.PalForge.api
+local api    = _G.PalForge.pack("beacon")
 local log    = _G.PalForge.utils.log.scope("beacon.effects")
 local Effect = api.Effect
 local Item   = api.Item
@@ -312,7 +332,7 @@ return M
 
 ```lua title="Scripts/beacon/pals.lua"
 -- beacon.pals — the guardian the beacon calls.
-local api = _G.PalForge.api
+local api = _G.PalForge.pack("beacon")
 local log = _G.PalForge.utils.log.scope("beacon.pals")
 local Pal = api.Pal
 
@@ -359,7 +379,7 @@ PalForge 从生成出来的那只生物的蓝图类名里找到这个定义：`B
 
 ```lua title="Scripts/beacon/items.lua"
 -- beacon.items — the reward the beacon pays out.
-local api  = _G.PalForge.api
+local api  = _G.PalForge.pack("beacon")
 local log  = _G.PalForge.utils.log.scope("beacon.items")
 local Item = api.Item
 
@@ -383,7 +403,12 @@ M.Reward = Item{
     },
     events = {
         onObtain = function(item, ctx)
-            log.info("reward obtained x" .. tostring(ctx.count))
+            log.info("reward obtained x" .. tostring(ctx.count) .. " via " .. tostring(ctx.via))
+        end,
+        onCraft = function(item, ctx)
+            -- Fired when a production finishes at a real machine. ctx.count is absent: the
+            -- per-craft count lives in the recipe row, not on the hook.
+            log.info("reward crafted from recipe " .. tostring(ctx.recipeId))
         end,
     },
 }
@@ -391,11 +416,14 @@ M.Reward = Item{
 return M
 ```
 
-<Callout type="warn">
-`onObtain` 跟的是游戏自己那条“你获得了一件道具”的日志
-（`PalPlayerState:AddItemGetLog_ToClient`），拾取、战利品和奖励都会触发它。不进这条日志的
-背包添加不在覆盖范围内，所以别指望自己调用的 `:give` 会以 `onObtain` 的形式回到你这里——要
-记录就在调用的地方记。`onCraft` 和 `onDiscard` 可以声明，但目前没有任何东西会发送它们。
+<Callout type="info">
+道具的四个处理函数都是活的。`onObtain` 有两个来源，去重后合成一个事件：游戏自己那条"你获得了
+一件道具"的日志（`PalPlayerState:AddItemGetLog_ToClient`，`ctx.via = "getlog"`），以及背包的添加
+（`PalPlayerInventoryData:AddItem_ServerInternal`，`ctx.via = "additem"`）。两个都挂上，是因为它们
+朝相反的方向失效，而 `ctx.via` 会说出这次是哪一个送来的。`onCraft` 在真实设备上一次生产完成时
+触发（`ctx.itemId`、`ctx.recipeId`、`ctx.via = "convert" | "product"`）；`ctx.count` 是特意没有的，
+因为每次产出的数量写在配方行里，而钩子不是读数据表的地方。`onDiscard` 在丢弃或处理掉时触发
+（`ctx.itemId`、`ctx.count`、`ctx.reason = "drop" | "dispose"`）。
 </Callout>
 
 </Step>
@@ -410,7 +438,7 @@ return M
 ```lua title="Scripts/beacon/skills.lua"
 -- beacon.skills — the signal the beacon fires. :activate runs the handler now and refuses
 -- while the skill is still cooling down, so the beacon gets its rate limit for free.
-local api     = _G.PalForge.api
+local api     = _G.PalForge.pack("beacon")
 local log     = _G.PalForge.utils.log.scope("beacon.skills")
 local Skill   = api.Skill
 local audio   = require("beacon.audio")
@@ -455,7 +483,7 @@ return M
 
 ```lua title="Scripts/beacon/buildings.lua"
 -- beacon.buildings — the structure the player interacts with.
-local api      = _G.PalForge.api
+local api      = _G.PalForge.pack("beacon")
 local log      = _G.PalForge.utils.log.scope("beacon.buildings")
 local Building = api.Building
 local items    = require("beacon.items")
@@ -542,8 +570,9 @@ return M
 两个模组都启用后启动游戏，进入世界，放一个 Altar 再和它交互。UE4SS 控制台会把整件事讲清楚：
 
 ```text
-[PalForge.main][info] PalForge v0.3.0 starting (dev=true)
-[PalForge.registry][info] initialized (dev=true, 12 class(es) registered)
+[PalForge.main][info] PalForge v0.3.0 starting | game build: declared v1.0.2.101103, live v1.0.2.101103 (PalGameSetting) | dev=true debug=true | dev overlay: Scripts/palforge_dev.lua
+[PalForge.main][info] PalForge targets SINGLE-PLAYER Palworld. Dedicated servers and co-op guests are not supported and are not tested: there is no replication layer, and the item, spawn and event routes are all client-authoritative. A pack may appear to work for the host and do nothing for anyone else.
+[PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
 [PalForge.beacon][info] loading against PalForge v0.3.0
 [PalForge.beacon][info] loaded
 [PalForge.event][info] world ready - building dispatch enabled
@@ -633,15 +662,18 @@ flowchart LR
 | --- | --- | --- |
 | Building | `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady`, `onWorldLeft` | `:instances()`, `:render()`, `:update()`, `:unlock()` |
 | Pal | `onSpawned`, `onDamaged`, `onDeath`, `onCaptured`, `onTick` | `:spawn()`（帕鲁几秒后才到）、`:renderOn(actor)`、`:skillsOf()`、`:teachAll(actor)` |
-| Item | `onObtain`, `onUse` | `:count()`、`:give(n)`、`:take(n)`（消耗掉；需要玩家装备着东西）、`:iconOf()`、`:recipeOf()` |
+| Item | `onObtain`, `onUse`, `onCraft`, `onDiscard` | `:count()`、`:give(n)`、`:take(n)`（消耗掉；需要玩家装备着东西）、`:iconOf()`、`:recipeOf()` |
 | Effect | `onApply`, `onTick`, `onStack`, `onExpire`（按 PalForge 自己的时间表） | `:apply()`, `:remove()`, `:isActive()`, `:stacksOn()`, `:timeLeft()` |
 | Skill | 没有 | `:activate()`, `:hit()`, `:equip()`, `:unequip()`, `:cooldownLeft()`, `:teach(actor)`, `:forget(actor)`, `:skillsOn(actor)` |
 | Audio | 没有 | `:play()`, `:stop()` |
 
-有四个处理函数可以声明，但目前不会运行，因为游戏里没有东西宣告它们：
-`Building.onLeftClick`、`Building.onBreak`、`Item.onCraft` 和 `Item.onDiscard`。建筑物请用
-`onRightClick` 和 `onRemove`，道具请用 `onObtain` 和 `onUse`。它们保留可声明，是为了将来找到
-来源时，你的包不用改。
+有两个处理函数可以声明，而且永远不会运行：`Building.onLeftClick` 和 `Building.onBreak`。这是
+一个已经定下来的否定结论，不是还没找到：可能拥有它们的每个类的完整函数表都读过了。
+`PalBuildObject` 有 22 个函数，里面没有任何点击、命中或击打项；唯一一个形状像伤害的，是一个
+每 12 到 13 秒走一次、玩家根本不在旁边的老化计时；而破坏只以委托*字段*的形式存在，`RegisterHook`
+没法按路径去指它。交互请用 `onRightClick`；建筑物消失请用 `ctx.reason = "missing"` 的 `onRemove`
+——它分不清是被拆掉了还是被流式卸载了。两个都保留可声明，这样包自己的 emit 可用，将来出现来源
+时也有地方落脚。
 
 `Building.onBuild` 在一个建筑物建造完成时运行，最早可能比它的活对象早一次扫描。它是唯一一个
 `self` 是定义而不是活对象的建筑物处理函数，所以 `self.actor`、`self.pos`、`self.state` 和
@@ -654,8 +686,11 @@ flowchart LR
 进来的就收不到。每个建筑物自己的初始化，请放进 `onLoad`，那里的 `ctx.reconstructed` 会告诉你
 这个建筑物是从存档回来的。你也可以用 `event.on("world.ready", fn)` 自己订阅这个频道。
 
-`Pal.onSpawned` 接在 `BroadcastOnCompleteInitializeParameter` 上，这是一个候选钩子而非确认的
-钩子，而且 PalForge 只在世界加载完之后才装上它。请把它当作尽力而为，并让处理函数跑两次也
+`Pal.onSpawned` 挂在三个来源上，而且全都只在世界加载完之后才装：同一个信号会在加载风暴里为世界
+中已有的每只帕鲁触发一次，在启动时就装会把共享的钩子分发挤死。`BroadcastOnCompleteInitializeParameter`
+在真实存档里被测出什么都不送，所以真正干活的是绑在它上面的两个委托接收方：
+`PalPlayerCharacter:OnCompleteInitializeParameter`（只对玩家订阅过的角色触发）和
+`PalNPC:OnCompletedInitParam`（绑在帕鲁自己那一侧，所以不依赖谁去订阅）。请让处理函数跑两次也
 不出事。
 
 ## 更多做法
@@ -666,7 +701,7 @@ mesh 本身就是一种内容，所以你可以只声明一次，让好几个定
 
 ```lua title="Scripts/beacon/meshes.lua"
 -- beacon.meshes — named visuals, so a model is declared once and reused by id.
-local api  = _G.PalForge.api
+local api  = _G.PalForge.pack("beacon")
 local Mesh = api.Mesh
 
 local M = {}
@@ -722,7 +757,10 @@ M.Beacon = Building{
 _G.PalForge.api.Building.get("beacon:Beacon"):unlock()
 ```
 
-这个调用要求会话里已经有 `PalCheatManager`，所以它需要 CheatManagerEnabler 模组。
+这个调用要求会话里已经有 `PalCheatManager`，所以它需要 CheatManagerEnabler 模组 —— 这一点和
+生成帕鲁那条路不同，那条路在没有时会自己在玩家控制器上造一个。科技解锁走的是道具辅助模块自己的
+查找，而那个查找只要一个现成的作弊管理器，不会去造。它事后还会核对：必须存在同名的科技行，
+否则日志会写成"调用发出去了，但没有可解锁的东西"，`unlock()` 返回 `false`。
 
 ### 加一个调试模块
 
@@ -785,6 +823,13 @@ PalForge: Building: field "events" (Building.Spec.Events): unknown field "onRigh
 PalForge: Building: field "id" is required (build id: a game BuildObjectId ("PalBoxV2") or "pack:name")
 ```
 
+还有 id 自己的形状，在定义时就检查。带命名空间的 id 会解析成数据表的行名 `packid_name`，所以两半
+都必须是字母、数字或 `_` —— 带连字符的 id 会一路定义、注册下去，然后解析不到任何东西：
+
+```text
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
 同样的信息也可以在运行时读，不用猜：
 
 ```lua
@@ -811,8 +856,12 @@ print(schema.help("Building.Spec.Events"))
 **效果在 tick，但什么都没变。** 效果跑的是它自己的时间表，不是游戏的状态系统。该发生的事情
 要写进 `onTick`。
 
-**两个定义用了同一个 id。** 同一种内容里同一个 id 注册两次，后面的会替换前面的，所以最后跑的
-那个定义赢。定义放在加载时做，处理函数里用 `X.get(id)` 取，而不是每次事件都重新定义一遍。
+**两个定义用了同一个 id。** 最后跑的那个定义仍然赢，但现在注册表会把这件事说出来，而不是默默
+覆盖；如果两者来自不同的包，它还会把两边都点名：
+`item 'mypack:Potion' was defined by pack 'mypack' and is being redefined by pack 'other'; the
+new definition replaces the old one (last-wins)`。这行只有在包说出自己是谁时才存在，而
+`PalForge.pack("beacon")` 就是为此而设。定义放在加载时做，处理函数里用 `X.get(id)` 取，而不是
+每次事件都重新定义一遍。
 
 ## 接下来读什么
 
@@ -856,8 +905,11 @@ print(schema.help("Building.Spec.Events"))
 
 - 一个包就是它自己的模组文件夹，带一个 `Scripts/main.lua`。它读 `_G.PalForge`，require 自己的
   模块，模块加载时里面每一次 `X{ ... }` 调用就注册那份内容。
-- `id` 是任何地方唯一必填的字段。带冒号的 id（`"beacon:Flare"`）是你自己的；不带冒号的
-  id（`"Altar"`、`"Ruby"`、`"Kitsunebi"`）是游戏里已经有的内容。
+- api 请从 `PalForge.pack("beacon")` 取，而不是 `PalForge.api`：成员是同样的九个，而经由它做出的
+  每个定义都会记下归哪个包所有。
+- `id` 是任何地方唯一必填的字段，而且它的形状在定义时就会检查。带冒号的 id（`"beacon:Flare"`）
+  是你自己的；不带冒号的 id（`"Altar"`、`"Ruby"`、`"Kitsunebi"`）是游戏里已经有的内容。两半都
+  只能是字母、数字或 `_`。
 - 只有放下的建筑物会拿到自己的活对象。`self.state` 是你的表，`self:save()` 把它写进世界存档，
   下次进游戏它还在。
 - 建筑物、帕鲁和道具的处理函数由游戏来调用。技能和声音要你自己发动，效果按 PalForge 自己的

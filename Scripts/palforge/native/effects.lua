@@ -15,7 +15,18 @@
 --                    owns the naming rule; for this list it is the identity, because every one
 --                    of the 38 EPalStatusID names is already a Lua identifier.
 --   (c) M.get(id)  — the same handles by id string; nil for anything else.
---   (d) M.Poison / M.Burn / M.Freeze — the three with hand-written timings.
+--   (d) M.publish(id) — register that handle with object_manager, on request. See below.
+--   (e) M.Poison / M.Burn / M.Freeze — the three with hand-written timings.
+--
+-- A READ REGISTERS NOTHING (2026-08-02). M.get builds with `{ register = false }` (contract C2)
+-- — the publish gate, forced by native/buildings.lua where registration is not inert (a
+-- registered building def makes core/event track and PERSIST every matching actor, so a field
+-- read started writing to the player's save). Effects persist nothing, and 38 rows is not a
+-- registry problem, but the gate is one rule in all six catalogs rather than five exceptions.
+-- Registration is what makes Effect.get(id) hand back this class rather than fabricate a thin
+-- one; the effect RUNTIME (apply / expire / the tick schedule) does not consult the registry at
+-- all, so an unregistered handle applies and removes ailments exactly as before. The three
+-- CURATED ones below still register at load, under the framework's own pack id (contract C3).
 --
 -- WHAT AN APPLICATION DOES. Two things happen and they are worth keeping apart: PalForge runs
 -- its own schedule (duration, interval, stacking, expiry) off core/event's heartbeat, and the
@@ -62,13 +73,33 @@ M.UNNAMED = unnamed
 ---
 ---No `duration` is set, so an ailment fetched this way stays on until you :remove() it. Define
 ---your own Effect with the same `nativeStatus` if you want one that times out.
+---
+---`{ register = false }` (contract C2) is the publish gate described in the header: the handle
+---is fully built and fully cached, and object_manager is simply not told about it until
+---M.publish(id) is called. Applying and removing an ailment never consulted the registry.
 ---@param id string
 ---@return Effect.Handle?
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Effect{ id = id, nativeStatus = id }
+    local h = Effect({ id = id, nativeStatus = id }, { register = false, pack = catalog.PACK })
     cache[id] = h
+    return h
+end
+
+---Register this catalog's handle for `id` with object_manager: the opt-in half of the publish
+---gate. All it buys for an effect is that Effect.get(id) and Effect.get_all() see this handle
+---instead of fabricating a thin one — the runtime does not read the registry — so it exists for
+---symmetry with the other five catalogs and for tooling that enumerates definitions.
+---
+---Idempotent, and it publishes the SAME handle the named field hands back, so a curated entry
+---keeps its duration and interval. Returns nil for a name this build does not declare.
+---@param id string
+---@return Effect.Handle?
+function M.publish(id)
+    local h = M.get(id)
+    if not h then return nil end
+    catalog.publish("effect", h, "native.effects")
     return h
 end
 
@@ -78,10 +109,18 @@ end
 -- ailment already does whatever the game says it does, and an empty handler would only cost a
 -- dispatch. Declare your own Effect with the same `nativeStatus` and an `onTick` if you want a
 -- payload of your own on top.
+--
+-- They register at load, under the framework's own pack id (contract C3) so that a pack
+-- declaring "Poison" replaces a definition whose previous owner can be named. Registering an
+-- effect writes nothing anywhere: the persistence that made native/buildings.lua's curated pair
+-- a release gate is the building runtime's alone.
 
-M.Poison = Effect{ id = "Poison", nativeStatus = "Poison", duration = 10.0, interval = 1.0 }
-M.Burn   = Effect{ id = "Burn",   nativeStatus = "Burn",   duration = 5.0,  interval = 1.0 }
-M.Freeze = Effect{ id = "Freeze", nativeStatus = "Freeze", duration = 3.0 }
+M.Poison = Effect({ id = "Poison", nativeStatus = "Poison", duration = 10.0, interval = 1.0 },
+                  { pack = catalog.PACK })
+M.Burn   = Effect({ id = "Burn",   nativeStatus = "Burn",   duration = 5.0,  interval = 1.0 },
+                  { pack = catalog.PACK })
+M.Freeze = Effect({ id = "Freeze", nativeStatus = "Freeze", duration = 3.0 },
+                  { pack = catalog.PACK })
 
 -- Pre-seed the curated ones so get(id) hands back the timed handle rather than building a
 -- second, durationless definition under the same id. All three are named exactly as the enum

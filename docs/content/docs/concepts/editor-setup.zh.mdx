@@ -102,11 +102,12 @@ _G.Pal = Pal
 ```
 
 花括号里之所以能补全，靠的是每个模块上的 `---@overload` 那一行 —— 它告诉编辑器
-`Pal{ ... }` 接收一个 `Pal.Spec`，返回一个 `Pal.Handle`：
+`Pal{ ... }` 接收一个 `Pal.Spec`、一个可选的第二参数 `opts`
+（`{ register = false, pack = "mypack" }`），返回一个 `Pal.Handle`：
 
 ```lua title="Scripts/palforge/api/pal.lua"
 ---@class palforge.pal
----@overload fun(spec: Pal.Spec): Pal.Handle
+---@overload fun(spec: Pal.Spec, opts: table?): Pal.Handle
 local Pal = {}
 ```
 
@@ -129,11 +130,11 @@ Pal{
     name         string?                 shown in UI (defaults to id)
     description  string?                 one-line description, for UI and tooling
     skills       string[]?               skill ids this pal owns (see Skill)
-    mesh         Mesh.Spec|Mesh.Handle?  the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+    mesh         Mesh.Spec|Mesh.Handle?  the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
     material     Pal.Spec.Material?      material override applied to that mesh
     color        table?                  base tint { r, g, b, a } (shorthand for material.color)
     texture      string?                 png path applied to the mesh (shorthand for material.texture)
-    icon         any?                    fallback icon used when the DataTable lookup misses
+    icon         string?                 /Game/... texture path used when the icon DataTable has no row for this id
     events       Pal.Spec.Events?        lifecycle handlers (grouped)
     data         table?                  free-form payload of your own, carried onto the definition
 }
@@ -142,12 +143,14 @@ Pal{
 你一下子拿到四样东西：
 
 - **每个字段和它的说明。** `---@field` 行里 `#` 后面的文字，就是规格声明中的 `doc =`
-  字符串，所以把鼠标停在 `maxStack` 上会显示 *inventory stack ceiling (default 1)* ——
-  默认值也包含在内。
-- **只允许几个取值的字段，会给出一份很短的菜单。** 带 `values` 列表的字段会有自己的具名类型。
-  一共五个：`Mesh.Spec.Kind`、`Item.Spec.Category`、`Building.Spec.Mesh.Kind`、
-  `Skill.Spec.Kind` 和 `Audio.Spec.Kind`。
-  在 `kind =` 后面打一个引号，出现的正好是
+  字符串，所以把鼠标停在 `maxStack` 上会显示 *stack ceiling you declare; the GAME's ceiling
+  is a DataTable column (default 1)* —— 默认值也包含在内。
+- **只允许几个取值的字段，会给出一份很短的菜单。** 带 `values` 列表的字段会有自己的具名类型，
+  一共 **30 个**。五个来自各领域的规格：`Mesh.Spec.Kind`、`Item.Spec.Category`、
+  `Building.Spec.Mesh.Kind`、`Skill.Spec.Kind` 和 `Audio.Spec.Kind`；另外 25 个来自
+  `api/ui.lua`：`UI.Spec.Input`、`UI.Node.Button.LabelAlign`、`UI.Node.Sprite.From`，
+  以及十一个节点构造器各自的一对 `HAlign` / `VAlign`。
+  在网格里的 `kind =` 后面打一个引号，出现的正好是
   `"procedural"`、`"static"`、`"skeletal"`、`"obj"`，没有别的。
 - **嵌套的结构，两种写法都认。** `mesh` 的类型是 `Mesh.Spec|Mesh.Handle`，因为你既可以就地
   写这个网格，*也可以*把 `Mesh{ ... }` 调用返回的东西传进去。
@@ -203,19 +206,30 @@ Building{
 --
 -- Regenerate with:  lua5.4 tools/gen-types.lua
 -- Source of truth:  the schema declarations in Scripts/palforge/api/*.lua
+--
+-- Annotations only: nothing requires this file at runtime. It exists so an editor
+-- (LuaLS / lua-language-server) can complete the fields of every X{ ... } call,
+-- show each field's meaning, and jump from a spec name to its field list.
 ---@meta
 
 ---@alias Mesh.Spec.Kind "procedural"|"static"|"skeletal"|"obj"
 ---@class Mesh.Spec
 ---@field id? string # mesh id, e.g. "pack:name" (required when defined directly; omit when inline)
 ---@field kind? Mesh.Spec.Kind # which core.mesh backend renders it (default skeletal)
----@field model string # USkeletalMesh / UStaticMesh asset path
+---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ```
 
-文件里有 18 个类，每种已声明的结构一个：`Pal.Spec`、`Pal.Spec.Events`、`Pal.Spec.Material`、
-`Item.Spec`、`Item.Spec.Recipe`、`Item.Spec.Events`、`Building.Spec`、`Building.Spec.Mesh`、
-`Building.Spec.Material`、`Building.Spec.Events`、`Skill.Spec`、`Skill.Spec.Events`、
-`Effect.Spec`、`Effect.Spec.Events`、`Audio.Spec`、`UI.Spec`、`Mesh.Spec` 和 `Coord`。
+文件里有 **37 个类和 30 个别名**，而且它很长：生成器报的是 8752 行。其中 30 个类是已声明的
+结构，和 `schema.all()` 返回的名字一一对应：`Mesh.Spec`，`Pal.Spec` 及其 `Events`、
+`Material`，`Item.Spec` 及其 `Recipe`、`Events`，四个 `Building.Spec.*`，`Skill.Spec` 及其
+`Events`，`Effect.Spec` 及其 `Events`，`Audio.Spec`，十一个 `UI.Node.*`，`UI.Spec` 和
+`UI.Spec.Host`，以及 `Coord`。
+
+剩下的 7 个类，以及绝大部分行数，是**原生内容目录**：`palforge.native.buildings`、`.items`、
+`.pals`、`.skills`、`.effects`、`.audio`，加上把它们装在一起的 `palforge.native`。
+`native.items.Arrow_Fire` 在运行时由元表的 `__index` 提供（`native/_catalog.lua`），而编辑器
+看不穿元表，所以生成器直接从目录本身把这些名字列举出来 —— 这个版本上是 8293 个。原生 id
+之所以是打字就能发现的东西，而不是必须事先知道的东西，靠的就是这一段。
 
 <Callout type="info">
 删掉 `types.lua` 只会让补全失效，别的什么都不会坏。游戏不读它，有没有它，`Pal{ ... }`
@@ -225,27 +239,38 @@ Building{
 
 ## 重新生成 types.lua
 
-规格一有变动就运行生成器。它是开发用的工具，在游戏关着的情况下用普通的 Lua 解释器就能跑：
+规格一有变动就运行生成器。它是开发用的工具，在游戏关着的情况下用普通的 Lua 解释器就能跑，
+除了仓库本身什么都不需要：
 
 ```bash
 cd /path/to/PalForge
 lua5.4 tools/gen-types.lua
 ```
 
+它只打印一行，那一行就是全部结果：
+
 ```text
-wrote ./Scripts/palforge/types.lua (18 classes, 223 lines)
+wrote ./Scripts/palforge/types.lua (37 classes, 8752 lines, 8293 native catalog names)
 ```
 
-它会把 `Scripts/palforge/types.lua` 写到你给它的根目录下面，默认是你当前所在的文件夹，所以
-你也可以从别的地方运行它：
+`classes` 是它写出的 `---@class` 行数，`lines` 是它写出的文件行数，`native catalog names`
+是它从目录里列举出的 `native.*` 字段个数。文件每次都被整体覆盖。
+
+参数是仓库的**根目录**，不是输出路径。不给参数就用你当前所在的文件夹，所以它总是写到
+`<root>/Scripts/palforge/types.lua`：
 
 ```bash
 lua5.4 tools/gen-types.lua /path/to/PalForge
 ```
 
+它通过 `require` `palforge.api` 拿到规格 —— 这一步把每种结构放进 schema 注册表 —— 然后遍历
+`schema.all()`。加载不了的目录不会中断整个运行，只会在标准错误上留下一行
+`gen-types: skipping <module>` 被跳过，所以 `native catalog names` 偏少就是有东西没加载成功
+的信号。
+
 只要 `schema.define` 或 `schema.derive` 的调用有改动，就重新跑一次：加了字段、加了允许的值、
-改了默认值、重写了说明，都算。`types.lua` 是提交进仓库的，所以重新生成的文件应该和规格改动
-放在同一个提交里。
+改了默认值、重写了说明，以及原生目录重新生成，都算。`types.lua` 是提交进仓库的，所以重新
+生成的文件应该和引起改动的那次修改放在同一个提交里。
 
 <Callout type="warn">
 不要手工编辑 `types.lua`。生成器下次运行会把整个文件重写一遍。请改
@@ -280,7 +305,7 @@ flowchart LR
 | `mapOf = "number"` | `table<string, number>` |
 | `sig = "fun(self: Pal.Handle, ctx: table)"` | 原样写出这个签名 |
 | `doc = "..."` | `#` 后面的文字 |
-| `check = schema.nonEmpty` | 什么都不生成 —— check 只在定义时运行 |
+| `check = schema.validId` | 什么都不生成 —— check 只在定义时运行 |
 | 没有 `type` | `any` |
 
 有两点值得知道：
@@ -290,7 +315,7 @@ flowchart LR
   `offset` 的措辞更清楚 —— 所以它生成的 `Building.Spec.Mesh.Kind` 有同样的四个值，但写明的
   默认值不同。
 - 类按声明顺序输出，并按结构名的第一段分组。所以 `Mesh.Spec` 排在 `Mesh` 这个标题下面，而
-  没有领域前缀的 `Coord` 落在 `Common` 里。
+  没有领域前缀的 `Coord` 落在 `Common` 里。原生目录的那几个类排在所有已声明结构之后，放在文件最末尾。
 
 ## 游戏运行时 UE4SS 加进来的名字
 
@@ -341,11 +366,11 @@ Pal.Spec {
   name          string     shown in UI (defaults to id)
   description   string     one-line description, for UI and tooling
   skills        table      (string[]) skill ids this pal owns (see Skill)
-  mesh          table      (Mesh.Spec) the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+  mesh          table      (Mesh.Spec) the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
   material      table      (Pal.Spec.Material) material override applied to that mesh
   color         table      base tint { r, g, b, a } (shorthand for material.color)
   texture       string     png path applied to the mesh (shorthand for material.texture)
-  icon          any        fallback icon used when the DataTable lookup misses
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Pal.Spec.Events) lifecycle handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
 }
@@ -354,7 +379,7 @@ Pal.Spec {
 问一个从来没有声明过的名字，你会拿到已经声明过的名字列表：
 
 ```text
-PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
+PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Node.Border, UI.Node.Button, UI.Node.Frame, UI.Node.GameWidget, UI.Node.HBox, UI.Node.Label, UI.Node.Overlay, UI.Node.ScrollBox, UI.Node.SizeBox, UI.Node.Sprite, UI.Node.VBox, UI.Spec, UI.Spec.Host
 ```
 
 同一份信息出现的第三个地方，就是错误本身。每一个问题都会中止加载，并说出领域、字段和有效的
@@ -364,7 +389,8 @@ PalForge: no spec named "Pal.Events". Declared: Audio.Spec, Building.Spec, Build
 PalForge: Pal: unknown field "displayName" (did you mean "name"?). Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data
 PalForge: Pal: field "id" is required (pal id: a game CharacterID ("ChickenPal") or "pack:name")
 PalForge: Pal: field "mesh" (Mesh.Spec): field "kind" must be one of { "procedural", "static", "skeletal", "obj" }, got "voxel"
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
+PalForge: Pal: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Boss' (letters/digits/_ only)
 ```
 
 ## 实用做法
@@ -437,7 +463,7 @@ LuaLS 通过库路径就能读到。
 
 ```lua title="Scripts/palforge/api/skill.lua"
 local Spec = schema.define("Skill.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "skill id: a game row id or \"pack:name\"" },
     { "name",        type = "string", doc = "shown in skill lists (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
@@ -465,10 +491,10 @@ git add Scripts/palforge/api/skill.lua Scripts/palforge/types.lua
 ---@field name? string # shown in skill lists (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field kind? Skill.Spec.Kind # an active skill is fired; a passive one is equipped (default active)
----@field element? string # attribute / element (fire, water, ...)
+---@field element? string # attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing
 ---@field cooldown? number # seconds between activations (enforced by :activate)
----@field power? number # base power / magnitude
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field power? number # base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Skill.Spec.Events # behaviour handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 ---@field range? number # metres the skill reaches

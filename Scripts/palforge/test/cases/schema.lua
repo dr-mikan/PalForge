@@ -17,6 +17,21 @@ local api     = require("palforge.api")
 
 local s = T.suite("schema")
 
+-- WHAT THIS SUITE LEAVES BEHIND, and it is the one accretion support.sweep() cannot reach.
+-- Every api.X{ } call below is inside t:errors, so it RAISES and registers nothing in
+-- object_manager — there is nothing here for the definition sweep to take back out. What does
+-- accumulate is the SPEC registry: schema.define(support.id("Inner"), ...) adds a spec named
+-- "palforge_test:Inner_N" to core/schema's own table — EIGHT of them per press, counted, and
+-- they are the only eight the whole run leaves behind: Inner, Spec, Dup, Derived, ReqDefault,
+-- FnDefault, Untyped, Checked. (This comment said "ten" until 2026-08-02, when the delta was
+-- measured across two consecutive run()s in a bare lua5.4 process rather than counted by eye
+-- off the schema.define call sites — six of the fourteen calls here are inside t:errors and
+-- therefore register nothing.) core/schema declares no remove/undefine to pair with define.
+-- They are namespaced, inert, and never dispatched against — nothing walks the spec list per
+-- lookup the way core/event walks the definition registry — so this is a note rather than a
+-- leak with a cost. If core/schema ever grows an undefine, this is the file that should call it.
+support.sweepAfter(s)
+
 -- Every shape the api declares. The registry is the only way to reach them (the specs
 -- themselves are locals in their modules), so this list doubles as the surface under test.
 local DECLARED = {
@@ -266,11 +281,25 @@ s:test("type rejects the wrong Lua type, accepts either arm of a union, and is o
     t:errors(function() return api.Building{ id = support.id("b"), state = 5 } end,
         "PalForge: Building: field \"state\" expects table|function, got number")
 
-    -- Pal.icon declares no type at all, so it takes whatever the caller has
+    -- A field with NO `type =` takes whatever the caller has. This used to be demonstrated
+    -- with Pal.Spec.icon, and that is no longer true of it: api/pal.lua:223-231 now declares
+    -- `icon` as a string, deliberately, because core/icons answers an asset PATH and an
+    -- untyped fallback made :iconOf a union every caller had to branch on. So the mechanism is
+    -- shown on a spec declared right here — the claim is about core/schema, not about which
+    -- api field happens to be untyped this month — and Pal.icon is asserted as the typed
+    -- field it now is.
+    local untyped = schema.define(support.id("Untyped"), {
+        { "id",       type = "string", required = true },
+        { "anything", doc = "no type declared" },
+    })
+    t:eq(untyped:validate({ id = "x", anything = 5 }, "Untyped").anything, 5)
+    t:eq(untyped:validate({ id = "x", anything = "s" }, "Untyped").anything, "s")
+    t:type(untyped:validate({ id = "x", anything = {} }, "Untyped").anything, "table")
+
     local P = schema.get("Pal.Spec")
-    t:eq(P:validate({ id = support.id("pal"), icon = 5 }, "Pal").icon, 5)
     t:eq(P:validate({ id = support.id("pal"), icon = "path.png" }, "Pal").icon, "path.png")
-    t:type(P:validate({ id = support.id("pal"), icon = {} }, "Pal").icon, "table")
+    t:errors(function() return api.Pal{ id = support.id("pal"), icon = 5 } end,
+        "PalForge: Pal: field \"icon\" expects string, got number")
 end)
 
 s:test("a callable table stands in wherever a function is expected", function(t)

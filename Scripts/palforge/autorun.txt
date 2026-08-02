@@ -3,8 +3,28 @@
 #   <name>            run as soon as the world is ready
 #   <seconds> <name>  run that many seconds after the world is ready
 #
-# The names are the pf_* actions:
-#   pf_tests pf_spawn pf_teach pf_reflect pf_pal pf_watch pf_title pf_uislot pf_uievents pf_mesh
+# The names are the pf_* actions. THE FULL LIST, and it was wrong until 2026-08-02: this line
+# named ten while the same file ran pf_native, pf_keys, pf_uiroute and pf_uiz as live lines a
+# hundred lines further down. A queue file whose own legend omits what it is running is worse
+# than one with no legend.
+#
+#   pf_tests    pf_spawn    pf_teach    pf_mesh     pf_native   pf_keys
+#   pf_uidecl   pf_uiroute  pf_uiz
+#   pf_reflect  pf_pal      pf_watch    pf_title    pf_uislot   pf_uievents
+#   pf_hooks    pf_hooks_all            + one pf_hook_<id> per declared test hook (see below)
+#
+# ONE ACTIONS ENTRY IS DELIBERATELY NOT IN THAT LIST: `pf_hook`, the console spelling that takes
+# an id (`pf_hook pal-skills-equip`). A line here is `[delay] name` and carries no argument
+# (core/autorun.lua:62-67), so a bare `pf_hook` in this file would resolve, run with no id, and
+# print the hook listing instead of a measurement. The generated per-hook names in the last row
+# above are what this file uses, and they exist for exactly that reason.
+#
+# ⚠️ DO NOT MAINTAIN THAT LIST BY HAND EITHER. The authority is palforge.test's ACTIONS table,
+# and test/init.lua PRINTS it sorted at every startup — grep UE4SS.log for "console commands:"
+# and what comes back is what this file may contain, generated rather than remembered.
+# core/autorun.lua looks each name up in that table and warns when there is no match; it reads
+# a list of NAMES and never code, so nothing here can run anything a keypress could not.
+#
 # Lines starting with # are ignored. Delete a line to stop it running.
 #
 # THIS SESSION'S GOAL: settle skill.hit and skill.equip without catching a pal.
@@ -107,3 +127,117 @@
 8 pf_keys
 15 pf_uiroute
 130 pf_uiz
+
+# =====================================================================================
+# ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Fifteen measurements that CANNOT be taken
+# with the game switched off, each one a declared hook naming the plan/TODO.md item it
+# closes. Every line below is commented out; uncomment the ONE you are running.
+#
+# THEY NEED env.debug = true. With it off nothing under test/hooks is even loaded and
+# these names do not exist — core/autorun will say `no action named "pf_hook_..."`, which
+# is the honest answer and not a defect. Set it in Scripts/palforge_dev.lua:
+#     local env = require("palforge.env"); env.dev = true; env.debug = true
+#
+# `pf_hooks` first, always: it lists every hook, whether its gate is open, and the exact
+# sentence that opens a shut one. It needs nothing but a loaded world.
+#5 pf_hooks
+#
+# ---- read-only, nothing to do in game ------------------------------------------------
+#
+# game-build-live — the cheapest one here and the one to run FIRST in any session whose log
+# you intend to paste anywhere. main.lua asks the running game what build it is and records
+# the answer in env.gameBuildLive; that read has never once been run, so which of
+# GetBuildVersion / GetEngineVersion / GetGameName carries "v1.0.2.101103" is unknown. This
+# prints all three raw. A run of nils is a result: it means no build string is readable on
+# this engine and the startup line's `unknown` is final rather than a wiring fault.
+#5 pf_hook_game_build_live
+#
+# mesh-actor-identity — A-1, the most consequential finding in the audit. Three sweeps of
+# the building actors, six seconds apart, asking a table keyed on the ACTOR HANDLE and a
+# table keyed on GetFullName whether each still hits for a structure that certainly still
+# exists. A handle MISS plus a name HIT is the confirmation the whole per-actor re-key
+# rests on. Stand near some buildings.
+#20 pf_hook_mesh_actor_identity
+#
+# item-datatable-row-read (+ item-recipe-of) — can Product_Count / WorkAmount /
+# Material1_Id be indexed off the struct dt:FindRow('Arrow') returns, or must a recipe be
+# assembled column-by-column the way icons are. Both routes run; whichever answers is the
+# implementation. Open a crafting bench first if the table is not loaded.
+#20 pf_hook_item_datatable_row_read
+#
+# audio-custom-file-loader — the five-block enumeration that decides whether ANY runtime
+# file loader exists on this build. A run of nils CLOSES the item permanently, so the nils
+# are printed rather than skipped.
+#20 pf_hook_audio_custom_file_loader
+#
+# ---- read-only, but they need you to DO something -----------------------------------
+#
+# ui-update-event — arms every Open/Show/Construct/Refresh/Update/Setup UFunction on the
+# four UI classes, then wants: inventory open and closed, build menu opened, and a return
+# to the TITLE SCREEN. Verdicts at 30 s, 90 s and 180 s. ⚠️ arms hooks UE4SS cannot remove.
+#20 pf_hook_ui_update_event
+#
+# pal-spawned-fresh — the timestamps that say whether pal.spawned means a FRESH pal. Run it
+# with a DELAY, because the delay is the measurement: `30 pf_hook_pal_spawned_fresh` makes
+# world.ready exactly 30 s before t=0 and every distance below it exact. It prints a marker
+# before each of: release a pal from the palbox, hatch/travel, run pf_spawn.
+#30 pf_hook_pal_spawned_fresh
+#
+# skill-hit-source — confirms the NEGATIVE so the item can close: reads the damage structs
+# out of the running build to show none carries a waza, then counts skill.hit against
+# pal.damaged for two minutes while you FIGHT SOMETHING.
+#20 pf_hook_skill_hit_source
+#
+# ui-host-layer — pushes a panel onto one of Palworld's own CommonUI layers through
+# BP_AddWidget. Just LOOK for a teal panel top-left; it takes itself down at 45 s.
+#20 pf_hook_ui_host_layer
+#
+# ui-backhandler — mounts a panel that CLAIMS the CommonUI back action, then asks you to
+# PRESS ESC and report which of three things happened. Run ui-host-layer first: if that one
+# cannot mount, this one cannot either and its silence would mean nothing.
+#20 pf_hook_ui_backhandler
+#
+# ---- these WRITE, and each needs its own opt-in in palforge_dev.lua ------------------
+#
+#     env.debugHooks["mesh-color-change"] = true
+# mesh-color-change — hangs a chest in front of you and turns it red, green, blue. Nobody
+# has ever watched a colour change; the parameter names are measured, the pixels are not.
+#20 pf_hook_mesh_color_change
+#
+#     env.debugHooks["building-unlock"] = true
+# building-unlock — ⚠️ NO UNDO: there is no "lock this again" call. Records every fact that
+# can be established and then asks you to open the technology menu, because no accessor on
+# this build can be asked instead.
+#20 pf_hook_building_unlock
+#
+#     env.debugHooks["item-satiety-write"] = true
+# item-satiety-write — CAN AN ITEM FEED ANYONE. Reads satiety and HP off your own character,
+# then PRINTS THE PARAMETER LIST the live build declares for SetFullStomach — the one fact
+# the C++ dump has no body for — and calls it ONLY if that walk succeeded and read a single
+# scalar, restoring the exact value it found. Also fires AddHPByRate(-0.1), the one HP write
+# on this build that carries no struct, and heals you again afterwards. A REFUSAL NAMING THE
+# DECLARATION IS THE RESULT; nothing is pushed at an unread signature. Throwaway save.
+#20 pf_hook_item_satiety_write
+#
+#     env.debugHooks["skill-projectile-spawn"] = true
+# skill-projectile-spawn — WHY A PACK'S ACTIVE SKILL SPAWNS NOTHING. Prints what the running
+# build declares for ShootOneBullet(Default), CreateChildSkillEffect, Initialize,
+# BeginDeferredActorSpawnFromClass / FinishSpawningActor and FindWazaForBP, fires the ONE
+# entry that takes no arguments (a real bullet — stand somewhere empty), and REFUSES every
+# route that declares a struct, naming the parameter that stopped it. It settles
+# core/spawn.lua's M.actor in the same block. Needs a pal near you; a pal with a RANGED
+# weapon out is what makes block [2] measurable at all.
+#20 pf_hook_skill_projectile_spawn
+#
+#     env.debugHooks["pal-skills-equip"] = true      (old spelling: _G.PALFORGE_TEST_WRITE_WAZA)
+# pal-skills-equip — ⚠️ THE PUBLISH BLOCKER, AND THE ONE THAT ONCE PRECEDED THE GAME CLOSING
+# BY 1.4 SECONDS. Writes an active move onto a live pal, exercises teachAll's partial-result
+# contract and clearSkills, reads back after every write and puts everything back. USE A
+# THROWAWAY SAVE, and have a pal standing next to you (pf_spawn, then wait ~10 s).
+#pf_spawn
+#40 pf_hook_pal_skills_equip
+#
+# audio-setvolume-audible — does not write and needs no opt-in, but it does move your
+# character's output bus volume and put it back to 1.0. Plays one explosion at 1.0, 0.25,
+# 0.0 and 1.0 and asks whether you heard the difference. TURN YOUR SPEAKERS UP.
+#20 pf_hook_audio_setvolume_audible

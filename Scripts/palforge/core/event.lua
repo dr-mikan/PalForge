@@ -15,8 +15,10 @@
 -- watch — plus the OnCompleteBuild hook that runtime refused (see building.build).
 -- The runtime no longer calls hooks directly — the scan/hooks EMIT channels and
 -- DISPATCH resolves the live instance and calls the hook (place fires exactly once).
--- The PAL source arms six native hooks plus a slow onTick sweep, the ITEM source six, and
--- the SKILL source eight. Most were found in dumps/cxx/Pal.hpp — UE4SS's own CXXHeaderDump
+-- The PAL source arms six native hooks plus a slow onTick sweep, the ITEM source seven, and
+-- the SKILL source eight. (The item count read "six" here for as long as craft was one hook;
+-- it is seven now — use, get-log, inventory add, the two OnFinishWorkInServer craft models,
+-- drop and dispose. Counted from the tryHook calls in installItemSource, not from memory.) Most were found in dumps/cxx/Pal.hpp — UE4SS's own CXXHeaderDump
 -- of the installed binary — which is the first source in this tree that could answer "what
 -- does the game call when X happens" without the game running. Each carries, at its hook,
 -- the EVIDENCE CLASS it was wired on:
@@ -34,6 +36,13 @@
 -- Every one of them is guarded on the identity it needs (a named EPalWazaID, a live actor),
 -- so an extra source can only add silence, never a wrong event.
 --
+-- ONE OF THOSE FOUR HAS SINCE CARRIED, which is the whole argument for keeping a silent hook
+-- armed rather than deleting it. AddPassiveSkill fired later in that same day and closed
+-- skill-passive-source: what made it carry was a WRITE — core.character.addSkill putting a
+-- passive on a live pal — so the earlier silence was a fact about the game's own bench and
+-- party writes, not about the hook. See installSkillSource's SOURCE 1 for the detail. The other
+-- three of the four are still silent, and each says so at its own hook.
+--
 -- ARMED LATE, ON PURPOSE. Some of those hooks — building.build's
 -- OnCompleteBuild_ServerInternal, the three pal.spawned candidates, the three passive ones
 -- — also fire for every PRE-EXISTING object during the world-load storm, where the
@@ -44,6 +53,93 @@
 -- Not every channel dispatches to a live instance: building.build fires BEFORE the actor
 -- exists, so like pal/item it resolves to the DEFINITION CLASS (see resolve()).
 --
+-- ==== FOUR RULES THIS FILE IS BUILT ON. Each one was a defect first. ====================
+--
+-- 1. NOTHING PER-ACTOR IS KEYED ON A HANDLE. UE4SS mints a fresh userdata wrapper per
+--    lookup, so `t[actor]` written in one scan is not `t[actor]` read in the next even for
+--    the identical engine object. Every per-actor table here is keyed on
+--    core.uobject.key(actor) — the GetFullName string — and the handle rides in the VALUE.
+--    The building scan used to key its actor->instance map on the wrapper, and the FindAllOf
+--    it runs every 500 ms hands back a new wrapper each time, so the fast path missed on
+--    every sweep after the one that created the instance and the WHOLE of it went unrun:
+--    the position refresh, spatial.indexUpdate, the only line that resets missingStreak on a
+--    healthy structure, and the consumption of _meshPending — so a declared
+--    Building{ mesh = ... } was marked pending once and never rendered. Every scan took the
+--    slow path instead, which re-derived the key from the position and then declined to
+--    touch the instance it found because the actor "differed" from the one already held.
+--    The instance itself remembers the key it is bound under (inst.actorKey), because a DEAD
+--    actor will not answer its own name and removal still has to find the entry.
+--
+-- 2. THE RUNTIME STATE LIVES ON _G, exactly like the bus below and for the same reason.
+--    A hot reload (F9) builds a fresh module while the native hooks and LoopAsync loops
+--    armed by the FIRST load keep running. Anything held in a module-local table would be
+--    written by those old closures and read by nobody: the new installDispatch resolved
+--    against a new, permanently empty instance registry, so after one F9 no building hook
+--    fired again, onTick was dead and Building.Handle:instances() returned {} forever. One
+--    table, _G.__PalForgeBuildingRegistry, holds the def/instance registry, the actor index,
+--    the world-ready gate, the pal sweep's memo and the persistence cache. core.reload must
+--    NOT wipe it; it is not a module, so its KEEP list does not have to.
+--
+-- 3. THE PERSISTENT DRIVERS RE-ENTER THE CURRENT MODULE. The scan, the flush, the pal sweep,
+--    the ready-watch and the RequestBuild place-intent hook are armed once per session and
+--    cannot be taken back, so each one calls require("palforge.core.event").__xxxPump()
+--    rather than the copy of the function it captured. Otherwise the code that keeps running
+--    after a reload is the OLD code — the old buildDef, the old scan, the old dispatch, over
+--    the old api.building base class — and it would fight the new module over the shared
+--    tables above. The registry is NOT part of that list any more: core/reload.lua keeps
+--    palforge.core.object_manager across the wipe (its KEEP table), so both modules read one
+--    registry and a pre-reload driver at least sees the current definitions. That is what
+--    makes the fallback in pump() safe; it is not a reason to drop the pump. This is the same
+--    technique the tick source already uses for core.poll, one level up.
+--
+-- 4. ONLY A REGISTERED DEFINITION IS EVER TRACKED, AND TRACKING PERSISTS. This is a publish
+--    gate, not a preference. refreshDefs takes its defs from object_manager's registry and
+--    from nowhere else, so a building becomes tracked when — and only when — a Building{...}
+--    define call REGISTERED it. The consequence is why the rule is written here: a tracked
+--    def means every matching actor in the world becomes a live instance AND a record in the
+--    player's save file. A catalog READ (native.buildings.Foundation, or a picker iterating
+--    CATALOG) must therefore not register, or reading a tooltip starts persisting the whole
+--    base; the domain constructors take `opts.register == false` for that. Do not widen this
+--    to "any class object_manager can produce" — that is the same bug with a new spelling.
+--
+-- ==== WHAT IS PERSISTED, WHO OWNS IT, AND WHAT IS NEVER DELETED (F-7) ==================
+--
+-- One JSON file per save (state/entities_<saveId>.json), shared by every pack. A record is
+-- keyed `<resolvedBuildId>@<cell>` (core.spatial), which carries no owner, so the owner is
+-- written INTO the record: `v` (record version), `def` (the definition id, e.g.
+-- "mypack:Bench") and `pack` (the owning pack id from object_manager, nil when the registry
+-- cannot attribute it). Old records are stamped on the first scan that binds them.
+--
+-- NOTHING IS EVER SILENTLY DESTROYED. A record whose build id no definition claims this
+-- session is QUARANTINED, not deleted: it moves to the file's `orphans` section, is logged
+-- with a count and with the packs it belonged to, and moves BACK the moment a definition
+-- claims that build id again. That is the conservative half of the prune — a pack that is
+-- merely not loaded today (a player disables a mod for one evening, a pack that defines its
+-- buildings lazily has not got there yet) must not cost the player their structures' state.
+-- The only destructive act in the whole file is the quarantine cap (ORPHAN_MAX): past it the
+-- OLDEST quarantined records are dropped, oldest first, and the log says how many and why.
+--
+-- ONE CASE THAT WAS ON THAT LIST AND NO LONGER IS, because two halves of this sweep met: an
+-- F9 hot reload. core/reload.lua used to wipe palforge.core.object_manager with everything
+-- else and re-require only palforge.native.*, so every pack's definitions vanished until the
+-- game was restarted — which, with this prune in place, would have quarantined every pack
+-- record in the save about thirty seconds after the press. core/reload.lua now KEEPS
+-- object_manager (its KEEP table, the F-5 fix), so the registry survives the wipe and a
+-- reload changes nothing about what is claimed. The two changes have to stay together: if
+-- object_manager is ever dropped from KEEP again, ORPHAN_GRACE_SCANS is all that stands
+-- between a reload and a mass quarantine.
+--
+-- RENAMING AN ID. The record key is the resolved BUILD id, so changing what a definition
+-- attaches to changes the key and nothing migrates by itself. The narrow, unambiguous case
+-- IS migrated, because the record now remembers its definition id: a record whose `def` is
+-- still registered, whose build id that def no longer claims, where the def now claims
+-- exactly ONE build id and the target key is free, is re-keyed in place and logged. Anything
+-- ambiguous (two candidate build ids, an occupied target) is left alone and quarantined
+-- instead. Renaming the DEFINITION id itself still loses the binding — there is no rename
+-- map anywhere in the framework to consult — but the state is recoverable: it sits in
+-- quarantine until the old id comes back. (`altKeys`, written by persist() and read by
+-- nothing since the port, is gone. It was not a migration; it was an empty table.)
+--
 --   local event = require("palforge.core.event")
 --   event.on("pal.spawned", function(ctx) end)
 --   event.observable("building.interact"):filter(...):subscribe(...)
@@ -51,6 +147,10 @@
 
 local Rx  = require("palforge.core.vendor.rx")
 local log = require("palforge.utils.log").scope("event")
+-- The one place that answers "is this UObject live" and "what may I key a table on".
+-- Rule 1 in the header is enforced through uo.key / uo.same and nothing else; see
+-- core/uobject.lua for the measurement behind it.
+local uo  = require("palforge.core.uobject")
 
 -- Building-runtime deps (self-contained generic primitives; NO deprecated/tmp require).
 local object_manager = require("palforge.core.object_manager")
@@ -211,52 +311,85 @@ end
 -- building.* channels: scan / instance tracking / persistence / deferred mesh.
 -- =====================================================================================
 
--- module-local registry + live instances (the domain state, not a public API).
-local Registry = {
-    defs         = {},   -- clsId -> def { id, cls, buildIds, gridCm, tickInterval, hooks } (cached)
-    byBuildId    = {},   -- resolvedBuildId -> def
-    instances    = {},   -- key -> instance
-    tickList     = {},   -- array of instances whose class overrides onTick
-    pending      = {},   -- placement intents { buildId, pos, player }
-}
--- weak actor -> instance map (actors are engine objects; don't keep them alive)
-local instancesByActor = setmetatable({}, { __mode = "k" })
+-- THE RUNTIME STATE, ON _G. Rule 2 in the header: the sources are armed once per SESSION
+-- and a hot reload builds a fresh module underneath them, so every table an old closure
+-- writes and a new module reads has to be the SAME table. It was module-local until F-5 was
+-- written up, and the measured consequence was total: after one F9 the new dispatch resolved
+-- `building.place/load/interact/remove` against a new, permanently empty `instances`, the
+-- tick list was empty so onTick never ran again, and Building.Handle:instances() answered {}
+-- for the rest of the session. Everything the runtime remembers is in here, and it is the
+-- only state in this file that a reload must not lose.
+local RT = _G.__PalForgeBuildingRegistry
+if not RT then
+    RT = {
+        defs      = {},   -- registryId -> def { id, cls, pack, buildIds, gridCm, tickInterval, hooks }
+        byBuildId = {},   -- resolvedBuildId -> def   (REBUILT by refreshDefs, never appended to)
+        instances = {},   -- key -> instance
+        tickList  = {},   -- array of instances whose class overrides onTick
+        pending   = {},   -- placement intents { buildId, pos, player }
+        -- uo.key(actor) -> instance. NOT the actor wrapper (rule 1); a string key cannot be
+        -- weak, so entries are removed explicitly through unbindActor/removeInstance and the
+        -- instance carries the key it was bound under.
+        byActor   = {},
+        world     = { ready = false, pendingReady = false, readyCount = 0,
+                      scans = 0, pruned = false },
+        pal       = { classOf = {}, classOfN = 0, defCount = -1,
+                      tickState = setmetatable({}, { __mode = "k" }) },
+        store     = { cache = nil, dirty = false },
+    }
+    _G.__PalForgeBuildingRegistry = RT
+end
+local Registry         = RT
+local instancesByActor = RT.byActor
+local gate             = RT.world     -- the world-load gate, shared with the old closures
+local store            = RT.store     -- the persistence cache, shared for the same reason
 
 local MISS_THRESHOLD        = 6    -- consecutive scans an instance may be unseen before removal
 local INTERACT_DEBOUNCE_SEC = 1.0
 local READY_POLLS           = 5    -- consecutive ~1s polls with a valid player pawn
 
-local worldReady = false  -- world-load gate (set by the ready-watch source below)
--- world.ready is DEFERRED: the ready-watch opens the gate above and raises this flag,
+-- world.ready is DEFERRED: the ready-watch opens gate.ready and raises gate.pendingReady,
 -- and the first reconstruction scan that completes afterwards emits the channel. The scan
 -- is what creates the live instances, so emitting at gate-open time would dispatch
 -- onWorldReady over an empty registry (which is exactly what it used to do).
-local pendingWorldReady = false
-local readyCount = 0
 local lastInteract = {}   -- "<actorName>" -> os.clock()
 
 -- ---- persistence (per-world file, via utils.file) ----
-local worldCache = nil     -- { version, entities = { key -> record } }
-local worldDirty = false
+-- The record schema. Bumped when the SHAPE of a record changes, and written into every
+-- record so a later version can tell what it is looking at without guessing:
+--   1  { buildId, pos, state, altKeys = {} }   -- the port. altKeys was written by nothing
+--                                              -- and read by nothing; it is gone.
+--   2  { v, buildId, def, pack, pos, state }   -- carries its owner (F-7)
+local REC_VERSION = 2
+
+-- Quarantine bounds. ORPHAN_GRACE_SCANS delays the one prune pass per world long enough for
+-- a pack that defines its buildings at world.ready (or lazily, on first use) to have done so;
+-- ORPHAN_MAX is the only limit in this file whose enforcement DELETES a player's record, and
+-- it says so in the log when it does.
+local ORPHAN_GRACE_SCANS = 60      -- ~30 s at SCAN_MS = 500
+local ORPHAN_MAX         = 4096
 
 local function worldKey()
     return "entities_" .. spatial.saveId()
 end
 
 local function loadWorld()
-    if worldCache then return worldCache end
+    if store.cache then return store.cache end
     local data = file.get(worldKey())
     if type(data) ~= "table" or type(data.entities) ~= "table" then
-        data = { version = 1, entities = {} }
+        data = { version = REC_VERSION, entities = {}, orphans = {} }
     end
-    worldCache = data
-    return worldCache
+    -- A file written before quarantine existed has no orphans section; adding it here rather
+    -- than at every use site keeps the shape of `w` a single fact.
+    if type(data.orphans) ~= "table" then data.orphans = {} end
+    store.cache = data
+    return store.cache
 end
 
 local function flushWorld()
-    if not worldCache or not worldDirty then return end
-    file.setAndFlush(worldKey(), worldCache)
-    worldDirty = false
+    if not store.cache or not store.dirty then return end
+    file.setAndFlush(worldKey(), store.cache)
+    store.dirty = false
 end
 
 -- ---- class helpers ----
@@ -273,22 +406,78 @@ local function hasMesh(inst)
     return ok and type(m) == "table" and m.model ~= nil
 end
 
+-- Which pack owns a definition, when object_manager can say. `owner` is part of the
+-- registry surface added for the pack-identity work (contract C3); this file is written to
+-- run with or without it, because a nil owner is a perfectly good record — it means
+-- "registered before pack identity existed, or by a caller that declared no pack" — and an
+-- unattributed record must still be persisted, not dropped.
+local function ownerOf(defId)
+    if type(object_manager.owner) ~= "function" then return nil end
+    local ok, pack = pcall(object_manager.owner, "building", defId)
+    if ok and type(pack) == "string" and #pack > 0 then return pack end
+    return nil
+end
+
+-- One warning per (definition id, declared build id) pair. buildDef only runs when a class
+-- is first seen or re-registered, so this is already rare; the set exists so a pack that
+-- re-registers in a loop cannot turn one broken id into a log flood.
+local badBuildIdSeen = {}
+
 -- Build a def from a registered building CLASS. The going-live def used to be built in
 -- Building:register(); now it is derived from object_manager's catalog (registry no
 -- longer calls cls:register()). Port of Building:register's validation + lowering.
-local function buildDef(cls)
-    local id = cls.id or cls.__name
+--
+-- AN ID THAT WILL NOT RESOLVE FALLS BACK TO THE LITERAL, AND SAYS SO (F-4). This loop used
+-- to DROP such an id. That is the one behaviour in the tree that turns a definition inert
+-- with no log line at all: an empty buildIds means byBuildId never learns the id, the scan
+-- never matches an actor, and onPlace / onLoad / onTick / onRemove never fire — for a
+-- definition that registered successfully and answers every read a pack makes about it. The
+-- rest of the tree resolves engine-bound ids as `resolve(x) or x` (utils/items, core/spawn,
+-- api/building's Handle:unlock), so the literal fallback is what the file already believed;
+-- only this call site disagreed. A literal that names no real BuildObjectId simply never
+-- matches, which is a silent MISS rather than a silent DEATH, and the warning below names
+-- the id and the reason resolve gave so the author can fix the shape (`my-pack:Bench` — a
+-- hyphen — is the shape that produced this). Define-time validation (om.validId, contract
+-- C4) is the other half and catches it earlier; this half is the engine boundary, and both
+-- are wanted: a def can reach here from a registry write that predates the check.
+local function buildDef(cls, regId)
+    local id = cls.id or regId or cls.__name
     local tickInterval = cls.tickInterval or 1
     if type(tickInterval) ~= "number" or tickInterval < 1 or tickInterval % 1 ~= 0 then tickInterval = 1 end
     local buildIds = cls.buildIds or { id }
     local resolved = {}
     for _, bid in ipairs(buildIds) do
-        local r = object_manager.resolve(bid)
-        if r then table.insert(resolved, r) end
+        if type(bid) ~= "string" or #bid == 0 then
+            -- Not an id at all. There is no literal to fall back TO, so this one really is
+            -- dropped — and unlike the old behaviour it is dropped out loud.
+            local k = tostring(id) .. "\0" .. tostring(bid)
+            if not badBuildIdSeen[k] then
+                badBuildIdSeen[k] = true
+                log.warn(string.format("building '%s': buildIds entry of type %s is not an id "
+                    .. "and is IGNORED — that entry can never match a placed actor",
+                    tostring(id), type(bid)))
+            end
+        else
+            local r, why = object_manager.resolve(bid)
+            if not r then
+                local k = id .. "\0" .. bid
+                if not badBuildIdSeen[k] then
+                    badBuildIdSeen[k] = true
+                    log.warn(string.format("building '%s': build id %q does not resolve (%s) — "
+                        .. "using it LITERALLY, which is what every other engine boundary does. "
+                        .. "It will only match an actor whose BuildObjectId is spelled exactly "
+                        .. "that; a namespaced id must be [%%w_]+:[%%w_]+ to become <pack>_<name>",
+                        tostring(id), bid, tostring(why or "no reason given")))
+                end
+                r = bid
+            end
+            resolved[#resolved + 1] = r
+        end
     end
     return {
         id           = id,
         cls          = cls,
+        pack         = ownerOf(regId or id),
         buildIds     = resolved,
         gridCm       = cls.gridCm or spatial.GRID_CM,
         tickInterval = tickInterval,
@@ -303,21 +492,92 @@ local function buildDef(cls)
     }
 end
 
+-- One warning per (resolved build id, loser, winner) triple — a standing collision must not
+-- reprint itself twice a second, and a collision whose OUTCOME changes is a different fact
+-- and does get its own line.
+local buildIdConflictSeen = {}
+
 -- Refresh defs + byBuildId from the central catalog. Cheap; cached def objects are
 -- reused (stable inst.def identity) unless a class is (re)registered. Called before
 -- the scan and before recording a placement intent, so buildings defined AFTER
 -- start() are picked up.
+--
+-- THE ONLY SOURCE OF TRACKED DEFINITIONS IS object_manager's REGISTRY (rule 4 in the
+-- header). Nothing here builds a def from a catalog table, a spec or an id string: a
+-- building is tracked because a define call registered it, and being tracked is what makes
+-- every matching actor in the world a live instance AND a line in the player's save file.
+--
+-- DETERMINISTIC, AND IT REBUILDS RATHER THAN APPENDS. Two problems lived in the four lines
+-- this replaces. (1) It walked pairs(), whose order is unspecified, and let the last writer
+-- win, so with two definitions claiming one resolved build id — which `resolve` allows,
+-- since "my:pack_Thing" and "my_pack:Thing" both become "my_pack_Thing" — the owner of a
+-- placed structure varied BETWEEN SESSIONS with nothing logged. Ids are sorted and the
+-- FIRST one wins now: same registry, same answer, every launch, and the loser is named in
+-- the log. (2) byBuildId was add-only, so re-defining a building with different buildIds
+-- left the old ids pointing at a def nothing else referenced any more. It is rebuilt from
+-- the live registry each pass and defs whose id is no longer registered are retired with it.
 local function refreshDefs()
-    for id, cls in pairs(object_manager.all("building")) do
+    local live = object_manager.all("building")
+
+    local ids = {}
+    for id in pairs(live) do ids[#ids + 1] = id end
+    table.sort(ids)
+
+    local byBuildId = {}
+    for _, id in ipairs(ids) do
+        local cls = live[id]
         local def = Registry.defs[id]
         if not def or def.cls ~= cls then
-            def = buildDef(cls)
+            def = buildDef(cls, id)
             Registry.defs[id] = def
         end
         for _, r in ipairs(def.buildIds) do
-            Registry.byBuildId[r] = def
+            local held = byBuildId[r]
+            if held == nil then
+                byBuildId[r] = def
+            elseif held ~= def then
+                local k = r .. "\0" .. tostring(held.id) .. "\0" .. tostring(def.id)
+                if not buildIdConflictSeen[k] then
+                    buildIdConflictSeen[k] = true
+                    log.warn(string.format("build id %q is claimed by TWO definitions, '%s' "
+                        .. "(pack %s) and '%s' (pack %s) — '%s' wins because the registered ids "
+                        .. "are sorted, which at least makes it the same one every session. "
+                        .. "They also SHARE one record key space, so a placed structure's saved "
+                        .. "state is handed to whichever wins",
+                        r, tostring(held.id), tostring(held.pack or "?"),
+                        tostring(def.id), tostring(def.pack or "?"), tostring(held.id)))
+                end
+            end
         end
     end
+
+    -- Retire: replace the index wholesale (a stale build id must stop resolving) and drop
+    -- defs for ids the registry no longer holds. Existing INSTANCES keep the def object they
+    -- were created with, which is what makes inst.def identity stable across a redefinition.
+    Registry.byBuildId = byBuildId
+    for id in pairs(Registry.defs) do
+        if live[id] == nil then Registry.defs[id] = nil end
+    end
+end
+
+-- ---- the actor -> instance index (rule 1 in the header; contract C1) ----
+-- Bind `inst` to `actor` under uo.key(actor) and remember the key ON the instance. The
+-- remembered key is not a convenience: an actor that has been destroyed will not answer
+-- GetFullName any more, and removal — which happens exactly when the actor is gone — would
+-- otherwise have no way to find the entry it must clear. An actor that will not answer at
+-- all is bound to nothing and the instance is still tracked by key; it simply takes the
+-- scan's slow path until it answers.
+local function bindActor(inst, actor, actorKey)
+    local k = actorKey or uo.key(actor)
+    if inst.actorKey and inst.actorKey ~= k then instancesByActor[inst.actorKey] = nil end
+    inst.actor    = actor
+    inst.actorKey = k
+    if k then instancesByActor[k] = inst end
+end
+
+local function unbindActor(inst)
+    if inst.actorKey then instancesByActor[inst.actorKey] = nil end
+    inst.actorKey = nil
 end
 
 -- ---- instance object (port of entity.makeInstance + model instance sugar) ----
@@ -335,28 +595,46 @@ local function makeInstance(def, buildId, actor, pos, state, key)
     -- to the Building class method set). The persisted record's `state` is the SAME table
     -- reference as inst.state, so an in-place mutation is written on the next flush.
     inst.setDirty = function(self)
-        worldDirty = true
+        store.dirty = true
         local rec = loadWorld().entities[self.key]
         if rec then rec.state = self.state end
     end
     inst.save = function(self) self:setDirty(); flushWorld() end
-    inst.isValid = function(self)
-        return self.actor and self.actor.IsValid and self.actor:IsValid()
-    end
+    inst.isValid = function(self) return uo.live(self.actor) end
     return inst
+end
+
+-- Stamp a record with WHO it belongs to and WHAT SHAPE it is (F-7). A record used to carry
+-- buildId / pos / state and an `altKeys` table that nothing ever wrote to and nothing ever
+-- read — no owner, no version, no way for a later load to tell an old record from a new one
+-- or to say which pack's file this line is. It carries all three now, and an old record is
+-- upgraded in place the first time the scan binds it, which is the only migration path a
+-- single shared file can have.
+local function stampRecord(rec, inst)
+    if type(rec) ~= "table" then return false end
+    local defId = inst.def and inst.def.id or nil
+    local pack  = inst.def and inst.def.pack or nil
+    if rec.v == REC_VERSION and rec.def == defId and rec.pack == pack then return false end
+    rec.v       = REC_VERSION
+    rec.def     = defId
+    rec.pack    = pack
+    rec.altKeys = nil          -- the dead field, removed on contact rather than rewritten
+    return true
 end
 
 -- write/refresh the persisted record for an instance
 local function persist(inst)
     local w = loadWorld()
-    w.entities[inst.key] = { buildId = inst.buildId, pos = inst.pos, state = inst.state, altKeys = {} }
-    worldDirty = true
+    local rec = { buildId = inst.buildId, pos = inst.pos, state = inst.state }
+    stampRecord(rec, inst)
+    w.entities[inst.key] = rec
+    store.dirty = true
 end
 
 -- register a live instance: index, deferred mesh, tick set.
 local function addInstance(inst)
     Registry.instances[inst.key] = inst
-    if inst.actor then instancesByActor[inst.actor] = inst end
+    if inst.actor then bindActor(inst, inst.actor) end
     spatial.indexAdd(inst)
     -- mesh: DEFERRED. Adding a ProceduralMeshComponent to an actor still mid-init (the
     -- frame it's placed) can touch an invalid native object and crash during building.
@@ -374,7 +652,7 @@ local function removeInstance(key, reason)
     local inst = Registry.instances[key]
     if not inst then return end
     spatial.indexRemove(inst)
-    if inst.actor then instancesByActor[inst.actor] = nil end
+    unbindActor(inst)
     for i = #Registry.tickList, 1, -1 do
         if Registry.tickList[i] == inst then table.remove(Registry.tickList, i); break end
     end
@@ -382,7 +660,7 @@ local function removeInstance(key, reason)
     -- delete persisted record only on genuine removal (not world-left)
     if reason ~= "world_left" then
         loadWorld().entities[key] = nil
-        worldDirty = true
+        store.dirty = true
     end
 end
 
@@ -417,7 +695,7 @@ local function popPendingNear(buildId, pos)
     return best
 end
 
--- ---- reconstruction scan (crash-safe; gated on worldReady) ----
+-- ---- reconstruction scan (crash-safe; gated on gate.ready) ----
 -- resolveBuildId(actor): 3-tier. 1) class-name BP_BuildObject_<Id>_C direct map;
 -- 2) actor's MapObjectModel.BuildObjectId; 3) position match against a persisted record
 -- (handled in the scan below).
@@ -445,6 +723,141 @@ local function actorPos(actor)
     return p
 end
 
+-- ---- the orphan pass: quarantine, restore, and the one narrow rename migration (F-7) ----
+--
+-- WHY THERE HAS TO BE ONE. The miss sweep at the bottom of the scan only walks
+-- Registry.instances — live structures the scan can still see — so a record belonging to a
+-- pack that is no longer installed is never visited by anything, ever. There was no prune,
+-- no orphan scan and no TTL, in a file that is shared by every pack and only ever appended
+-- to; the checked-in state/entities_world.json is what that looks like after one session.
+--
+-- WHY IT DOES NOT DELETE. "No definition claims this build id" is NOT the same statement as
+-- "this pack is gone". A player disables a mod for one evening, a pack defines its buildings
+-- lazily and has not got there yet, a definition is being renamed. (An F9 hot reload used to
+-- be the first item on this list — core/reload wiped object_manager and re-required only
+-- palforge.native.*, so a press dropped every pack's content until the game restarted. It
+-- keeps object_manager now, so a reload no longer unclaims anything; the header has the
+-- account.) Deleting on that evidence would
+-- cost the player every structure's state for a reason that reverses itself. So an orphan is
+-- MOVED to the file's `orphans` section, keeping its bytes, and moved back the moment
+-- something claims its build id again. The player's state is recoverable by reinstalling the
+-- pack — including after an id rename, by renaming it back.
+--
+-- WHAT IT COSTS, stated plainly: the file still grows in the one case where growth is
+-- genuinely permanent (a pack uninstalled forever), and only the ORPHAN_MAX cap bounds it.
+-- That cap is the single destructive act in this file and it names itself in the log.
+local function orphanCount(w)
+    local n = 0
+    for _ in pairs(w.orphans) do n = n + 1 end
+    return n
+end
+
+-- The one migration a record can carry itself through. `def` is registered, the record's
+-- build id is one that def no longer claims, and the def now claims exactly ONE build id:
+-- then the structure at that position belongs to that build id and the record is re-keyed
+-- there. Anything ambiguous — several candidate build ids, or an occupied target key — is
+-- refused and left to quarantine, because guessing which of two ids a player's chest state
+-- belongs to is worse than keeping it where it is.
+local function tryMigrate(w, key, rec)
+    if type(rec.def) ~= "string" or type(rec.pos) ~= "table" then return nil end
+    local def = Registry.defs[rec.def]
+    if not def or #def.buildIds ~= 1 then return nil end
+    local bid = def.buildIds[1]
+    if bid == rec.buildId then return nil end
+    local newKey = spatial.keyOf(bid, spatial.cellOf(rec.pos, def.gridCm))
+    if newKey == key or w.entities[newKey] ~= nil or Registry.instances[newKey] then return nil end
+    rec.buildId = bid
+    w.entities[newKey] = rec
+    w.entities[key] = nil
+    log.info(string.format("record %s migrated to %s: definition '%s' is still registered and "
+        .. "now declares exactly one build id (%q), so the structure's saved state follows the "
+        .. "rename instead of being orphaned", key, newKey, rec.def, bid))
+    return newKey
+end
+
+local function pruneOrphans()
+    local w = loadWorld()
+    local restored, quarantined, junk = 0, 0, 0
+    local packs = {}
+
+    -- RESTORE FIRST, so a pack that came back this session gets its records before anything
+    -- else looks at them, and so a record cannot be counted as an orphan twice.
+    for key, rec in pairs(w.orphans) do
+        if type(rec) ~= "table" then
+            w.orphans[key] = nil; junk = junk + 1
+        elseif rec.buildId and Registry.byBuildId[rec.buildId] and w.entities[key] == nil then
+            rec.orphanedAt = nil
+            w.entities[key] = rec
+            w.orphans[key] = nil
+            restored = restored + 1
+        end
+    end
+
+    -- Snapshot the keys before touching the table: tryMigrate INSERTS a re-keyed record, and
+    -- adding a key to a table that a pairs() walk is in the middle of is undefined in Lua.
+    local live = {}
+    for key in pairs(w.entities) do live[#live + 1] = key end
+    for _, key in ipairs(live) do
+        local rec = w.entities[key]
+        if rec == nil then                          -- moved by an earlier tryMigrate
+            -- nothing to do
+        elseif type(rec) ~= "table" then
+            -- Not a record at all (a hand-edited or truncated file). Nothing can own it and
+            -- nothing can read it; quarantining junk would only make the junk permanent.
+            w.entities[key] = nil
+            junk = junk + 1
+        elseif not (type(rec.buildId) == "string" and Registry.byBuildId[rec.buildId]) then
+            if not tryMigrate(w, key, rec) then
+                rec.orphanedAt = rec.orphanedAt or os.time()
+                w.orphans[key] = rec
+                w.entities[key] = nil
+                quarantined = quarantined + 1
+                packs[tostring(rec.pack or rec.def or "unattributed")] = true
+            end
+        end
+    end
+
+    -- The cap. Oldest first, by the time the record was quarantined; a record with no
+    -- orphanedAt (written by a version that had none) sorts as oldest, which is the
+    -- conservative direction only if it is genuinely old — it is, because the field has been
+    -- written since quarantine existed.
+    local dropped = 0
+    local n = orphanCount(w)
+    if n > ORPHAN_MAX then
+        local keys = {}
+        for k in pairs(w.orphans) do keys[#keys + 1] = k end
+        table.sort(keys, function(a, b)
+            local ta = tonumber(w.orphans[a] and w.orphans[a].orphanedAt) or 0
+            local tb = tonumber(w.orphans[b] and w.orphans[b].orphanedAt) or 0
+            if ta ~= tb then return ta < tb end
+            return a < b                     -- deterministic tie-break
+        end)
+        for i = 1, n - ORPHAN_MAX do w.orphans[keys[i]] = nil; dropped = dropped + 1 end
+    end
+
+    if restored + quarantined + junk + dropped > 0 then
+        store.dirty = true
+        local names = {}
+        for p in pairs(packs) do names[#names + 1] = p end
+        table.sort(names)
+        local liveN = 0
+        for _ in pairs(w.entities) do liveN = liveN + 1 end
+        log.info(string.format("world records: %d restored, %d quarantined%s, %d unreadable "
+            .. "dropped, %d live. A quarantined record is one whose build id NO registered "
+            .. "definition claims this session — it is kept, not deleted, and comes back by "
+            .. "itself if the pack is loaded again",
+            restored, quarantined,
+            (#names > 0 and (" (" .. table.concat(names, ", ") .. ")") or ""),
+            junk, liveN))
+        if dropped > 0 then
+            log.warn(string.format("world records: the quarantine held more than %d entries, so "
+                .. "%d of the OLDEST were DELETED permanently. This is the only place PalForge "
+                .. "destroys a saved record; it means that many structures belonged to packs "
+                .. "that have not been loaded for a long time", ORPHAN_MAX, dropped))
+        end
+    end
+end
+
 -- One reconstruction pass. Discovers NEW building actors -> creates+tracks the instance
 -- and EMITS building.place (matched to a pending RequestBuild intent) / building.load
 -- (reconstructed from a saved record). Vanished instances past the miss threshold EMIT
@@ -452,8 +865,23 @@ end
 -- (never a direct inst:onX here). The instance-creation branch runs once per key, so
 -- building.place emits exactly once per placement.
 local function scanOnce()
-    if not worldReady then return 0 end
+    if not gate.ready then return 0 end
     refreshDefs()
+
+    -- ONE orphan pass per loaded world, and not immediately (F-7). The grace period is not
+    -- politeness: refreshDefs above is the only thing that decides whether a build id is
+    -- claimed, and a pack may still be defining — native catalogs materialize lazily, a pack
+    -- may define from its own world.ready handler. Quarantining before it has spoken would
+    -- move records out and the next pass would move them straight back, twice per world load,
+    -- for nothing. gate.pruned is cleared by the world-left teardown, so a second world in the
+    -- same session gets its own pass.
+    gate.scans = (gate.scans or 0) + 1
+    if not gate.pruned and gate.scans >= ORPHAN_GRACE_SCANS then
+        gate.pruned = true
+        local okP, eP = pcall(pruneOrphans)
+        if not okP then log.warn("world records: the orphan pass failed: " .. tostring(eP)) end
+    end
+
     local okFind, actors = pcall(FindAllOf, "PalBuildObject")
     if not okFind or type(actors) ~= "table" then return 0 end
     local matched = {}
@@ -466,8 +894,22 @@ local function scanOnce()
             -- FAST PATH: identity is the ACTOR, not the quantized position (a placed
             -- building's location jitters by >1 cell between scans; keying new instances
             -- off that would churn the same actor into endless instances).
-            local bound = instancesByActor[actor]
+            --
+            -- KEYED ON uo.key(actor), NOT ON THE ACTOR (A-1/A-2, contract C1). `actors` comes
+            -- from a fresh FindAllOf every scan and UE4SS mints a new userdata wrapper per
+            -- lookup, so the old `instancesByActor[actor]` missed on EVERY sweep after the one
+            -- that created the instance. Three silent failures came out of that one miss and
+            -- all three are fixed by this line: missingStreak never reset (so a structure was
+            -- one bad scan away from a spurious building.remove and could never accumulate the
+            -- six it needs), spatial.indexUpdate below never ran (the "KNOWN GAP" core/spatial
+            -- attributes to this runtime), and _meshPending — set once in addInstance and
+            -- consumed ONLY here — was never consumed, so a declared Building{ mesh = ... }
+            -- never rendered itself although api/pal.lua and plan/TODO.md both said it always
+            -- had. The handle is refreshed from this sweep's fresher one on every hit.
+            local actorKey = uo.key(actor)
+            local bound = actorKey and instancesByActor[actorKey] or nil
             if bound and Registry.instances[bound.key] == bound then
+                bound.actor = actor          -- C1: keep the freshest wrapper in the record
                 bound.missingStreak = 0
                 matched[bound.key] = true
                 local p = actorPos(actor)
@@ -477,9 +919,10 @@ local function scanOnce()
                     -- indexed at, and this line is the only place an instance ever moves —
                     -- so without the update a structure that drifts far enough keeps its old
                     -- bucket and spatial.neighbors(pos, r) stops finding it. core/spatial.lua
-                    -- names this exact call as its one missing hook ("KNOWN GAP ... it
-                    -- belongs to the building runtime"). Cheap: it compares the bucket key
-                    -- and only touches the index when that key actually changed.
+                    -- named this exact call as its one missing hook; the call was here all
+                    -- along and the actor-keyed lookup above is what stopped it running.
+                    -- Cheap: it compares the bucket key and only touches the index when that
+                    -- key actually changed.
                     spatial.indexUpdate(bound)
                 end
                 -- deferred mesh: the actor survived >=1 scan, so it's initialized now.
@@ -515,13 +958,18 @@ local function scanOnce()
             local inst = Registry.instances[key]
             if inst then
                 -- Same key already held. Reuse only if unbound or the same actor; do NOT
-                -- steal another live actor's instance (two buildings in one cell).
-                local sameActor = inst.actor == actor
-                local heldValid = inst.actor and not sameActor
-                    and pcall(function() return inst.actor:IsValid() end) and inst.actor:IsValid()
+                -- steal another live actor's instance (two buildings in one cell). This guard
+                -- is why a position-derived key works as well as it does in practice and it
+                -- is kept exactly as it was — only the two IDENTITY tests underneath it
+                -- changed, because `inst.actor == actor` compared two userdata WRAPPERS and
+                -- was therefore false even for the same engine object, which made every
+                -- re-encounter look like a different actor arriving in an occupied cell.
+                local sameActor = (inst.actorKey ~= nil and inst.actorKey == actorKey)
+                    or uo.same(inst.actor, actor)
+                local heldValid = inst.actor ~= nil and not sameActor and uo.live(inst.actor)
                 if not heldValid then
-                    inst.actor = actor; inst.pos = pos
-                    instancesByActor[actor] = inst
+                    bindActor(inst, actor, actorKey)
+                    inst.pos = pos
                     inst.missingStreak = 0
                     if not sameActor and hasMesh(inst) then inst._meshPending = true end
                 end
@@ -544,7 +992,16 @@ local function scanOnce()
             else state = {} end
 
             inst = makeInstance(def, buildId, actor, pos, state, key)
-            if not rec then persist(inst) end
+            if rec then
+                -- An EXISTING record, being bound for the first time this session: upgrade it
+                -- in place to the current shape and owner (F-7). This is the only moment a
+                -- v1 record — no version, no def, no pack, one dead `altKeys` — can be
+                -- attributed, because it is the only moment the runtime knows which
+                -- definition claimed it.
+                if stampRecord(rec, inst) then store.dirty = true end
+            else
+                persist(inst)
+            end
             addInstance(inst)
             changes = changes + 1
 
@@ -612,47 +1069,122 @@ local function dropAllInstances()
     local keys = {}
     for k in pairs(Registry.instances) do keys[#keys + 1] = k end
     for _, k in ipairs(keys) do removeInstance(k, "world_left") end
-    instancesByActor = setmetatable({}, { __mode = "k" })
+    -- CLEARED IN PLACE, never replaced. This table is _G.__PalForgeBuildingRegistry.byActor
+    -- and the closures armed on the first load hold the table itself; assigning a fresh one
+    -- here would leave them writing into a table the module no longer reads — which is the
+    -- F-5 split all over again, one field down.
+    for k in pairs(instancesByActor) do instancesByActor[k] = nil end
     spatial.indexReset()
-    worldCache = nil  -- re-read on next world (saveId may differ)
+    store.cache = nil  -- re-read on next world (saveId may differ)
+    gate.scans  = 0    -- the next world gets its own orphan pass, after its own grace period
+    gate.pruned = false
     spatial.resetSaveId()
 end
 
 -- =====================================================================================
+-- THE PUMPS — how a driver armed on the FIRST load reaches the CURRENT module (rule 3).
+--
+-- UE4SS can take back neither a RegisterHook nor a LoopAsync, so the scan, the flush, the
+-- pal sweep and the ready-watch are armed once per SESSION and keep running across every
+-- hot reload holding the closure they were created with. That closure sees the modules that
+-- existed when it was armed: its api.building base class is the pre-reload one and its copy of
+-- every function above is the pre-reload code. Sharing the STATE through _G is only half the
+-- fix — with both modules alive, the old one would go on writing defs built by the old
+-- buildDef, over the old class table, into the table the new one dispatches from.
+--
+-- ONE captured module is NOT stale, and it is worth naming because it used to be the loudest
+-- item in this paragraph: object_manager. core/reload.lua keeps palforge.core.object_manager
+-- across the wipe (KEEP), so the registry an old closure reads and the registry a pack's next
+-- define call writes are the same table — a pre-reload driver sees post-reload definitions.
+-- That is what makes pump()'s fallback to THIS module a degradation rather than a break.
+--
+-- So each driver calls a named entry point on whatever `require` answers with NOW. The tick
+-- source already does exactly this for core.poll ("Required fresh each tick, never captured")
+-- and this is the same technique applied to the four drivers that own runtime state. If the
+-- reload left a module that cannot be required or does not carry the entry point, the call
+-- falls back to THIS module, so a broken reload degrades to the old behaviour rather than to
+-- silence.
+-- =====================================================================================
+local function pump(name, ...)
+    local fn
+    local ok, mod = pcall(require, "palforge.core.event")
+    if ok and type(mod) == "table" and type(mod[name]) == "function" then fn = mod[name] end
+    if fn == nil then fn = M[name] end
+    if type(fn) == "function" then return fn(...) end
+end
+
+-- One reconstruction pass plus the DEFERRED world.ready emit. The scan is what turns actors
+-- into live instances, so world.ready is announced by the first scan that COMPLETES after
+-- the gate opened — by then the structures around the player exist and the onWorldReady
+-- dispatch has something to iterate. Order matters: scan first, then emit.
+function M.__scanPump()
+    scanOnce()
+    if gate.pendingReady then
+        gate.pendingReady = false
+        pcall(function() srcEmit("world.ready") end)
+        -- THE DECLARED-ASSET PASS (A-6). The one moment it can run: the world is up, the
+        -- load storm is over, and every definition that is going to register at startup has.
+        -- core.mesh.validateDeclared walks om.all("mesh") — every REGISTERED Mesh{...}, which
+        -- is what a Pal or a Building points its own mesh at — resolves each declared model /
+        -- animClass / texture / material and logs one MESHVALIDATE block naming what did not
+        -- resolve, which turns "my boss is invisible" from a bisect into a log line. A mesh
+        -- spec written INLINE in a Building{ mesh = { ... } } block is not in that registry
+        -- and is not covered; the scan's render path is what reports on those, one actor at a
+        -- time. Guarded on the function existing, so this file still works against a core.mesh
+        -- that has not gained it yet.
+        pcall(function()
+            local m = require("palforge.core.mesh")
+            if type(m.validateDeclared) == "function" then m.validateDeclared() end
+        end)
+        -- The one moment a dev queue can run: the world exists, the player pawn exists, and
+        -- nothing has been asked of the keyboard. See core/autorun.lua for why that matters.
+        pcall(function() require("palforge.core.autorun").run() end)
+    end
+end
+
+function M.__flushPump() return flushWorld() end
+
+function M.__placeIntent(buildId, pos, player) return onPlaceRequest(buildId, pos, player) end
+
+-- =====================================================================================
 -- SOURCE world — ready-watch (port of entity/events.startReadyWatch). LoopAsync(1000)
--- polling the player pawn: N stable polls -> OPEN the worldReady gate and arm the
--- deferred world.ready emit (the scan below fires it, see pendingWorldReady); going
+-- polling the player pawn: N stable polls -> OPEN the gate.ready gate and arm the
+-- deferred world.ready emit (the scan below fires it, see gate.pendingReady); going
 -- invalid -> emit world.left (then drop live instances). This gate also guards the
 -- building scan/hooks (don't touch objects during the load storm).
 -- =====================================================================================
+-- One poll of the ready-watch. Public-by-convention (the `__` says "a driver calls this,
+-- you do not") because the LoopAsync below must reach the CURRENT copy of it — see pump().
+function M.__worldPoll()
+    local okFind, pawn = pcall(FindFirstOf, "PalPlayerCharacter")
+    local valid = okFind and pawn and pawn:IsValid()
+    if valid then
+        gate.readyCount = gate.readyCount + 1
+        if gate.readyCount == READY_POLLS then
+            -- The gate flips HERE (unchanged): every `if not gate.ready then
+            -- return end` guard keeps exactly its old load-storm protection.
+            -- The CHANNEL is armed instead of emitted — the next scan owns it.
+            gate.ready = true
+            gate.pendingReady = true
+            log.info("world ready - building dispatch enabled")
+        end
+    else
+        local wasReady = gate.ready
+        gate.ready = false
+        gate.pendingReady = false  -- never emit a ready for a world we already left
+        gate.readyCount = 0
+        if wasReady then
+            log.info("world left - building dispatch paused")
+            pcall(function() srcEmit("world.left") end)
+            pcall(dropAllInstances)
+        end
+    end
+end
+
 local function installWorldSource()
     local ok, e = pcall(function()
         LoopAsync(1000, function()
-            ExecuteInGameThread(function()
-                local okFind, pawn = pcall(FindFirstOf, "PalPlayerCharacter")
-                local valid = okFind and pawn and pawn:IsValid()
-                if valid then
-                    readyCount = readyCount + 1
-                    if readyCount == READY_POLLS then
-                        -- The gate flips HERE (unchanged): every `if not worldReady then
-                        -- return end` guard keeps exactly its old load-storm protection.
-                        -- The CHANNEL is armed instead of emitted — the next scan owns it.
-                        worldReady = true
-                        pendingWorldReady = true
-                        log.info("world ready - building dispatch enabled")
-                    end
-                else
-                    local wasReady = worldReady
-                    worldReady = false
-                    pendingWorldReady = false  -- never emit a ready for a world we already left
-                    readyCount = 0
-                    if wasReady then
-                        log.info("world left - building dispatch paused")
-                        pcall(function() srcEmit("world.left") end)
-                        pcall(dropAllInstances)
-                    end
-                end
-            end)
+            ExecuteInGameThread(function() pump("__worldPoll") end)
             return false -- keep polling
         end)
     end)
@@ -660,8 +1192,8 @@ local function installWorldSource()
         -- fail OPEN but loudly: dispatch works, at the cost of the load-storm guard.
         -- (Arm the deferred emit too, so world.ready still lands if a heartbeat exists;
         --  when LoopAsync is gone there is no scan either, and nothing emits.)
-        worldReady = true
-        pendingWorldReady = true
+        gate.ready = true
+        gate.pendingReady = true
         log.warn("ready-watch unavailable (" .. tostring(e) .. ") - dispatch always on")
     end
 end
@@ -693,11 +1225,9 @@ end
 ---(a component to its owner, a notify state to its filter) asks this first, because an
 ---engine object handed to a hook can be mid-teardown and a property read on one of those is
 ---the shape that faults natively — which pcall cannot catch.
-local function alive(o)
-    if o == nil then return false end
-    local ok, v = pcall(function() return o.IsValid and o:IsValid() end)
-    return ok and v == true
-end
+---(core.uobject.live is the implementation; the name is kept because a dozen hooks below
+---read as English with it.)
+local function alive(o) return uo.live(o) end
 
 ---A STABLE table key for a UObject, as a string.
 ---
@@ -708,12 +1238,11 @@ end
 ---(`PalPassiveSkillComponent /Game/.../BP_ChickenPal_C_2147460233.PassiveSkillComponent`) and
 ---is the same string every time. nil when it cannot be read, and every caller treats that as
 ---"do not remember this one" rather than as a key.
-local function objKey(o)
-    if o == nil then return nil end
-    local s; pcall(function() s = o:GetFullName() end)
-    if type(s) ~= "string" or s == "" then return nil end
-    return s
-end
+---
+---The rule this states is now the whole tree's (contract C1) and core.uobject.key is the one
+---implementation of it. The name stays because the hooks below read as English with it, and
+---because the paragraph above is the measurement that produced the rule.
+local function objKey(o) return uo.key(o) end
 
 ---Read a hook param that IS the value (a bare FName / number), not a struct field.
 local function pstr(p)
@@ -778,7 +1307,7 @@ end
 --
 -- WHAT IT DOES NOT BUY, plainly: UE4SS has no unregister. On a SECOND world load in the
 -- same session the hook is still armed and will fire during that storm; the only defence
--- left is the `if not worldReady then return end` line every handler opens with, which
+-- left is the `if not gate.ready then return end` line every handler opens with, which
 -- stops US from touching the object but not the game from calling us. And if LoopAsync is
 -- unavailable there is no scan, so world.ready never lands and the hook never arms at all
 -- (fail-soft: that hook's feature is simply off, like any tryHook miss).
@@ -786,7 +1315,7 @@ local function tryHookAfterWorldReady(path, fn)
     local armed = false
     M.on("world.ready", function()
         if armed then return end        -- one-shot: world.ready re-fires on every world load
-        if not worldReady then return end  -- the CHANNEL is public and anyone may emit it (the
+        if not gate.ready then return end  -- the CHANNEL is public and anyone may emit it (the
                                            -- test suite does, at the title screen); arm on the
                                            -- GATE, so a synthetic emit cannot arm us into a
                                            -- world-load storm.
@@ -800,7 +1329,7 @@ local function installBuildingSource()
     -- The actor doesn't exist yet; the scan reconciles this intent against the real
     -- GetActorLocation once it sees the new actor (-> building.place).
     tryHook("/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer", function(self, buildObjectId, location)
-        if not worldReady then return end
+        if not gate.ready then return end
         local ok, e = pcall(function()
             local id = get(buildObjectId):ToString()
             local pos = nil
@@ -809,7 +1338,10 @@ local function installBuildingSource()
                 if loc then pos = { x = loc.X, y = loc.Y, z = loc.Z } end
             end)
             local player = FindFirstOf("PalPlayerCharacter")
-            onPlaceRequest(id, pos, player)
+            -- Through the pump: this hook was armed once, and the intent it records is read
+            -- by the scan, which runs in the CURRENT module. Recording it into the previous
+            -- module's idea of the registry would drop every placement made after a reload.
+            pump("__placeIntent", id, pos, player)
         end)
         if not ok then log.err("building source: place-intent handler: " .. tostring(e)) end
     end)
@@ -818,7 +1350,7 @@ local function installBuildingSource()
     -- Resolve the id from the class name and EMIT building.interact; DISPATCH resolves the
     -- live instance (by actor) and calls onRightClick.
     tryHook("/Script/Pal.PalBuildObject:OnBeginInteractBuilding", function(self, other)
-        if not worldReady then return end
+        if not gate.ready then return end
         local ok, e = pcall(function()
             local building = get(self)
             local otherActor = get(other)
@@ -827,7 +1359,13 @@ local function installBuildingSource()
             if not (otherActor and otherActor:IsValid()) then return end
             if charClass and charClass:IsValid() and not otherActor:IsA(charClass) then return end
 
-            local actorName = building:GetFullName()
+            -- The debounce key is objKey (core.uobject.key), not a second GetFullName spelled
+            -- here — contract C1 says there is one identity helper for a UObject and nothing
+            -- invents another. Same string either way; what changes is that a building which
+            -- will not answer its own name now returns nil instead of raising and aborting
+            -- the whole handler, so the interact is simply not debounced rather than lost.
+            local actorName = objKey(building)
+            if not actorName then return end
             local now = os.clock()
             if lastInteract[actorName] and (now - lastInteract[actorName]) < INTERACT_DEBOUNCE_SEC then return end
             lastInteract[actorName] = now
@@ -840,7 +1378,7 @@ local function installBuildingSource()
         if not ok then log.err("building source: interact handler: " .. tostring(e)) end
     end)
 
-    -- Reconstruction scan on the shared heartbeat (gated on worldReady inside scanOnce),
+    -- Reconstruction scan on the shared heartbeat (gated on gate.ready inside scanOnce),
     -- and the DEFERRED world.ready emit. The scan is what turns actors into live
     -- instances, so world.ready is announced by the first scan that completes after the
     -- gate opened — by then the structures around the player exist and the onWorldReady
@@ -848,24 +1386,17 @@ local function installBuildingSource()
     -- flag itself is untouched, so the notification only moves <= SCAN_MS later.
     -- Buildings that stream in on a LATER scan still miss it; onLoad is the per-instance
     -- startup hook. (M.every already pcalls this body, so a throwing scan just leaves
-    -- pendingWorldReady raised and the next pass retries the emit.)
-    M.every(SCAN_MS, function()
-        scanOnce()
-        if pendingWorldReady then
-            pendingWorldReady = false
-            pcall(function() srcEmit("world.ready") end)
-            -- The one moment a dev queue can run: the world exists, the player pawn exists, and
-            -- nothing has been asked of the keyboard. See core/autorun.lua for why that matters.
-            pcall(function() require("palforge.core.autorun").run() end)
-        end
-    end)
+    -- gate.pendingReady raised and the next pass retries the emit.)
+    -- Both drivers below go through pump(): they are subscriptions on the shared bus, made
+    -- once per session, and the work they drive owns the shared registry — see the pumps.
+    M.every(SCAN_MS, function() pump("__scanPump") end)
 
     -- Batched persistence flush (see FLUSH_MS). Without it the ONLY writes are inst:save()
     -- and the world-left teardown, so a structure discovered by the scan — and any state a
     -- handler mutated in place after inst:setDirty() — reached disk only on a clean exit and
     -- was lost to an alt-F4 or a crash. flushWorld is a no-op while nothing is dirty, so this
     -- costs one boolean test every 10 s.
-    M.every(FLUSH_MS, flushWorld)
+    M.every(FLUSH_MS, function() pump("__flushPump") end)
 
     -- build COMPLETE -> building.build (api/building's declarable `onBuild`).
     --     /Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal(UPalMapObjectModel*)
@@ -890,7 +1421,7 @@ local function installBuildingSource()
     -- instance-level dispatch would silently no-op forever. See resolveBuildingClass.
     tryHookAfterWorldReady("/Script/Pal.PalPlayerRecordData:OnCompleteBuild_ServerInternal",
         function(self, model)
-            if not worldReady then return end
+            if not gate.ready then return end
             local ok, e = pcall(function()
                 local m = get(model)
                 if not (m and m.IsValid and m:IsValid()) then return end
@@ -953,10 +1484,21 @@ local resolvePalClass
 --
 -- COST is the reason this is not on the heartbeat; see M.PAL_SCAN_MS. Per sweep a pal with
 -- no PalForge definition costs ONE failed lookup ever: the result (class, or `false` for a
--- miss) is memoized against the actor in a weak table, so later sweeps are a table read.
-local palClassOf     = setmetatable({}, { __mode = "k" })   -- actor -> cls | false (miss)
-local palTickState   = setmetatable({}, { __mode = "k" })   -- cls -> { fails, broken }
-local palDefCount    = -1                                   -- registered pals at last sweep
+-- miss) is memoized against the actor, so later sweeps are a table read.
+--
+-- THAT CLAIM WAS FALSE UNTIL THE KEY WAS FIXED. The memo was a weak table keyed on the actor
+-- WRAPPER, and `actors` comes from a fresh FindAllOf every sweep, so every lookup missed and
+-- every pal in the world paid a full resolvePalClass — a GetClass, a GetFullName, a pattern
+-- match and, for anything not registered under its exact BP id, a pairs() walk over every
+-- registered pal — every three seconds, forever. Same defect as the building scan's
+-- actor->instance map (rule 1 in the header, contract C1), same fix: uo.key.
+--
+-- The consequence of a string key is that it cannot be weak, so the memo is BOUNDED instead:
+-- pals stream in and out for a whole session and nothing would ever release those keys. At
+-- the cap the table is dropped whole, which costs one re-resolution per actor seen after it —
+-- the same trade the spawn dedupe table makes, for the same reason.
+local PAL_CLASS_KEYS_MAX = 4096
+local palTickState   = RT.pal.tickState                     -- cls -> { fails, broken } (weak)
 local PAL_TICK_FAILS = 5    -- circuit-breaker threshold, same as the building tickOne
 
 -- Does this pal CLASS implement onTick? api/pal's default is an inert no-op, so without
@@ -991,7 +1533,8 @@ end
 -- One sweep. Returns how many pals were ticked (0 whenever the gate is shut or the
 -- enumeration is unavailable — never throws).
 local function palScanOnce(ctx)
-    if not worldReady then return 0 end
+    if not gate.ready then return 0 end
+    local pal = RT.pal   -- the memo lives on _G with the rest of the runtime state (rule 2)
 
     -- A definition can be registered at any time (native/pals.lua materializes one lazily on
     -- first get), so a `false` memoized before that would keep a real pal silent for its
@@ -999,9 +1542,9 @@ local function palScanOnce(ctx)
     -- snapshot walk per sweep, not per actor.
     local n = 0
     for _ in pairs(object_manager.all("pal")) do n = n + 1 end
-    if n ~= palDefCount then
-        palDefCount = n
-        palClassOf = setmetatable({}, { __mode = "k" })
+    if n ~= pal.defCount then
+        pal.defCount = n
+        pal.classOf, pal.classOfN = {}, 0
     end
     if n == 0 then return 0 end   -- nothing defined: skip the FindAllOf entirely
 
@@ -1012,10 +1555,15 @@ local function palScanOnce(ctx)
     for _, actor in ipairs(actors) do
         local ok = pcall(function()
             if not (actor and actor.IsValid and actor:IsValid()) then return end
-            local cls = palClassOf[actor]
+            local akey = uo.key(actor)
+            local cls = akey and pal.classOf[akey]
             if cls == nil then
                 cls = resolvePalClass({ actor = actor }) or false
-                palClassOf[actor] = cls
+                if akey then
+                    if pal.classOfN >= PAL_CLASS_KEYS_MAX then pal.classOf, pal.classOfN = {}, 0 end
+                    if pal.classOf[akey] == nil then pal.classOfN = pal.classOfN + 1 end
+                    pal.classOf[akey] = cls
+                end
             end
             if cls and palOverridesTick(cls) then
                 ticked = ticked + 1
@@ -1031,18 +1579,24 @@ local function palScanOnce(ctx)
     return ticked
 end
 
+function M.__palSweep(ctx) return palScanOnce(ctx) end
+
 -- Drive the sweep off the heartbeat, but at its own much slower cadence. Written out rather
 -- than handed to M.every because M.every captures its interval: reading M.PAL_SCAN_MS here,
--- every heartbeat, is what makes the constant tunable without editing this loop.
+-- every heartbeat, is what makes the constant tunable without editing this loop. The
+-- subscription is made once per session and survives a reload, so the sweep itself is
+-- reached through pump() and the cadence is read off whichever module answers now.
 local function installPalTickSource()
     local acc = 0
     M.on("tick", function(ctx)
-        local every = tonumber(M.PAL_SCAN_MS)
+        local ok, mod = pcall(require, "palforge.core.event")
+        local cur = (ok and type(mod) == "table") and mod or M
+        local every = tonumber(cur.PAL_SCAN_MS)
         if not every or every <= 0 then return end   -- 0 / nil / garbage = sweep disabled
         acc = acc + M.TICK_MS
         if acc < every then return end
         acc = 0
-        pcall(palScanOnce, ctx)
+        pcall(pump, "__palSweep", ctx)
     end)
 end
 
@@ -1085,7 +1639,7 @@ local function installPalSource()
     -- capture: SetIsCapturedProcessing(true) on the pal's param component; the pal actor
     -- is the component's owner. (probe: a1=true, self=BP_ChickenPal_C.CharacterParameterComponent)
     tryHook("/Script/Pal.PalCharacterParameterComponent:SetIsCapturedProcessing", function(self, started)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function()
             if get(started) ~= true then return end
             local comp = get(self)
@@ -1095,12 +1649,12 @@ local function installPalSource()
     end)
     -- damage: OnDamageReaction (self = the character taking damage).
     tryHook("/Script/Pal.PalCharacter:OnDamageReaction", function(self)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function() srcEmit("pal.damaged", { actor = get(self) }) end)
     end)
     -- death: OnDeadCharacter (self = the dead character).
     tryHook("/Script/Pal.PalCharacter:OnDeadCharacter", function(self)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function() srcEmit("pal.death", { actor = get(self) }) end)
     end)
     -- spawned (UNCONFIRMED candidate): fires when a pal finishes parameter init.
@@ -1133,7 +1687,7 @@ local function installPalSource()
     -- unregister — and the two delegate TARGETS it names are armed beside it.
     tryHookAfterWorldReady("/Script/Pal.PalCharacter:BroadcastOnCompleteInitializeParameter",
         function(self)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function() emitSpawned(get(self), "BroadcastOnCompleteInitializeParameter") end)
         end)
 
@@ -1165,7 +1719,7 @@ local function installPalSource()
     -- second does not.
     tryHookAfterWorldReady("/Script/Pal.PalPlayerCharacter:OnCompleteInitializeParameter",
         function(self, inCharacter)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 emitSpawned(getv(inCharacter), "PalPlayerCharacter:OnCompleteInitializeParameter")
             end)
@@ -1173,7 +1727,7 @@ local function installPalSource()
 
     tryHookAfterWorldReady("/Script/Pal.PalNPC:OnCompletedInitParam",
         function(self, inCharacter)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local who = getv(inCharacter)
                 if not alive(who) then who = get(self) end
@@ -1246,7 +1800,7 @@ local function installItemSource()
     --     one would be a plausible fabrication. Handed over as-is so a pack that learns the
     --     resolution can use it, and so a later probe has somewhere to land.
     tryHook("/Script/Pal.PalItemUseProcessor:UseItemToCharacter_ServerInternal", function(self, a1, a2, a3, a4)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function()
             local id
             local params = { a1, a2, a3, a4 }
@@ -1301,7 +1855,7 @@ local function installItemSource()
 
     -- obtain 1: the get-log. Scan the params for the struct carrying StaticItemId (+ Num).
     tryHook("/Script/Pal.PalPlayerState:AddItemGetLog_ToClient", function(self, a1, a2, a3, a4)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function()
             local id, count
             for _, p in ipairs({ a1, a2, a3, a4 }) do
@@ -1323,7 +1877,7 @@ local function installItemSource()
     -- one — a cheap guard on a shape nothing in this tree has been seen to produce, since
     -- utils.items.take drops items through the cheat manager and never signs a count.
     tryHook("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal", function(self, a1, a2, a3, a4)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function()
             local id = pstr(a1)
             if not id then return end
@@ -1375,7 +1929,7 @@ local function installItemSource()
     -- place for a DataTable read.
     local function craftSource(path, field, via)
         tryHook(path, function(self, work)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local m = getv(self)
                 if not (m and m.IsValid and m:IsValid()) then return end
@@ -1550,13 +2104,13 @@ local function installItemSource()
     -- drop: an ARRAY of slots, so one emit per entry. The Num on the entry is what is leaving
     -- the bag, which is the number a handler wants — not the slot's whole stack.
     tryHook("/Script/Pal.PalNetworkItemComponent:RequestDrop_ToServer", function(self, slots)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function() eachArray(getv(slots), function(e) emitDiscard(e, "drop") end) end)
     end)
 
     -- dispose: trashing one stack from the inventory menu. a1 is the request guid, a2 the slot.
     tryHook("/Script/Pal.PalNetworkItemComponent:RequestDispose_ToServer", function(self, _reqId, slotInfo)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function() emitDiscard(getv(slotInfo), "dispose") end)
     end)
 end
@@ -1730,7 +2284,7 @@ local function installSkillSource()
     -- cannot unregister and a silent helper costs nothing; if it ever does fire, the via line
     -- says so and this comment is wrong rather than the wiring.
     tryHook("/Script/Pal.PalUtility:PlayActionByWazaID", function(self, actionActor, targetActor, wazaID)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function()
             local id = wazaName(getv(wazaID))
             if not id then return end
@@ -1772,7 +2326,7 @@ local function installSkillSource()
 
     -- SOURCE 2 — the action object announcing its own start. `self` IS the move.
     tryHook("/Script/Pal.PalActionBase:OnBeginAction", function(self)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function() emitFromAction(getv(self), "PalActionBase:OnBeginAction") end)
     end)
 
@@ -1781,7 +2335,7 @@ local function installSkillSource()
     -- action's own GetActionCharacter is the authority (a summoned weapon's action is played
     -- on the weapon, not on the player).
     tryHook("/Script/Pal.PalPlayerCharacter:OnBeginAction", function(self, action)
-        if not worldReady then return end
+        if not gate.ready then return end
         pcall(function() emitFromAction(getv(action), "PalPlayerCharacter:OnBeginAction") end)
     end)
 
@@ -1791,7 +2345,7 @@ local function installSkillSource()
     -- SOURCE 1 — MEASURED SILENT while pal.damaged fired in the same fight. Kept armed.
     tryHook("/Script/Pal.PalUtility:MakeDamageInfoByWazaType",
         function(self, attacker, defender, _aHit, _dHit, hitLocation, _foliage, wazaType)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local id = wazaName(getv(wazaType))
                 if not id then return end
@@ -1813,7 +2367,7 @@ local function installSkillSource()
     -- .Waza and drops out — same guard, same silence-not-noise failure mode as the activate pair.
     tryHook("/Script/Pal.PalAnimNotifyState_AttackCollision:OnHit",
         function(self, _myComp, hitActor, _hitComp, _foliage, hitLocation)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local notify = getv(self)
                 if not alive(notify) then return end
@@ -1851,10 +2405,23 @@ local function installSkillSource()
         return actor, p
     end
 
-    -- SOURCE 1 — MEASURED SILENT across a session of catching and releasing pals. Kept armed.
+    -- SOURCE 1 — THIS IS THE SOURCE THAT CARRIED. Two measurements, in this order, and the
+    -- second overtook the first:
+    --   1. MEASURED SILENT across a session of catching and releasing pals. Kept armed on the
+    --      strength of the declaration alone, which is the policy in this file's header.
+    --   2. FIRED, 2026-07-26 — skill.equip carried its first event with via = "AddPassiveSkill",
+    --      and the item closed as skill-passive-source. The write that triggered it came from
+    --      PalForge itself: core.character.addSkill put a passive on a live BP_ChickenPal_C and
+    --      read it back. So (1) is a fact about the GAME's own bench and party writes — which
+    --      still have not been seen to reach this function — and not about the hook.
+    -- A handler must therefore be ready to hear about a change its own pack made. What is still
+    -- unsettled is only which call the GAME uses when a player edits a passive at a bench;
+    -- SOURCE 2 below stays armed beside this one and has carried nothing yet, and announceVia
+    -- names whichever wins. See api/skill.lua's onEquip/onUnequip block for the full account.
+    -- ⚠️ The unequip DIRECTION has never been recorded firing from any source.
     tryHookAfterWorldReady("/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill",
         function(self, addSkill, overrideSkill)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local id = pstr(addSkill)
                 if not id then return end
@@ -1871,7 +2438,7 @@ local function installSkillSource()
 
     tryHookAfterWorldReady("/Script/Pal.PalIndividualCharacterParameter:RemovePassiveSkill",
         function(self, skillId)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local id = pstr(skillId)
                 if not id then return end
@@ -1922,7 +2489,7 @@ local function installSkillSource()
 
     tryHookAfterWorldReady("/Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf",
         function(self, ownerObject, skillList)
-            if not worldReady then return end
+            if not gate.ready then return end
             pcall(function()
                 local comp = getv(self)
                 if not alive(comp) then return end
@@ -1995,12 +2562,13 @@ function resolvePalClass(ctx)
     local cls = object_manager.get("pal", id)
     if cls then return cls end
     -- namespaced pals: a registered "pack:name" whose resolved fname == the BP id
-    -- (covers a modded BP_<pack>_<name>_C class). Fail-soft over the snapshot.
-    for regId, c in pairs(object_manager.all("pal")) do
-        local okR, r = pcall(object_manager.resolve, regId)
-        if okR and r == id then return c end
-    end
-    return nil
+    -- (covers a modded BP_<pack>_<name>_C class). ONE INDEXED LOOKUP (contract C3). This
+    -- used to copy the whole "pal" bucket with object_manager.all() and walk it with pairs(),
+    -- re-resolving every registered id, ONCE PER EVENT — and because pairs() order is
+    -- unspecified, two ids that resolve to the same row picked a different winner between
+    -- sessions. object_manager maintains the reverse map at register time instead, so this is
+    -- O(1) and the collision is a warning at define time rather than a coin flip here.
+    return (object_manager.byResolved("pal", id))
 end
 
 -- Resolve the PalForge Item CLASS behind an item ctx. Like pals, items have no
@@ -2014,13 +2582,9 @@ local function resolveItemClass(ctx)
     if cls then return cls end
     -- namespaced items: a registered "pack:name" whose resolved fname == the game id
     -- (the game emits the PalSchema row name "pack_name", never the colon form). Without
-    -- this every pack-authored item would be silently eventless. Fail-soft over the
-    -- snapshot — same shape as resolvePalClass above.
-    for regId, c in pairs(object_manager.all("item")) do
-        local okR, r = pcall(object_manager.resolve, regId)
-        if okR and r == ctx.itemId then return c end
-    end
-    return nil
+    -- this every pack-authored item would be silently eventless. One indexed lookup, same
+    -- shape as resolvePalClass above — see the note there for what it replaced and why.
+    return (object_manager.byResolved("item", ctx.itemId))
 end
 
 -- Resolve the PalForge Skill CLASS behind a skill ctx. Same shape as items: skills have no
@@ -2035,11 +2599,8 @@ local function resolveSkillClass(ctx)
     local cls = object_manager.get("skill", ctx.skillId)
     if cls then return cls end
     -- namespaced skills: a registered "pack:name" whose resolved fname == the game id.
-    for regId, c in pairs(object_manager.all("skill")) do
-        local okR, r = pcall(object_manager.resolve, regId)
-        if okR and r == ctx.skillId then return c end
-    end
-    return nil
+    -- One indexed lookup, same shape as resolvePalClass above.
+    return (object_manager.byResolved("skill", ctx.skillId))
 end
 
 -- Resolve the PalForge Building DEFINITION CLASS behind a build id. building.build is the
@@ -2071,7 +2632,15 @@ local function resolve(otype, ctx) --> instance | class | nil
     if otype ~= "building" then return nil end
     if type(ctx) ~= "table" then return nil end
     if ctx.key and Registry.instances[ctx.key] then return Registry.instances[ctx.key] end
-    if ctx.actor and instancesByActor[ctx.actor] then return instancesByActor[ctx.actor] end
+    -- By ACTOR: keyed on uo.key, never on the handle. building.interact carries the actor the
+    -- native hook was handed, which is a different userdata wrapper from the one the scan
+    -- bound the instance under even when it is the same structure — so this lookup used to
+    -- fall through to the position fallback below, and onRightClick reached the instance only
+    -- when the ctx also carried a position. It does not.
+    if ctx.actor then
+        local k = uo.key(ctx.actor)
+        if k and instancesByActor[k] then return instancesByActor[k] end
+    end
     if ctx.buildId and ctx.pos then
         local def = Registry.byBuildId[ctx.buildId]
         if def then
@@ -2190,13 +2759,19 @@ function M.instances(buildId)
 end
 
 -- The live instance bound to `actor`, or nil. (What the interact dispatch resolves.)
+--
+-- Takes ANY handle onto the actor, not the one the scan happened to bind: the lookup is by
+-- uo.key(actor), so a pawn from a later FindAllOf or from an event ctx answers the same. A
+-- value that is not a UObject — a plain table, a number — has no key and is nil, which is
+-- what the suite asserts.
 function M.instanceOfActor(actor)
     if actor == nil then return nil end
-    return instancesByActor[actor]
+    local k = uo.key(actor)
+    return k and instancesByActor[k] or nil
 end
 
 -- Is the world loaded far enough for the building runtime to touch objects?
-function M.isWorldReady() return worldReady end
+function M.isWorldReady() return gate.ready end
 
 -- =====================================================================================
 -- start: wire the whole 導線 once (called by registry.initialize)

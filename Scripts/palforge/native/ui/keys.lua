@@ -86,7 +86,7 @@
 -- "I accept that, and I accept I may get nothing".
 --
 -- NOTHING IS EVER UNBOUND. UE4SS has no unregister for a keybind — the same fact
--- core/event.lua:779-782 records for hooks — so a key is armed once and stays armed for the
+-- core/event.lua:33 and :2161 record for hooks — so a key is armed once and stays armed for the
 -- session. An element that unmounts stops receiving because the ROUTER stops choosing it,
 -- not because the bind went away. That is why the routing lives in api/ui and not here.
 

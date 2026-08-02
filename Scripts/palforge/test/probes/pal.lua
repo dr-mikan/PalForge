@@ -1,14 +1,43 @@
 -- palforge/test/probes/pal.lua — what a LIVE pal's mesh component really is, in its own words.
 --
--- Closes three plan/TODO.md items, in this order: `mesh-skeletal-setter` (which mesh setter a
--- pal's component carries and whether the component is reachable at all), `mesh-skeletal-animclass`
--- (SetAnimClass / SetAnimationMode and the EAnimationMode value we merely assume is 0) and
--- `mesh-material-params` (the vector / scalar / texture parameter NAMES a real Palworld material
--- exposes, versus the six names core/mesh/base/renderer.lua guesses). WHAT MUST BE ON SCREEN: a
--- loaded save with a live pal standing near the player — spawn or whistle one out first, then
--- press the probe key. With no pal but a world it falls back to the player pawn and says so.
+-- IT CLOSED three plan/TODO.md items, and ALL THREE ARE NOW IN THE CLOSED LIST — checked
+-- 2026-08-02. Every block this file emits is therefore a REGRESSION read, not a question, and
+-- what each one is measured against is written down:
+--
+--   `mesh-skeletal-setter`     -- CLOSED. One route survives, SetSkinnedAssetAndUpdate(asset,
+--                                 true), reached through the `Mesh` property; `GetMesh()` is not
+--                                 declared anywhere in dumps/cxx, and the two setters are
+--                                 inherited by the SAME component, so the second was never a
+--                                 fallback. A run where `.Mesh property -> absent` is a REOPENING.
+--   `mesh-skeletal-animclass`  -- CLOSED. SetAnimClass(UClass*), SetAnimationMode(TEnumAsByte)
+--                                 and EAnimationMode::AnimationBlueprint = 0 all confirmed. The
+--                                 weak link is elsewhere and this probe still prints it: the
+--                                 LoadAsset resolve of an AnimBlueprintGeneratedClass, which one
+--                                 live sweep found zero of while the classes plainly exist.
+--   `mesh-material-params`     -- CLOSED on measured NAMES, read off the running game because a
+--                                 header dump could never have said them (they are data inside a
+--                                 .uasset). Mostly Title Case WITH SPACES. Re-reading them here
+--                                 is how a patch that renames one gets noticed.
+--
+-- WHAT MUST BE ON SCREEN: a loaded save with a live pal standing near the player — spawn or
+-- whistle one out first, then press the probe key. With no pal but a world it falls back to the
+-- player pawn and says so.
+--
 -- READ-ONLY: nothing here sets a mesh, an anim class or a material parameter; every write the
--- TODO paragraphs describe is named in a NOTE at the end of its section instead.
+-- items describe is named in a NOTE at the end of its section instead. That is also the one
+-- thing still OWED on mesh-material-params, and it is owed to the eye rather than to any file:
+-- the names are measured, a `true` from setColor means the write RAN (api/pal.lua is explicit
+-- about that at Handle:setColor), and NOBODY HAS EVER WATCHED A COLOUR CHANGE. That last half
+-- is NOW A DECLARED HOOK: `pf_hook mesh-color-change` (test/hooks/mesh_color_change.lua) hangs
+-- a chest, drives it red -> green -> blue through the same setColor path and asks the person at
+-- the keyboard what they saw. It writes, so it wants env.debugHooks["mesh-color-change"] = true.
+-- Until this file's own header said otherwise, the recipe was "recolour a throwaway spawn by
+-- hand"; the closing NOTE of the material section still describes that by-hand route, and it is
+-- the pal-shaped version of what the hook does to a chest.
+--
+-- STILL A PROBE, NOT A TEST: it prints what the component IS and stops, asserting nothing.
+-- Nothing here duplicates a declared hook (`pf_hooks` lists them all, with each one's gate);
+-- all three of this file's ids are closed and none of them is a hook.
 local probe   = require("palforge.test.probe")
 local support = require("palforge.test.support")
 
@@ -233,7 +262,10 @@ end
 
 local function mesh_skeletal_setter()
     probe.begin("mesh-skeletal-setter",
-        "which setter a live pal's mesh component carries, and whether .Mesh reaches it at all")
+        "CLOSED — this block is a REGRESSION read. Expected: the component reaches through the "
+        .. ".Mesh property, SetSkinnedAssetAndUpdate is declared, GetMesh() is not. Anything else "
+        .. "REOPENS the item. Which setter a live pal's mesh component carries, and whether .Mesh "
+        .. "reaches it at all.")
 
     local s = acquire()
     if not (s and s.comp) then
@@ -286,7 +318,11 @@ end
 
 local function mesh_skeletal_animclass()
     probe.begin("mesh-skeletal-animclass",
-        "SetAnimClass / SetAnimationMode on that same component, plus what EAnimationMode really is")
+        "CLOSED — this block is a REGRESSION read. Expected: SetAnimClass and SetAnimationMode "
+        .. "both declared and EAnimationMode::AnimationBlueprint = 0. The part still worth "
+        .. "reading is the ABP resolve, which is what the close identified as the real weak link. "
+        .. "SetAnimClass / SetAnimationMode on that same component, plus what EAnimationMode "
+        .. "really is.")
 
     local s = acquire()
     if not (s and s.comp) then
@@ -412,7 +448,12 @@ end
 
 local function mesh_material_params()
     probe.begin("mesh-material-params",
-        "the parameter names a REAL Palworld material carries, versus the six PalForge guesses")
+        "CLOSED on measured NAMES — this block is a REGRESSION read, and it is the one worth "
+        .. "re-running after a game patch, because these names are data inside a .uasset and no "
+        .. "header dump can restate them. Expected to include vector BaseColor and 'Subsurface "
+        .. "Color', texture 'Base Texture' / 'Normal Map', scalar 'Roughness Add' — Title Case "
+        .. "WITH SPACES, which no guess had. The parameter names a REAL Palworld material "
+        .. "carries, versus the guesses core/mesh/base/renderer.lua still holds.")
 
     local s = acquire()
     local harvest, seenMat = {}, {}

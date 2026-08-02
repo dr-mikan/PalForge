@@ -54,6 +54,7 @@
 local Renderer = require("palforge.core.mesh.base.renderer")
 local assets   = require("palforge.core.mesh.assets")
 local sig      = require("palforge.core.signature")
+local uo       = require("palforge.core.uobject")
 local log      = require("palforge.utils.log").scope("mesh")
 
 local SkeletalMesh = Renderer:extend("SkeletalMeshRenderer")
@@ -113,14 +114,14 @@ local function assetOn(mc)
     return nil
 end
 
--- Identity by full name: two UE4SS handles onto one UObject are not necessarily equal,
--- so a name is the only comparison that means anything. nil when it cannot be read.
-local function nameOf(o)
-    local n
-    pcall(function() n = o:GetFullName() end)
-    if type(n) == "string" and #n > 0 then return n end
-    return nil
-end
+-- IDENTITY BY FULL NAME: two UE4SS handles onto one UObject are not necessarily equal, so a
+-- name is the only comparison that means anything. That measurement is this file's, it was
+-- written down here first, and it is now the whole basis of core/uobject.lua — the private
+-- `nameOf` that used to sit on this line IS `uo.key`, and every call site below spells it
+-- that way instead. The reason for moving it rather than keeping a local copy is the defect
+-- the audit found four lines further down: this file used the fact correctly for the mesh
+-- read-back at :219 and ignored it for `originalOf`'s table key at :153, which is exactly
+-- what a single greppable helper makes hard to do again.
 
 -- Set the component's mesh, returning the name of the setter that executed, or nil.
 --
@@ -148,9 +149,31 @@ local function setMesh(mc, mesh)
 end
 
 -- What the pawn wore before we touched it, per actor, so detach can put it back:
---   { comp, asset, scale = { X,Y,Z }, loc = { X,Y,Z } }
--- __mode="k" weak table, so a pawn that goes away drops out on its own.
-local originalOf = setmetatable({}, { __mode = "k" })
+--   { actor, comp, asset, scale = { X,Y,Z }, loc = { X,Y,Z } }
+--
+-- KEYED ON uo.key (the actor's full name), NOT on the actor handle — contract C1. This one
+-- table produced the worst of the four consequences the audit lists, because it INVERTED the
+-- feature it exists for: the capture below runs only when there is no record yet, and keyed
+-- on a handle there was never a record on a second attach, so the "original" captured the
+-- second time was THE MESH PALFORGE HAD JUST INSTALLED. A later detach then restored our own
+-- mesh and reported true. That is worse than not restoring at all, and nothing logged it.
+--
+-- The record holds the pawn handle as well as the component, so a stale record can be
+-- recognised and dropped rather than replayed onto a pawn that no longer exists.
+local originalOf = {}
+
+-- The restore record for `actor`, re-validated, with the handle refreshed from the caller's
+-- fresher one. A record whose COMPONENT is gone is dropped: the pawn was torn down, and
+-- there is nothing left to put an asset back onto.
+local function recordFor(actor)
+    local k = uo.key(actor)
+    if not k then return nil, nil end
+    local rec = originalOf[k]
+    if rec == nil then return nil, k end
+    if not uo.live(rec.comp) then originalOf[k] = nil; return nil, k end
+    rec.actor = actor
+    return rec, k
+end
 
 -- The component this backend dressed `actor` with (base/renderer contract). This is what
 -- gives skeletal a working setColor: the base makes the MID on demand from it, so a pal
@@ -173,32 +196,56 @@ end
 -- Swap `actor`'s skeletal mesh (and anim class) to spec.model / spec.animClass, then
 -- apply the declared scale / offset / material. Returns true only if the mesh setter
 -- actually ran AND, where the asset can be read back, the read-back agrees with what we
--- set. Fail-soft: any missing piece is a logged no-op, not an error.
+-- set; otherwise false PLUS the English reason, which is the same string this logs — a pack
+-- author who gets a bare false back has to go and read UE4SS.log to find out which step
+-- refused. Fail-soft: any missing piece is a logged no-op, not an error.
 function SkeletalMesh:attach(actor, spec)
-    local ok, done = pcall(function()
-        if not (actor and actor.IsValid and actor:IsValid()) then return false end
+    local ok, done, why = pcall(function()
+        if not (actor and actor.IsValid and actor:IsValid()) then
+            return false, "skeletal: the actor is not a live UObject"
+        end
         local model = spec and (spec.model or spec.asset)
-        if type(model) ~= "string" or #model == 0 then return false end
+        if type(model) ~= "string" or #model == 0 then
+            return false, "skeletal: spec carries no model path"
+        end
         local mc = meshComponentOf(actor)
         if not mc then
-            log.err("skeletal: actor carries no readable .Mesh component (ACharacter::Mesh, "
-                .. "dumps/cxx/Engine.hpp:8156) - it is probably not an APalCharacter")
-            return false
+            local m = "skeletal: actor carries no readable .Mesh component (ACharacter::Mesh, "
+                .. "dumps/cxx/Engine.hpp:8156) - it is probably not an APalCharacter"
+            log.err(m)
+            return false, m
         end
         -- THE PRIMARY ROUTE: a /Game/... path, loaded and class-checked (see ASSET_CLASS).
         -- core/mesh/assets.lua carries the measured ones — assets.SK.PinkCat is the entry
         -- whose mesh AND animation blueprint were read off the same live pawn.
         local mesh, merr = assets.load(model, { class = ASSET_CLASS })
-        if not mesh then log.err("skeletal: " .. tostring(merr)); return false end
+        if not mesh then
+            local m = "skeletal: " .. tostring(merr)
+            log.err(m)
+            return false, m
+        end
 
-        -- capture EVERYTHING we are about to change, before changing it (see header)
-        if originalOf[actor] == nil then
-            originalOf[actor] = {
+        -- Capture EVERYTHING we are about to change, before changing it (see header), and
+        -- capture it ONCE: the record is what detach replays, so a second attach must not
+        -- overwrite it with the state the FIRST attach produced. That "once" is only real
+        -- now that the lookup is by name — see the note on originalOf.
+        local rec, key = recordFor(actor)
+        if not rec and key then
+            rec = {
+                actor = actor,
                 comp  = mc,
                 asset = assetOn(mc),
                 scale = vecOf(mc, "RelativeScale3D"),
                 loc   = vecOf(mc, "RelativeLocation"),
             }
+            originalOf[key] = rec
+        elseif not key then
+            -- No name, no record. The swap below still runs — refusing to change a mesh
+            -- because we could not file a restore note would be the wrong trade for a
+            -- decorative feature — but detach will have nothing to put back, and that is
+            -- worth one line rather than a surprise later.
+            log.warn("skeletal: this actor would not answer GetFullName, so no restore "
+                .. "record was kept - detach will not be able to put its own mesh back")
         end
 
         -- Pal's own guard: SetDisableChangeMesh(bool Disable) on UPalSkeletalMeshComponent
@@ -209,17 +256,19 @@ function SkeletalMesh:attach(actor, spec)
         pcall(function() mc:SetDisableChangeMesh(false) end)
         local via = setMesh(mc, mesh)
         if not via then
-            log.err("skeletal: SetSkinnedAssetAndUpdate did not fire on this component "
+            local m = "skeletal: SetSkinnedAssetAndUpdate did not fire on this component "
                 .. "(core.signature has logged whether it was refused or raised) - mesh "
-                .. "NOT set: " .. model)
-            return false
+                .. "NOT set: " .. model
+            log.err(m)
+            return false, m
         end
         -- confirm, where the component lets us: a setter that runs and is ignored is a
         -- false. A component with no readable asset is a "cannot tell", so it stands.
-        local back, want = nameOf(assetOn(mc)), nameOf(mesh)
+        local back, want = uo.key(assetOn(mc)), uo.key(mesh)
         if back and want and back ~= want then
-            log.err("skeletal: " .. via .. " ran but the component still wears " .. back)
-            return false
+            local m = "skeletal: " .. via .. " ran but the component still wears " .. back
+            log.err(m)
+            return false, m
         end
 
         -- Optional matching anim class: force AnimationBlueprint mode, then bind the ABP so
@@ -271,8 +320,8 @@ function SkeletalMesh:attach(actor, spec)
                     -- GetSkinnedAsset, and it is why the log line below can name a fact.
                     -- A component that will not answer is a "cannot tell", not a failure.
                     local bound; pcall(function() bound = mc:GetAnimClass() end)
-                    local boundName = assets.live(bound) and nameOf(bound) or nil
-                    local wantName  = nameOf(anim)
+                    local boundName = uo.live(bound) and uo.key(bound) or nil
+                    local wantName  = uo.key(anim)
                     if boundName and wantName and boundName ~= wantName then
                         log.warn("skeletal: SetAnimClass ran and the component still reports "
                             .. boundName)
@@ -289,7 +338,9 @@ function SkeletalMesh:attach(actor, spec)
         -- original, so nothing we cannot undo is written to a pawn we do not own. The
         -- offset is additive: a character's mesh component sits at a deliberate relative
         -- location (the capsule half-height), and overwriting it would sink the model.
-        local rec = originalOf[actor]
+        -- `rec` may be nil here — an actor with no readable name got no record, and the
+        -- rule "only write what we captured" then means writing neither.
+        rec = rec or {}
         if spec.scale and rec.scale then
             local s = tonumber(spec.scale) or 1.0
             pcall(function() mc:SetWorldScale3D({ X = s, Y = s, Z = s }) end)
@@ -315,10 +366,22 @@ function SkeletalMesh:attach(actor, spec)
             .. (st ~= "none" and (" material [" .. st .. "]") or ""))
         return true
     end)
-    return ok and done == true
+    if ok and done == true then return true end
+    -- Two different failures reach here and they are told apart: a step that refused and
+    -- said why (ok == true, `why` is that sentence) and the body raising (ok == false, and
+    -- Lua's error is in `done`). The second should be impossible — every engine touch above
+    -- is individually pcall'd — so if it ever appears it is a PalForge bug and the message
+    -- says so rather than being folded into "attach failed".
+    if ok then return false, why or "skeletal: attach refused without stating a reason" end
+    return false, "skeletal: attach raised, which it is not supposed to be able to: "
+        .. tostring(done)
 end
 
 -- The swap is idempotent (re-setting the same mesh is harmless), so once == attach.
+-- Unlike procedural and static there is nothing to stack: this backend dresses the pawn's
+-- OWN body component, so a second attach re-sets one asset rather than adding a component.
+-- The thing a second attach must not do is re-capture the restore record, and that is
+-- handled at the capture itself (see originalOf).
 function SkeletalMesh:attachOnce(actor, spec)
     return self:attach(actor, spec)
 end
@@ -329,17 +392,17 @@ end
 -- captured was actually re-set. Nothing captured (we never dressed this actor, or the
 -- component would not tell us what it wore) is an honest false.
 function SkeletalMesh:detach(actor)
-    if not actor then return false end
-    local rec = originalOf[actor]
-    if not rec then return false end
-    local mc = rec.comp
-    local live = false
-    pcall(function() live = mc:IsValid() == true end)
-    if not live then
-        originalOf[actor] = nil
-        self:forgetMaterial(actor)
-        return false
+    if not actor then return false, "skeletal: no actor" end
+    -- recordFor has already dropped a record whose component is gone (the pawn was torn
+    -- down under us), so "we never dressed this actor" and "there is nothing left to
+    -- restore onto" arrive here as one case. Both mean this call restored nothing.
+    local rec, key = recordFor(actor)
+    if not rec then
+        if key then self:forgetMaterial(actor) end
+        return false, "skeletal: no restore record for this actor, so there is nothing to "
+            .. "put back (either PalForge never swapped its mesh, or its component is gone)"
     end
+    local mc = rec.comp
 
     self:forgetMaterial(actor)  -- puts the captured material interfaces back on their slots
     -- SetRelativeScale3D(FVector) — Engine.hpp:20411 — restores what vecOf read off the
@@ -352,18 +415,20 @@ function SkeletalMesh:detach(actor)
         -- we changed the mesh but the component never told us what it had been, so the
         -- one thing that matters cannot be undone. Keep the record: a later detach with a
         -- readable component would still be able to try.
-        log.warn("skeletal: detach cannot restore the original mesh (the component would "
-            .. "not read its asset back at attach time)")
-        return false
+        local why = "skeletal: detach cannot restore the original mesh (the component would "
+            .. "not read its asset back at attach time)"
+        log.warn(why)
+        return false, why
     end
     pcall(function() mc:SetDisableChangeMesh(false) end)   -- Pal.hpp:28899, as at attach
     local via = setMesh(mc, rec.asset)
     if not via then
-        log.warn("skeletal: detach failed (SetSkinnedAssetAndUpdate did not fire - "
-            .. "core.signature has logged why), so the pawn keeps our mesh")
-        return false
+        local why = "skeletal: detach failed (SetSkinnedAssetAndUpdate did not fire - "
+            .. "core.signature has logged why), so the pawn keeps our mesh"
+        log.warn(why)
+        return false, why
     end
-    originalOf[actor] = nil
+    originalOf[key] = nil
     return true
 end
 

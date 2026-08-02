@@ -63,9 +63,22 @@
 -- is NOT a USkinnedAsset (they are siblings, dumps/cxx/Engine.hpp:20511 vs :21631) and a
 -- wrong argument type faults inside UE4SS's marshalling where pcall cannot see it.
 
+-- PACK-RELATIVE PATHS. `model` and `texture` accept a path RELATIVE to the .lua file that
+-- declared the mesh, resolved at define time against that file's own directory:
+--
+--   Mesh{ id = "example:marker", kind = "obj", model = "art/marker.obj" }
+--
+-- An absolute path still works and is untouched, and so is every /Game/... object path (it
+-- starts with "/", which utils.file.isAbsolute counts as absolute for exactly this reason).
+-- Before this, the only documented shape was the one in the docs' own examples —
+-- `C:/mods/example/marker.obj` — a path that is correct on exactly one machine, which made
+-- the one asset route a pack can genuinely ship on unshippable. See utils/file/init.lua for
+-- how the calling file is found, and for the case it deliberately refuses to guess at.
 local om     = require("palforge.core.object_manager")
 local mesh   = require("palforge.core.mesh")
 local schema = require("palforge.core.schema")
+local file   = require("palforge.utils.file")
+local log    = require("palforge.utils.log").scope("mesh")
 
 --=============================================================================
 -- SPEC — the shape of Mesh{ ... }, declared as data so it is enforced on every call and
@@ -86,18 +99,84 @@ local Spec = schema.define("Mesh.Spec", {
     { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
                    default = "skeletal", doc = "which core.mesh backend renders it" },
     { "model",     type = "string", required = true,
-                   doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an absolute .obj file path" },
+                   doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it" },
     { "animClass", type = "string",
                    doc = "a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only" },
     { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
     { "offset",    type = "table",  doc = "{ x, y, z } offset from the mesh's normal position, in cm" },
     { "texture",   type = "string",
-                   doc = "a /Game/... UTexture2D path (see Mesh.assets.T), or an absolute path to a png of your own" },
+                   doc = "a /Game/... UTexture2D path (see Mesh.assets.T), or a png of your own - absolute, or relative to the .lua file that declares it" },
     { "color",     type = "table",  doc = "tint { r, g, b, a } in 0..1" },
     { "material",  type = "string", doc = "base material asset path to instance from" },
     { "params",    type = "table",
                    doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"/Game/... or <abs png>\" } }" },
 }, { handle = "Mesh.Handle" })   -- a Mesh.Handle satisfies this shape too (see __spec below)
+
+--=============================================================================
+-- DEFINE-TIME CROSS-FIELD WORK: the kind/prefix check, and pack-relative paths.
+--
+-- Both of these need to see the WHOLE declaration, and schema's per-field `check` is handed
+-- only the field's own value — so they hang off Mesh.Spec's validate rather than off a
+-- field. Doing it here rather than in `define()` below is what makes them apply to an INLINE
+-- mesh too (`Pal{ mesh = { model = "..." } }`), because api/pal nests THIS spec object and
+-- core/schema calls `f.of:validate(...)` on it.
+--=============================================================================
+
+-- Prefix -> the kind that prefix really is, for the one mistake ordinary pack code makes.
+--
+-- Mesh.Spec defaults `kind` to "skeletal" (a named mesh is a creature body), so
+-- `Mesh{ model = "/Game/.../SM_ChestWood.SM_ChestWood" }` — a perfectly reasonable thing to
+-- type — declares a STATIC mesh as skeletal. core/mesh/skeletal.lua:68-78 names that as the
+-- mistake and it is a real one, not a nitpick: `USkeletalMesh : USkinnedAsset` and
+-- `UStaticMesh : UStreamableRenderAsset` are SIBLINGS (dumps/cxx/Engine.hpp:20511 vs :21631),
+-- so the asset would reach `SetSkinnedAssetAndUpdate(USkinnedAsset*, bool)` as a wrong
+-- argument TYPE — the shape that faults inside UE4SS's marshalling where pcall cannot see it.
+-- The class check in core/mesh/assets.lua catches it before it can, at ATTACH time, in a
+-- world. This catches it at LOAD time, with no world, which is where an author is looking.
+--
+-- It WARNS rather than raising, and that is deliberate: the prefix is a naming convention
+-- this build follows everywhere the tree has measured (every SM_/SK_ entry in
+-- core/mesh/assets.lua's catalog), but a convention is not a guarantee, and refusing to load
+-- a pack over a filename would be claiming more than the evidence supports.
+local KIND_BY_PREFIX = { SM_ = "static", SK_ = "skeletal" }
+
+local function warnKindPrefix(spec)
+    local kind  = spec.kind or "skeletal"
+    local model = spec.model
+    if type(model) ~= "string" or kind == "procedural" or kind == "obj" then return end
+    local last = model:match("([^/]+)$")
+    if not last then return end
+    for prefix, realKind in pairs(KIND_BY_PREFIX) do
+        if last:sub(1, #prefix) == prefix and realKind ~= kind then
+            log.warn(string.format(
+                "Mesh%s declares kind = %q but its model is named %q - the %s prefix is this "
+                .. "build's convention for a %s mesh. A UStaticMesh and a USkeletalMesh are "
+                .. "sibling classes, not relatives, so the wrong one will be refused by the "
+                .. "class check at attach time and nothing will render. Did you mean "
+                .. "kind = %q?",
+                spec.id and (" " .. spec.id) or " (inline)", kind, last, prefix, realKind,
+                realKind))
+            return
+        end
+    end
+end
+
+local specValidate = Spec.validate   -- the shared implementation, before this one shadows it
+
+-- Mesh.Spec's own validate: the declared shape first (unchanged), then the two cross-field
+-- passes above. Assigning here rawsets on the SPEC OBJECT, so it shadows core/schema's
+-- method for this one spec and every caller — direct, nested, or tooling — goes through it.
+function Spec:validate(t, context)
+    local out = specValidate(self, t, context)
+    -- Relative paths resolve against the CALLING pack's directory. utils.file walks out of
+    -- PalForge's own tree to find that caller, which is why this works at whatever stack
+    -- depth the declaration arrives at: `Mesh{ ... }` and `Pal{ mesh = { ... } }` are two
+    -- and four frames deep respectively, and a fixed count would be wrong for one of them.
+    if type(out.model) == "string" then out.model = file.resolvePackPath(out.model) end
+    if type(out.texture) == "string" then out.texture = file.resolvePackPath(out.texture) end
+    warnKindPrefix(out)
+    return out
+end
 
 --=============================================================================
 -- the registered mesh DEFINITION class
@@ -117,7 +196,7 @@ function Class:source() return self end
 
 ---The mesh domain. CALL it to define a mesh; the two named functions look existing ones up.
 ---@class palforge.mesh
----@overload fun(spec: Mesh.Spec): Mesh.Handle
+---@overload fun(spec: Mesh.Spec, opts: table?): Mesh.Handle
 local Mesh = {}
 
 local wrap  -- forward decl; the Mesh.Handle wrapper is defined in the BOTTOM section
@@ -125,23 +204,53 @@ local wrap  -- forward decl; the Mesh.Handle wrapper is defined in the BOTTOM se
 ---Define a NAMED mesh and register it. Returns a handle you can attach, or nest
 ---directly in another definition (`Pal{ mesh = Mesh{ ... } }`).
 ---`spec` is validated against Mesh.Spec: `model` is required, unknown fields are an error.
+---
+---`opts` (optional, contract C2) — omitting it behaves exactly as before:
+---  `opts.register == false`  build and return the Handle, register NOTHING. This is what a
+---                            catalog accessor needs: reading a definition out of a native
+---                            catalog used to REGISTER it as a side effect, which quietly
+---                            made a read into a write against the shared registry.
+---  `opts.pack == "id"`       register under that pack id (contract C3), so a collision can
+---                            name both owners instead of last-wins in silence.
 ---@param spec Mesh.Spec
+---@param opts table?
 ---@return Mesh.Handle
-local function define(spec)
+local function define(spec, opts)
+    opts = (type(opts) == "table") and opts or {}
     spec = Spec:validate(spec, "Mesh")
     if spec.id == nil then
         error("PalForge: Mesh: field \"id\" is required (an unnamed mesh cannot be "
             .. "looked up again - write it inline as mesh = { ... } instead)", 0)
     end
+    -- DEFINE-TIME id SHAPE CHECK (contract C4). An id with a colon must have both halves
+    -- match ^[%w_]+$ — the exact shape om.resolve requires — because an id that cannot
+    -- resolve registers fine and is then silently dead at every engine boundary. Raising
+    -- here, in the same style as the schema errors, is the whole point: "my-pack:Bench"
+    -- becomes a line the author reads at load instead of a mesh that never renders.
+    --
+    -- Called unguarded, like the other seven domains. It used to be behind `if om.validId`
+    -- because that function was landing in the same sweep as this file; it is in
+    -- core/object_manager.lua now, and a presence guard on a function this module's own
+    -- contract requires would turn "the check was removed" into "meshes stopped being
+    -- checked", silently — the exact failure mode this check exists to prevent.
+    local okId, why = om.validId(spec.id)
+    if not okId then
+        error(string.format("PalForge: Mesh: id %q is not a valid PalForge id: %s",
+            tostring(spec.id), tostring(why)), 0)
+    end
     -- `spec` is already a fresh, validated, defaults-filled copy that nothing else holds
     -- a reference to, so the definition can BE it rather than another transcription.
     local cls = setmetatable(spec, Class)
-    pcall(function() om.register("mesh", spec.id, cls) end)
+    if opts.register ~= false then
+        pcall(function()
+            om.register("mesh", spec.id, cls, opts.pack and { pack = opts.pack } or nil)
+        end)
+    end
     return wrap(cls)
 end
 
 -- Calling the module IS defining:  Mesh{ id = "example:body", model = "..." }
-setmetatable(Mesh, { __call = function(_, spec) return define(spec) end })
+setmetatable(Mesh, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get a previously-defined mesh by id. Errors when nothing is registered under it —
 ---unlike a pal or an item there is no sensible thin fallback, since a mesh with no
@@ -188,10 +297,19 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 ---Attach this mesh to a live actor, once (core.mesh guards against re-stacking).
 ---Fail-soft false when the actor is not valid.
+---
+---RETURNS `true`, or `false` PLUS AN ENGLISH REASON. The true path is unchanged, so a caller
+---writing `if m:attachTo(a) then` is unaffected; what is new is that the sentence the
+---backend already produced ("… is a StaticMesh, not a SkinnedAsset", "that path did not
+---resolve and its package is not in memory either") comes back to the caller instead of only
+---reaching UE4SS.log. An author who got a bare `false` had no way to tell a wrong path from
+---a wrong kind from an actor that is not a character.
 ---@param actor any   # the pawn to decorate (e.g. ctx.actor)
----@return boolean ok
+---@return boolean ok, string? reason
 function Handle:attachTo(actor)
-    if not (actor and actor.IsValid and actor:IsValid()) then return false end
+    if not (actor and actor.IsValid and actor:IsValid()) then
+        return false, "attachTo: the actor is not a live UObject"
+    end
     return mesh.attachOnce(actor, self._cls:source())
 end
 
@@ -202,9 +320,11 @@ end
 ---False — never a pretended tint — when nothing of ours is on the actor to write to.
 ---@param actor any
 ---@param color table  # { r, g, b, a } in 0..1
----@return boolean ok
+---@return boolean ok, string? reason
 function Handle:setColor(actor, color)
-    if not (actor and actor.IsValid and actor:IsValid()) then return false end
+    if not (actor and actor.IsValid and actor:IsValid()) then
+        return false, "setColor: the actor is not a live UObject"
+    end
     return mesh.setColor(actor, color, self._cls.kind)
 end
 
@@ -213,9 +333,11 @@ end
 ---scale, offset and materials it captured before the swap. False when nothing of
 ---PalForge's is on the actor, and when the undo did not execute.
 ---@param actor any
----@return boolean ok
+---@return boolean ok, string? reason
 function Handle:detach(actor)
-    if not (actor and actor.IsValid and actor:IsValid()) then return false end
+    if not (actor and actor.IsValid and actor:IsValid()) then
+        return false, "detach: the actor is not a live UObject"
+    end
     return mesh.detach(actor)
 end
 
@@ -250,6 +372,14 @@ function Handle:kind() return self._cls.kind or "skeletal" end
 ---read off a live actor's own component — and core/mesh/assets.lua cites which for each. The
 ---two builder functions return a path SHAPE and are documented as the weaker claim they are.
 Mesh.assets = mesh.assets
+
+---Resolve every asset every REGISTERED mesh declares, and report it as one block. Re-exported
+---from core.mesh so a pack has it beside the rest of the domain: `Mesh.validateDeclared()`.
+---This is the answer to "my boss is invisible" — it turns a wrong `model` from a silent
+---no-render into one MESHVALIDATE line naming the id, the field and what the path resolved
+---to. Read-only in the sense that matters (it loads packages; it writes to no actor,
+---component or save). Meant to run once at world.ready; safe to run again by hand.
+Mesh.validateDeclared = mesh.validateDeclared
 
 Mesh.Class = Class   -- the base class (used for subclassing / override detection)
 return Mesh

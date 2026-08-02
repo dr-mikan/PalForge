@@ -51,9 +51,27 @@
 -- information comes from Scripts/palforge/types.lua, which is GENERATED from those specs
 -- (tools/gen-types.lua), so the completion can never drift from what a call accepts.
 --
+-- WHO IS DEFINING (F-6). A definition call is a plain Lua call and carries no evidence of
+-- which mod made it, so the framework cannot attribute content — and cannot tell a pack
+-- overwriting its own id from a pack overwriting SOMEONE ELSE'S — unless the pack says so.
+-- `api.pack(packId)` is where it says so:
+--
+--   local api  = PalForge.pack("mypack")   -- or require("palforge.api").pack("mypack")
+--   local Item = api.Item
+--   Item{ id = "mypack:Potion" }           -- registered with pack = "mypack"
+--
+-- It returns the SAME nine members; the eight constructors are wrapped so the define runs
+-- inside object_manager.withPack — and so are the two extra define routes a domain adds as
+-- named functions (Audio.bgm / Audio.se), because those register too. Everything else
+-- (X.get, X.get_all, Player) passes through untouched. Using it is optional and nothing
+-- changes for a pack that does not — an unattributed definition registers with pack = nil,
+-- exactly as before.
+--
 -- The ---@type annotations make LuaLS auto-complete the bare globals.
 -- (UE4SS gives each Lua mod its own state, so these globals are mod-local — no clash
 --  with the game or other mods.)
+
+local om       = require("palforge.core.object_manager")
 
 local Pal      = require("palforge.api.pal")
 local Item     = require("palforge.api.item")
@@ -95,7 +113,7 @@ _G.Player = Player
 ---@field Mesh     palforge.mesh
 ---@field UI       palforge.ui
 ---@field Player   palforge.player
-return {
+local api = {
     Pal      = Pal,
     Item     = Item,
     Building = Building,
@@ -106,3 +124,112 @@ return {
     UI       = UI,
     Player   = Player,
 }
+
+-- ---- the scoped surface: api.pack(packId) ----
+
+-- The eight callable domains. Player is the ninth member and is deliberately NOT wrapped:
+-- it defines nothing, it acts on the local player, so there is no registration for a pack
+-- id to attribute.
+local CONSTRUCTORS = { "Pal", "Item", "Building", "Skill", "Effect", "Audio", "Mesh", "UI" }
+
+-- MEMBERS THAT ARE ALSO CONSTRUCTORS. A domain's define call is normally the module itself
+-- (`Item{ ... }`, reached through __call), but Audio has two more: Audio.bgm and Audio.se are
+-- plain functions on the module that pin `kind` and then run the SAME define — registration
+-- included. They are reached through __index, not __call, so a wrapper that only wraps __call
+-- hands the raw function back and `PalForge.pack("mypack").Audio.bgm{ ... }` registers with
+-- pack = nil: the one definition route the scoped surface did not cover, and the failure was
+-- silent (the sound worked, only the attribution was lost). Named here rather than inferred,
+-- because "every function member" would also wrap the accessors, and X.get / X.get_all are
+-- specified to pass through unchanged.
+local EXTRA_CONSTRUCTORS = {
+    Audio = { "bgm", "se" },
+}
+
+-- A pack id is the first half of every id the pack will register, so it has to satisfy the
+-- same rule `object_manager.resolve` applies to that half. Checked here, loudly, at the top
+-- of a pack file, rather than turning into an unresolvable id per definition later.
+local PACK_ID = "^[%w_]+$"
+
+-- One scoped table per pack id, so `api.pack("x").Item == api.pack("x").Item` and a pack
+-- that calls it in ten files builds eight wrappers, not eighty.
+local scopedApis = {}
+
+-- Wrap a domain module: calling it defines INSIDE withPack, so object_manager.register
+-- attributes the entry to this pack; every other member (get, get_all, and whatever a
+-- domain adds — Audio.bgm, UI's builders) reaches the real module through __index and is
+-- unchanged. Varargs are forwarded whole, so the optional second argument of C2
+-- (`X(spec, { register = false })`) keeps working through the scoped surface.
+-- `extras` names the module's other constructors (see EXTRA_CONSTRUCTORS). Each is wrapped
+-- ONCE, at scope-build time, so `p.Audio.bgm == p.Audio.bgm` the way `p.Audio == p.Audio`
+-- already held, and so a per-call closure is not minted inside __index.
+local function scopeModule(mod, packId, extras)
+    local wrapped = nil
+    for _, name in ipairs(extras or {}) do
+        local fn = mod[name]
+        if type(fn) == "function" then
+            wrapped = wrapped or {}
+            wrapped[name] = function(...) return om.withPack(packId, fn, ...) end
+        end
+    end
+    return setmetatable({}, {
+        __call  = function(_, ...) return om.withPack(packId, mod, ...) end,
+        __index = wrapped and function(_, k)
+            local w = wrapped[k]
+            if w ~= nil then return w end
+            return mod[k]
+        end or mod,
+        -- The wrapper is a view, not a copy: writing into it would silently diverge from
+        -- the module every other caller sees.
+        __newindex = function(_, k)
+            error(string.format("PalForge: api.pack(%q) is a read-only view of the api; "
+                .. "cannot assign %q on it", packId, tostring(k)), 0)
+        end,
+    })
+end
+
+-- The scoped api. `opts.depends` / `opts.recommends` (arrays of pack ids, or set-like
+-- tables) are recorded with object_manager so checkImport can answer "may this pack
+-- mention that id?" without every call site threading the set through.
+---@param packId string
+---@param opts? { depends?: string[], recommends?: string[] }
+---@return palforge.api
+function api.pack(packId, opts)
+    if type(packId) ~= "string" or not packId:match(PACK_ID) then
+        error(string.format("PalForge: api.pack(%s): a pack id must be letters, digits or _ "
+            .. "(it becomes the \"packid\" half of every \"packid:name\" this pack defines)",
+            type(packId) == "string" and string.format("%q", packId) or type(packId)), 0)
+    end
+    if opts ~= nil then
+        if type(opts) ~= "table" then
+            error(string.format("PalForge: api.pack(%q): the second argument must be a table "
+                .. "of { depends = { ... }, recommends = { ... } }", packId), 0)
+        end
+        -- Iterating the FIELD NAMES, not { opts.depends, opts.recommends }: a pack that
+        -- declares only `recommends` would leave a hole at index 1 of that array and ipairs
+        -- would stop before reaching it.
+        local deps = {}
+        for _, field in ipairs({ "depends", "recommends" }) do
+            local list = opts[field]
+            if type(list) == "table" then
+                for k, v in pairs(list) do
+                    if type(v) == "string" then deps[v] = true elseif v then deps[k] = true end
+                end
+            end
+        end
+        if next(deps) then om.declareDeps(packId, deps) end
+    end
+
+    local scoped = scopedApis[packId]
+    if not scoped then
+        -- `pack` rides along so the scoped table is a drop-in for the unscoped one: a pack
+        -- that wrote `local api = PalForge.pack("mypack")` can still reach api.pack.
+        scoped = { Player = Player, pack = api.pack }
+        for _, name in ipairs(CONSTRUCTORS) do
+            scoped[name] = scopeModule(api[name], packId, EXTRA_CONSTRUCTORS[name])
+        end
+        scopedApis[packId] = scoped
+    end
+    return scoped
+end
+
+return api

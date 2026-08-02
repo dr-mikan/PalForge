@@ -1,5 +1,6 @@
 -- PalForge utils.file: the persistence FACADE, backed by the default json_file
--- backend (JSON key/value files under <Mods>/PalForge/state/). Self-contained.
+-- backend (JSON key/value files under <Mods>/PalForge/state/), PLUS the pack-relative
+-- path resolver every pack that ships an asset needs. Self-contained.
 --
 -- PUBLIC API — the same method names the old core.util.store exposed, so callers
 -- (core.building) only change their `require` (...util.store -> ...util.file) and
@@ -8,6 +9,18 @@
 --   M.set(key, val)         -- stage in memory
 --   M.setAndFlush(key, val) -- stage + persist immediately
 --   M.flush(key)            -- persist (key, or everything staged)
+--   M.packDir(level)        -- the directory of the .lua file that called you
+--   M.resolvePackPath(rel)  -- that directory + a relative path
+--   M.isAbsolute(path)      -- the test the two above dispatch on
+--
+-- WHY THE PATH HALF IS HERE AND WHY IT WAS MISSING. The one asset route a pack can
+-- genuinely ship on today is a file off disk (a .obj for the procedural mesh backend, a
+-- .png for ImportFileAsTexture2D), and both of those went to io.open / the importer
+-- VERBATIM. So the documented example was `C:/mods/example/marker.obj` — a path that is
+-- correct on exactly one machine, which makes the one shippable route unshippable. The
+-- technique was already in the tree and used once: utils/file/json_file.lua resolves
+-- <Mods>/PalForge/state/ from `debug.getinfo(1, "S").source`, i.e. from where its OWN
+-- module file sits. The only new idea here is doing it for a frame that is NOT ours.
 local backend = require("palforge.utils.file.json_file")
 
 local M = {}
@@ -23,5 +36,118 @@ function M.setAndFlush(key, value) return backend:setAndFlush(key, value) end
 
 -- Persist a key (nil = everything staged).
 function M.flush(key) return backend:flush(key) end
+
+--=============================================================================
+-- pack-relative paths
+--=============================================================================
+
+local SEP = package.config:sub(1, 1)   -- "\\" on Windows, "/" elsewhere
+
+-- Compare paths with one separator and one case. Windows is the real target and its
+-- filesystem is case-insensitive, so a prefix test that is not would report "outside
+-- PalForge" for a path that differs only in the drive letter's case.
+local function canon(p)
+    return (tostring(p):gsub("\\", "/"):lower())
+end
+
+-- The directory of the source file at an ABSOLUTE debug stack level, with its trailing
+-- separator, or nil. `source` is "@<path>" for a file chunk and something else entirely for
+-- a string chunk (`load("...")`) or a C function — both of which return nil here rather
+-- than a guess, which is why every caller has a "no pack directory" branch.
+local function frameDir(level)
+    local info = debug.getinfo(level, "S")
+    if not info or type(info.source) ~= "string" or info.source:sub(1, 1) ~= "@" then
+        return nil
+    end
+    return info.source:match("@(.*[\\/])")
+end
+
+-- PalForge's OWN module root, resolved the way json_file.lua resolves the state dir: this
+-- file is .../PalForge/Scripts/palforge/utils/file/init.lua, so two dirs up is
+-- .../Scripts/palforge/. It is what the automatic frame walk skips over — a frame inside it
+-- is the framework calling itself, never the pack that asked.
+local SELF_ROOT = (function()
+    local here = frameDir(1)
+    if not here then return nil end
+    return canon(here .. ".." .. SEP .. ".." .. SEP):gsub("/[^/]+/%.%./", "/"):gsub("/[^/]+/%.%./", "/")
+end)()
+
+---Is `path` already absolute? Two shapes count, and both matter here:
+---a POSIX/UE root ("/Game/...", "/home/...") and a Windows drive ("C:/mods/..."). Everything
+---else is relative to something, and for a pack that something is its own directory.
+---
+---A UE OBJECT path is absolute by this test, which is deliberate: `/Game/A/SK_X.SK_X` must
+---never be joined to a pack directory. That is the same first-character rule
+---core.assetpath.isObjectPath uses, arrived at from the other side.
+---@param path any
+---@return boolean
+function M.isAbsolute(path)
+    if type(path) ~= "string" or #path == 0 then return false end
+    local c = path:sub(1, 1)
+    if c == "/" or c == "\\" then return true end
+    return path:match("^%a:[\\/]") ~= nil
+end
+
+---The directory of the .lua file that called you, with a trailing separator — the "pack
+---directory" a pack should resolve its own shipped files against.
+---
+---`level` is a stack level counted from the CALLER: 1 (the default meaning of an explicit
+---value) is the file that called packDir, 2 is that file's caller, and so on — the same
+---counting `debug.getinfo` uses, shifted so a caller never has to know that packDir has a
+---frame of its own.
+---
+---With NO argument the level is found by WALKING OUT of PalForge: the first frame whose
+---source is not under Scripts/palforge/ is the pack. That is what makes this usable from
+---inside the framework, where the number of frames between a pack's `Mesh{ ... }` and the
+---code doing the resolving depends on whether the mesh was declared directly or nested
+---inside a Pal{ } — a fixed number would be wrong for one of the two.
+---
+---Returns nil when there is no such frame: a definition made from a string chunk, from C,
+---or from PalForge's own test suite has no pack directory, and inventing one would turn a
+---relative path into a confidently wrong absolute path.
+---@param level integer?
+---@return string?
+function M.packDir(level)
+    if level ~= nil then
+        local n = tonumber(level)
+        if not n then return nil end
+        return frameDir(n + 1)          -- +1 skips packDir's own frame
+    end
+    -- 2 = our caller. 24 is a ceiling, not a measurement: nothing in this tree nests
+    -- definitions anywhere near that deep, and an unbounded walk on a recursive call site
+    -- would be the one way this could hang.
+    for l = 2, 24 do
+        local d = frameDir(l)
+        if d then
+            if not (SELF_ROOT and canon(d):sub(1, #SELF_ROOT) == SELF_ROOT) then return d end
+        end
+    end
+    return nil
+end
+
+---Resolve `rel` against the calling pack's directory. An ABSOLUTE path (including any
+---/Game/... object path) is returned unchanged, so this is safe to run over every path a
+---spec carries without first knowing which kind it is.
+---
+---   local file = require("palforge.utils.file")
+---   Mesh{ id = "example:marker", kind = "obj", model = file.resolvePackPath("marker.obj") }
+---
+---`level` has the same meaning as in packDir and is normally omitted. When no pack
+---directory can be found the path comes back UNCHANGED — a relative path that stays
+---relative fails at io.open with the string the author wrote, which is a readable failure;
+---a path joined to a guessed directory is not.
+---@param rel string
+---@param level integer?
+---@return string
+function M.resolvePackPath(rel, level)
+    if type(rel) ~= "string" or #rel == 0 then return rel end
+    if M.isAbsolute(rel) then return rel end
+    local dir = (level ~= nil) and frameDir((tonumber(level) or 1) + 1) or M.packDir()
+    if not dir then return rel end
+    -- "./x" and ".\x" are the same statement as "x"; anything further (".." segments) is
+    -- left to the OS, which resolves them correctly on both platforms.
+    local cleaned = rel:gsub("^%.[\\/]", "")
+    return dir .. cleaned
+end
 
 return M

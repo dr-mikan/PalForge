@@ -79,6 +79,21 @@
 -- the engine as a row the game could match instead of as a string it never will. A literal
 -- game id passes through untouched.
 --
+-- THE CHEAT MANAGER IS AN OBJECT THAT CAN EXECUTE A CALL PERFECTLY AND REACH NOTHING, and both
+-- halves of that pattern were measured on this build. Keep them straight, because for weeks they
+-- were one claim and half of it was wrong:
+--   * UPalCheatManager::GetItem — declared, called on the player's OWN cheat manager, on an
+--     inventory with room for an id that inventory could count, evidence "declared", and the count
+--     never moved. It returns void, so it could never say why. Five in-game runs went into
+--     establishing it; utils/items now routes give through the inventory's own write instead.
+--   * UPalCheatManager::SpawnMonster — the same shape of report ("ran, nothing spawned"), and it
+--     was NOT the same thing. The call works; the verdict around it was a stopwatch stopped at
+--     1.2 s on an arrival that takes about six. That is retired, and the log lines above are the
+--     disproof.
+-- What survives the correction is the DISCIPLINE, not the suspicion: a cheat that answers nothing
+-- can only ever be reported as ISSUED, and the world has to be asked separately, later, on a
+-- clock. Which is exactly what this file does.
+--
 -- WHAT A `true` MEANS: THE CALL WAS ISSUED. Nothing more, and deliberately not more. None of
 -- these calls answers anything (an unknown CharacterID neither throws nor reports), and the
 -- world cannot be asked in their place either, because the pal arrives SECONDS after the caller
@@ -102,6 +117,7 @@ local log            = require("palforge.utils.log").scope("spawn")
 local object_manager = require("palforge.core.object_manager")
 local poll           = require("palforge.core.poll")
 local sig            = require("palforge.core.signature")
+local uo             = require("palforge.core.uobject")
 
 local M = {}
 
@@ -136,15 +152,16 @@ local FINISH_PARAMS = { "ObjectProperty", "StructProperty" }
 function M.actor(worldCtx, cls, transform, owner)
     if not (worldCtx and cls and type(transform) == "table") then return nil end
     local gs = StaticFindObject("/Script/Engine.Default__GameplayStatics")
-    if not (gs and gs:IsValid()) then log.warn("spawn.actor: no GameplayStatics"); return nil end
+    if not uo.live(gs) then log.warn("spawn.actor: no GameplayStatics"); return nil end
     owner = owner or worldCtx
     -- collision 2 = AdjustIfPossibleButAlwaysSpawn.
     local ok, a, level = sig.call(gs, "BeginDeferredActorSpawnFromClass", BEGIN_PARAMS,
         worldCtx, cls, transform, 2, owner)
-    -- `.IsValid and :IsValid()`, never a bare :IsValid(): a refused call answers nil and a build
-    -- that returns something other than an actor would otherwise raise inside the guard itself.
-    local live = function(o) return o ~= nil and o.IsValid ~= nil and o:IsValid() end
-    if not (ok and live(a)) then
+    -- core.uobject.live, never a bare :IsValid(): a refused call answers nil and a build that
+    -- returns something other than an actor would otherwise raise inside the guard itself. That
+    -- guard used to be a local written out here; it is the framework's one liveness question now,
+    -- with the same body and one implementation (core/uobject.lua).
+    if not (ok and uo.live(a)) then
         log.err(string.format("spawn.actor: BeginDeferredActorSpawnFromClass did not produce an "
             .. "actor [evidence %s]", tostring(level)))
         return nil
@@ -153,7 +170,7 @@ function M.actor(worldCtx, cls, transform, owner)
     -- the world but un-initialized (its construction script and BeginPlay never ran). Report nil
     -- when it did not run instead of handing back a half-constructed actor as if it were live.
     local finished, _, flevel = sig.call(gs, "FinishSpawningActor", FINISH_PARAMS, a, transform)
-    if finished and live(a) then
+    if finished and uo.live(a) then
         log.info(string.format("spawn.actor: spawned and finished [evidence %s/%s]", level, flevel))
         return a
     end
@@ -172,27 +189,27 @@ end
 -- spawn. nil when there is no player controller yet (no world / not connected).
 local function cheatManager()
     local cm; pcall(function() cm = FindFirstOf("PalCheatManager") end)
-    if cm and cm:IsValid() then return cm end
+    if uo.live(cm) then return cm end
     local pc; pcall(function() pc = FindFirstOf("PalPlayerController") end)
-    if not (pc and pc.IsValid and pc:IsValid()) then return nil end
+    if not uo.live(pc) then return nil end
     cm = nil; pcall(function() cm = pc.CheatManager end)
-    if cm and cm:IsValid() then return cm end
+    if uo.live(cm) then return cm end
     -- Nothing to find: build it. CheatClass is the controller's own (PalCheatManager on this
     -- build); the two StaticFindObject fallbacks mirror the enabler for a controller whose
     -- CheatClass is null.
     cm = nil
     pcall(function()
         local cls = pc.CheatClass
-        if not (cls and cls:IsValid()) then cls = StaticFindObject("/Script/Pal.PalCheatManager") end
-        if not (cls and cls:IsValid()) then cls = StaticFindObject("/Script/Engine.CheatManager") end
-        if not (cls and cls:IsValid()) then return end
+        if not uo.live(cls) then cls = StaticFindObject("/Script/Pal.PalCheatManager") end
+        if not uo.live(cls) then cls = StaticFindObject("/Script/Engine.CheatManager") end
+        if not uo.live(cls) then return end
         local created = StaticConstructObject(cls, pc)
-        if created and created:IsValid() then
+        if uo.live(created) then
             pc.CheatManager = created
             cm = created
         end
     end)
-    if cm and cm:IsValid() then
+    if uo.live(cm) then
         log.info("cheatManager: none existed, constructed one on the player controller")
         return cm
     end
@@ -222,17 +239,28 @@ local function palActors()
     return {}
 end
 
+-- THE IDENTITY EVERY SNAPSHOT HERE IS KEYED ON, and it is core.uobject.key — the framework's one
+-- table key for a UObject (GetFullName), never the handle itself. That rule comes from a measured
+-- fact: UE4SS mints a fresh userdata wrapper per lookup, so the same pal read twice is two
+-- different Lua values and `seen[actor]` can never match.
+--
+-- IT USED TO PREFER GetAddress AND FALL BACK TO GetFullName. The address is a fine identity for
+-- one instant and a bad key across seconds, which is exactly the span these snapshots cover: this
+-- file compares a world taken BEFORE a spawn against a world up to twelve seconds later, and a
+-- freed address can be handed to a different UObject in that window (the ABA case core/uobject's
+-- header names). A pal arriving at a recycled address would then be "already in the snapshot" and
+-- the arrival watch would report a miss for a spawn that worked — the precise failure this file
+-- spent weeks writing down as a property of the build. The full name carries the instance suffix
+-- (BP_ChickenPal_C_2), so it distinguishes two pals of one species, and it is what every other
+-- per-object record in the tree is keyed on.
 local function actorId(a)
-    local ok, id = pcall(function() return a:GetAddress() end)
-    if ok and id then return id end
-    ok, id = pcall(function() return a:GetFullName() end)
-    return ok and id or nil
+    return uo.key(a)
 end
 
 local function snapshotPals()
     local s = {}
     for _, a in ipairs(palActors()) do
-        if a and a.IsValid and a:IsValid() then
+        if uo.live(a) then
             local id = actorId(a); if id then s[id] = true end
         end
     end
@@ -255,7 +283,7 @@ end
 local function newPalCount(before)
     local n = 0
     for _, a in ipairs(palActors()) do
-        if a and a.IsValid and a:IsValid() then
+        if uo.live(a) then
             local id = actorId(a)
             if id and not before[id] then n = n + 1 end
         end
@@ -510,7 +538,7 @@ end
 local function placeNewPal(job)
     local best, bd
     for _, a in ipairs(palActors()) do
-        if a and a.IsValid and a:IsValid() then
+        if uo.live(a) then
             local id = actorId(a)
             if id and not job.before[id] then
                 local l = actorLoc(a)
@@ -593,7 +621,7 @@ function M.palAt(charId, level, x, y, z)
     -- nearest new actor from (the pal is expected to appear beside the player).
     local px, py, pz = 0, 0, 0
     local pl; pcall(function() pl = FindFirstOf("PalPlayerCharacter") end)
-    if pl and pl.IsValid and pl:IsValid() then
+    if uo.live(pl) then
         local l = actorLoc(pl)
         if l then px, py, pz = l.X, l.Y, l.Z end
     end
@@ -611,7 +639,11 @@ function M.palAt(charId, level, x, y, z)
         -- Same heartbeat, same reason: no timer of its own. placeNewPal answers whether the
         -- chain is FINISHED, which is exactly what a poller returns.
         poll.every("spawn.palAt placement", function() return placeNewPal(job) == true end)
-    end    return true
+    end
+    -- ISSUED, not spawned: the pal is seconds away and the placement chain above is the only
+    -- thing that will ever see it. Every log line and every doc in this file says "issued" for
+    -- exactly this reason.
+    return true
 end
 
 -- ---- the player-summon route ------------------------------------------------------------
@@ -623,12 +655,12 @@ end
 -- meaningful, which is why the controller is asked first — it names the player who is here.
 local function localPlayerState()
     local pc; pcall(function() pc = FindFirstOf("PalPlayerController") end)
-    if pc and pc.IsValid and pc:IsValid() then
+    if uo.live(pc) then
         local ok, ps = sig.call(pc, "GetPalPlayerState", {})
-        if ok and ps and ps.IsValid and ps:IsValid() then return ps end
+        if ok and uo.live(ps) then return ps end
     end
     local ps; pcall(function() ps = FindFirstOf("PalPlayerState") end)
-    if ps and ps.IsValid and ps:IsValid() then return ps end
+    if uo.live(ps) then return ps end
     return nil
 end
 

@@ -14,7 +14,15 @@ local widget = require("palforge.native.ui._widget")
 
 local alive = widget.alive
 
-return UI{
+-- ⚠️ REGISTERED UNDER THE PACK ID "palforge", AND THAT IS NOT DECORATION. There is ONE registry
+-- bucket per object type, and a pack's `UI{ id = ... }` writes into the same ("ui", id) map this
+-- line does, under the same last-wins rule — so a pack that happens to define "palforge:Button"
+-- REPLACES this element and every :new{} taken afterwards is the pack's. Last-wins stays; what
+-- naming the owner buys is that the collision becomes ATTRIBUTABLE: object_manager warns naming
+-- the type, the id, the previous owner ("palforge") and the new one, instead of the framework's
+-- own element disappearing in silence. Every native/* and native/ui/* definition declares the
+-- same pack for the same reason.
+return UI({
     id          = "palforge:Button",
     name        = "Button",
 
@@ -81,4 +89,4 @@ return UI{
         if not alive(btn) then return false end
         return pcall(function() btn:RemoveFromParent() end)
     end,
-}
+}, { pack = "palforge" })

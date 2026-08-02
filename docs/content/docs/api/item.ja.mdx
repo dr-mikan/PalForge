@@ -9,6 +9,7 @@ description: プレイヤーの所持品にアイテムを入れたり減らし�
 - 自分のコードからプレイヤーの所持品にアイテムを追加し、また取り出す
 - プレイヤーが何かを拾った瞬間に処理を走らせる
 - プレイヤーが何かを食べたり使ったりした瞬間に処理を走らせる
+- 設備がそのアイテムを作り終えたとき、プレイヤーが捨てたときに処理を走らせる
 - ゲームにあるアイテムに、自分の名前・説明・レシピの数値を付ける
 
 アイテムは所持品に入るもの全般です。素材、食べ物、装備、弾薬などが該当します。`Item{ ... }` と書くとアイテムを 1 つ記述できます。返ってくるのは**ハンドル**、つまり `:give` などそのアイテムの操作を持った小さなオブジェクトです。
@@ -48,12 +49,13 @@ local items = require("palforge.native.items")
 
 items.CATALOG            -- every DT_ItemDataTable_Common row id, as a list of strings
 items.get("Arrow_Fire")  -- a lazily built, cached handle for any catalog id; nil if unknown
+items.publish("Arrow_Fire")  -- 任意: そのハンドルを登録して、イベントが届くようにする
 items.Wood               -- curated handles, defined at load; Wood and Berries carry hooks
 items.Berries
 items.Arrow
 ```
 
-最初から記述されているアイテムは `Wood`、`Berries`、`Arrow` の 3 つです。それ以外のカタログ ID は `items.get(id)` で初めて聞かれたときにハンドルが作られ、次からは同じものが返ります。
+最初から記述されているアイテムは `Wood`、`Berries`、`Arrow` の 3 つです。この 3 つはハンドラを宣言しているので読み込み時に登録されます。登録されていない定義にはイベントが届かないからです。それ以外のカタログ ID は `items.get(id)` で初めて聞かれたときにハンドルが作られますが、そのハンドルは何も登録しません。カタログの読み取りは読み取りだからです。レジストリに載せるのは任意操作の `items.publish(id)` です。
 
 ## フィールド
 
@@ -62,7 +64,7 @@ items.Arrow
 <TypeTable
   type={{
     id: {
-      description: 'アイテム ID。"Wood" のようなゲームの ItemId か、パックのコンテンツなら "pack:name"。空文字列は不可です。',
+      description: 'アイテム ID。"Wood" のようなゲームの ItemId か、パックのコンテンツなら "pack:name"。名前空間付き ID の前後どちらの半分も英数字と _ のみで、解決できない ID は定義時に拒否されます。',
       type: 'string',
       required: true,
     },
@@ -86,8 +88,8 @@ items.Arrow
       default: '1',
     },
     icon: {
-      description: 'アイコン DataTable の検索が外れたときに使う予備。任意の値で、そのまま返されます。',
-      type: 'any',
+      description: 'アイコン DataTable にこの id の行が無いときに使う /Game/... のテクスチャパス。文字列なのは、実際の検索が返せる値がそれしかないからです。',
+      type: 'string',
     },
     recipe: {
       description: 'このアイテムを生産するレシピ。形は Item.Spec.Recipe です。',
@@ -176,16 +178,37 @@ print(r.materials.Wood)       -- 2
 ```
 
 <Callout type="warn">
-レシピはメモであって、クラフトそのものではありません。PalForge はこれをゲームのクラフトシステムに登録しませんし、読み戻すのは `Handle:recipeOf()` だけです。レシピを書いてもゲーム内でクラフトできるようにはなりません。自分のコードが数値を置いておく場所になります。
+レシピはメモであって、クラフトそのものではありません。PalForge はこれをゲームのクラフトシステムに登録しませんし、読み戻すのは `Handle:recipeOf()` だけです。レシピを書いてもゲーム内でクラフトできるようにはなりません。自分のコードが数値を置いておく場所になります。ゲームが実際に回すレシピは `DT_ItemRecipeDataTable` の行で、Lua はその行を書けません。実物は PalSchema の JSON で宣言し、こちらは同じ内容を自分のコードとツールに伝えるために使ってください。
 </Callout>
+
+`recipeOf()` が読み戻すのは宣言した内容だけです。**ゲーム側のテーブルは読みません**。ですからバニラの id は、実物のレシピがあっても `nil` を返します。`DT_ItemRecipeDataTable_Common` は `/Game/Pal/DataTable/Item/` に 1414 行で読み込まれており、キーはアイテム id、列は `Product_Count`、`Material1_Id` から `Material5_Id`、`WorkAmount` ほか 9 つです。分かっていないのは、`FindRow` が返す構造体からスカラーや FName の列を直接引けるかどうかです。ここで読めた行の値は `TSoftObjectPtr` だけで、それは Lua から開けず、アイコン検索が列を文字列としてまとめて読む回り道をしているのはそのためです。列ごとに読む方式なら今日でも動き、1 テーブルあたり 13 回の呼び出しを 1 度だけ行ってキャッシュすれば済みます。この問いを計測するのは `pf_hook item-datatable-row-read` で、`env.debug` と読み込み済みのワールドが必要です。
+
+### 2 つめの引数
+
+`Item{ ... }` は spec のあとに省略可能なオプションテーブルを取ります。省略したときの動きはこれまでとまったく同じです。
+
+```lua
+-- ハンドルだけ作って登録はしない: レジストリに書いてはいけない「読み取り」用
+local probe = Item({ id = "Wood" }, { register = false })
+
+-- パックに帰属させて登録する。衝突に「誰が」を与えるのがこれ
+Item({ id = "example:Potion" }, { pack = "mypack" })
+
+-- 呼び出しごとに渡さずに同じ帰属を付ける書き方
+local api = PalForge.pack("mypack")
+api.Item{ id = "example:Potion" }
+```
+
+受け付けるのは `register` と `pack` だけで、綴りを間違えたオプションは黙って無視されずエラーになります。2 つのパックが同じ id を登録したときは両方のパック名つきでログに出ますし、解決後の行が同じになる 2 つの id も同様です。
 
 ### 検証
 
-テーブルに問題があれば必ずエラーになるので、呼び出しが中途半端に成功することはありません。メッセージは `PalForge: ` で始まり、止まったフィールド名を含みます。
+テーブルに問題があれば必ずエラーになるので、呼び出しが中途半端に成功することはありません。メッセージは `PalForge: ` で始まり、止まったフィールド名を含みます。id そのものも対象です。名前空間付き id の前後どちらの半分も英数字と `_` しか使えません。`"pack:Potion"` に対して PalSchema が書く行は `pack_Potion` だからです。解決できない id は、登録されて何にも一致しないまま残るのではなく、ここで拒否されます。
 
 ```text
 PalForge: Item: unknown field "maxStackSize" (did you mean "maxStack"?). Valid fields: id, name, description, category, maxStack, icon, recipe, events, data
 PalForge: Item: field "id" is required (item id: a game ItemId ("Wood") or "pack:name")
+PalForge: Item: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Potion' (letters/digits/_ only)
 PalForge: Item: field "category" must be one of { "material", "consumable", "equipment", "ammo", "ingredient", "other" }, got "food"
 PalForge: Item: field "maxStack" expects number, got string
 PalForge: Item: field "recipe" (Item.Spec.Recipe): field "materials" is required ({ <itemId> = <count> } consumed by one craft)
@@ -217,40 +240,44 @@ schema.get("Item.Spec").fields             -- the same as a table, for tooling
       type: 'fun(self: Item.Handle, ctx: table)',
     },
     onCraft: {
-      description: '宣言はできますが、item.craft を emit するものがまだ無いため動きません。',
+      description: 'LIVE。クラフト設備がこのアイテムを作り終えました。ctx.recipeId と ctx.via が入り、ctx.count は nil です。',
       type: 'fun(self: Item.Handle, ctx: table)',
     },
     onDiscard: {
-      description: '宣言はできますが、item.discard を emit するものがまだ無いため動きません。',
+      description: 'LIVE。アイテムが投棄または破棄されました。ctx.count と、"drop" か "dispose" の ctx.reason が入ります。',
       type: 'fun(self: Item.Handle, ctx: table)',
     },
   }}
 />
 
-ハンドラにはゲーム自身の呼び出しが 3 つ流れ込みます。2 つは入手を、1 つは使用を知らせます。
+この 4 つのハンドラにはゲーム自身の呼び出しが 7 つ流れ込み、4 つのチャンネルすべてが実際のセーブでイベントを運んだことが確認されています。
 
 ```mermaid
 flowchart LR
   A["AddItemGetLog_ToClient"] --> B["item.obtain"]
   G["AddItem_ServerInternal"] --> B
   C["UseItemToCharacter_ServerInternal"] --> D["item.use"]
+  H["OnFinishWorkInServer x2"] --> I["item.craft"]
+  J["RequestDrop / RequestDispose"] --> K["item.discard"]
   B --> E["resolve by ctx.itemId"]
   D --> E
+  I --> E
+  K --> E
   E --> F[your handler]
 ```
 
-PalForge はワールド上のアイテム 1 個 1 個を追跡しません。イベントからゲーム内アイテム ID を取り出し、その ID で控えてある定義を探します。そこに何も無ければ、記述済みのアイテムを順に見て、解決後の名前が一致するものを使います。自分で記述していないバニラアイテムはどれにも一致せず、ハンドラは動きません。
+PalForge はワールド上のアイテム 1 個 1 個を追跡しません。イベントからゲーム内アイテム ID を取り出し、その ID で控えてある定義を探し、次に「解決するとその ID になる」名前空間付き ID の定義を探します。自分で記述していないバニラアイテムはどれにも一致せず、ハンドラは動きません。
 
 ### 名前空間付きの ID
 
-`"example:Potion"` と記述したアイテムはその綴りのまま控えられますが、ゲームが知らせてくるのはデータ行名 `example_Potion` です。このずれは PalForge が埋めます。厳密な検索が外れたら、登録済みの ID を 1 つずつ解決して一致するものを返します。パックのコンテンツもちゃんとイベントを受け取れます。
+`"example:Potion"` と記述したアイテムはその綴りのまま控えられますが、ゲームが知らせてくるのはデータ行名 `example_Potion` です。このずれは PalForge が埋めます。すべての登録は解決後の形でも索引されているので、外れたときの追加コストはテーブル参照 1 回だけで、パックのコンテンツもちゃんとイベントを受け取れます。
 
 ```mermaid
 flowchart LR
   A["ctx.itemId is example_Potion"] --> B[exact lookup]
   B -->|hit| C[call the hook]
-  B -->|miss| D[resolve every registered id]
-  D --> E["example:Potion resolves to example_Potion"]
+  B -->|miss| D["解決済み id の索引"]
+  D --> E["example:Potion は example_Potion で索引されている"]
   E --> C
 ```
 
@@ -276,7 +303,7 @@ Item{
 Item.get("example:Potion"):give(1)   -- resolves to example_Potion for the engine
 ```
 
-この検索は登録済みアイテムのスナップショットを順不同でたどり、最初に一致したものを返します。したがって解決後の行名が同じになる ID が 2 つあると、どちらが選ばれるかは決まりません。パックの ID は一意に保ってください。Pal もブループリントのクラス名で同じように照合されます。
+解決後の行名が同じになる ID が 2 つあると、いまでも衝突します。索引は解決後の形 1 つにつき 1 件しか持たず、後から登録したほうがその枠を取ります。ただしそれはディスパッチ時の運任せではなく、定義時に両方の ID を挙げた警告になりました。パックの ID は一意に保ってください。Pal もブループリントのクラス名で同じように照合されます。
 
 ### onObtain
 
@@ -318,7 +345,7 @@ Item{
 | `ctx.processor` | any | 使用処理を実行した `PalItemUseProcessor`。 |
 
 <Callout type="warn">
-`ctx.actor` はアイテムを「使った」キャラクターです。食べ物やポーションのように自分に使うものなら、それが「使われた対象」と同じになります。パルに与えた場合、そのパルは `ctx.targetId` に入りますが、これは生のインスタンス ID で、アクターに変換する処理はありません。専用サーバーでは `ctx.actor` は最初に見つかったプレイヤーポーンなので、実際に行動した本人とは限りません。「作用させられるプレイヤーポーン」として扱い、行動者の証拠としては扱わないでください。
+`ctx.actor` はアイテムを「使った」キャラクターです。食べ物やポーションのように自分に使うものなら、それが「使われた対象」と同じになります。パルに与えた場合、そのパルは `ctx.targetId` に入りますが、これは生のインスタンス ID で、アクターに変換する処理はありません。この値はローカルプレイヤーのポーンを探して得たものなので、最初に見つかったポーンであって「誰が行動したか」の証拠ではありません。「作用させられるプレイヤーポーン」として扱ってください。PalForge が対象にしているのはシングルプレイヤーの Palworld で、レプリケーション層はありません。プレイヤーが 2 人以上いる場所では、これは答えられない問いです。
 </Callout>
 
 ```lua
@@ -338,10 +365,34 @@ Item{
 
 アイテム ID を取り出すとき、PalForge はまず第 1 引数の `ID` フィールドを読みます。ゲーム内で観測された唯一の形がこれです。続いて `Id`、`StaticId`、そして後続 3 つの引数へ順に試すので、シグネチャがずれても解決できます。ID が見つからなければ何も知らせず、ハンドラも動きません。
 
-### onCraft と onDiscard
+### onCraft
+
+`onCraft` は設備がそのアイテムを作り終えたときに動きます。アイテム ID を持つワークモデルが 2 つあり、どちらも `OnFinishWorkInServer` でフックしています。レシピ台や炉である `PalMapObjectConvertItemModel` と、産出物が固定の生産機である `PalMapObjectProductItemModel` です。実際の設備でクラフトしたときに、このチャンネルが最初のイベントを運んだことが確認されています。
+
+| ctx のキー | 型 | 備考 |
+| --- | --- | --- |
+| `ctx.itemId` | string | 設備が生産したアイテム。 |
+| `ctx.recipeId` | string | 同じ値を、convert 側の呼び名で入れたもの。Palworld のレシピテーブルは生産物のアイテム ID をキーにしているので、バニラのレシピではこの 2 つは本当に同じ文字列です。 |
+| `ctx.count` | nil | 設計上つねに `nil` です。 |
+| `ctx.via` | string | `"convert"` か `"product"`。 |
+| `ctx.model`、`ctx.work` | any | ワークモデルとワークオブジェクト。もっと踏み込みたいハンドラ向けです。 |
+
+<Callout type="info">
+`ctx.count` は `nil` で、これからも `nil` のままです。1 回あたりの生産数はレシピ行の `Product_Count` にあり、フックの中は DataTable を読む場所ではありません。誰も計測していない `1` を入れるより、正直な `nil` のほうがましです。個数が必要なら前後で `:count()` を読んでください。
+</Callout>
+
+### onDiscard
+
+`onDiscard` はプレイヤーがそのアイテムを捨てたときに動きます。ソースはどちらも `UPalNetworkItemComponent` の RPC で、地面に投棄する `RequestDrop_ToServer` と、所持品画面からスタックを破棄する `RequestDispose_ToServer` です。投棄は個数を負にした `AddItem_ServerInternal` を**通りません**。そのフックは仕掛けたうえで 2 セッションのあいだ一度も発火しませんでした。除去は 1 つ隣のネットワークコンポーネントにあるからです。
+
+| ctx のキー | 型 | 備考 |
+| --- | --- | --- |
+| `ctx.itemId` | string | リクエストが指しているスロットに今入っているアイテム ID。 |
+| `ctx.count` | number \| nil | 所持品から出ていく数。スロットのスタック全体ではなく、その項目自身の数です。 |
+| `ctx.reason` | string | `"drop"` か `"dispose"`。 |
 
 <Callout type="warn">
-`onCraft` と `onDiscard` は動きません。`item.craft` と `item.discard` のチャンネルはあり、ハンドラの配線も済んでいますが、ゲーム側からどちらの出来事も知らされません。クラフトの完了は入手ログではなくワークプロセスを通り、破棄の呼び出しはまだ見つかっていないからです。宣言してもエラーにはならないので残しておいても構いませんが、今日必要な処理は `onObtain` か `onUse`、あるいは自分のコードに置いてください。
+この RPC が運ぶのはアイテム ID ではなく**スロット ID** なので、サーバーがスロットを空にする前に ID を読み取る必要があります。そのためにはコンテナを見つけなければなりません。プレイヤー自身の所持品ヘルパーだけでは足りず、最初の実測では「プレイヤーの 6 つのコンテナのどれとも一致しなかった」と報告されました。そこでコンテナの集合はワールド全体の走査から取り、GUID の完全一致で照合します。スロットを解決できなかったときは、推測した ID でイベントを出す代わりに何も出さず、どの段階で失敗したかを理由ごとに 1 回だけログに残します。その形の投棄だけが無音で、チャンネル自体は動いています。
 </Callout>
 
 ### ハンドラについて知っておくこと
@@ -385,8 +436,8 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 | `:count()` | number \| nil | ローカルプレイヤーが今このアイテムをいくつ持っているか。`nil` は「読めなかった」であって「0 個」ではありません。 |
 | `:give(count)` | boolean | ローカルプレイヤーの所持品に `count` 個（既定 1）追加します。所持数が増えたのを観測できたときだけ `true` です。 |
 | `:take(count)` | boolean | ローカルプレイヤーの所持品から `count` 個（既定 1）を消費します。`count` は絶対値として扱われます。所持数が減ったのを観測できたときだけ `true` です。 |
-| `:recipeOf()` | table \| nil | 宣言されたレシピ。無ければ `nil`。 |
-| `:iconOf()` | any \| nil | アイコン DataTable のテクスチャ参照。外れたら宣言済みの `icon`。 |
+| `:recipeOf()` | table \| nil | 自分が宣言したレシピ。無ければ `nil`。ゲーム側のレシピテーブルは読みません。 |
+| `:iconOf()` | string \| nil | アイコン DataTable から得た `/Game/...` のパス。外れたら宣言済みの `icon`。 |
 | `:name()` | string | 宣言された名前。無ければ id。 |
 | `:description()` | string \| nil | 宣言された説明。 |
 | `:category()` | string | 宣言されたカテゴリ。無ければ `"material"`。 |
@@ -420,10 +471,12 @@ end
 戻り値は呼び出しの成否ではなく実測の結果です。`false` は「届いたものが観測できなかった」という意味で、原因はいくつかあります。所持品がその場で拒否した、空きが無かった、あとから所持数を読めなかった、などです。所持品自身が理由を答え、ログがそれを運ぶので、真偽値では区別できないケースもログで切り分けられます。
 
 ```text
-[PalForge.items][info] give Wood x10: 135 -> 145 [evidence declared]
+[PalForge.items][info] give Wood x3: 140 -> 143 [evidence declared]
 [PalForge.items][warn] give Wood x10: AddItem_ServerInternal answered Success but the count did not rise (135 -> 135). Weight is now 300.0 of 300.0
 [PalForge.items][err] give Wood x10 failed: the player's inventory could not be reached
 ```
+
+このうち 1 行目は実際のセーブから取った本物の行です。`give Wood x3: 140 -> 143` の隣で、ゲーム自身の入手イベントも発火しています。
 
 行末の `[evidence ...]` は、呼び出す前に PalForge が実行中のゲームと突き合わせて確認した方法の記録です。これに合わせて何かをする必要はありません。予想外の `false` を読み解くためのものです。
 
@@ -438,7 +491,7 @@ end
 `:take` は同じ実測を逆向きに行います。前後で所持数を読み、`true` は所持数が**減ったのを観測できた**という意味です。アイテムは消費されます。プレイヤーの足元に落ちて拾い直されることはないので、パックが本当の対価を取れます。
 
 <Callout type="warn" title="take にはプレイヤーが何かを装備している必要があります">
-消費はプレイヤーが持っている武器を経由して行われます。何も装備していないプレイヤーには経由するものが無いので、`:take` は `false` を返し、その旨をログに書きます。設計時に考慮すべきはこの一点です。建築物が対価を取る場合、素手で立っているプレイヤーは支払えません。
+経路はゲーム自身の消費処理 `APalWeaponBase:RequestConsumeItem` で、プレイヤーのロードアウトコンポーネントから辿ります。そしてこれは**武器アクターのメソッド**なので、何も持っていないプレイヤーには経路そのものが無く、`:take` はその旨を述べて `false` を返します。何かを装備していれば十分です。武器はスポーンしていればよく、手に持っている必要はありません。また、自分の弾ではなく渡された ID を消費します。設計時に考慮すべきはこの一点です。建築物が対価を取る場合、素手で立っているプレイヤーは支払えません。なお所持品側には除去の手段が一切ありません。クラス階層のどこにも減算する宣言は無く、追加処理に負の個数を渡す案も、受け付けられたうえで何も起きないと計測されました。
 </Callout>
 
 ```mermaid
@@ -458,13 +511,15 @@ else
 end
 ```
 
-プレイヤーの所持数より多く要求してもエラーにはなりません。要求は所持している分に丸められます。1 つも持っていないときは呼び出し自体を行いません。どちらもログに残るので、真偽値では区別できないケースもログで切り分けられます。
+プレイヤーの所持数より多く要求してもエラーにはなりません。要求は所持している分に丸められます。1 つも持っていないときは呼び出し自体を行わず `false` を返します。どちらもログに残るので、真偽値では区別できないケースもログで切り分けられます。
 
 ```text
 [PalForge.items][info] take Wood x3: 164 -> 161 [evidence declared]
-[PalForge.items][warn] take Wood x5: the inventory holds only 2, taking that many
-[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is taken
+[PalForge.items][warn] take Wood x5: the inventory holds only 2, removing that many
+[PalForge.items][warn] take Wood x3: the inventory holds none, so nothing is removed
 ```
+
+1 行目もまた本物で、`:give` を証明したのと同じ 1 回の操作から取ったものです。
 
 <Callout type="warn">
 丸められた除去でも `true` になります。上の 2 行目は 5 個の要求のうち 2 個を取って `true` を返します。`true` の意味は「所持数が減ったのを観測できた」であって「ちょうど `count` 個減った」ではありません。個数を正確に扱いたいときは、自分で前後に `:count()` を読んでください。
@@ -485,9 +540,9 @@ print(wood:maxStack())    -- 9999 for the curated definition, 1 for a bare handl
 local icon = wood:iconOf()   -- reads DT_ItemIconDataTable at runtime
 ```
 
-`count` は所持品まわりで唯一動く操作です。その ID をローカルプレイヤーがいくつ持っているかをゲームに尋ね、ただの数値を返します。`nil` は「まったく読めなかった」（ワールド未読み込み、プレイヤーが見つからない）という意味で、「0 個」ではありません。比較する前に `nil` かどうかを確かめてください。
+`count` はゲーム自身の `CountItemNum` を通して、その ID をローカルプレイヤーがいくつ持っているかを尋ね、ただの数値を返します。読み込み済みのセーブで Wood に 135 と答えたのが実測値です。`nil` は「まったく読めなかった」（ワールド未読み込み、プレイヤーが見つからない）という意味で、「0 個」ではありません。比較する前に `nil` かどうかを確かめてください。`:give` と `:take` の判定もこの読み取りを 2 回行ったものです。
 
-`iconOf` は `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` から ID を引き、行のテクスチャを読みます。バニラの ID なら、ゲーム本体がそのアイテムに使っている絵がそのまま返ります。各段階は fail-soft で、テーブル・行・カラムのいずれが欠けても宣言済みの `icon` を返します（設定していなければ `nil`）。自作の名前空間付き ID には行が無いので、常にフォールバックします。
+`iconOf` は `/Game/Pal/DataTable/Item/DT_ItemIconDataTable` から ID を引き、行のテクスチャを `/Game/...` のパス文字列として返します。バニラの ID なら、ゲーム本体がそのアイテムに使っている絵がそのまま返ります。この読み取りは動きます。実際のセーブで 1207 行のうち 1183 行がパスを返し、残る 24 行はもともとアイコンを持たない行でした。各段階は fail-soft で、外れたときは宣言済みの `icon` を返します（設定していなければ `nil`）。名前空間付きの ID は先に解決されるので、`Item{ id = "example:Potion" }:iconOf()` は PalSchema が書く行の綴り `example_Potion` で問い合わせ、パックがその行を作っていれば実際の行に届きます。
 
 ### 列挙
 
@@ -656,21 +711,23 @@ Building{
 
 **新しいアイテムは作れません。** Lua から `DT_ItemDataTable_Common` に行を追加することはできません。`Item{ ... }` は ID に挙動と情報を結び付けるもので、行を作るのは PalSchema です。誰も作っていない ID は、ゲームが表示しない ID のままです。
 
-**`onCraft` と `onDiscard` は動きません。** チャンネルも配線もありますが、ゲーム側からどちらの出来事も知らされません。
+**`onCraft` は個数を運びません。** そして `onDiscard` は、スロットをアイテム ID に解決できなかった投棄に対して無音です。どちらのチャンネルも生きていて発火も確認されています。この 2 つは機能停止ではなく、正直に述べておくべき縁です。
 
-**名前空間付きの ID は予備の検索で照合されます。** イベントが運ぶのはゲームのデータ行名なので、`"example:Potion"` として登録したアイテムは厳密な検索では見つからず、登録済み ID の走査が拾います。走査はスナップショットを順不同でたどり、最初に一致した ID を返すため、解決後の行名が同じになるパック ID が 2 つあるとどちらになるかは決まりません。
+**`recipeOf` はゲームのレシピテーブルを読みません。** 返すのは自分が宣言したレシピで、ゲームに本物の行があってもバニラの ID には `nil` を返します。
 
-**取り出しにはプレイヤーが何かを装備している必要があります。** 消費はプレイヤーが持っている武器を経由するので、何も持っていないプレイヤーには経路が無く、`:take` は `false` を返します。アイテム自体は落ちるのではなく消費されます。
+**名前空間付きの ID は解決済み id の索引で照合されます。** イベントが運ぶのはゲームのデータ行名なので、`"example:Potion"` として登録したアイテムは厳密な検索では見つからず、解決後の形を引く 2 回目の参照が拾います。解決後の形 1 つにつき登録は 1 件なので、同じ行名に解決するパック ID が 2 つあるとやはり衝突しますが、2 つめを登録した時点で両方の ID を挙げた警告が出ます。
+
+**取り出しにはプレイヤーが何かを装備している必要があります。** 消費はプレイヤーが持っている武器アクターのメソッドを経由するので、何も持っていないプレイヤーには経路が無く、`:take` は `false` を返します。アイテム自体は落ちるのではなく消費されます。
 
 **`onUse` は対象を直接は教えてくれません。** `ctx.actor` はアイテムを使ったローカルプレイヤーのポーンです。使われた対象は `ctx.targetId` に生のインスタンス ID として入っており、それをアクターに変換する処理はありません。食べ物やポーションなら両者は同じですが、パルに与えた場合は違います。
 
-**`category`、`maxStack`、`icon`、`recipe` は PalForge 側のメモです。** ハンドル経由と自分のコードから読み戻せるだけで、ゲーム自身のアイテムテーブルに書き込まれることはありません。`maxStack = 9999` と書いても、ゲーム側のスタックの仕方は変わりません。
+**`category`、`maxStack`、`recipe` は PalForge 側のメモです。** ハンドル経由と自分のコードから読み戻せるだけで、ゲーム自身のアイテムテーブルに書き込まれることはありません。`maxStack = 9999` と書いても、ゲーム側のスタックの仕方は変わりません。`icon` だけは片方向で例外です。先に実物のテーブルを読み、宣言したパスはその予備になります。
 
 **アイテムはデータを保存できません。** 保存される `state` と `:save()` は建築物のものなので、ハンドラが数えたものはそのセッション限りです。残したいなら自分でファイルに書いてください。
 
 **ハンドラのエラーはログに出ます。投げ直されません。** 失敗はチャンネル名とフック名を添えて `utils.log` に報告されます（例: `item.use -> onUse handler failed: ...`）。ハンドラ側からイベントを止めることはできません。
 
-**`give`・`take`・`count` はローカルプレイヤー専用です。** `PalPlayerCharacter` を探してその所持品に作用するので、共有サーバーでは最初に見つかったプレイヤーポーンについて答えます。`count` の `nil` は読み取りに失敗したという意味で、鞄が空という意味ではありません。
+**`give`・`take`・`count` はローカルプレイヤー専用です。** `PalPlayerCharacter` を探してその所持品に作用し、背後にレプリケーションを持たないクライアント権限の処理です。PalForge が対象にしているのはシングルプレイヤーの Palworld です。`count` の `nil` は読み取りに失敗したという意味で、鞄が空という意味ではありません。
 
 **`give` は所持品自身の書き込みを通ります。** 所持数の変化だけでなく、所持品が何と答えたかも報告するので、`false` の理由がログから分かります。
 
@@ -680,11 +737,11 @@ Building{
 
 ## まとめ
 
-- アイテムは `Item{ ... }` で記述します。必須は `id` だけで、ID はゲームに既にあるものを使います。
+- アイテムは `Item{ ... }` で記述します。必須は `id` だけで、ID はゲームに既にあるものを使い、行の綴りに解決できない ID はその場で拒否されます。
 - `Item.get("Wood")` はどのアイテムでもハンドルを返します。`:count()` は今いくつ持っているかを読み、`:give` は追加し、`:take` は消費します。3 つとも「試みたこと」ではなく「実測できたこと」を返します。`:take` にはプレイヤーが何かを装備している必要があります。
-- 自分のコードは `events` に書きます。`onObtain` は拾ったとき、`onUse` は使ったときに動きます。`onCraft` と `onDiscard` はまだ動きません。
+- 自分のコードは `events` に書きます。4 つとも動きます。`onObtain` は拾ったとき、`onUse` は使ったとき、`onCraft` は設備が作り終えたとき、`onDiscard` は投棄・破棄のときです。
 - `onUse` の `ctx.actor` はアイテムを使ったプレイヤーです。食べ物やポーションの対象はこれで合っています。
-- `category`、`maxStack`、`icon`、`recipe` は自分のコード向けのメモです。ゲームは読みません。
+- `category`、`maxStack`、`recipe` は自分のコード向けのメモで、ゲームは読みませんし、`recipeOf` もゲームのレシピテーブルを読みません。`icon` は、実際にゲームのアイコン行へ届く検索の予備にすぎません。
 - アイテムはデータを保存できません。累計は Lua の変数に持つか、`palforge.utils.file` で自分で書き出してください。
 
 次は [Effect](/docs/api/effect) を読むと、使ったときに続く効果を作れます。イベント全体の流れは [Lifecycle](/docs/concepts/lifecycle)、上で使ったドメインは [Pal](/docs/api/pal) と [Building](/docs/api/building) にあります。

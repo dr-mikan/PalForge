@@ -8,25 +8,33 @@
 -- ("skill", id), so it is discoverable (Skill.get / Skill.get_all / core.registry) and a
 -- Pal declares which skills it owns by id (Pal{ skills = { ... } }).
 --
--- HONEST STATE OF THE 導線, rewritten 2026-07-26. All four handlers now have a CHANNEL, a
--- SOURCE and a DISPATCH — core/event.lua declares skill.activate / skill.hit / skill.equip /
+-- HONEST STATE OF THE 導線, rewritten 2026-07-26 and corrected after the runs that closed
+-- skill-activate-source and skill-passive-source. All four handlers have a CHANNEL, a SOURCE
+-- and a DISPATCH — core/event.lua declares skill.activate / skill.hit / skill.equip /
 -- skill.unequip, arms a native hook for each, and resolves an emit back to the definition
--- registered under that skill id. What is still missing is the last mile, and it is the same
--- for all four: NONE OF THE FOUR HOOKS HAS BEEN SEEN TO FIRE IN GAME. They were chosen from
--- dumps/cxx/Pal.hpp (the installed binary's own header dump) with their real signatures, and
--- two of the four classes are reflected in the live build as well, but nobody has yet used a
--- move with them armed. So:
---   * a declared `events` table is no longer inert — but until an F8 run logs a firing,
---     assume it can still be silent, and keep the manual entry points as the reliable path;
+-- registered under that skill id. THREE OF THE FOUR HAVE NOW BEEN SEEN FIRING IN A REAL SAVE:
+--   * onActivate — observed in real combat, carried by PalActionBase:OnBeginAction, with the
+--     move's own EPalWazaID on `self` (skill-activate-source, Closed);
+--   * onEquip / onUnequip — observed from AddPassiveSkill (skill-passive-source, Closed);
+--   * onHit — the one that does NOT fire. Both of its sources are measured silent from both
+--     sides, and that is the Open item skill-hit-source; the marker on the field says what
+--     the measurements rule out and why inference must not be wired in its place.
+-- This header used to say, in capitals, that none of the four had ever been seen firing. It
+-- was written before the runs and left standing after them — which is the expensive kind of
+-- stale comment, because the failure is silent: a pack author who believes it writes around a
+-- channel that works, and nothing ever tells them. Closing an item includes its doc strings.
+--   * a declared `events` table is live for three of the four, and the log names the source
+--     the first time each channel carries something, so a session says which path fired;
 --   * MANUAL invocation is unchanged and unconditional: :activate(owner) / :hit(target) /
 --     :equip(owner) / :unequip(owner) run the handler now, with the cooldown enforced here
---     in Lua — from a Pal's onTick, a building's onRightClick, or a keybind;
+--     in Lua — from a Pal's onTick, a building's onRightClick, or a keybind. It is still the
+--     only route for onHit;
 --   * only a skill DEFINED with Skill{ ... } is dispatched to. Skill.get("FireBlast") hands
 --     back a handle that was never registered, so the game firing FireBlast reaches nothing;
 --   * ctx.skillId is an EPalWazaID NAME for the two combat channels ("FireBlast", the list is
 --     core.character.wazaNames()) and a passive row FName for the two passive ones;
 --   * Lua still cannot inject a row into the skill DataTables — that is PalSchema's job — and
---     nothing here reaches the engine except :iconOf, :teach and :forget.
+--     nothing here reaches the engine except :iconOf, :teach, :forget and :skillsOn.
 -- Each hook below records which native function feeds it and how strong the evidence is; the
 -- full account, including the one route the dumps CLOSED, is in core/event.lua's SOURCE skill
 -- block.
@@ -42,6 +50,7 @@ local om        = require("palforge.core.object_manager")
 local icons     = require("palforge.core.icons")
 local schema    = require("palforge.core.schema")
 local character = require("palforge.core.character")
+local uo        = require("palforge.core.uobject")
 
 --=============================================================================
 -- SPEC — the shape of Skill{ ... }, declared as data so it is enforced on every call and
@@ -68,9 +77,9 @@ local Events = schema.define("Skill.Spec.Events", {
     --   2. /Script/Pal.PalActionBase:OnBeginAction (Pal.hpp:13122). `self` IS the move: a pal's
     --      attack is a UPalActionWazaBase, which carries `EPalWazaID WazaID` on the object
     --      itself (:13272), plus GetActionCharacter (:13141) and GetActionTarget (:13138).
-    --      DECLARED ONLY. Its one failure mode: if Palworld's BP waza-action classes implement
-    --      this event, the subclass owns the UFunction that ProcessEvent runs and a hook on the
-    --      base sits behind it.
+    --      THIS IS THE ONE THAT FIRES — measured in real combat, and the failure mode feared
+    --      for it (a BP subclass owning the UFunction ProcessEvent runs, leaving a hook on the
+    --      base behind it) did not materialise on this build.
     --   3. /Script/Pal.PalPlayerCharacter:OnBeginAction(const UPalActionBase* action)
     --      (Pal.hpp:10651) — a delegate TARGET of UPalActionComponent::OnActionBeginDelegate,
     --      REFLECTED in the live build's PalPlayerCharacter listing. Bound to the PLAYER's
@@ -78,10 +87,14 @@ local Events = schema.define("Skill.Spec.Events", {
     -- ctx = { skillId, wazaId, owner, actor, target, via } (+ ctx.action for sources 2 and 3).
     -- `via` names which source carried it; the log announces the first one per session.
     -- onActivate FIRES, observed 2026-07-26 in real combat, carried by
--- PalActionBase:OnBeginAction. A pal's move is an action object that holds its own waza id;
--- the utility function this used to hook registered fine and never carried anything.
+    -- PalActionBase:OnBeginAction, and closed as skill-activate-source. A pal's move is an
+    -- action object that holds its own waza id; the utility function this used to hook
+    -- registered fine and never carried anything. The doc string below kept saying "none seen
+    -- firing" after that run — and it is the sentence schema.help("Skill.Spec.Events") prints
+    -- and the generated types.lua shows in the editor, so it was talking authors out of the
+    -- one combat channel that works.
     { "onActivate", type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "an active skill fired (self, owner, ctx) - three sources armed, none seen firing" },
+                    doc = "LIVE - an active skill fired (self, owner, ctx); via = \"PalActionBase:OnBeginAction\"" },
     -- TWO SOURCES, same shape: the first is measured silent, the second replaces it.
     --   1. /Script/Pal.PalUtility:MakeDamageInfoByWazaType(..., EPalWazaID WazaType, ...)
     --      (Pal.hpp:32046, 7th parameter). ARMED AND MEASURED SILENT in the same fight in which
@@ -122,18 +135,24 @@ local Events = schema.define("Skill.Spec.Events", {
     -- all be attributed to whatever activated last. If it is ever built it belongs behind a name
     -- that says so — a correlated guess a pack opts into — and never on onHit, which promises the
     -- game told us.
+    -- The doc string is the only one of the four that still says a channel does not carry, and
+    -- it says it because that is the measurement. onActivate / onEquip / onUnequip were
+    -- corrected upwards on the same pass; this one must not be, or the correction is just a
+    -- mood. :hit(target) is the working entry point.
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
-                    doc = "one of its hits landed (self, target, ctx) - two sources armed, melee only, may repeat" },
+                    doc = "NOT LIVE - both sources measured silent (skill-hit-source); only :hit() runs it" },
     -- TWO SOURCES for the pair, and again the first is measured rather than assumed.
     --   1. /Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill(FName AddSkill, FName
     --      OverrideSkill) — Pal.hpp:21155 — and :RemovePassiveSkill(FName SkillId) — :21003.
     --      Both are in the live build's listing of that class (02_reflection.txt:1107) and both
     --      take FNames, not an index; the owner is the same object's `APalCharacter*
-    --      IndividualActor` (:20910). ARMED AND MEASURED SILENT, 2026-07-26, across a session
-    --      of catching and releasing pals. Kept armed. ctx = { skillId, owner, actor, params,
-    --      overrides, via }. `overrides` is AddPassiveSkill's second argument passed straight
-    --      through; it is NOT read as an unequip, because the name does not say which of the
-    --      two ids is being displaced.
+    --      IndividualActor` (:20910). THIS IS THE SOURCE THAT CARRIED — see the measurement
+    --      below. It had been armed and measured SILENT across an earlier session of catching
+    --      and releasing pals, which is a fact about the GAME's own bench/party writes and not
+    --      about the hook: what made it carry was a write. ctx = { skillId, owner, actor,
+    --      params, overrides, via }. `overrides` is AddPassiveSkill's second argument passed
+    --      straight through; it is NOT read as an unequip, because the name does not say which
+    --      of the two ids is being displaced.
     --   2. /Script/Pal.PalPassiveSkillComponent:SetupSkillFromSelf(UObject* OwnerObject,
     --      const TArray<FName>& skillList) — Pal.hpp:26582. The component that actually applies
     --      passive effects, handed the WHOLE list. Because it is a list and not an event, the
@@ -142,29 +161,55 @@ local Events = schema.define("Skill.Spec.Events", {
     --      first call for a component emits equip for every passive that character already has,
     --      so a pal streaming into the world announces its four passives once. Keep onEquip
     --      idempotent. ctx = { skillId, owner, actor, component, source, via }.
-    -- onEquip FIRES, observed 2026-07-26: skill.equip carried its first event from source
-    -- "AddPassiveSkill". The write that triggered it came from PalForge itself — a passive was
-    -- put on a live pal and read back — which is a useful property in its own right: the source
-    -- catches a pack's own writes as well as the game's. SetupSkillFromSelf stays armed beside
-    -- it, so which one the GAME uses at a bench is still an open question the log will answer.
+    -- onEquip FIRES, observed 2026-07-26 and closed as skill-passive-source: skill.equip
+    -- carried its first event from source "AddPassiveSkill". The write that triggered it came
+    -- from PalForge itself — core/character.addSkill put a passive on a live BP_ChickenPal_C
+    -- and read it back — which is a useful property in its own right: the source catches a
+    -- pack's own writes as well as the game's, so a handler must be ready to hear about a
+    -- change it made itself. It also confirms the passive half of pal-skills-equip in passing.
+    -- WHAT IS STILL OPEN, and it is not whether the channel works: SetupSkillFromSelf stays
+    -- armed beside it and has carried nothing yet, so which call the GAME uses when a player
+    -- changes a passive at a bench is unsettled. The log names the source, so one bench visit
+    -- answers it. Both doc strings below said "none seen firing" long after the firing — the
+    -- string a pack author reads out of schema.help / types.lua, which is the whole cost.
     { "onEquip",    type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "a passive was attached (self, owner, ctx) - two sources armed, none seen firing" },
+                    doc = "LIVE - a passive was attached (self, owner, ctx); via names the source" },
     { "onUnequip",  type = "function", sig = "fun(self: Skill.Handle, owner: any, ctx: table)",
-                    doc = "a passive was removed (self, owner, ctx) - two sources armed, none seen firing" },
+                    doc = "LIVE - a passive was removed (self, owner, ctx); via names the source" },
 })
 
 ---What you pass to Skill{ ... }. `id` is the only required field.
+-- `id` carries schema.validId, not schema.nonEmpty: a namespaced id must survive
+-- object_manager.resolve to name anything the game has ("pack:Fireball" -> "pack_Fireball"),
+-- so an id that cannot resolve is refused at define time instead of registering dead. The
+-- rule is written once, in core/schema.lua.
 local Spec = schema.define("Skill.Spec", {
-    { "id",          type = "string", required = true, check = schema.nonEmpty,
+    { "id",          type = "string", required = true, check = schema.validId,
                      doc = "skill id: a game row id or \"pack:name\"" },
     { "name",        type = "string", doc = "shown in skill lists (defaults to id)" },
     { "description", type = "string", doc = "one-line description, for UI and tooling" },
     { "kind",        type = "string", values = { "active", "passive" }, default = "active",
                      doc = "an active skill is fired; a passive one is equipped" },
-    { "element",     type = "string", doc = "attribute / element (fire, water, ...)" },
+    -- element and power are AUTHOR METADATA, and the doc strings now say so, because the
+    -- neighbourhood was misleading: `cooldown` beside them is real — :activate and
+    -- :cooldownLeft enforce it in Lua — while these two are validated, stored, handed back by
+    -- :element() / :power() and read by NOTHING in the framework. They were not dropped
+    -- because a pack's own onActivate is where damage and typing are decided, and carrying
+    -- them on the definition is what lets a handler and a UI read one declaration instead of
+    -- inventing a parallel `data` convention. A skill's real element and power live in the
+    -- game's skill DataTable rows, which Lua cannot author (PalSchema's job) and which nothing
+    -- here writes. Item.Spec.Recipe states the same thing about itself in the same words.
+    { "element",     type = "string",
+                     doc = "attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing" },
     { "cooldown",    type = "number", doc = "seconds between activations (enforced by :activate)" },
-    { "power",       type = "number", doc = "base power / magnitude" },
-    { "icon",        doc = "fallback icon used when the DataTable lookup misses" },
+    { "power",       type = "number",
+                     doc = "base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing" },
+    -- ONE KIND OF THING, declared — the same decision as Item.Spec.icon, for the same reason:
+    -- core/icons answers a /Game/... asset PATH as a plain string (the icon column is read as
+    -- text, because the TSoftObjectPtr in the row cannot be unwrapped from Lua), so the
+    -- declared fallback is a string path too and :iconOf answers string|nil, always.
+    { "icon",        type = "string",
+                     doc = "/Game/... texture path used when the icon DataTable has no row for this id" },
     { "events",      type = "table", of = Events, doc = "behaviour handlers (grouped)" },
     { "data",        type = "table", doc = "free-form payload of your own, carried onto the definition" },
 })
@@ -203,33 +248,91 @@ function Class:onUnequip(owner, ctx) end
 -- fact this file already records: that table is keyed by PAL id, not by skill id, so only a
 -- pal-derived partner skill can ever hit it. A passive skill has no row there and falls back to
 -- the declared icon by design, which is the correct answer rather than a missing one.
+-- THE ID IS RESOLVED FIRST (F-3/C5). The table is keyed by the row spelling PalSchema writes,
+-- so a namespaced id has to be asked for as "pack_Fireball", never "pack:Fireball" — the raw
+-- form could not match a row under any circumstances, which made every namespaced skill look
+-- like one more miss in a table that misses a lot anyway. `or self.id` is the boundary rule:
+-- an id that will not resolve falls back to the LITERAL, never to nothing.
 function Class:iconOf()
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.skill, self.id) end)
+    local id = om.resolve(self.id) or self.id
+    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.skill, id) end)
     if ok and tex ~= nil then return tex end
     return self.icon
 end
 
 --=============================================================================
 -- cooldown bookkeeping. Per (class, owner) so two Pals with the same skill cool down
--- independently. Owners are engine objects — keep the table weak so it never holds a
--- pawn alive past its lifetime.
+-- independently.
+--
+-- THE OWNER KEY IS core.uobject.key (the owner's GetFullName), NOT the owner handle —
+-- contract C1. The comment above this table always said "ownerKey"; the code passed the raw
+-- handle, and UE4SS mints a fresh userdata wrapper per lookup, so two references to one pawn
+-- are not the same Lua value and Lua indexes a table by userdata IDENTITY. The consequence
+-- was that `cooldown` did nothing at all for any engine owner: :activate(pawn) stamped the
+-- clock under the wrapper the caller happened to hold, and the next :activate — reached
+-- through a pawn from a later FindAllOf, or from an event's ctx.actor, which is a different
+-- wrapper again — found an empty bucket and fired immediately. `cooldownLeft` answered 0 for
+-- the same reason. Nothing raised and nothing was logged; a declared cooldown was simply
+-- ignored, which is the silent-failure shape A-1 is about. It only ever worked for the
+-- NO_OWNER sentinel and for a plain Lua table owner (which IS identity-stable) — i.e. for
+-- exactly the cases test/cases/skill.lua exercises.
+--
+-- Anything that answers GetFullName is keyed on that name; anything that does not keys on
+-- itself. That covers all three cases without asking what type an owner is: a UObject is
+-- named, a plain Lua table owner (which a pack is free to pass, and which IS
+-- identity-stable) is not and keys on itself, and an object that will not answer its own
+-- name falls back to the handle — the old behaviour for that one object, which is the honest
+-- floor rather than `t[nil]`, which raises.
+--
+-- WEAK KEYS ARE GONE WITH THE HANDLE KEY. `__mode = "k"` existed so a cooldown stamp could
+-- never hold a pawn alive past its lifetime; a string key is not collectable, so it would
+-- have made the table immortal instead. What replaces it is a bounded sweep: a bucket whose
+-- newest stamp is older than COOLDOWN_KEEP_SEC can no longer make `cooling` say true for any
+-- cooldown a definition can plausibly declare, so it is dropped on the next stamp. The table
+-- therefore holds one small bucket per owner that fired something recently, and a pal that
+-- despawns takes its bucket with it a minute later.
 --=============================================================================
 
 local NO_OWNER = {}   -- sentinel key for :activate() with no owner
-local lastFire = setmetatable({}, { __mode = "k" })  -- ownerKey -> { [clsId] = os.clock() }
+local lastFire = {}   -- ownerKey -> { [clsId] = os.clock() }
+
+-- How long a bucket is kept after its newest stamp. Well past any cooldown a definition
+-- would declare, and the only thing that bounds this table now that the keys are names.
+local COOLDOWN_KEEP_SEC = 600
+local lastSweep = 0
+
+-- The bucket key for `owner`. See the C1 note above for the three cases.
+local function ownerKey(owner)
+    if owner == nil then return NO_OWNER end
+    return uo.key(owner) or owner
+end
+
+-- Drop buckets nothing can still be cooling in. Runs at most once a minute, from stamp()
+-- only — a read must never mutate the table it is answering from.
+local function sweep(now)
+    if now - lastSweep < 60 then return end
+    lastSweep = now
+    for key, bucket in pairs(lastFire) do
+        local newest = 0
+        for _, at in pairs(bucket) do if at > newest then newest = at end end
+        if now - newest > COOLDOWN_KEEP_SEC then lastFire[key] = nil end
+    end
+end
 
 local function cooling(cls, owner)
     local cd = tonumber(cls.cooldown)
     if not cd or cd <= 0 then return false end
-    local bucket = lastFire[owner or NO_OWNER]
+    local bucket = lastFire[ownerKey(owner)]
     local last = bucket and bucket[cls.id]
     return last ~= nil and (os.clock() - last) < cd
 end
 
 local function stamp(cls, owner)
-    local key = owner or NO_OWNER
+    local key = ownerKey(owner)
+    local now = os.clock()
+    sweep(now)
     lastFire[key] = lastFire[key] or {}
-    lastFire[key][cls.id] = os.clock()
+    lastFire[key][cls.id] = now
 end
 
 --=============================================================================
@@ -238,16 +341,26 @@ end
 
 ---The skill domain. CALL it to define one; the two named functions look existing ones up.
 ---@class palforge.skill
----@overload fun(spec: Skill.Spec): Skill.Handle
+---@overload fun(spec: Skill.Spec, opts: table?): Skill.Handle
 local Skill = {}
 
 local wrap  -- forward decl; the Skill.Handle wrapper is defined in the BOTTOM section
 
 ---Define a skill and register it.
 ---`spec` is validated against Skill.Spec: `id` is required, unknown fields are an error.
+---
+---`opts` is optional and omitting it behaves exactly as it always has:
+---  { register = false }   build and return the handle, register NOTHING — what a native
+---                         catalog uses so that READING native.skills.FireBlast stops writing
+---                         to the registry.
+---  { pack = "mypack" }    register attributed to that pack, which is what gives a collision
+---                         a "who". PalForge.pack("mypack").Skill is the same thing without
+---                         passing it per call.
 ---@param spec Skill.Spec
+---@param opts table?
 ---@return Skill.Handle
-local function define(spec)
+local function define(spec, opts)
+    local register, pack = schema.defineOpts(opts, "Skill")
     spec = Spec:validate(spec, "Skill")
     local cls = setmetatable({
         id          = spec.id,
@@ -268,12 +381,16 @@ local function define(spec)
     for name, handler in pairs(spec.events or {}) do           -- onActivate, ...
         cls[name] = function(_, ...) return handler(handle, ...) end
     end
-    pcall(function() om.register("skill", spec.id, cls) end)
+    -- so core/event's skill dispatch and Skill.get find it — unless the caller asked for a
+    -- definition that stays out of the registry, which is a build, not a define.
+    if register then
+        pcall(function() om.register("skill", spec.id, cls, { pack = pack }) end)
+    end
     return handle
 end
 
 -- Calling the module IS defining:  Skill{ id = "example:Fireball", ... }
-setmetatable(Skill, { __call = function(_, spec) return define(spec) end })
+setmetatable(Skill, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get an EXISTING skill by id: a previously-defined one, else a thin definition over any
 ---game skill id. Never nil.
@@ -382,11 +499,23 @@ function Handle:teach(actor) return character.addSkill(actor, self.id) end
 ---@return boolean ok
 function Handle:forget(actor) return character.removeSkill(actor, self.id) end
 
----What `actor` actually carries right now, straight from the game:
----`{ active = { "FireBlast", ... }, passive = { "Legend", ... } }`. Empty lists mean the read
----worked and found none; nil means the character could not be read at all — UNKNOWN, never
----"has none". This is a query about the CHARACTER, not about this skill, and it is on the
----handle only because that is where a caller already is.
+---What `actor` actually carries right now, straight from the game — FOUR lists, not two:
+---```
+---{ active    = { "FireBlast", ... },   -- the up-to-four moves equipped right now
+---  passive   = { "Legend", ... },      -- passive skill FNames
+---  equipable = { "Fireball", ... },    -- moves it COULD equip
+---  mastered  = { "Fireball", ... } }   -- moves it has learned
+---```
+---This doc used to name only the first two, which is worse than a missing sentence: a caller
+---reads it and never learns that an empty `active` on a wild pal is normal rather than a read
+---that missed. `equipable` and `mastered` are read for exactly that reason — they cost one
+---call each and they are what distinguishes "nothing equipped" from "nothing reachable"
+---(core/character.lua:507-511 is where the four are assembled).
+---
+---Empty lists mean the read worked and found none; nil for the whole table means the
+---character could not be read at all — UNKNOWN, never "has none". This is a query about the
+---CHARACTER, not about this skill, and it is on the handle only because that is where a
+---caller already is.
 ---@param actor any
 ---@return table?
 function Handle:skillsOn(actor) return character.skillsOn(actor) end
@@ -397,7 +526,7 @@ function Handle:skillsOn(actor) return character.skillsOn(actor) end
 function Handle:cooldownLeft(owner)
     local cd = tonumber(self._cls.cooldown)
     if not cd or cd <= 0 then return 0 end
-    local bucket = lastFire[owner or NO_OWNER]
+    local bucket = lastFire[ownerKey(owner)]
     local last = bucket and bucket[self.id]
     if not last then return 0 end
     local left = cd - (os.clock() - last)
@@ -421,7 +550,10 @@ function Handle:onUnequip(owner, ctx) if self._cls.onUnequip then return self._c
 
 -- ---- queries ----
 
----@return any?  # texture ref from the icon DataTable, else the declared icon
+---The icon as a /Game/... asset path: the partner-skill DataTable's row for this id (only a
+---pal-derived partner skill can have one — that table is keyed by PAL id), else the declared
+---`icon`, else nil. One kind of value, never an engine object — see the Skill.Spec `icon` note.
+---@return string?
 function Handle:iconOf() return self._cls:iconOf() end
 ---@return string
 function Handle:name() return self._cls.name or self.id end
@@ -429,8 +561,12 @@ function Handle:name() return self._cls.name or self.id end
 function Handle:description() return self._cls.description end
 ---@return string  # "active" | "passive"
 function Handle:kind() return self._cls.kind or "active" end
+---The DECLARED element. Author metadata: nothing in PalForge reads it, and the game's own
+---typing lives in a DataTable row Lua cannot author. See Skill.Spec.
 ---@return string?
 function Handle:element() return self._cls.element end
+---The DECLARED power. Author metadata, exactly like :element() — your onActivate is where a
+---number like this turns into anything.
 ---@return number?
 function Handle:power() return self._cls.power end
 

@@ -7,15 +7,26 @@
 --                    1957 AkAudioEvent names is already a Lua identifier. A named field is the
 --                    SOUND-EFFECT spelling (M.se), which is what M.get has always been.
 --   (c) M.bgm(name)/M.se(name)/M.get(name) — lazy, cached handles for any catalog name.
---   (d) CURATED    — the sound ids already chosen, as named helpers.
+--   (d) M.publish(name) — register that handle with object_manager, on request. See below.
+--   (e) CURATED    — the sound ids already chosen, as named helpers.
 --
--- bgm/se lower a catalog entry into an api/audio definition (registered under the "audio"
--- type in object_manager) carrying BOTH the event name and its asset path. `kind` is purely
--- descriptive here — the native route is the same call for music and effects — so calling
--- both bgm(name) and se(name) for one name simply keeps whichever was defined last. That is
--- also true of a named field: reading `audio.AKE_BGM_Title` defines it as an SE, and calling
--- `audio.bgm("AKE_BGM_Title")` afterwards re-defines the same id as a BGM. Both play the same
--- sound through the same call; only the descriptive `kind` moves.
+-- bgm/se lower a catalog entry into an api/audio definition carrying BOTH the event name and
+-- its asset path. `kind` is purely descriptive here — the native route is the same call for
+-- music and effects — so calling both bgm(name) and se(name) for one name simply keeps
+-- whichever was defined last. That is also true of a named field: reading `audio.AKE_BGM_Title`
+-- defines it as an SE, and calling `audio.bgm("AKE_BGM_Title")` afterwards re-defines the same
+-- id as a BGM. Both play the same sound through the same call; only the descriptive `kind` moves.
+--
+-- LOWERING ONE IS NO LONGER REGISTERING ONE (2026-08-02). bgm/se/get build with
+-- `{ register = false }` (contract C2) — the publish gate, forced by native/buildings.lua where
+-- registration is not inert (a registered building def makes core/event track and PERSIST every
+-- matching actor in the world, so a field read started writing to the player's save). Audio
+-- persists nothing, but this is the largest catalog in the tree at 1957 events and the gate is
+-- one rule in all six rather than five exceptions. Playing does not consult object_manager:
+-- Handle:play goes to core/sound with the event name and asset path it already holds. What
+-- registration buys is Audio.get(name) / Audio.get_all() seeing this handle, and that is what
+-- M.publish(name) is for. The six CURATED helpers below still register at load, under the
+-- framework's own pack id (contract C3).
 --
 --   local audio = require("palforge.native.audio")
 --   audio.MainTheme:play()                        -- curated bgm helper
@@ -1997,56 +2008,95 @@ M.CATALOG = {
 
 local bgmCache, seCache = {}, {}
 
--- bgm(name): a background-music handle for a catalog name, defined on first use + cached.
+-- The publish gate (contract C2, and the header): lowering a catalog entry BUILDS the handle and
+-- does not register it. `Audio.bgm`/`Audio.se` take the same opts as `Audio{}` and forward them.
+local NO_REGISTER = { register = false, pack = catalog.PACK }
+
+-- bgm(name): a background-music handle for a catalog name, built on first use + cached.
 -- Returns nil if name is not a known AkAudioEvent.
 function M.bgm(name)
     if not name or not M.CATALOG[name] then return nil end
     if bgmCache[name] then return bgmCache[name] end
-    bgmCache[name] = Audio.bgm{
+    bgmCache[name] = Audio.bgm({
         id        = name,
         soundId   = name,             -- AkAudioEvent name (fallback SoundID route)
         soundPath = M.CATALOG[name],  -- asset path -> the confirmed PlayAkEventSoundByActor route
-    }
+    }, NO_REGISTER)
     return bgmCache[name]
 end
 
--- se(name): a sound-effect handle for a catalog name, defined on first use + cached.
+-- se(name): a sound-effect handle for a catalog name, built on first use + cached.
 -- Returns nil if name is not a known AkAudioEvent.
 function M.se(name)
     if not name or not M.CATALOG[name] then return nil end
     if seCache[name] then return seCache[name] end
-    seCache[name] = Audio.se{
+    seCache[name] = Audio.se({
         id        = name,
         soundId   = name,             -- AkAudioEvent name (fallback SoundID route)
         soundPath = M.CATALOG[name],  -- asset path -> the confirmed PlayAkEventSoundByActor route
-    }
+    }, NO_REGISTER)
     return seCache[name]
 end
 
 -- get(name): the handle for a catalog name — WHICHEVER KIND IT WAS ALREADY BUILT AS, and a
 -- sound-effect one when it has not been built yet. nil if name is not in the catalog.
 --
--- The bgm-first check is not cosmetic. Defining an id re-registers it in object_manager under
--- that id (api/audio), so an unconditional M.se(name) would silently convert an already-defined
--- BGM into an SE — and since M.get is also what the NAMED FIELDS resolve through, merely
--- READING `audio.AKE_BGM_Title` would have downgraded the curated M.MainTheme. A read must not
--- redefine anything. Calling M.bgm/M.se explicitly still does what it always did: the last
--- explicit call wins, which is the documented behaviour at the top of this file.
+-- The bgm-first check is not cosmetic, and it is still load-bearing after the publish gate — for
+-- a narrower reason than the one it was written for, so both are recorded. WHEN LOWERING STILL
+-- REGISTERED, an unconditional M.se(name) re-registered the id in object_manager as an SE and
+-- silently converted an already-defined BGM; since M.get is also what the NAMED FIELDS resolve
+-- through, merely READING `audio.AKE_BGM_Title` downgraded the curated M.MainTheme in the
+-- registry. Lowering no longer registers (see the header), so that particular conversion is
+-- gone — but the CACHES are still two, and without this check a read would build an SE twin,
+-- cache it, and hand it back in place of the BGM handle the module's own M.MainTheme field
+-- still points at. Same symptom, one layer down: a read must not redefine anything. Calling
+-- M.bgm/M.se explicitly still does what it always did — the last explicit call wins, which is
+-- the documented behaviour at the top of this file.
 function M.get(name)
     if name and bgmCache[name] then return bgmCache[name] end
     return M.se(name)
+end
+
+---Register this catalog's handle for `name` with object_manager: the opt-in half of the publish
+---gate. Publishing the handle M.get would hand back, so a BGM that was lowered as a BGM is
+---published as one. All it buys is that Audio.get(name) / Audio.get_all() see this handle rather
+---than fabricating a thin one — playing never consulted the registry — so it exists for symmetry
+---with the other five catalogs and for tooling that enumerates definitions.
+---
+---Idempotent. Returns nil for a name that is not an AkAudioEvent in this build.
+---@param name string
+---@return Audio.Handle?
+function M.publish(name)
+    local h = M.get(name)
+    if not h then return nil end
+    catalog.publish("audio", h, "native.audio")
+    return h
 end
 
 -- ---- CURATED helpers (the sound ids already chosen; all dump-confirmed) ----
 -- All six are NICKNAMES rather than event names: "MainTheme" is not an AkAudioEvent, so it names
 -- nothing but this line, while `audio.AKE_BGM_Title` is the event's own name and resolves to
 -- this very handle through the bgm cache.
+--
+-- These six DO register — M.publish is called on each — because they are the framework's own
+-- chosen sounds rather than a row somebody read, and because Audio.get("AKE_BGM_Title") should
+-- find the curated BGM instead of fabricating an SE-shaped thin definition. Registering a sound
+-- writes nothing anywhere; the persistence that made native/buildings.lua's curated pair a
+-- release gate is the building runtime's alone. They register under the framework's own pack id
+-- (contract C3), so a pack that defines the same event name replaces something whose previous
+-- owner can be named.
 M.MainTheme    = M.bgm("AKE_BGM_Title")                       -- title-screen BGM
 M.BattleTheme  = M.bgm("AKE_LegendDeer_State_Strong_Strong")  -- boss-battle BGM
 M.VictoryTheme = M.bgm("AKE_Arena_Victory_01")                -- arena victory jingle
 M.Explosion    = M.se("AKE_General_Explosion")                -- generic explosion SE
 M.Laser        = M.se("AKE_Weapon_ChargeLaserRifle_Fire")     -- laser-rifle fire SE
 M.Footstep     = M.se("AKE_Pal_Footstep")                     -- Pal footstep SE
+
+for _, name in ipairs({ "AKE_BGM_Title", "AKE_LegendDeer_State_Strong_Strong",
+                        "AKE_Arena_Victory_01", "AKE_General_Explosion",
+                        "AKE_Weapon_ChargeLaserRifle_Fire", "AKE_Pal_Footstep" }) do
+    M.publish(name)
+end
 
 -- LAST: hang the lazy named fields off the module. THIS CATALOG IS A MAP, not a list, so its own
 -- CATALOG table IS the membership set — nothing is copied and index() only walks it to look for

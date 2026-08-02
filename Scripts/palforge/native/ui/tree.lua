@@ -358,6 +358,17 @@ end
 -- and the widget that was clicked. That is the house shape for events (Pal / Building /
 -- Item all pass (self, ctx)), and it is what makes one declared tree reusable across
 -- instances: the node is shared, `self` is not.
+-- ⚠️ `labelAlign = "left"` IS A SECOND CONSTRUCTION, NOT A SECOND SETTING, and the split is here
+-- rather than inside _widget because the two shapes hand back different widgets and bind their
+-- text to different things. `center` is the game button alone and its `text` is written through
+-- _widget.setButtonText (the button's own label, its own font). `left` is _widget.clickableRow:
+-- an Overlay holding the same game button stretched to fill, with a TextBlock of ours over the
+-- top at HitTestInvisible so clicks pass through — and its `text` is written through SetText on
+-- THAT TextBlock, because setButtonText would write the button's own hidden label and nothing
+-- would change on screen. The header on _widget.clickableRow records why this is the only route
+-- to a left-aligned button label on this build (and why `ui-menubutton-inner-slot` is still
+-- correctly closed). What goes into the parent slot differs too — an Overlay, not a button — so
+-- the maker's return is the thing that has to change, which is exactly why it is decided here.
 MAKE.button = function(node, ctx, built)
     local pc = controller(ctx)
     local text = M.valueOf(node.text, ctx.self)
@@ -365,8 +376,23 @@ MAKE.button = function(node, ctx, built)
     local onClick = node.onClick and function()
         node.onClick(ctx.self, clickCtx)
     end or nil
+    local label = (text == nil) and "" or tostring(text)
 
-    local btn, inv, key = widget.menuButton(ctx.outer, pc, (text == nil) and "" or tostring(text), onClick)
+    if node.labelAlign == "left" then
+        local row, inv, key, lbl = widget.clickableRow(ctx.outer, pc, label, onClick)
+        if not row then error("clickableRow: " .. tostring(inv), 0) end
+        clickCtx.widget = row
+        if key then built.clicks[#built.clicks + 1] = key end
+        -- The binding goes to OUR TextBlock. `lbl` is nil only if the row was built without one,
+        -- which cannot happen today; guarded anyway, because a binding registered against nil
+        -- would raise on the first heartbeat rather than at build time.
+        if type(node.text) == "function" and alive(lbl) then
+            bind(built, node, "text", setText, lbl, text)
+        end
+        return row
+    end
+
+    local btn, inv, key = widget.menuButton(ctx.outer, pc, label, onClick)
     if not btn then error("menuButton: " .. tostring(inv), 0) end
     clickCtx.widget = btn
     if key then built.clicks[#built.clicks + 1] = key end
@@ -742,9 +768,16 @@ function M.armInput(spec) return keys.arm(spec) end
 ---@return string[]
 function M.keyReport() return keys.report() end
 
----The whole live keymap plus the per-name lookup table: what Palworld has an action on, and what
----every UE4SS-bindable name's status is. Re-exported for the same reason keyReport is — a probe
----or an autorun action should not have to reach past this seam to ask.
+---The whole live keymap: what Palworld has an action on, per key. Re-exported for the same reason
+---keyReport is — a probe or an autorun action should not have to reach past this seam to ask.
+---
+---⚠️ IT IS ALSO WHAT UI.report() READS LAST, which it did not until 2026-08-02. This function was
+---written alongside keyReport and grabReport and left out of api/ui.lua's list of report sources,
+---so the one report an operator is told to paste stated a CONCLUSION — "F7 never arrived AND THE
+---GAME HAS AN ACTION ON IT" — with no sign of the reading that conclusion was drawn from, and the
+---evidence had to be fetched by a second command nobody knew to run. It is the longest of the
+---four blocks (a line per source, a line per container, then a line per key the game has an
+---action on — 107 rows on the measured build), which is why it goes last and not first.
 ---@return string[]
 function M.keymapReport()
     local out = {}

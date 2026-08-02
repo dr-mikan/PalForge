@@ -37,9 +37,10 @@ Building{ id = "WorkBench" }
 ```
 
 That one call is what puts the id on PalForge's watch list. The scan that finds placed
-structures in the world only tracks build ids you have defined. `Building.get(id)` on an id
-nobody defined still hands back a handle you can call methods on, but it does not add the id
-to the list, so `:instances()` on it stays empty.
+structures in the world takes its definitions from the registry and from nowhere else, so it
+tracks exactly the build ids a define call **registered**. `Building.get(id)` on an id nobody
+defined still hands back a handle you can call methods on, but it registers nothing, so
+`:instances()` on it stays empty.
 
 A full definition reads as one table:
 
@@ -119,26 +120,55 @@ data tables — that is PalSchema's job. What a definition does is give an id th
 exists behaviour, saved data, a model and metadata.
 </Callout>
 
-Defining the same id twice replaces the earlier one. Palworld's own catalog loads before your
-pack code, so a pack that defines `WorkBench` takes over from `native.buildings.WorkBench`,
-mesh included — restate anything you still want.
+The **shape** of an id is checked when you define it, not when something later goes looking for
+the structure. A colon anywhere means you meant the namespaced form, so both halves must be
+letters, digits and underscores:
+
+```lua
+Building{ id = "my-pack:Bench" }
+-- PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
+A hyphen makes the id unresolvable, and an unresolvable id has nowhere to go: the DataTable row
+name cannot be built, so the icon lookup, the technology unlock and the build-id match all miss
+while the definition sits in the registry looking healthy. The define call is the only place you
+can watch that happen, so that is where it stops.
+
+`buildIds` gets the same question one step later, at the engine boundary, and more forgivingly:
+an entry that will not resolve is used **literally** and a warning names the id and the reason
+resolve gave. A literal that matches no real `BuildObjectId` never matches an actor, which is a
+silent miss you can chase; a dropped id would be a definition that registered, answered every
+read, and was dead.
+
+Defining the same id twice replaces the earlier one. `native.buildings` registers nothing, so a
+pack that defines `WorkBench` is the only definition of it — but a second pack that defines the
+same id replaces yours, and the registry logs the collision naming both owners.
 
 ### The native catalog
 
-`native/buildings.lua` carries every `DT_BuildObjectDataTable_Common` row id as plain data,
-plus two ready-made definitions.
+`native/buildings.lua` carries all 498 `DT_BuildObjectDataTable_Common` row ids as plain data,
+plus two hand-written definitions that add a mesh and a display name.
 
 ```lua
 local buildings = require("palforge.native.buildings")
 
-buildings.WorkBench          -- curated handle for "WorkBench" (BP_BuildObject_WorkBench_C)
-buildings.PalBox             -- curated handle for "PalBoxV2"
-buildings.get("ItemChest")   -- defines + registers on first use, then cached; nil for an unknown id
-buildings.CATALOG            -- the id list, as data
+buildings.WorkBench             -- curated handle for "WorkBench" (BP_BuildObject_WorkBench_C)
+buildings.PalBox                -- curated handle for "PalBoxV2"
+buildings.get("ItemChest")      -- a handle, built on first read and cached; nil for an unknown id
+buildings.publish("WorkBench")  -- opt IN to tracking, and with it to persistence
+buildings.CATALOG               -- the 498 ids, as data
 ```
 
-Requiring the module registers only those two. `get(id)` is what turns a catalog id into a
-real definition, so startup never registers the hundreds of rows.
+Nothing in that module registers anything, and reading a field registers nothing either. That
+matters more here than in any other domain, because registering a building is **not inert**: the
+scan picks a registered definition up, every matching actor already standing in the world becomes
+a tracked instance, and a tracked instance is written into the save's entity file. A tooltip that
+read `buildings.Stone_Foundation` would otherwise start persisting every stone foundation in the
+base, and a picker walking `CATALOG` would persist the whole base.
+
+So a handle from `get(id)` or from a named field answers `:unlock()` and `:iconOf()` for real —
+both are id-driven table reads — while `:instances()` stays empty and nothing is written, until
+you call `buildings.publish(id)` or declare `Building{ id = <the same id> }` yourself.
 
 ## Spec fields
 
@@ -189,6 +219,25 @@ print(schema.help("Building.Spec"))
 print(schema.help("Building.Spec.Events"))
 schema.get("Building.Spec").fields   -- the same, as a table, for tooling
 ```
+
+### The second argument
+
+`Building(spec, opts)` takes an optional second table. It controls registration and nothing
+else — the definition it builds is the same either way:
+
+```lua
+Building(spec)                          -- define and register
+Building(spec, { register = false })    -- build the handle, register nothing
+Building(spec, { pack = "mypack" })     -- register with that pack recorded as the owner
+```
+
+`register = false` is the difference between a read and a write here, for the reason above: a
+registered definition is tracked, and a tracked structure is persisted. The handle still works,
+`core/event` never sees the definition, and nothing goes into the save.
+
+`pack` is what gives a collision a "who": the owner is recorded on the registration, named in the
+warning when two packs claim one id, and written into every persisted record.
+`PalForge.pack("mypack").Building` fills it in for you.
 
 ### state — a table or a factory
 
@@ -307,14 +356,26 @@ mesh = {
 },
 ```
 
-The ready-made `WorkBench` and `PalBoxV2` declare `static` meshes, so they attach on the scan
-after the one that first sees the actor.
+<Callout type="info">
+That absolute OBJ path is correct on exactly one machine. `Mesh.Spec` resolves a relative
+`model` or `texture` against the calling pack's own directory, but that resolution lives on
+`Mesh.Spec:validate` and `Building.Spec.Mesh` is a derived spec with its own — so a **relative
+path in an inline building mesh stays relative** and fails at `io.open` with what you wrote.
+Declare the OBJ as a named `Mesh{ ... }` and nest that handle, which is the route that carries
+the resolved path.
+</Callout>
+
+The curated `WorkBench` and `PalBoxV2` declare `static` meshes. They only reach a placed actor
+once something registers them — `buildings.publish(id)`, or your own definition — and then they
+attach on the scan after the one that first sees the actor.
 
 <Callout type="warn">
-`skeletal` swaps the asset on the pawn's own `Mesh` component. A build object does not carry
-one, so a structure declaring `kind = "skeletal"` attaches nothing and its `render()` returns
-`false`. That backend is also unconfirmed in-game — it reports which setter executed, not that
-anything rendered.
+`skeletal` swaps the asset on the pawn's own `Mesh` component — `ACharacter::Mesh`, which a
+build object does not have, so a structure declaring `kind = "skeletal"` attaches nothing, logs
+that the actor is probably not an `APalCharacter`, and its `render()` returns `false`. That
+backend is also unconfirmed in game: it goes through the live signature check and reads the asset
+back to compare it, so a setter that runs and is ignored is a `false` rather than a pretended
+success — but nobody has watched anything visibly change shape.
 </Callout>
 
 ## The live instance
@@ -386,18 +447,21 @@ Anything the definition declared is reachable through the class, so `self.name`,
 ### Instance methods
 
 ```lua
-self:save()        -- stage state and write the json file now
-self:setDirty()    -- stage only; written by the next save or on world.left
-self:isValid()     -- is self.actor still a valid engine object
-self:render()      -- attach mesh + material once; false without a valid actor or a model
-self:update()      -- re-tint the live material from self:currentColor()
-self:mesh()        -- the declared mesh table
-self:material()    -- the declared material, or one built from color / texture
-self:iconOf()      -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
+self:save()             -- stage state and write the json file now
+self:setDirty()         -- stage only; written by the next save or on world.left
+self:isValid()          -- is self.actor still a valid engine object
+self:render()           -- attach mesh + material once; false without a valid actor or a model
+self:update()           -- re-tint the live material from self:currentColor()
+self:neighbors(cm)      -- every OTHER tracked structure within cm of this one
+self:mesh()             -- the declared mesh table
+self:material()         -- the declared material, or one built from color / texture
+self:currentColor()     -- the tint update() will write; override for a state-driven look
+self:iconOf()           -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
 ```
 
 `currentColor()` returns `self.color`, which is the definition's tint by default. Set the field
-on the structure itself to make the look follow the state, then push it:
+on the structure itself to make the look follow the state, then push it — or override the method
+on the definition class when the colour is a function of the state:
 
 ```lua
 onTick = function(self, ctx)
@@ -409,11 +473,33 @@ end,
 ```
 
 <Callout type="info">
-`update()` goes through `core/mesh`, which remembers which backend dressed each actor and sends
-the re-tint back to that same backend. Only `procedural` implements one, writing to the
-material instance it created on attach. A `static` mesh attaches but has no re-tint, so
-`update()` returns `false` there.
+`update()` goes through `core/mesh`, which remembers which backend dressed each actor — keyed on
+the actor's `GetFullName()`, because a UE4SS handle is minted fresh per lookup — and sends the
+re-tint back to that same backend. `static`, `procedural` and `skeletal` all answer: the shared
+material layer makes the dynamic material instance on the spot when the mesh was attached without
+a colour. `true` means a write **executed** on a real material instance. It is not proof of a
+visible change: a write to a parameter name the Palworld material does not carry is a silent
+no-op, and no tint has been watched land in game. `false` means there was nothing to write to —
+no mesh of ours on the actor, or no colour.
 </Callout>
+
+### neighbors
+
+`self:neighbors(radiusCm)` is every **other** tracked structure within that radius — any
+definition, not just this one's — as live instances. It is `core/spatial`'s hash grid, and the
+call re-buckets the tracked instances first, so a structure that moved is still found.
+
+```lua
+onTick = function(self, ctx)
+    for _, n in ipairs(self:neighbors(350)) do    -- everything within 3.5 m
+        log.info(self.key .. " is next to " .. n.key)
+    end
+end,
+```
+
+It returns an empty list on a definition rather than an instance (there is no `self.pos` there)
+and on a radius that is not a positive number. Only structures PalForge is tracking are in the
+index, so a base full of unregistered vanilla ids answers empty.
 
 ### Saving state
 
@@ -424,24 +510,46 @@ directory:
 <UE4SS Mods>/PalForge/state/entities_<saveId>.json
 ```
 
-`saveId` comes from `core/spatial`: `w_` plus the game instance's `WorldGuid`,
-`WorldSaveName` or `SaveName` with anything that is not a letter, digit or underscore replaced
-by `_`, and plain `world` when none of them can be read. The file holds one record per
-structure key:
+`saveId` comes from `core/spatial`, which reads the selected save off the live
+`PalGameInstance`. It tries `GetSelectedWorldSaveDirectoryName` first and falls back to
+`GetSelectedWorldName`, each with its backing property (`SelectedWorldSaveDirectoryName`,
+`SelectedWorldName`) as a second chance; the answer becomes `w_` plus that name with anything
+that is not a letter, digit or underscore replaced by `_`, and plain `world` when nothing can be
+read.
+
+<Callout type="info">
+`WorldGuid`, `WorldSaveName` and `SaveName` are not on that class. `PalGameInstance`'s full
+111-property listing carries neither, so a probe built on those three names could only ever land
+on the `world` fallback — which is why every save shared one persistence file, and why the one
+artifact a real session left behind is called `entities_world.json`. The directory name is
+preferred over the display name because two saves cannot share a save folder, while two saves may
+well carry the same label the player typed.
+</Callout>
+
+The file holds one record per structure key, plus a quarantine section:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "entities": {
     "WorkBench@1234,-56,78": {
+      "v": 2,
       "buildId": "WorkBench",
+      "def": "mypack:Bench",
+      "pack": "mypack",
       "pos": { "x": 123400.0, "y": -5600.0, "z": 7800.0 },
-      "state": { "uses": 3 },
-      "altKeys": {}
+      "state": { "uses": 3 }
     }
-  }
+  },
+  "orphans": {}
 }
 ```
+
+The key is the resolved **build** id and a cell, so it names no owner at all. The owner therefore
+rides inside the record: `v` is the record shape, `def` the definition id that claimed it and
+`pack` the owning pack when the registry can attribute one. An older record is upgraded in place
+the first time a scan binds it, which is the only migration path a single file shared by every
+pack can have.
 
 A record's `state` is the same table as `inst.state`, so changing it in place is enough to
 change what will be written. Nothing writes on its own:
@@ -456,6 +564,16 @@ every tick writes the file on every heartbeat.
 Records are deleted only on real removal. A structure the scan fails to see for six scans in a
 row — about three seconds at the 500 ms cadence — emits `building.remove` and is dropped along
 with its record.
+
+A record whose build id **no definition claims this session** is not deleted. It is quarantined:
+moved into the file's `orphans` section with its bytes intact, logged with a count and with the
+packs it belonged to, and moved back the moment a definition claims that build id again. The
+pass waits about 30 seconds after a world opens before it runs, so a pack that defines its
+buildings at `world.ready` or lazily has time to get there. Quarantine is deliberately
+conservative: a pack a player disabled for one evening must not cost them their structures'
+state. The only thing in the runtime that ever destroys a record is the quarantine cap of 4096,
+past which the oldest quarantined records are dropped oldest-first, and the log says how many and
+why.
 
 ```mermaid
 stateDiagram-v2
@@ -487,6 +605,13 @@ event.isWorldReady()                       -- has the world finished loading
 polls for a valid `PalPlayerCharacter` once a second and only opens the gate after five
 successful polls in a row.
 
+All of it survives a hot reload. The building runtime holds its definition index, its live
+instances, its actor index and its persistence cache in one table on `_G`, and `core/reload`
+keeps `object_manager` across the wipe, so pressing F9 leaves `:instances()` answering and the
+building hooks firing on the definitions you already had. The two halves have to stay together:
+a reload that dropped the registry would look to the orphan pass like every pack unloading at
+once, about thirty seconds after the press.
+
 ## Lifecycle events
 
 Handlers go under `events`. The first argument is the placed structure the event happened to,
@@ -515,9 +640,39 @@ events = {
 | `onBreak` | — | never | — |
 
 <Callout type="warn">
-`onLeftClick` and `onBreak` can be declared, but nothing in the game emits them, so they never
-run. Use `onRightClick` for interaction and `onRemove` for a structure that disappears.
+`onLeftClick` and `onBreak` can be declared, but nothing emits them, so they never run. That is
+settled negatively rather than not yet found — see **What is not there** below. Use
+`onRightClick` for interaction and `onRemove` for a structure that disappears.
 </Callout>
+
+### What is not there, and how that was established
+
+Both missing hooks were searched for by reading the complete function lists of every class that
+could own one, so this is a measurement rather than a gap.
+
+**There is no click, hit or strike entry on `PalBuildObject`.** Its 22 reflected functions are on
+disk in full. The only input-shaped entries are the interact family —
+`OnBeginInteractBuilding`, `OnTriggerInteractBuilding`, `OnStartTriggerInteractBuilding`,
+`OnEndTriggerInteractBuilding` — which is right-click, and is already `onRightClick`. The one
+damage-shaped entry, `OnDamage`, was the standing candidate and is not a strike: a recorded
+session caught it firing **196 times on a strict 12-13 second per-structure cadence**, with no
+player anywhere near it. The workbench placed at t=306.412 took its first at t=306.933 and 180
+more over the next 2250 seconds without dying. It is the deterioration timer, and wiring
+`onLeftClick` to it would call your handler every twelve seconds on every structure in the base,
+for ever.
+
+**Destruction exists only as delegate FIELDS.** None of `PalBuildObject` (22 functions),
+`PalMapObjectModel` (18), `PalMapObjectConcreteModelBase` (25) or `PalNetworkPlayerComponent`
+(77) carries a Destroy / Dismantle / Demolish / Deconstruct / Break function. What does exist is
+`PalMapObjectModel:OnDestroyDelegate` and `:OnDisposeDelegateInServer`, and `RegisterHook`
+cannot address a delegate field by path. `PalBuildObject.OnChangeVisualForDismantle` is the
+dismantle *preview* visual, not a completion.
+
+So a structure disappearing surfaces one way: the scan's miss sweep, as `onRemove` with
+`ctx.reason = "missing"`. That cannot tell a dismantle from a structure that streamed out, and it
+arrives six scans late. Both hooks stay declarable so your own `emit` works and so a future
+source has somewhere to arrive; nothing emits them today. The one place the dumps do not reach is
+a `BP_BuildObject_<Id>_C` subclass graph event — they cover `/Script/Pal.*` only.
 
 ### onPlace
 
@@ -717,8 +872,31 @@ Building.get("example:Bench"):unlock()
 ```
 
 Unlocks the technology row named after the resolved id (`example_Bench`) through
-`PalCheatManager:UnlockOneTechnology`. That is how a building tech injected by PalSchema gets
-into the build menu. Returns `false` and logs when no cheat manager is available.
+`PalCheatManager:UnlockOneTechnology(FName)`. That is how a building tech injected by PalSchema
+gets into the build menu.
+
+<Callout type="warn">
+**This has never been observed working, and it is unverifiable by construction.** A `true` does
+not mean the technology is unlocked. It means the two things that can be read: the cheat call ran
+without raising, and a technology row of that resolved name really exists in the live
+`DT_TechnologyRecipeUnlock` — which is the check that stops the cheat "succeeding" for a building
+with nothing to unlock, and is why `Building.get("PalBoxV2"):unlock()` is `false` (only 115 of the
+501 vanilla build ids have such a row).
+
+What cannot be read is the result. `UnlockOneTechnology` returns nothing, and no "is this
+technology unlocked" accessor exists anywhere on this build — not on the cheat-manager surface,
+not in the header dump, not in the item bridge. And it rides the same cheat-manager route that was
+measured accepting a call and silently doing nothing, which is the exact failure this cannot
+distinguish itself from.
+
+The only way to settle it is to press it in a save and look at the build menu. That is the
+declared hook `pf_hook building-unlock` — it needs a world and a player and it writes, because it
+mutates the player's technology state.
+</Callout>
+
+`false` also comes back, with a distinct log line each time, when the technology table cannot be
+read at all and when there is no cheat manager to call — this route uses whichever one already
+exists and does not construct one.
 
 ### instances, render, update
 
@@ -893,8 +1071,9 @@ return Building{
 
 The `if` runs its body as soon as the spawn call is issued, which is several seconds before the
 pal turns up — so the counter and the cooldown move first and the creature follows. That is the
-right order here: the post has committed to the summon. Defining `PalBoxV2` again replaces the
-ready-made definition from `native/buildings.lua`, so the mesh is restated here. The vanilla pal box UI still opens — the interact hook watches the
+right order here: the post has committed to the summon. `native/buildings.lua` registers nothing,
+so this is the only definition of `PalBoxV2`; its mesh is restated here because a definition
+carries only what it declares. The vanilla pal box UI still opens — the interact hook watches the
 call, it does not swallow it.
 
 ## Summary
@@ -905,11 +1084,13 @@ call, it does not swallow it.
 - Handlers go in `events`, and the first argument is the placed structure, so `self.state`,
   `self.pos` and `self.actor` are right there.
 - `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady` and
-  `onWorldLeft` all run. `onLeftClick` and `onBreak` never do.
+  `onWorldLeft` all run. `onLeftClick` and `onBreak` never do, and that is measured, not pending.
 - A structure is found again by its rounded world position, so `gridCm` decides how close two
-  of them can stand.
+  of them can stand. The record that key names carries the definition and pack that own it.
+- Registering a building is a write: only a registered definition is tracked, and only a tracked
+  structure is persisted. `native/buildings.lua` registers nothing until you `publish` it.
 - `Building.get(id):instances()` gives you every structure of that definition standing in the
-  world right now.
+  world right now, and `self:neighbors(cm)` gives one structure the ones standing around it.
 
 Next, read [Item](/docs/api/item) for `:give` and `:take`, which is how a building hands things
 to the player.

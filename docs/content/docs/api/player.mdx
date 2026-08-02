@@ -246,8 +246,15 @@ your point — where it lands exactly. All of that takes four to eight seconds, 
 the pal turning up next to you and then moving.
 
 `:spawn` returns before any of it has happened, so the boolean says the call was issued and
-nothing more. See [Pal](/docs/api/pal). It also needs the `CheatManagerEnabler` mod: without it
-there is no admin object at all, and a world spawn answers `false` before it reaches the game.
+nothing more. See [Pal](/docs/api/pal).
+
+It does **not** need the `CheatManagerEnabler` mod. `core/spawn` looks for a live
+`PalCheatManager`, then for one on the player controller, and when the session has neither it
+builds one itself: `StaticConstructObject` on the `PalPlayerController`'s own `CheatClass`,
+falling back to `/Script/Pal.PalCheatManager` and then `/Script/Engine.CheatManager`, attached to
+the controller so it happens once per session rather than once per spawn. What a world spawn does
+need is a player controller — no world loaded, or not connected yet, and it answers `false`
+before reaching the game and warns that none could be built.
 </Callout>
 
 ### Spawn in front of the player
@@ -304,6 +311,38 @@ Guard every call on its own, because `coordinateOffset` re-reads the pawn each t
 player leaves the world halfway through the loop, the remaining rounds get `nil` rather than
 a stale position.
 
+### What the player is carrying
+
+The local player's inventory is readable, and that read is the one item route on this build
+measured end to end. `Item.Handle:count()` walks the `PalUtility` CDO to the player, to the
+player state, to `InventoryData`, and asks the game's own `CountItemNum`: a loaded save answered
+`135` for `Wood` as a plain Lua number, with a real object printed at every step of that chain.
+
+```lua title="content/inventory_report.lua"
+local event = require("palforge.core.event")
+local log   = require("palforge.utils.log").scope("example")
+
+event.on("world.ready", function()
+    for _, id in ipairs({ "Wood", "Stone", "Berries" }) do
+        local n = Item.get(id):count()
+        log.info(string.format("%-8s %s", id, n and tostring(n) or "unknown"))
+    end
+end)
+```
+
+`nil` means **unknown**, never zero — no world, no player, or a read that would not answer. Guard
+it exactly the way you guard `Player.coordinate()`.
+
+<Callout type="warn">
+Reaching past the API and calling `CountItemNum` yourself is fine, but the id must be wrapped:
+`inv:CountItemNum(FName("Wood"))` answers, while `inv:CountItemNum("Wood")` — a bare Lua string
+where an `FName` is declared — faults inside UE4SS's argument marshalling and takes Palworld down,
+and `pcall` never sees it. That happened once, on the line after the read that succeeded. It is
+also why the 64-bit sibling `CountItemNum64` is called nowhere in PalForge: it is in the class's
+function list, its parameter list has never been read, and guessing at a declaration is what cost
+the session.
+</Callout>
+
 ### Distance to something in the world
 
 A live building carries `pos`, the same `x, y, z`-in-centimetres shape, so a plain distance
@@ -340,6 +379,7 @@ end
 - `Player.coordinateOffset(dx, dy, dz)` is that point shifted along the world axes — the short way to say "next to me".
 - `Player.character()` is the player's own actor, for anything you want to apply to them directly.
 - All three give `nil` when there is no world, so check before you use the value.
+- What the player is holding is readable: `Item.get(id):count()`, with `nil` meaning unknown.
 - Read them fresh each time. They are snapshots, and the pawn is rebuilt on every world load.
 
 Next, read [Pal](/docs/api/pal) to see what `:spawn` does with the coordinate you just found.

@@ -8,7 +8,7 @@ description: 怎么做出一份内容、会拿回什么，以及之后怎么再�
 - 把自己的帕鲁、道具、建筑物、声音或网格加进游戏
 - 不声明任何东西，就给游戏里已有的内容加上新行为
 - 在包的任何地方，找回你先前做好的东西
-- 起一个不会和别人模组撞车的名字
+- 起一个不会和别人模组撞车的名字，真撞上时也能知道
 - 读懂字段写错时 PalForge 打印的消息，并把它改对
 
 ## 做出一样东西
@@ -172,28 +172,43 @@ end
 for name, handler in pairs(spec.events) do cls[name] = handler end
 ```
 
-然后这个类被注册：
+然后这个类连同“此刻正在定义的是哪个模组包”一起被注册：
 
 ```lua
-pcall(function() om.register("pal", spec.id, cls) end)
+om.register("pal", spec.id, cls, { pack = pack })
 ```
 
-由此有两点。注册是在 `pcall` 里跑的，所以注册表出问题绝不会弄坏你的定义调用。另外，键就是
-**你写下来的那个 id**，冒号也在里面 —— `"example:Boss"` 存在 `"example:Boss"` 下，而不是
-`"example_Boss"`。
+`register` 返回这个类，或者返回 `nil` 加一条原因，它从不抛异常。八个域里有六个是尽力调用并丢掉
+返回值的，所以注册表出问题绝不会弄坏你的定义调用。另外两个不会沉默，因为没注册上的定义谁也找
+不到：`api/pal.lua` 会读这个返回值，`api/ui.lua` 会捕获异常并点名什么将不再工作。
 
-注册表可以直接读：
+```text
+[PalForge.pal][err] Pal 'example:Boss' could NOT be registered (...) — it will receive no lifecycle events and Pal.get will not find it
+```
+
+键就是**你写下来的那个 id**，冒号也在里面：`"example:Boss"` 存在 `"example:Boss"` 下。解析后的
+写法 `example_Boss` 会进到旁边的第二份索引里，分发拿游戏行名来比对的正是它。
+
+注册表可以直接读，也可以问它某个 id 归谁：
 
 ```lua
 local om = require("palforge.core.object_manager")
 
-om.get("pal", "ChickenPal")   -- the definition class, or nil
-om.all("pal")                 -- { id -> cls }, a shallow copy you may not mutate into
-om.TYPES                      -- audio, building, effect, item, mesh, pal, skill, ui
+om.get("pal", "ChickenPal")          -- the definition class, or nil
+om.all("pal")                        -- { id -> cls }, a shallow copy you may not mutate into
+om.TYPES                             -- audio, building, effect, item, mesh, pal, skill, ui
+
+om.isRegistered("pal", "ChickenPal") -- always a boolean: is this id taken
+om.owner("pal", "example:Boss")      -- the pack id that registered it, or nil
+om.entry("pal", "example:Boss")      -- a copy of { cls = , pack = , resolved = }
+om.byResolved("pal", "example_Boss") -- cls, sourceId - one table read, not a scan
+om.unregister("pal", "example:Boss") -- true when something was there to forget
+om.validId("my-pack:Bench")          -- false, plus the reason
 ```
 
-`om.all` 交还的是一份副本，往里写不会有任何变化。一个 id 注册之后就一直在；想改就再定义
-一次。
+“这个 id 被占了吗”只有 `om.isRegistered` 能公开回答：`X.get` 答不了，因为七个域在没命中时会
+造一个薄句柄出来，而 `Mesh.get` 直接抛异常。`om.all` 和 `om.entry` 交还的都是副本，往里写不会
+有任何变化。
 
 ## 一次调用，从头到尾
 
@@ -327,7 +342,9 @@ Pal{
 ## ID：你自己的，和游戏的
 
 带冒号的 id 是包 id：`"packid:name"`。在游戏的 DataTable 里，对应那一行的 FName 是
-`packid_name`。PalSchema 的行是所有模组共用的，所以这个前缀就是防止两个包撞车的东西。
+`packid_name` —— 这条规则不是假设出来的：转储的 `DT_ItemDataTable` 里注入的那两行，写法正好就是
+`PalSmith_TestPotion` 和 `example_Potion`。PalSchema 的行是所有模组共用的，所以这个前缀就是防止
+两个包撞车的东西。
 
 不带冒号的 id 就是字面上的游戏 id：`"Wood"`、`"ChickenPal"`、`"PalBoxV2"`、`"WorkBench"`、
 `"AKE_BGM_Title"`。
@@ -340,13 +357,25 @@ om.resolve("PalBoxV2")        -- "PalBoxV2"
 om.resolve("my pack:Bench")   -- nil, "invalid pack id 'my pack' (letters/digits/_ only)"
 ```
 
-带命名空间的 id，冒号两边都只能是字母、数字或下划线。这项检查是在 id 被 **解析** 的时候跑的，
-不是你定义它的时候 —— 定义时对 `id` 只检查它是不是非空字符串。
+带命名空间的 id，冒号两边都只能是字母、数字或下划线；这个形状在**定义**时和解析时都会检查。
+代价最大的那种写法值得写出来：`Building{ id = "my-pack:Bench" }` 因为有连字符而无法解析，于是
+build id 永远进不了扫描的索引，于是 `onPlace` / `onLoad` / `onTick` / `onRemove` 一个都不可能
+触发 —— 而这份定义还会返回一个看上去很正常的句柄。现在它是一个直接点名规则的硬错误：
+
+```text
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
+id 是**按域**分开的。注册表的键是 `(type, id)` 这一对，所以 `Pal{ id = "Ash" }` 和
+`Item{ id = "Ash" }` 是两条互不相干的记录，撞不到一起。真会撞的是同一个域里解析到同一个行名的
+两个 id，那种情况会在定义时发出警告。
 
 解析发生在需要游戏行名的地方，不在注册表里：
 
 - `Building.Handle:unlock()` 会先解析 id，再解锁科技行。
 - `core/event` 会先解析建筑物的 `buildIds`，再拿已放置的 actor 去和它们比对。
+- `:iconOf()`、被动技能的写入和音频目录的查找也都先解析，所以
+  `Item{ id = "pack:Potion" }:iconOf()` 能够到真正那一行。
 
 注册表的键始终是你写下来的那个 id，这一点在查找时很要紧：
 
@@ -356,6 +385,27 @@ Building{ id = "example:Bench" }
 Building.get("example:Bench")   -- the definition
 Building.get("example_Bench")   -- a thin fallback: nothing is registered under that key
 ```
+
+### 说明是哪个包在定义
+
+定义调用只是一次普通的 Lua 调用，本身不带任何“是哪个模组干的”的证据。所以除非包自己说明，否则
+没有东西能给一次注册标上归属，也分不清一个包是在覆盖自己的 id 还是别人的 id。说明的地方就是
+`PalForge.pack(packId)`：
+
+```lua
+local mine = PalForge.pack("mypack", { depends = { "otherpack" } })
+local Item = mine.Item
+
+Item{ id = "mypack:Potion" }     -- registered with pack = "mypack"
+```
+
+它交还的还是同样的九个成员。八个构造器被包了一层，使定义在记录着包名的状态下运行；域以具名函数
+形式额外提供的定义入口（`Audio.bgm`、`Audio.se`）也一样，因为它们同样会注册。其余的东西 ——
+`X.get`、`X.get_all`、`Player` —— 原样透传。这张带作用域的表是只读视图：往上赋值会报错，而不是
+悄悄和别人看到的那个模块产生分歧。
+
+用不用随你。不用的包，其记录上的 `pack` 是 `nil`，那也是一条完全正常的记录，意思是“没有哪个包
+特别声明过它”；唯一的代价是撞车时说不出归属。
 
 <Callout type="warn">
 定义一个带命名空间的 id，是给这个 id 加上行为和元数据。它不会给游戏加一行新的 DataTable ——
@@ -451,8 +501,8 @@ Building{ id = "WorkBench", name = "Workbench", gridCm = 100, mesh = BenchBody }
 
 ## 同一个 id 定义两次
 
-`om.register` 直接写进桶里，所以同一个 `(type, id)` 定义两次会把原来那条记录换掉。不会有任何
-警告，注册也收不回来。
+同一个 `(type, id)` 定义两次会把原来那条记录换掉。last-wins 是既定策略，并且仍然是；注册表补上
+的是：这次替换看得见，而且在双方都报过名字时说得出归属。
 
 ```lua
 local first  = Item{ id = "Wood", name = "Wood" }
@@ -462,6 +512,26 @@ first:name()              -- "Wood"          (the first class, still held by tha
 second:name()             -- "Seasoned Wood"
 Item.get("Wood"):name()   -- "Seasoned Wood" (the registry holds the second)
 ```
+
+分三种情况，日志的写法是刻意不同的：
+
+- **两个包争一个 id。** 一条警告，点名类型、id、原来持有它的包、正在接手的包，以及结果。
+- **一个包重新定义自己的 id。** 在警告级别上是安静的。这是最寻常的情况 —— F9 热重载、测试套件、
+  原生目录再次实体化一行 —— 所以它是一条受 `env.debug` 控制的 info，而不是让作者读上几百遍的
+  警告。
+- **两个 id 落到同一行游戏数据。** `"my:pack_Thing"` 和 `"my_pack:Thing"` 都会变成
+  `my_pack_Thing`，于是一行上挂着两份定义。警告会点名两个源 id，并说明现在是哪一个拥有解析后的
+  查找。把其中一个改名。
+
+```text
+[PalForge.objects][warn] item 'Wood' was defined by pack 'first' and is being redefined by pack 'second'; the new definition replaces the old one (last-wins)
+[PalForge.objects][warn] item ids 'my:pack_Thing' and 'my_pack:Thing' both resolve to the single game row 'my_pack_Thing' — one row, two definitions. 'my_pack:Thing' now owns the resolved lookup; rename one of them
+```
+
+要说得出归属，就得有名字可打：不用 `PalForge.pack("mypack")` 的话，双方都以 `pack = nil` 注册，
+那读起来就是同一个主人，于是这次撞车会被记成一次安静的重新定义，而不是一条警告。
+
+注册也是收得回来的：`om.unregister(type, id)`，它会告诉你原本有没有东西在。
 
 由此可以得出：
 
@@ -691,9 +761,11 @@ Pal{
   第一个参数收到的就是它。
 - `X.get(id)` 用来再次找到它。七个领域在查不到时会给你一个只带 id 的薄句柄，所以原版内容不用
   声明就能操作；只有 `Mesh.get` 是抛错。
-- 带冒号的 id 是你自己的（`"mypack:Bench"`），不带冒号的是游戏的（`"Wood"`）。定义是把行为
-  挂到一个已经存在的 id 上。
+- 带冒号的 id 是你自己的（`"mypack:Bench"`），不带冒号的是游戏的（`"Wood"`）。带命名空间的 id
+  两边都只能是字母、数字和 `_`，这一点在定义时就检查；id 还是按域分开的。
 - 字段写错或拼错都是直接报错，报错里会写明字段名，而且什么都不会注册。
+- 同一个 id 定义两次会被替换，而注册表会说出来：跨包撞车点名双方的归属，两个 id 落到同一行
+  游戏数据则点名两个 id。用 `PalForge.pack("mypack")` 报上名字，这些消息里才说得出你。
 - 每个 id 在加载时只定义一次，处理函数里用 `X.get`。
 
 接着读 [生命周期](/docs/concepts/lifecycle)，看看哪些事件真的会到达你的处理函数。

@@ -2,8 +2,11 @@
   "title": "核心概念",
   "pages": [
     "definitions",
+    "identity-and-ownership",
     "schema",
     "lifecycle",
+    "status-and-icons",
+    "spatial-index",
     "editor-setup"
   ]
 }

@@ -9,6 +9,7 @@ description: 書けるフィールドと、それぞれの意味と、間違え�
 - 定義が間違っているときに出るメッセージを読んで、名指しされた行をそのまま直す
 - ゲームを動かしたまま、パルや建物にどのフィールドが書けるかを調べる
 - 同じモデルを、書き直さずに複数のパルで使い回す
+- 登録せずに定義だけを組み立て、id の所有パックを記録する
 - 自分のパックの設定も同じ方法で確認して、書き間違いを遊ぶ前に止める
 
 `Pal{ ... }` や `Item{ ... }`、`Building{ ... }` といった `X{ ... }` の呼び出しは、ゲームに
@@ -33,14 +34,18 @@ local Spec = schema.define("Mesh.Spec", {
                    doc = "mesh id, e.g. \"pack:name\" (required when defined directly; omit when inline)" },
     { "kind",      type = "string", values = { "procedural", "static", "skeletal", "obj" },
                    default = "skeletal", doc = "which core.mesh backend renders it" },
-    { "model",     type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" },
-    { "animClass", type = "string", doc = "ABP_*_C animation blueprint path (skeletal only)" },
+    { "model",     type = "string", required = true,
+                   doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it" },
+    { "animClass", type = "string",
+                   doc = "a /Game/... ABP path, with or without the _C tail (see Mesh.assets.ABP); skeletal only" },
     { "scale",     type = "number", doc = "uniform scale applied to the attached mesh" },
-    { "offset",    type = "table",  doc = "{ x, y, z } offset from the pawn's origin" },
-    { "texture",   type = "string", doc = "absolute path to a png applied to the mesh" },
+    { "offset",    type = "table",  doc = "{ x, y, z } offset from the mesh's normal position, in cm" },
+    { "texture",   type = "string",
+                   doc = "a /Game/... UTexture2D path (see Mesh.assets.T), or a png of your own - absolute, or relative to the .lua file that declares it" },
     { "color",     type = "table",  doc = "tint { r, g, b, a } in 0..1" },
     { "material",  type = "string", doc = "base material asset path to instance from" },
-    { "params",    type = "table",  doc = "extra material parameters passed through" },
+    { "params",    type = "table",
+                   doc = "extra material parameters: { vector = { name = {r,g,b,a} }, scalar = { name = n }, texture = { name = \"/Game/... or <abs png>\" } }" },
 }, { handle = "Mesh.Handle" })
 ```
 
@@ -157,7 +162,8 @@ Pal{ id = "example:Boss", events = { onSpawned = counter } }   -- accepted
 default が同時に効くフィールドはありません。
 
 ```lua
-{ "model", type = "string", required = true, doc = "USkeletalMesh / UStaticMesh asset path" }
+{ "model", type = "string", required = true,
+           doc = "a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); ..." }
 ```
 
 `id` はどのドメインでも必須です。唯一 `Mesh.Spec` だけが任意で、パルや建物の中にインラインで書いた
@@ -202,9 +208,9 @@ PalForge 自身のフィールド一覧に関数デフォルトを使うもの�
 名前まで伸びるので、ネストしたテーブル内のフィールドの話でも、どの一覧を読みに行けばよいか分かります。
 
 ```lua
-{ "mesh",   type = "table", of = Mesh,   doc = "the mesh attached to a spawned pawn" }
+{ "mesh",   type = "table", of = Mesh,   doc = "the mesh worn by a spawned pawn ..." }
 { "events", type = "table", of = Events, doc = "lifecycle handlers (grouped)" }
-{ "recipe", type = "table", of = Recipe, doc = "the recipe that produces THIS item" }
+{ "recipe", type = "table", of = Recipe, doc = "the recipe that produces THIS item ..." }
 ```
 
 ### arrayOf
@@ -254,7 +260,7 @@ Item{
 
 ```lua
 { "onSpawned", type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
-               doc = "LIVE (candidate hook) - finished spawning into the world" }
+               doc = "LIVE - a pal finished initialising (ctx.actor); may repeat per pawn, keep it idempotent" }
 ```
 
 ### check
@@ -262,7 +268,8 @@ Item{
 ネストした `of` も含めて、**すべての後に**走る自前の判定です。受理するなら `true`、拒否するなら
 `false` と理由の文字列を返します。その理由がメッセージにそのまま引用されます。
 
-共有されているのは `schema.nonEmpty` で、全ドメインの `id` フィールドが使っています。
+`core/schema.lua` が公開している共有 check は 2 つです。`schema.nonEmpty` は弱いほうで、
+空でない文字列かどうかしか見ません。
 
 ```lua title="Scripts/palforge/core/schema.lua"
 function M.nonEmpty(v)
@@ -270,6 +277,33 @@ function M.nonEmpty(v)
     return false, "must be a non-empty string"
 end
 ```
+
+強いほうが `schema.validId` で、これが**定義時の id 検証そのもの**です。コロンを含まない id は
+ゲーム側のそのままの id なので、空でなければ通ります。コロンを含む id は名前空間付きなので、
+前後どちらの半分も `^[%w_]+$` でなければなりません。`core/object_manager.resolve` が要求する形
+そのもので、`pack:name` に対して PalSchema が書き込む行の綴りが `pack_name` だからです。
+`schema.validId` は `om.validId` に委譲していて、パターンの写しをここに持ちません。5 つの
+ドメインはこれをフィールドに付けています。
+
+```lua title="Scripts/palforge/api/pal.lua"
+{ "id",  type = "string", required = true, check = schema.validId,
+         doc = "pal id: a game CharacterID (\"ChickenPal\") or \"pack:name\"" },
+```
+
+`Item.Spec`・`Skill.Spec`・`Effect.Spec`・`Audio.Spec` の `id` も同じ書き方です。残る 3 つ、
+`Mesh`・`Building`・`UI` は自分の `define` の中で `om.validId` を直接呼びます。理由の前に置く
+文言をそれぞれ変えたいからです。拒否する id は 8 ドメインとも同じです。
+
+```text
+PalForge: Pal: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Boss' (letters/digits/_ only)
+PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+PalForge: Mesh: id "my-pack:body" is not a valid PalForge id: invalid pack id 'my-pack' in 'my-pack:body' (letters/digits/_ only)
+```
+
+引っかかるのはパック名側のハイフンです。`Building{ id = "my-pack:Bench" }` は登録自体はきれいに
+通り、そのあとゲーム側の境界すべてで死にます。アイコン参照もテクノロジー解放もビルド ID の照合も
+外れ、ログには何も出ません。この check があると、それが定義を書いているその場で読める 1 行に
+変わります。
 
 自作の check も同じ約束に従います。
 
@@ -300,6 +334,64 @@ end
 形の側で一度宣言しておけば、`of` でその形を指すすべてのフィールドが、書き直さなくてもエディタ上で
 ユニオンになります。`Pal.Spec.mesh` は `Mesh.Spec|Mesh.Handle` です。派生した形はベースの
 `handle` を引き継ぐので、`Building.Spec.Mesh` も `Mesh.Handle` を報告します。
+
+## 定義の第 2 引数
+
+`X{ ... }` は `X(spec, opts)` を引数 1 つで呼んだ形です。8 つのドメインのコンストラクタはすべて
+この第 2 引数を受け取ります。省略可能で、制御するのは**登録だけ**です。定義そのものには何も影響
+しません。返ってくるハンドルはどちらでも同じものです。
+
+```lua
+Item{ id = "example:Torch", maxStack = 20 }                             -- define and register
+
+local h = Item({ id = "example:Torch", maxStack = 20 },
+               { register = false })                                    -- build the handle, register nothing
+
+Item({ id = "example:Torch", maxStack = 20 }, { pack = "mypack" })      -- register with an owner
+```
+
+<TypeTable
+  type={{
+    register: {
+      description: 'false ならハンドルを組み立てて返すだけで、id をレジストリに入れない。それ以外なら登録する。',
+      type: 'boolean',
+      default: 'true',
+    },
+    pack: {
+      description: '登録の所有者として記録されるパック id。id の衝突がどのパックのものか特定できるのはこれによる。',
+      type: 'string',
+    },
+  }}
+/>
+
+`register = false` は、**読み取り**が書き込みになってしまうのを防ぐためのものです。ネイティブ
+カタログは必要になった時点で定義をでっち上げます（`native.buildings.Foundation` は内部的には
+`Building{ id = ... }` です）。そして建物にとって登録は無害ではありません。`core/event` の再構成
+スキャンが新しい定義を拾い、その時点で世界に立っているすべての一致アクターが追跡対象のインスタンス
+になり、セーブに永続化されます。つまりツールチップで建物 id を 1 つ読むだけで、拠点の土台すべての
+レコードを書き始めていました。カタログ側は `{ register = false }` を渡すので、参照はふたたび
+ただの参照です。
+
+`pack` はスコープ付きの表面が代わりに埋めてくれます。`PalForge.pack("mypack").Item` は、
+`{ pack = "mypack" }` をあらかじめ付けた同じコンストラクタです。
+
+`Pal`・`Item`・`Skill`・`Effect`・`Audio` はこの引数を `schema.defineOpts` に通します。書き間違いを
+弾くのもそこです。黙って無視されるオプションこそ、この層が防ぐために存在する失敗そのものだからです。
+
+```lua
+Item({ id = "example:Torch" }, { registr = false })
+Item({ id = "example:Torch" }, { register = "no" })
+Item({ id = "example:Torch" }, "nope")
+```
+
+```text
+PalForge: Item: unknown define option "registr". Valid options: register, pack
+PalForge: Item: define option "register" expects boolean, got string
+PalForge: Item: the second argument is the options table { register = false, pack = "packid" }, got string
+```
+
+`Mesh`・`Building`・`UI` は `schema.defineOpts` を呼ばず、自分の `define` の中で同じ 2 つのキーを
+読みます。`register` と `pack` の扱いは同じですが、3 つ目のキーを書いてもエラーにはなりません。
 
 ## 定義を呼んだときに起きること
 
@@ -535,7 +627,7 @@ Pal{ id = "example:Boss", mesh = { kind = "skeletal" } }
 ```
 
 ```text
-PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (USkeletalMesh / UStaticMesh asset path)
+PalForge: Pal: field "mesh" (Mesh.Spec): field "model" is required (a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it)
 ```
 
 ```lua
@@ -627,7 +719,7 @@ Pal{ id = "example:Boss", mesh = { model = "/Game/Pal/Model/Character/Monster/Ch
 local body = Mesh{
     id      = "example:body",
     model   = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal",
-    texture = "C:/mods/example/body.png",
+    texture = "art/body.png",
 }
 
 Pal{ id = "example:Boss", mesh = body }
@@ -702,13 +794,15 @@ local Mesh = schema.derive("Building.Spec.Mesh", schema.get("Mesh.Spec"), {
 ```text
 Mesh.Spec {
   kind          string     (default=skeletal, one of { "procedural", "static", "skeletal", "obj" }) which core.mesh backend renders it
-  model         string     (required) USkeletalMesh / UStaticMesh asset path
+  model         string     (required) a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
+  offset        table      { x, y, z } offset from the mesh's normal position, in cm
   ...
 }
 
 Building.Spec.Mesh {
   kind          string     (default=static, one of { "procedural", "static", "skeletal", "obj" }) which core.mesh backend renders it
   model         string     (required) UStaticMesh asset path, or an OBJ path for the procedural backend
+  offset        table      { x, y, z } offset from the actor's origin
   ...
 }
 ```
@@ -757,11 +851,11 @@ Pal.Spec {
   name          string     shown in UI (defaults to id)
   description   string     one-line description, for UI and tooling
   skills        table      (string[]) skill ids this pal owns (see Skill)
-  mesh          table      (Mesh.Spec) the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+  mesh          table      (Mesh.Spec) the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
   material      table      (Pal.Spec.Material) material override applied to that mesh
   color         table      base tint { r, g, b, a } (shorthand for material.color)
   texture       string     png path applied to the mesh (shorthand for material.texture)
-  icon          any        fallback icon used when the DataTable lookup misses
+  icon          string     /Game/... texture path used when the icon DataTable has no row for this id
   events        table      (Pal.Spec.Events) lifecycle handlers (grouped)
   data          table      free-form payload of your own, carried onto the definition
 }
@@ -779,7 +873,7 @@ print(schema.help("Pal.Specc"))
 ```
 
 ```text
-PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Spec
+PalForge: no spec named "Pal.Specc". Declared: Audio.Spec, Building.Spec, Building.Spec.Events, Building.Spec.Material, Building.Spec.Mesh, Coord, Effect.Spec, Effect.Spec.Events, Item.Spec, Item.Spec.Events, Item.Spec.Recipe, Mesh.Spec, Pal.Spec, Pal.Spec.Events, Pal.Spec.Material, Skill.Spec, Skill.Spec.Events, UI.Node.Border, UI.Node.Button, UI.Node.Frame, UI.Node.GameWidget, UI.Node.HBox, UI.Node.Label, UI.Node.Overlay, UI.Node.ScrollBox, UI.Node.SizeBox, UI.Node.Sprite, UI.Node.VBox, UI.Spec, UI.Spec.Host
 ```
 
 `schema.all()` は新しいリストを**宣言順**で返します。ソートはされません。ネストした形は常にそれを
@@ -793,25 +887,42 @@ end
 ```
 
 ```text
-Mesh.Spec            Mesh.Handle
-Pal.Spec.Material    nil
-Pal.Spec.Events      nil
-Pal.Spec             nil
-Item.Spec.Recipe     nil
-Item.Spec.Events     nil
-Item.Spec            nil
-Building.Spec.Mesh   Mesh.Handle
+Mesh.Spec              Mesh.Handle
+Pal.Spec.Material      nil
+Pal.Spec.Events        nil
+Pal.Spec               nil
+Item.Spec.Recipe       nil
+Item.Spec.Events       nil
+Item.Spec              nil
+Building.Spec.Mesh     Mesh.Handle
 Building.Spec.Material nil
-Building.Spec.Events nil
-Building.Spec        nil
-Skill.Spec.Events    nil
-Skill.Spec           nil
-Effect.Spec.Events   nil
-Effect.Spec          nil
-Audio.Spec           nil
-UI.Spec              nil
-Coord                nil
+Building.Spec.Events   nil
+Building.Spec          nil
+Skill.Spec.Events      nil
+Skill.Spec             nil
+Effect.Spec.Events     nil
+Effect.Spec            nil
+Audio.Spec             nil
+UI.Node.VBox           nil
+UI.Node.HBox           nil
+UI.Node.Overlay        nil
+UI.Node.ScrollBox      nil
+UI.Node.Border         nil
+UI.Node.SizeBox        nil
+UI.Node.Label          nil
+UI.Node.Frame          nil
+UI.Node.Button         nil
+UI.Node.Sprite         nil
+UI.Node.GameWidget     nil
+UI.Spec.Host           nil
+UI.Spec                nil
+Coord                  nil
 ```
+
+形は全部で 30 個あり、そのうち 11 個は `UI.Node.*` — `UI.VBox`・`UI.Label`・`UI.Button` などの
+ノードコンストラクタが受け取る形が 1 つずつ — で、さらに `UI.Spec.Host`（パネルの `host` を
+テーブルで書いたときの形）が加わります。いずれも `api/ui.lua` が他のスペックと同じように宣言して
+いるので、`schema.help("UI.Node.Button")` は `schema.help("Pal.Spec")` と同じように答えます。
 
 名前にドメインが付かない唯一の形が `Coord` です。`Player.coordinate()` が返し、
 `Pal.Handle:spawn` が受け取る世界座標で、`schema.help("Coord")` とエディタの両方がフィールドを
@@ -849,11 +960,11 @@ doc 付きで補完するには、LuaLS がワークスペース内でこのフ�
 ---@field name? string # shown in UI (defaults to id)
 ---@field description? string # one-line description, for UI and tooling
 ---@field skills? string[] # skill ids this pal owns (see Skill)
----@field mesh? Mesh.Spec|Mesh.Handle # the mesh attached to a spawned pawn (inline, or a Mesh{ ... } handle)
+---@field mesh? Mesh.Spec|Mesh.Handle # the mesh worn by a spawned pawn (inline, or a Mesh{ ... } handle); attached automatically on pal.spawned
 ---@field material? Pal.Spec.Material # material override applied to that mesh
 ---@field color? table # base tint { r, g, b, a } (shorthand for material.color)
 ---@field texture? string # png path applied to the mesh (shorthand for material.texture)
----@field icon? any # fallback icon used when the DataTable lookup misses
+---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Pal.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 ```
@@ -987,10 +1098,10 @@ local ok, err = pcall(function()
         mesh        = Mesh{
             id      = "example:chicken",
             model   = "/Game/Pal/Model/Character/Monster/ChickenPal/SK_ChickenPal",
-            texture = "C:/mods/example/chicken.png",
+            texture = "art/chicken.png",
         },
         events = {
-            onSpawned = function(pal, ctx) pal:renderOn(ctx.actor) end,
+            onSpawned = function(pal, ctx) log.info("chicken spawned") end,
         },
     }
 end)
@@ -1002,8 +1113,13 @@ if not ok then log.err(tostring(err)) end
 
 - `X{ ... }` の呼び出しは、何かが登録される前に検査されます。丸ごと成功するか、送出して何も登録
   しないかのどちらかです。
-- `id` はどのドメインでも必須です。書かなかったフィールドは、任意かデフォルトで埋まるかのどちらか
-  です。
+- `id` はどのドメインでも必須で、その形は書いている最中に検査されます。コロンを含む id の前後
+  どちらかに英数字と `_` 以外が入っていれば、ゲームが決して届かないものを登録する代わりに送出
+  します。
+- `X{ ... }` は `X(spec, opts)` を引数 1 つで呼んだ形です。省略可能な第 2 引数が制御するのは登録
+  だけで、`{ register = false }` はハンドルを組み立てて何も登録せず、`{ pack = "mypack" }` は
+  所有者を記録します。
+- 書かなかったフィールドは、任意かデフォルトで埋まるかのどちらかです。
 - フィールド名の書き間違いはエラーになり、多くの場合メッセージが意図したフィールドを名指しします。
 - メッセージは `PalForge: ` で始まり、ドメイン、フィールド、理由の順に続きます。`(...)` に形の
   名前が出たら、それが調べるべき内側の一覧です。

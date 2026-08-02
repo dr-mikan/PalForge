@@ -9,6 +9,27 @@
 --   key = "<buildId>@<qx>,<qy>,<qz>"
 -- The canonical position is always the live actor's GetActorLocation.
 --
+-- WHAT THE KEY DOES NOT CARRY, AND WHERE THAT LIVES INSTEAD (F-7). `buildId` is the
+-- RESOLVED game build id — "WorkBench", "mypack_Bench" — because it is matched against what
+-- the game emits, and it therefore names no pack and no definition. So the key alone cannot
+-- answer "whose record is this?", and a persistence file shared by every pack needs an
+-- answer. It is not fixed by widening the key: changing the key format invalidates every
+-- record every player already has, and the pack id is not knowable from an actor in the
+-- world. The owner rides INSIDE the record instead — core/event.lua writes `v` (record
+-- version), `def` (the definition id, e.g. "mypack:Bench") and `pack` (the owning pack id,
+-- when object_manager can attribute it) into every record and stamps old ones on first bind.
+--
+-- TWO CONSEQUENCES OF A POSITIONAL KEY, both deliberate and both worth knowing:
+--   * Renaming what a definition attaches to changes the key, so nothing migrates by
+--     itself. core/event.lua migrates the one unambiguous case (the record still names a
+--     registered definition, and that definition now claims exactly one build id) and
+--     QUARANTINES the rest rather than deleting them, so the player's state survives a
+--     rename and comes back if the id comes back. See its header for the whole policy.
+--   * Two definitions that resolve to the same build id share one key space and therefore
+--     one record. core/event.lua's refreshDefs picks a deterministic winner and logs the
+--     collision; it cannot split the state, because there is only one structure standing
+--     there and only one record describing it.
+--
 -- The neighbour index is not automatic: it has a small drive contract (what to call
 -- on place, on remove and to query) written out at "hash-grid neighbour index" below.
 local M = {}
@@ -51,11 +72,12 @@ M.dist2 = dist2
 -- the game, and holds STRONG references — an instance dropped without indexRemove
 -- stays alive in here until indexReset.
 --
--- DRIVING IT — the whole contract, in call order:
---   on place / load   spatial.indexAdd(inst)       -- building runtime: core/event.lua:277
---   on remove         spatial.indexRemove(inst)    -- building runtime: core/event.lua:293
---   on world left     spatial.indexReset()         -- building runtime: core/event.lua:516
---   after a move      spatial.indexUpdate(inst)    -- see reindexAll + the gap below
+-- DRIVING IT — the whole contract, in call order (the building runtime's function is named
+-- rather than its line, because the line moves and the name does not):
+--   on place / load   spatial.indexAdd(inst)       -- core/event.lua  addInstance
+--   on remove         spatial.indexRemove(inst)    -- core/event.lua  removeInstance
+--   on world left     spatial.indexReset()         -- core/event.lua  dropAllInstances
+--   after a move      spatial.indexUpdate(inst)    -- core/event.lua  scanOnce, fast path
 --   to query          spatial.neighbors(pos, radiusCm, exclude) -> { inst, ... }
 --
 -- Placed buildings are therefore already in the index; querying is the caller's half
@@ -75,15 +97,34 @@ M.dist2 = dist2
 -- adjacency); that file is a reference, not a live caller, since it still requires the
 -- removed `palsmith.*` modules and would need its requires swapped to palforge.core.*.
 --
--- KNOWN GAP, deliberately NOT fixed here: the building scan refreshes an instance's
--- position in place (core/event.lua:383 `bound.pos = p`) without re-bucketing it, so an
--- instance that MOVES far enough keeps its old bucket and a raw neighbors() can miss it.
--- The fix is one line — spatial.indexUpdate(bound) next to that refresh — but it belongs
--- to the building runtime, and core.spatial deliberately knows nothing about it. Until
--- that hook exists, a caller whose instances can move calls reindexAll() before a batch of
--- queries, which is precisely what Building.Instance:neighbors does on its own behalf.
+-- THE KNOWN GAP IS CLOSED, and the history is worth keeping because the shape of it recurs.
+-- This header used to say the building scan refreshed an instance's position in place
+-- (`bound.pos = p`) WITHOUT re-bucketing it, so an instance that moved far enough kept its
+-- old bucket and a raw neighbors() could miss it — and that the one-line fix belonged to the
+-- building runtime. The call was in fact already written there, on the line below that
+-- refresh; what was broken was the lookup above it. The scan found the instance for an actor
+-- through a table keyed on the actor USERDATA, UE4SS mints a fresh wrapper per lookup, and
+-- the scan re-reads its actors from FindAllOf every pass — so the fast path missed on every
+-- sweep after the first and neither the position refresh nor the re-bucket ever ran at all.
+-- Re-keying that table on core.uobject.key (contract C1) is what made this hook real. The
+-- lesson core.spatial keeps from it: an index whose driver is somebody else's code is only
+-- as live as that driver's own identity model.
+--
+-- reindexAll below is therefore no longer a workaround for a missing hook, but it stays: a
+-- caller with instances the building runtime does not own — anything a pack indexes itself —
+-- still has no driver, and Building.Instance:neighbors keeps calling it because O(tracked)
+-- pure Lua is cheaper than reasoning about whether the last scan has run yet.
 M.BUCKET_CM = 200
-M.index = {}  -- bucketKey -> { [instance]=true }
+
+-- THE INDEX LIVES ON _G, for the same reason core/event's instance registry does. A hot
+-- reload (F9) builds a fresh core.spatial while the building runtime's live instances —
+-- which are held on _G — keep existing, and every one of them carries an `_bucket` string
+-- naming a bucket in the index that was current when it was added. A fresh empty table here
+-- would mean neighbors() answering {} for a base full of structures, with `_bucket` set on
+-- every instance and no bucket to match it. Sharing the table keeps the two halves of the
+-- index — the buckets here and the `_bucket` stamps out there — describing one thing.
+M.index = _G.__PalForgeSpatialIndex or {}   -- bucketKey -> { [instance]=true }
+_G.__PalForgeSpatialIndex = M.index
 
 local function bucketKey(pos)
     return string.format("%d,%d,%d",
@@ -169,8 +210,11 @@ function M.neighbors(pos, radiusCm, exclude)
     return out
 end
 
+-- Empty the index. CLEARED IN PLACE, never replaced: the table is shared through _G (see
+-- M.index above), so assigning a fresh one would leave a pre-reload module — and anything
+-- that captured `spatial.index` in a local — reading a table this module no longer writes.
 function M.indexReset()
-    M.index = {}
+    for k in pairs(M.index) do M.index[k] = nil end
 end
 
 -- ---- world/save id for the persistence namespace ----

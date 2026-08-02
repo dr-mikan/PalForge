@@ -1,20 +1,34 @@
 {
   "name": "palforge",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.3.0",
+  "description": "Content framework for single-player Palworld (UE4SS Lua mod). PalForge itself is the Lua tree under Scripts/; this package.json is the task runner for it and for the docs site.",
+  "private": true,
   "directories": {
     "doc": "docs",
     "test": "tests"
   },
-  "scripts": {},
+  "scripts": {
+    "lint:lua": "find Scripts tools -name '*.lua' -print0 | xargs -0 -n1 luac5.4 -p",
+    "lint:docs": "node docs/scripts/lint-content.mjs",
+    "test": "cd Scripts && lua5.4 -e 'package.path=\"./?.lua;./?/init.lua;\"..package.path local env=require(\"palforge.env\") env.dev=true env.debug=true local r=require(\"palforge.test\").run() if r.failed > 0 then os.exit(1) end'",
+    "test:e2e": "playwright test",
+    "types:gen": "lua5.4 tools/gen-types.lua",
+    "types:check": "t=$(mktemp -d) && cp -r Scripts \"$t/Scripts\" && lua5.4 tools/gen-types.lua \"$t/\" && diff -u Scripts/palforge/types.lua \"$t/Scripts/palforge/types.lua\" && rm -rf \"$t\" || { echo 'types.lua is stale — run: npm run types:gen'; exit 1; }",
+    "check": "npm run lint:lua && npm test && npm run types:check && npm run lint:docs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dr-mikan/PalForge.git"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "palworld",
+    "ue4ss",
+    "lua",
+    "modding",
+    "framework"
+  ],
+  "author": "YUYA556223",
+  "license": "MIT",
   "bugs": {
     "url": "https://github.com/dr-mikan/PalForge/issues"
   },

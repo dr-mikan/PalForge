@@ -108,10 +108,15 @@
 --                     (CommonGame.hpp:156-160); pushing onto one through BP_AddWidget
 --                     (CommonUI.hpp:194) makes the game create, stack, activate, transition and
 --                     register the widget, and RemoveWidget (:190) undoes every part of that
---                     including the input mode. It needs a UI.Frame root (only a Palworld
---                     activatable may go on a layer) and it is UNMEASURED — no run has watched
---                     BP_AddWidget answer here — so an element that declares it and cannot get
---                     on stays unmounted with the reason, which is what :autoMount retries.
+--                     including the input mode. It REQUIRES a UI.Frame root — only a Palworld
+--                     activatable may go on a layer — and that is now REFUSED AT DEFINE TIME
+--                     rather than merely documented: a VBox-rooted host = "layer" used to pass
+--                     define and fail at mount with a message about the host not accepting the
+--                     root, which named the symptom and not the rule. It is also UNMEASURED — no
+--                     run has watched BP_AddWidget answer here, and pf_uiz's LAYER panel
+--                     (test/init.lua:900-918) plus pf_uiroute are what would settle it — so an
+--                     element that declares it and cannot get on stays unmounted with the reason,
+--                     which is what :autoMount retries.
 --   host = { widget = "PalUITitleBase", panel = "VerticalBox_0" }
 --                     any live widget class and the panel inside it — which is how a pack
 --                     EXTENDS a screen the game already draws, without owning it
@@ -317,15 +322,32 @@ local function nodeFields(own)
     return out
 end
 
-local CHILDREN = { "children", type = "table", sig = "UI.Node[]", check = childrenCheck,
-    doc = "the nodes inside this one; normally written positionally — VBox{ Label{...}, Button{...} }" }
+-- `children` is declared per KIND rather than shared, because the one sentence a reader needs
+-- from it is HOW MANY the node takes, and that differs. The check is the same in both cases —
+-- the "holds one" limit is enforced in construct(), where the count is known — so the only thing
+-- that varies here is the doc, which is exactly the thing the generated types and the docs site
+-- reproduce verbatim.
+local function childrenField(holds)
+    return { "children", type = "table", sig = "UI.Node[]", check = childrenCheck,
+        doc = (holds == "one")
+            and "the ONE node inside this one; normally written positionally — Border{ Label{...} }. "
+                .. "Two or more is a hard error at the call site, naming VBox/HBox as the fix"
+            or "the nodes inside this one, any number; normally written positionally — "
+                .. "VBox{ Label{...}, Button{...} }" }
+end
+
+local CHILDREN     = childrenField("many")
+local CHILDREN_ONE = childrenField("one")
 
 local TEXT = { "text", type = "string|number|function",
     sig = "string|number|fun(self: UI.Handle): any",
-    doc = "BINDABLE - what it says" }
+    doc = "BINDABLE - what it says. A function is re-evaluated on every :refresh() with the "
+        .. "element instance as its argument and written back only when the value CHANGED" }
 
 local ON_CLICK = { "onClick", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
-    doc = "clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget)" }
+    doc = "clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget). Routed "
+        .. "through the game's own CommonButtonBase, so unlike UI.Spec.onMousePressed it really "
+        .. "does know which widget was hit" }
 
 -- kind -> { ctor, kind, holds, spec }. `holds` is how many children the node can take, and it
 -- is enforced at the call site rather than at build time: UI.Label{ UI.Button{...} } is a
@@ -340,14 +362,22 @@ kind("VBox",      "vbox",     "many", { CHILDREN })
 kind("HBox",      "hbox",     "many", { CHILDREN })
 kind("Overlay",   "overlay",  "many", { CHILDREN })
 kind("ScrollBox", "scroll",   "many", { CHILDREN })
-kind("Border",    "border",   "one",  { CHILDREN,
-    { "color", type = "table", doc = "background tint { r, g, b, a } in 0..1" } })
-kind("SizeBox",   "sizebox",  "one",  { CHILDREN,
-    { "width",  type = "number", doc = "fixed width in slate units" },
+kind("Border",    "border",   "one",  { CHILDREN_ONE,
+    { "color", type = "table", sig = "number[]",
+      doc = "background tint { r, g, b, a } in 0..1 (a defaults to 1). Omitted: PalForge's own "
+          .. "dark panel colour. For the GAME's window art instead of a flat colour, use UI.Frame" } })
+kind("SizeBox",   "sizebox",  "one",  { CHILDREN_ONE,
+    { "width",  type = "number",
+      doc = "fixed width in slate units. This is how a Sprite is sized — the UImage in this build "
+          .. "has no size call that is not a struct write" },
     { "height", type = "number", doc = "fixed height in slate units" } })
 kind("Label",     "label",    "none", { TEXT,
-    { "size",  type = "number", doc = "font size (default 16)" },
-    { "color", type = "table",  doc = "text colour { r, g, b, a } in 0..1" },
+    { "size",  type = "number",
+      doc = "font size (default 16). With `native = true` the size goes through the game's own "
+          .. "UpdateFontSize instead, which also applies the player's UI scale setting" },
+    { "color", type = "table", sig = "number[]",
+      doc = "text colour { r, g, b, a } in 0..1 (a defaults to 1). IGNORED when `native = true` — "
+          .. "BP_PalTextBlock_C takes its colour from the game's own text style" },
     -- `native` swaps the plain UMG TextBlock for the game's OWN label, BP_PalTextBlock_C — a
     -- UPalTextBlockBase, which is where Palworld's font scaling, UI-settings binding and
     -- localisation live (dumps/cxx/Pal.hpp:30039-30050) and therefore most of what makes text
@@ -380,7 +410,7 @@ local FRAME_NO_COLOUR =
     .. "(UMG.hpp:1709), is a struct call and would tint the CONTENT too. For a coloured panel "
     .. "write Border{ color = { r, g, b, a } }; for the game's chrome AROUND a colour of your "
     .. "own, put the Border inside it — Frame{ Border{ color = {...}, ... } }"
-kind("Frame",     "frame",    "one",  { CHILDREN,
+kind("Frame",     "frame",    "one",  { CHILDREN_ONE,
     { "color", type = "table", check = function() return false, FRAME_NO_COLOUR end,
       doc = "⚠️ REFUSED — " .. FRAME_NO_COLOUR } })
 -- A Button is the GAME's own WBP_Title_MenuButton wired through the shared click router —
@@ -388,7 +418,36 @@ kind("Frame",     "frame",    "one",  { CHILDREN,
 -- button in this tree rather than two that drift apart. `self` inside onClick is the element
 -- INSTANCE, which is the mountable object itself: a close button is `self:unmount()`, and a
 -- button that changes what a sibling label says is one assignment to `self`.
-kind("Button",    "button",   "none", { TEXT, ON_CLICK })
+--
+-- ⚠️ `labelAlign` IS THE ANSWER TO A QUESTION THAT WAS CLOSED NEGATIVELY, AND IT IS A DIFFERENT
+-- ROUTE RATHER THAN A SECOND ATTEMPT AT THE SAME ONE. `ui-menubutton-inner-slot` established by
+-- reading the class's own template tree that a game menu button's label CANNOT be left-aligned
+-- through its slot: the inner HorizontalBox_0 sits in a CanvasPanelSlot, and a UCanvasPanelSlot
+-- is the one slot class that declares no SetHorizontalAlignment (UMG.hpp:350-374), so
+-- core/signature refused that call every time — correctly — and the label has always stayed
+-- centred. That item is closed and stays closed.
+--
+-- What `labelAlign = "left"` does instead is not touch the button's inside at all. It builds an
+-- UMG Overlay, puts the game button in it stretched to fill, and lays a plain TextBlock over the
+-- top at ESlateVisibility HitTestInvisible (3) so every click passes through to the button
+-- underneath. An OverlaySlot DOES declare SetHorizontalAlignment, so the alignment happens on a
+-- slot class that has one. This is `_widget.clickableRow`, which is not new code: it is the row
+-- the shipped two-pane Mod Manager was built out of (deprecated/modmanager.lua:264), so the
+-- construction is one that has been on screen — what has never been watched is a DECLARED tree
+-- building one, which is the same thing that is true of every other node here.
+--
+-- The cost is real and is why it is opt-in rather than the default: the text is a TextBlock of
+-- ours and not the button's own label, so it does not inherit the button's font, its hover
+-- states or its localisation, and `text` is written through the TextBlock instead of through
+-- _widget.setButtonText.
+kind("Button",    "button",   "none", { TEXT, ON_CLICK,
+    { "labelAlign", type = "string", values = { "center", "left" }, default = "center",
+      doc = "where the button's own text sits. \"center\" (default) is the game button's own "
+          .. "label and its own font — the only alignment a game menu button's inner slot can do "
+          .. "(a CanvasPanelSlot declares no SetHorizontalAlignment, UMG.hpp:350-374). \"left\" "
+          .. "builds the button inside an Overlay with a hit-test-invisible TextBlock laid over "
+          .. "it left-aligned: clicks pass straight through, but the text is ours and inherits "
+          .. "none of the button's font or hover styling" } })
 -- A SPRITE is one picture: a UImage with a texture in it (dumps/cxx/UMG.hpp:747, the brush set
 -- through SetBrushFromTexture at :765 — the one call in that class that takes no struct).
 --
@@ -418,19 +477,38 @@ kind("Sprite",    "sprite",   "none", {
       doc = "which of the game's icon tables `icon` is looked up in" },
     { "matchSize", type = "boolean", default = true,
       doc = "take the texture's own pixel size (SetBrushFromTexture's bMatchSize). false: let the layout decide" },
-    { "color",   type = "table",  doc = "tint { r, g, b, a } in 0..1, multiplied over the texture" },
-    { "opacity", type = "number", doc = "0..1" } })
+    { "color",   type = "table", sig = "number[]",
+      doc = "tint { r, g, b, a } in 0..1, MULTIPLIED over the texture — it cannot lighten one" },
+    { "opacity", type = "number",
+      doc = "0..1, the whole image's alpha (SetOpacity, UMG.hpp:759). Separate from `color`'s "
+          .. "fourth component, which tints the brush" } })
 -- The escape hatch for "use the game's own component": any Blueprint widget by class path.
 -- The three child names have to be given because they differ per widget and nothing can guess
 -- them — WBP_Title_MenuButton's are Test_Content and WBP_PalInvisibleButton
 -- (dumps/cxx/WBP_Title_MenuButton.hpp:14-15).
 kind("GameWidget", "gamewidget", "none", {
     { "class", type = "string", required = true, check = schema.nonEmpty,
-      doc = "Blueprint widget class path, e.g. \"/Game/Pal/Blueprint/UI/.../WBP_Foo.WBP_Foo_C\"" },
-    TEXT,
-    { "textChild",  type = "string", doc = "name of the child widget that carries the text" },
-    { "clickChild", type = "string", doc = "name of the child widget that receives clicks" },
-    ON_CLICK })
+      doc = "Blueprint widget class path, e.g. \"/Game/Pal/Blueprint/UI/.../WBP_Foo.WBP_Foo_C\". "
+          .. "Must already be LOADED — a class the world has not pulled in is a mount failure "
+          .. "naming the path, not a load" },
+    -- Its own descriptor rather than the shared TEXT / ON_CLICK, because on this node BOTH are
+    -- conditional on a second field and a doc that did not say so was the shape of a silent
+    -- no-op: cloneGameWidget writes the label only `if opts.label and opts.labelChild`, and
+    -- registers the click only `if opts.onClick and opts.clickChild` (_widget.lua:988-995).
+    { "text", type = "string|number|function", sig = "string|number|fun(self: UI.Handle): any",
+      doc = "BINDABLE - what it says. ⚠️ DOES NOTHING WITHOUT `textChild`: this node clones a "
+          .. "widget whose internals it cannot guess, so the text goes to the child you name and "
+          .. "nowhere otherwise" },
+    { "textChild",  type = "string",
+      doc = "name of the child widget that carries the text — required for `text` to do "
+          .. "anything. WBP_Title_MenuButton's is \"Test_Content\" (WBP_Title_MenuButton.hpp:14)" },
+    { "clickChild", type = "string",
+      doc = "name of the child widget that receives clicks — required for `onClick` to do "
+          .. "anything. WBP_Title_MenuButton's is \"WBP_PalInvisibleButton\" (:15)" },
+    { "onClick", type = "function", sig = "fun(self: UI.Handle, ctx: table)",
+      doc = "clicked: (self = the element INSTANCE, ctx.node / ctx.name / ctx.widget). ⚠️ DOES "
+          .. "NOTHING WITHOUT `clickChild`, and the child named must be a CommonButtonBase — "
+          .. "that is the class the shared click hook reports" } })
 
 -- Split a call's positional children from its named fields, validate the fields against this
 -- kind's spec, and hand back the node. Everything that can be wrong is wrong HERE, at the call
@@ -732,10 +810,10 @@ local Spec = schema.define("UI.Spec", {
     { "name",        type = "string",   doc = "human label (defaults to id)" },
     { "description", type = "string",   doc = "one-line description, for UI and tooling" },
     { "root",        type = "table", sig = "UI.Node", check = nodeCheck,
-                     doc = "the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question" },
+                     doc = "the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question. Any node that declared `name = \"...\"` is reachable afterwards as UI.Handle:find(\"<name>\"), which is the imperative escape hatch out of a declared tree. It also decides what `input`, `backHandler` and host = \"layer\" may declare: all three need the root to be a UI.Frame, because that is the one node here that builds a Palworld activatable" },
     { "host",        type = "string|table", sig = "UI.Spec.Host|\"screen\"|\"game\"|\"layer\"",
                      check = hostCheck,
-                     doc = "where to mount when mount() is given no root: \"screen\" (a viewport layer of our own), \"game\" (the game's own in-game UI root canvas), \"layer\" (⚠️ the GAME's own route — pushed onto a CommonUI layer through BP_AddWidget so the action router owns its activation, focus and input mode; needs a Frame root and is unmeasured), or { widget = <class>, panel = <member> } for a panel the game already draws" },
+                     doc = "where to mount when mount() is given no root: \"screen\" (a viewport layer of our own, stacked by AddToViewport), \"game\" (the game's own in-game UI root canvas, CanvasPanel_Root in WBP_PalOverallUILayout — the one host with a real ZOrder), \"layer\" (⚠️ the GAME's own route — pushed onto a CommonUI layer through BP_AddWidget so the action router owns its activation, focus and input mode; REQUIRES a UI.Frame root and is refused at define time without one, and it has NEVER BEEN OBSERVED WORKING — pf_uiz's LAYER panel is the run that would settle it, test/hooks/ui-host-layer), or { widget = <class>, panel = <member> } for a panel the game already draws. mount(root) with an explicit root wins over this field. A host that is not up yet is not a failure — it is what :autoMount retries" },
     { "render",      type = "function", sig = "fun(self: UI.Handle, root: any): boolean?",
                      doc = "build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted" },
     { "update",      type = "function", sig = "fun(self: UI.Handle)",
@@ -744,11 +822,11 @@ local Spec = schema.define("UI.Spec", {
                      doc = "remove the widgets render() built (self); runs on :unmount()" },
     { "input",       type = "string", default = "none",
                      values = { "none", "cursor", "clicks", "exclusive" },
-                     doc = "how much of the player's input this element takes while it is mounted. \"none\" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). \"cursor\" shows the cursor and nothing else. \"clicks\" and \"exclusive\" are the GAME's own GameAndMenu and Menu modes, declared on the element's activatable widget the way every Palworld screen declares them (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and put back by the CommonUI action router on unmount — so both REQUIRE a UI.Frame root. PalForge never calls SetInputMode itself; doing that broke Esc twice" },
+                     doc = "how much of the player's input this element takes while it is mounted. \"none\" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). \"cursor\" shows the cursor and nothing else, by writing bShowMouseCursor (Engine.hpp:9035) and restoring exactly what it found. \"clicks\" and \"exclusive\" are the GAME's own GameAndMenu and Menu modes, declared on the element's activatable widget the way every Palworld screen declares them (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and put back by the CommonUI action router on unmount — so both REQUIRE a UI.Frame root and are refused at define time without one. PalForge never calls SetInputMode itself; doing that broke Esc twice. ⚠️ NEITHER MODE HAS BEEN OBSERVED WORKING: no run has watched the router read a declaration off a widget of ours (pf_uiroute, test/hooks/ui-backhandler)" },
     { "backHandler", type = "boolean",
-                     doc = "⚠️ claim the CommonUI BACK action (that is Esc) on this element's window: sets bIsBackHandler (CommonUI.hpp:149) before the widget is activated, which is how a Palworld screen says \"Esc closes ME\". Needs a UI.Frame root. UNMEASURED — whether the action router registers a widget of ours at all is the open question pf_uiroute exists to answer — so a panel that declares it must still have another way down" },
+                     doc = "⚠️ claim the CommonUI BACK action (that is Esc) on this element's window: sets bIsBackHandler (CommonUI.hpp:149) before the widget is activated, which is how a Palworld screen says \"Esc closes ME\", and answers BP_OnHandleBackAction (:172). REQUIRES a UI.Frame root and is refused at define time without one. DECLARED, SHIPPED AND NEVER ONCE OBSERVED WORKING — whether the action router registers a widget of ours at all is the open question, pf_uiroute is the instrument, test/hooks/ui-backhandler is the hook that records the answer — so a panel that declares it must still have another way down" },
     { "z",           type = "number", default = 0,
-                     doc = "stacking order, higher on top (default 0). Decides DRAWING where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder), a VerticalBox does not — and decides EVENT ROUTING always: keys and mouse presses walk the mounted elements from the highest z down" },
+                     doc = "stacking order, higher on top (default 0). Decides DRAWING only where the host has a z of its own — the game's canvas does (UCanvasPanelSlot::SetZOrder, UMG.hpp:356), a VerticalBox does not and says so once rather than per mount, and a \"screen\" host takes it through AddToViewport instead. It decides EVENT ROUTING always, host or no host: keys and mouse presses walk the mounted elements from the highest z down, and among equal z the most recently mounted goes first" },
     { "keys",        type = "table", sig = "string[]", check = keysCheck,
                      doc = "the key names onKeyPressed wants, spelled as UE4SS's Key table spells them (\"INS\", \"END\", \"F4\", \"NUM_ZERO\"). Required alongside onKeyPressed (or `overrideKeys`): a press is read through RegisterKeyBind, which binds ONE named key. A key Palworld's live key config already uses is REFUSED with the action named — use `overrideKeys` to take it anyway. \"ESCAPE\" is refused by name" },
     { "overrideKeys", type = "table", sig = "string[]", check = keysCheck,
@@ -1084,7 +1162,7 @@ end
 ---    local VBox, Label, Button = UI.VBox, UI.Label, UI.Button
 ---
 ---@class palforge.ui
----@overload fun(spec: UI.Spec): UI.Handle
+---@overload fun(spec: UI.Spec, opts: UI.DefineOpts?): UI.Handle
 ---@field VBox      fun(spec: UI.Node.VBox): UI.Node        # a column
 ---@field HBox      fun(spec: UI.Node.HBox): UI.Node        # a row
 ---@field Overlay   fun(spec: UI.Node.Overlay): UI.Node     # children stacked on top of each other
@@ -1104,13 +1182,45 @@ for ctor, node in pairs(NODES) do UI[ctor] = node end
 
 local wrap  -- forward decl; the UI.Handle wrapper is defined in the BOTTOM section
 
+---The optional second argument every PalForge domain constructor takes.
+---@class UI.DefineOpts
+---@field register boolean? # false: build and return the Handle WITHOUT registering the id
+---@field pack     string?  # register under this pack id, so a collision is attributable
+
 ---Define a UI element and register it. Returns a Handle that is itself mountable (a
 ---default instance); use :new{...} for independent copies with their own state.
 ---`spec` is validated against UI.Spec: `id` is required, unknown fields are an error.
+---
+---`opts` is the second argument every domain constructor here takes, and it is what makes a
+---definition something other than an unconditional write into the global registry:
+---
+---  UI(spec, { register = false })    build the class and hand it back, register NOTHING. This
+---                                    is what a catalog accessor needs — a READ that fabricates
+---                                    a handle must not take the id away from a pack that has
+---                                    not defined it yet.
+---  UI(spec, { pack = "mypack" })     register under that pack id, so the collision warning
+---                                    object_manager raises can NAME who held the id before and
+---                                    who has it now. PalForge.pack("mypack").UI is the same
+---                                    call with the pack filled in.
 ---@param spec UI.Spec
+---@param opts UI.DefineOpts?
 ---@return UI.Handle
-local function define(spec)
+local function define(spec, opts)
     spec = Spec:validate(spec, "UI")
+    -- THE ID IS CHECKED FOR THE SHAPE `resolve` REQUIRES, HERE, AT DEFINE TIME. An id with a
+    -- colon whose halves are not [%w_]+ ("my-pack:Panel") resolves to nothing at every engine
+    -- boundary, so it used to register, look completely healthy in UI.get_all(), and be silently
+    -- dead. om.validId is the one place that shape lives; the message it hands back is the
+    -- reason, and it is raised the way schema raises so a bad id reads like a bad field.
+    --
+    -- ⚠️ NO SECOND COPY OF THE RULE LIVES HERE. One shape check, one owner: two would drift, and
+    -- the drift would be invisible precisely because both would usually agree. Every domain
+    -- constructor in api/ calls this same function, which is what makes "my-pack:Bench" and
+    -- "my-pack:Panel" fail identically.
+    local okId, whyId = om.validId(spec.id)
+    if not okId then
+        fail(string.format("UI %q: %s", tostring(spec.id), tostring(whyId)))
+    end
     local cls = setmetatable({ id = spec.id, name = spec.name or spec.id,
                                description = spec.description }, Class)
     cls.__index = cls
@@ -1155,24 +1265,51 @@ local function define(spec)
             .. "be bound for the whole session and routed to nothing.", spec.id))
     end
 
-    -- ⚠️ `input` AND `backHandler` BOTH LAND ON THE ELEMENT'S ACTIVATABLE WIDGET, AND ONLY A
-    -- UI.Frame BUILDS ONE. Palworld keeps the input mode and the back-handler flag on the widget
-    -- (Pal.hpp:13369-13370, CommonUI.hpp:149) and its action router reads them when the widget
-    -- activates; a VBox or a Border is not an activatable and never will be. Declaring either
-    -- without a Frame root used to mean "PalForge calls SetInputMode on the player controller
-    -- instead", which is what broke Esc in two live runs — so it is refused here, at the call
-    -- site, rather than degrading into the thing that caused the failure.
+    -- ⚠️ `input`, `backHandler` AND host = "layer" ALL LAND ON THE ELEMENT'S ACTIVATABLE WIDGET,
+    -- AND ONLY A UI.Frame BUILDS ONE. Palworld keeps the input mode and the back-handler flag on
+    -- the widget (Pal.hpp:13369-13370, CommonUI.hpp:149) and its action router reads them when the
+    -- widget activates; a CommonUI layer takes activatables and nothing else (BP_AddWidget,
+    -- CommonUI.hpp:194). A VBox or a Border is not an activatable and never will be. Declaring
+    -- input without a Frame root used to mean "PalForge calls SetInputMode on the player
+    -- controller instead", which is what broke Esc in two live runs — so it is refused here, at
+    -- the call site, rather than degrading into the thing that caused the failure.
+    --
+    -- host = "layer" JOINED THIS CHECK RATHER THAN BEING DOCUMENTED AS NEEDING A FRAME. Both the
+    -- `host` doc above and native/ui/tree.host's own comment said "it requires a Frame root ...
+    -- and says so rather than half-working", and until now nothing said so: a VBox-rooted
+    -- host = "layer" passed define, resolved a host with no panel, and failed at mount with a
+    -- message about the host not accepting the tree's root. The rule is now enforced where the
+    -- other two are, so the three declarations that need an activatable are refused in one place
+    -- with one sentence.
+    --
+    -- ⚠️⚠️ AND THE REFUSAL SAYS WHAT IS UNMEASURED, because the honest thing to tell an author
+    -- whose declaration was just rejected is not only how to satisfy the rule but what satisfying
+    -- it is currently known to buy — which is nothing yet. See the paragraph in the message.
     local wantsActivatable = (spec.input == "clicks") or (spec.input == "exclusive")
-        or (spec.backHandler == true)
+        or (spec.backHandler == true) or (spec.host == "layer")
     if wantsActivatable and spec.root and spec.root.kind ~= "frame" then
+        local what
+        if spec.host == "layer" then
+            what = "host = \"layer\""
+        elseif spec.backHandler == true then
+            what = "backHandler = true"
+        else
+            what = "input = " .. string.format("%q", tostring(spec.input))
+        end
         fail(string.format("UI %q declares %s, which Palworld carries on an ACTIVATABLE WIDGET "
-            .. "(UPalActivatableWidget.InputConfig / bIsBackHandler) — and this element's root is "
-            .. "a %s, which is not one. Wrap the tree in UI.Frame{ ... }: that builds "
-            .. "WBP_PalCommonWindow_C, the game's own window, which IS an activatable and is the "
-            .. "one node here the CommonUI action router can read a declaration off. PalForge "
-            .. "does NOT set the input mode on the player controller instead — doing that stopped "
-            .. "Esc reaching the game's own menu, twice.", spec.id,
-            spec.backHandler == true and "backHandler = true" or ("input = " .. string.format("%q", tostring(spec.input))),
+            .. "(UPalActivatableWidget.InputConfig / bIsBackHandler, and a CommonUI layer takes "
+            .. "nothing else) — and this element's root is a %s, which is not one. Wrap the tree "
+            .. "in UI.Frame{ ... }: that builds WBP_PalCommonWindow_C, the game's own window, "
+            .. "which IS an activatable and is the one node here the CommonUI action router can "
+            .. "read a declaration off. PalForge does NOT set the input mode on the player "
+            .. "controller instead — doing that stopped Esc reaching the game's own menu, twice. "
+            .. "⚠️ AND BE TOLD THE REST OF IT: host = \"layer\" and backHandler = true are "
+            .. "DECLARED, SHIPPED AND HAVE NEVER ONCE BEEN OBSERVED WORKING. No run has watched "
+            .. "BP_AddWidget answer for a widget of ours, and no run has watched the action router "
+            .. "register one. The two runs that would settle them are pf_uiz's LAYER panel "
+            .. "(test/init.lua:900-918) and pf_uiroute, recorded as test/hooks/ui-host-layer and "
+            .. "test/hooks/ui-backhandler; until one of them reports, a panel that declares either "
+            .. "must still have another way up and another way down.", spec.id, what,
             tostring(spec.root.kind)))
     end
 
@@ -1265,12 +1402,26 @@ local function define(spec)
         end or Class.destroyTree
     end
 
-    pcall(function() om.register("ui", spec.id, cls) end)
+    -- REGISTERING IS THE LAST THING AND IT IS OPTIONAL. `register = false` builds the class and
+    -- hands it back without touching the registry, which is what a catalog accessor needs: a READ
+    -- that fabricates a handle must not take the id. A registration that raises is caught and
+    -- LOGGED rather than swallowed — the pcall here predates this change and the silence was the
+    -- defect in it: an element that failed to register still mounts and still works, so it must
+    -- not take the whole definition down, but nothing else in the session would ever say that
+    -- UI.get(id) will not find it.
+    if not (opts and opts.register == false) then
+        local ok, err = pcall(om.register, "ui", spec.id, cls, { pack = opts and opts.pack })
+        if not ok then
+            log.err(string.format("UI %q was built but NOT registered: %s. The handle returned "
+                .. "here still mounts; what will not work is UI.get(%q), UI.get_all() and every "
+                .. "tool that reads the registry.", spec.id, tostring(err), spec.id))
+        end
+    end
     return wrap(cls)
 end
 
 -- Calling the module IS defining:  UI{ id = "example:Panel", render = ... }
-setmetatable(UI, { __call = function(_, spec) return define(spec) end })
+setmetatable(UI, { __call = function(_, spec, opts) return define(spec, opts) end })
 
 ---Get an EXISTING element by id: a previously-defined one, else a thin (inert) element.
 ---Never nil.
@@ -1378,10 +1529,20 @@ function UI.report()
             .. "any key is bound"
         return out
     end
-    -- Three questions, three sources, and none of them answers another's: the stack says WHO
-    -- would get a press, the key binds say whether a press can arrive at all, and the grab list
-    -- says what is still being held from the player — which is the one that used to be invisible.
-    for _, fn in ipairs({ tree.keyReport, tree.grabReport }) do
+    -- FOUR questions, four sources, and none of them answers another's: the stack says WHO would
+    -- get a press, the key binds say whether a press can arrive at all, the grab list says what is
+    -- still being held from the player — which is the one that used to be invisible — and the
+    -- keymap says WHAT PALWORLD HAS ON EVERY KEY, which is the evidence the key-bind lines read
+    -- their attribution out of.
+    --
+    -- keymapReport was written alongside the other two and left out of this list, so the one
+    -- report an operator is told to paste carried a conclusion ("F7 never arrived AND THE GAME HAS
+    -- AN ACTION ON IT") with no sign of the reading it was drawn from. It goes LAST because it is
+    -- much the longest of the four — one line per source, one per container, then one per key the
+    -- game has an action on, which was 107 rows on the measured build (v1.0.2.101103) — and
+    -- because the three short answers are the ones read first. Every one of the four is pcall'd:
+    -- the keymap read is the only one that touches the engine, and a report is never worth a raise.
+    for _, fn in ipairs({ tree.keyReport, tree.grabReport, tree.keymapReport }) do
         local ok, lines = pcall(fn)
         if ok and type(lines) == "table" then
             for _, line in ipairs(lines) do out[#out + 1] = line end
@@ -1473,10 +1634,25 @@ function Handle:find(name) return self._st:find(name) end
 ---@return string?
 function Handle:lastError() return self._st._mountError end
 
----Poll refresh() every `ms` milliseconds off core/event's heartbeat (opt-in; there is no
----confirmed native UI-update event to hook). No-op while the element is unmounted — use
----:autoMount when the host UI may not be up yet. Cancelled by :unmount(). Returns true if
----the subscription was installed.
+---Poll refresh() every `ms` milliseconds off core/event's heartbeat.
+---
+---⚠️ READ THIS BEFORE DECIDING WHAT `ms` SHOULD BE, BECAUSE POLLING IS NOT ONE OF TWO OPTIONS —
+---IT IS THE ONLY REFRESH DRIVER PALFORGE HAS. Nothing calls refresh() for a pack. No native "the
+---UI was rebuilt" event has been confirmed FIRING, so every element either calls :refresh() by
+---hand when its own state changes or rides this heartbeat, and there is no way to refresh exactly
+---when the game rebuilds a screen. The consequences are worth stating plainly rather than leaving
+---to be discovered:
+---
+---  * a panel shows STALE CONTENT for up to `ms` milliseconds. A binding that reads a count the
+---    player just changed is behind by that much, and shortening `ms` is the only lever.
+---  * TitleMenu's whole re-injection strategy is a poll for the same reason: the title screen
+---    rebuilds its widget tree and takes our buttons with it, nothing tells us it did, so
+---    native/ui/title_menu.lua's update() re-checks every entry on this same beat.
+---  * a beat over an idle panel is cheap ON PURPOSE — bindings compare and write back only what
+---    CHANGED (native/ui/tree.lua's update) — so a fast `ms` costs comparisons, not native calls.
+---
+---No-op while the element is unmounted — use :autoMount when the host UI may not be up yet.
+---Cancelled by :unmount(). Returns true if the subscription was installed.
 ---@param ms integer?  # default 500
 ---@return boolean ok
 function Handle:autoRefresh(ms)
@@ -1494,7 +1670,9 @@ function Handle:autoRefresh(ms)
     -- It also eliminated the recipe's first target: UPalUIManagerSubsystem (Pal.hpp:30988)
     -- declares zero functions. Do not enumerate it again.
     --
-    -- TODO(ui-update-event): what is unknown is now narrower and is about HOOKING, not existence.
+    -- TODO(ui-update-event): MEASURED BY test/hooks/ui-update-event — that hook id and this
+    -- marker are the pair, so one grep finds both the question and the instrument that answers it.
+    -- What is unknown is now narrower and is about HOOKING, not existence.
     -- (a) OnSetup / OnClosed / AddHUD read as BlueprintImplementableEvents, and a blueprint that
     --     implements one gets its OWN UFunction of that name — a hook on the base never sees the
     --     override, so it is unmeasured which screens such a hook would actually catch.
@@ -1509,7 +1687,7 @@ function Handle:autoRefresh(ms)
     -- a report on core/poll's heartbeat. (a) falls out of the totals: a candidate that stays at
     -- zero while menus open and close is one whose base UFunction nothing calls. (b) needs the
     -- storm, and a hook armed at world.ready misses ITS OWN world's storm by definition — so the
-    -- measurement is taken across a SECOND load: core/event.lua:779-782 records that UE4SS has no
+    -- measurement is taken across a SECOND load: core/event.lua:33 and :2161 record that UE4SS has no
     -- unregister and a hook stays armed into the next world load, which turns that warning into
     -- the instrument. Autorun `pf_uievents`, then quit to the title and load a save again; the
     -- window between world.left and world.ready IS the storm.
@@ -1521,6 +1699,17 @@ end
 ---yet (the title screen at load) gets in the moment it appears — and once it is up this
 ---refreshes it. Cancelled by :unmount(), which is therefore also how you stop it retrying.
 ---Idempotent, and shares the one subscription slot with :autoRefresh.
+---
+---THIS IS THE MOUNT PATH EVERY LIVE PalForge UI TAKES, and it is worth saying why rather than
+---leaving it as a convenience: at the moment a pack's files load there is no title screen, no
+---in-game layout and often no player controller, so a plain mount() returns false and
+---:autoRefresh alone would never retry it (refresh() is a no-op on an unmounted element). Every
+---shipped element therefore goes through here — native/ui/title_menu.lua's header says so in as
+---many words, and test/init.lua's pf_uiz mounts all three of its panels this way.
+---
+---A retry that keeps failing is NOT silent: mount() records the reason on the instance and logs
+---it once per DISTINCT reason, so :lastError() answers "why is my panel not up" at any moment
+---and the log does not fill with one line per beat.
 ---@param root any?      # the root handed to each mount attempt (nil for elements that find their own)
 ---@param ms integer?    # default 2000 — a retry loop wants a slower beat than a refresh
 ---@return boolean ok

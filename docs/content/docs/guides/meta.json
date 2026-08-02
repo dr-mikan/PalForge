@@ -1,4 +1,11 @@
 {
   "title": "Guides",
-  "pages": ["first-content-pack", "testing"]
+  "pages": [
+    "first-content-pack",
+    "what-a-pack-can-ship",
+    "vanilla-assets",
+    "console-commands",
+    "dev-tooling",
+    "testing"
+  ]
 }

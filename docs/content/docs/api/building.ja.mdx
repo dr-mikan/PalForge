@@ -36,9 +36,10 @@ local all   = Building.get_all()                                       -- every 
 Building{ id = "WorkBench" }
 ```
 
-この 1 回の呼び出しで、その id が PalForge の監視対象に入ります。ワールドの設置物を探すスキャンが
-追跡するのは、定義済みの build id だけです。誰も定義していない id に `Building.get(id)` を使っても
-メソッドを呼べる handle は返りますが、監視対象には入らないため、その `:instances()` は空のままです。
+この 1 回の呼び出しで、その id が PalForge の監視対象に入ります。ワールドの設置物を探すスキャンは
+定義をレジストリからのみ取るので、追跡されるのは定義呼び出しが**登録した** build id だけです。誰も
+定義していない id に `Building.get(id)` を使ってもメソッドを呼べる handle は返りますが、何も登録
+されないため、その `:instances()` は空のままです。
 
 完全な定義は 1 つのテーブルとして読めます。
 
@@ -118,26 +119,55 @@ building 側の既定値はもう効かないので、名前付き mesh を buil
 データ、モデル、メタデータを与えることです。
 </Callout>
 
-同じ id を 2 回定義すると、後のほうが前を置き換えます。Palworld 側のカタログはパックのコードより
-先に読み込まれるため、`WorkBench` を定義するパックは mesh も含めて `native.buildings.WorkBench`
-を置き換えます。必要なものは書き直してください。
+id の**形**は、定義した時点で検査されます。あとで設置物を探しに行った時点ではありません。
+コロンが 1 つでもあれば名前空間付きの形を意図したとみなされるので、前後どちらの半分も英数字と
+アンダースコアだけである必要があります。
+
+```lua
+Building{ id = "my-pack:Bench" }
+-- PalForge: Building: field "id" is invalid: invalid pack id 'my-pack' in 'my-pack:Bench' (letters/digits/_ only)
+```
+
+ハイフンが入ると id は解決できなくなり、解決できない id には行き先がありません。DataTable の行名を
+組み立てられないので、アイコン参照もテクノロジー解放も build id の照合もすべて外れる一方、定義は
+レジストリの中で健全そうに座っています。それを目にできる場所は定義呼び出しだけなので、そこで
+止めます。
+
+`buildIds` には、同じ問いがもう一段あとのエンジン境界で、もう少し寛容にかかります。解決できない
+エントリは**リテラル**として使われ、警告が id と resolve の理由を挙げます。実在する
+`BuildObjectId` に当たらないリテラルはアクターに一致しないだけで、それは追いかけられる静かな
+ミスです。逆に id を捨てていたら、登録に成功しあらゆる読み取りに答えながら死んでいる定義に
+なります。
+
+同じ id を 2 回定義すると、後のほうが前を置き換えます。`native.buildings` は何も登録しないので、
+`WorkBench` を定義するパックがその唯一の定義になります。ただし別のパックが同じ id を定義すれば
+あなたの定義が置き換えられ、レジストリが双方の所有者を挙げて衝突をログに出します。
 
 ### native カタログ
 
-`native/buildings.lua` は `DT_BuildObjectDataTable_Common` の行 id をすべて素のデータとして持ち、
-加えて 2 つの用意済み定義を持ちます。
+`native/buildings.lua` は `DT_BuildObjectDataTable_Common` の行 id 498 件をすべて素のデータとして
+持ち、加えて mesh と表示名を足した手書きの定義を 2 つ持ちます。
 
 ```lua
 local buildings = require("palforge.native.buildings")
 
-buildings.WorkBench          -- curated handle for "WorkBench" (BP_BuildObject_WorkBench_C)
-buildings.PalBox             -- curated handle for "PalBoxV2"
-buildings.get("ItemChest")   -- defines + registers on first use, then cached; nil for an unknown id
-buildings.CATALOG            -- the id list, as data
+buildings.WorkBench             -- curated handle for "WorkBench" (BP_BuildObject_WorkBench_C)
+buildings.PalBox                -- curated handle for "PalBoxV2"
+buildings.get("ItemChest")      -- a handle, built on first read and cached; nil for an unknown id
+buildings.publish("WorkBench")  -- opt IN to tracking, and with it to persistence
+buildings.CATALOG               -- the 498 ids, as data
 ```
 
-require しただけで登録されるのはこの 2 つだけです。カタログの id を実際の定義に変えるのは
-`get(id)` なので、起動時に数百件が登録されることはありません。
+このモジュールは何も登録せず、フィールドを読んでも何も登録されません。これはほかのどのドメイン
+よりもここで重要です。building の登録は**無害ではない**からです。スキャンは登録済みの定義を拾い、
+すでにワールドに立っている一致アクターはすべて追跡インスタンスになり、追跡インスタンスはセーブの
+エンティティファイルに書き込まれます。そうでなければ、ツールチップで
+`buildings.Stone_Foundation` を読んだだけで拠点中の石の土台すべてに記録が書かれ始め、`CATALOG` を
+なめるピッカーは拠点全体を永続化してしまいます。
+
+なので `get(id)` や名前付きフィールドから得たハンドルは、`:unlock()` と `:iconOf()` には本当に
+答えます（どちらも id 起点のテーブル読み取りです）。一方 `:instances()` は空のままで、何も書かれ
+ません。`buildings.publish(id)` を呼ぶか、自分で `Building{ id = <同じ id> }` を宣言するまでは。
 
 ## Spec のフィールド
 
@@ -188,6 +218,25 @@ print(schema.help("Building.Spec"))
 print(schema.help("Building.Spec.Events"))
 schema.get("Building.Spec").fields   -- the same, as a table, for tooling
 ```
+
+### 第 2 引数
+
+`Building(spec, opts)` は省略可能な第 2 テーブルを取ります。制御するのは登録だけで、それ以外は
+何も変わりません。作られる定義はどちらでも同じものです。
+
+```lua
+Building(spec)                          -- define and register
+Building(spec, { register = false })    -- build the handle, register nothing
+Building(spec, { pack = "mypack" })     -- register with that pack recorded as the owner
+```
+
+`register = false` は、上で述べた理由により、このドメインでは読み取りと書き込みの分かれ目です。
+登録された定義は追跡され、追跡された設置物は永続化されます。ハンドルはそのまま使え、`core/event`
+はその定義を一切見ず、セーブには何も入りません。
+
+`pack` は衝突に「誰が」を与えます。所有者は登録に記録され、2 つのパックが 1 つの id を主張したと
+きの警告に名前が出て、永続化されるレコードすべてに書き込まれます。
+`PalForge.pack("mypack").Building` が代わりに入れてくれます。
 
 ### state — テーブルかファクトリか
 
@@ -303,14 +352,26 @@ mesh = {
 },
 ```
 
-用意済みの `WorkBench` と `PalBoxV2` は `static` の mesh を宣言しているため、actor を最初に見つけた
+<Callout type="info">
+この絶対 OBJ パスが正しいのは 1 台のマシンの上だけです。`Mesh.Spec` は相対的な `model` や
+`texture` を呼び出し元パック自身のディレクトリに対して解決しますが、その解決は
+`Mesh.Spec:validate` にあり、`Building.Spec.Mesh` は独自の validate を持つ派生 spec です。
+つまり**インラインの building mesh に書いた相対パスは相対のまま**で、書いたとおりの文字列で
+`io.open` に失敗します。OBJ は名前付きの `Mesh{ ... }` として宣言し、そのハンドルを入れ子に
+してください。解決済みのパスを運ぶのはそちらの経路です。
+</Callout>
+
+用意済みの `WorkBench` と `PalBoxV2` は `static` の mesh を宣言しています。ただし置かれた actor に
+届くのは、`buildings.publish(id)` か自分の定義かで登録されてからで、そのあと actor を最初に見つけた
 次のスキャンで取り付けられます。
 
 <Callout type="warn">
-`skeletal` はポーン自身の `Mesh` コンポーネント上でアセットを差し替えます。build object はそれを
-持たないため、`kind = "skeletal"` を宣言した設置物には何も取り付けられず、`render()` は `false` を
-返します。このバックエンド自体もゲーム内では未確認で、どの setter が実行されたかを報告するだけで、
-描画されたことまでは示しません。
+`skeletal` はポーン自身の `Mesh` コンポーネント（`ACharacter::Mesh`）上でアセットを差し替えます。
+build object はそれを持たないため、`kind = "skeletal"` を宣言した設置物には何も取り付けられず、
+「この actor はおそらく `APalCharacter` ではない」というログが出て `render()` は `false` を返します。
+このバックエンド自体もゲーム内では未確認です。実機のシグネチャ検査を通し、設定後にアセットを読み
+返して比較するので、走ったのに無視された setter は成功のふりではなく `false` になります。ただし、
+何かが実際に見た目を変えるところを見届けた人はまだいません。
 </Callout>
 
 ## ライブインスタンス
@@ -381,18 +442,21 @@ flowchart TD
 ### インスタンスのメソッド
 
 ```lua
-self:save()        -- stage state and write the json file now
-self:setDirty()    -- stage only; written by the next save or on world.left
-self:isValid()     -- is self.actor still a valid engine object
-self:render()      -- attach mesh + material once; false without a valid actor or a model
-self:update()      -- re-tint the live material from self:currentColor()
-self:mesh()        -- the declared mesh table
-self:material()    -- the declared material, or one built from color / texture
-self:iconOf()      -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
+self:save()             -- stage state and write the json file now
+self:setDirty()         -- stage only; written by the next save or on world.left
+self:isValid()          -- is self.actor still a valid engine object
+self:render()           -- attach mesh + material once; false without a valid actor or a model
+self:update()           -- re-tint the live material from self:currentColor()
+self:neighbors(cm)      -- every OTHER tracked structure within cm of this one
+self:mesh()             -- the declared mesh table
+self:material()         -- the declared material, or one built from color / texture
+self:currentColor()     -- the tint update() will write; override for a state-driven look
+self:iconOf()           -- DT_BuildObjectIconDataTable lookup, falling back to the declared icon
 ```
 
 `currentColor()` は `self.color` を返し、既定では定義側の色味になります。見た目を state に
-追随させたいときは、設置物側にフィールドを立ててから反映します。
+追随させたいときは、設置物側にフィールドを立ててから反映するか、色が state の関数になるなら
+定義クラス側でこのメソッドを上書きします。
 
 ```lua
 onTick = function(self, ctx)
@@ -404,11 +468,35 @@ end,
 ```
 
 <Callout type="info">
-`update()` は `core/mesh` を経由します。`core/mesh` は各 actor をどのバックエンドが着せたかを覚えて
-いて、塗り直しも同じバックエンドへ送ります。実装しているのは `procedural` だけで、取り付け時に
-作ったマテリアルインスタンスに書き込みます。`static` の mesh は取り付けはされますが塗り直しは
-持たないため、そこでは `update()` は `false` を返します。
+`update()` は `core/mesh` を経由します。`core/mesh` は各 actor をどのバックエンドが着せたかを —
+UE4SS のハンドルは参照のたびに作り直されるため、actor の `GetFullName()` をキーにして — 覚えて
+いて、塗り直しも同じバックエンドへ送ります。`static`、`procedural`、`skeletal` のいずれも応答
+します。色なしで取り付けられた mesh に対しては、共有のマテリアル層がその場で動的マテリアル
+インスタンスを作るためです。`true` は実在のマテリアルインスタンスに書き込みが**実行された**という
+意味です。見た目が変わった証拠ではありません。Palworld のマテリアルが持っていないパラメーター名
+への書き込みは黙って何もしないうえ、ゲーム内で色が乗るところを見届けた記録はまだありません。
+`false` は書き込む先が無かったという意味です（この actor に PalForge の mesh が無い、または色が
+無い）。
 </Callout>
+
+### neighbors
+
+`self:neighbors(radiusCm)` は、その半径内にいる**他の**追跡中の設置物を — 自分の定義のものだけで
+なく、どの定義のものでも — ライブインスタンスとして返します。実体は `core/spatial` のハッシュ
+グリッドで、この呼び出しは先に追跡中インスタンスをバケットに入れ直すので、移動した設置物も
+見つかります。
+
+```lua
+onTick = function(self, ctx)
+    for _, n in ipairs(self:neighbors(350)) do    -- everything within 3.5 m
+        log.info(self.key .. " is next to " .. n.key)
+    end
+end,
+```
+
+インスタンスではなく定義の上で呼んだ場合（`self.pos` が無いため）と、半径が正の数でない場合は空の
+リストを返します。索引に入っているのは PalForge が追跡している設置物だけなので、未登録の
+バニラ id だらけの拠点では空が返ります。
 
 ### state を保存する
 
@@ -419,24 +507,45 @@ state はワールドごとに 1 つの JSON ファイルへ、`utils/file` が�
 <UE4SS Mods>/PalForge/state/entities_<saveId>.json
 ```
 
-`saveId` は `core/spatial` が決めます。ゲームインスタンスの `WorldGuid`、`WorldSaveName`、
-`SaveName` のいずれかについて、英数字とアンダースコア以外を `_` に置き換え、先頭に `w_` を付けた
-ものです。どれも読めなければ単に `world` になります。ファイルには設置物のキーごとにレコードが
-入ります。
+`saveId` は `core/spatial` が決めます。生きている `PalGameInstance` から選択中のセーブを読み、
+まず `GetSelectedWorldSaveDirectoryName` を、次に `GetSelectedWorldName` を試します。それぞれ
+バッキングプロパティ（`SelectedWorldSaveDirectoryName`、`SelectedWorldName`）が第 2 の手段です。
+得られた名前の英数字とアンダースコア以外を `_` に置き換え、先頭に `w_` を付けたものが saveId で、
+何も読めなければ単に `world` になります。
+
+<Callout type="info">
+`WorldGuid`、`WorldSaveName`、`SaveName` はこのクラスにありません。`PalGameInstance` の
+111 プロパティの完全な一覧にどれも載っていないので、この 3 つの名前に基づくプローブは `world`
+フォールバックにしか行き着けませんでした。それがすべてのセーブで永続化ファイルが 1 つに
+なっていた理由であり、実セッションが残した唯一の成果物が `entities_world.json` という名前である
+理由でもあります。表示名よりディレクトリ名を優先するのは、2 つのセーブがセーブフォルダを共有する
+ことはできない一方、プレイヤーが入力したラベルは重複し得るからです。
+</Callout>
+
+ファイルには設置物のキーごとのレコードと、隔離用のセクションが入ります。
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "entities": {
     "WorkBench@1234,-56,78": {
+      "v": 2,
       "buildId": "WorkBench",
+      "def": "mypack:Bench",
+      "pack": "mypack",
       "pos": { "x": 123400.0, "y": -5600.0, "z": 7800.0 },
-      "state": { "uses": 3 },
-      "altKeys": {}
+      "state": { "uses": 3 }
     }
-  }
+  },
+  "orphans": {}
 }
 ```
+
+キーは解決済みの **build** id とセルなので、所有者をまったく名乗りません。そこで所有者はレコードの
+中に乗ります。`v` がレコードの形、`def` がそれを主張した定義 id、`pack` はレジストリが帰属を
+言えるときの所有パック id です。古いレコードは、スキャンが最初に結びつけた時点でその場で
+アップグレードされます。すべてのパックが 1 つのファイルを共有する構成で取れる移行経路はそれだけ
+です。
 
 レコードの `state` は `inst.state` と同じテーブルなので、その場で書き換えるだけで書き出される内容が
 変わります。ただし自動では何も書きません。
@@ -451,6 +560,14 @@ state はワールドごとに 1 つの JSON ファイルへ、`utils/file` が�
 レコードが消えるのは本当に撤去されたときだけです。スキャンが 6 回連続で見つけられなかった設置物、
 つまり 500 ms 間隔でおよそ 3 秒間見えなかった設置物は `building.remove` を emit し、レコードごと
 破棄されます。
+
+そのセッションで**どの定義も主張しなかった** build id のレコードは削除されません。隔離されます。
+中身をそのままファイルの `orphans` セクションへ移し、件数と所属していたパックをログに出し、その
+build id をどれかの定義が再び主張した瞬間に戻します。このパスはワールドが開いてからおよそ 30 秒
+待ってから走るので、`world.ready` や遅延で building を定義するパックにも間に合います。隔離が保守的
+なのは意図的です。プレイヤーが一晩だけ無効にしたパックのために、設置物の状態を失わせるわけには
+いきません。ランタイムでレコードを本当に破棄するのは隔離上限の 4096 件だけで、それを超えると古い
+ものから順に落とし、何件をなぜ落としたかをログに書きます。
 
 ```mermaid
 stateDiagram-v2
@@ -481,6 +598,13 @@ event.isWorldReady()                       -- has the world finished loading
 `:instances()` はスキャンが走るまで空で、スキャンにはロード済みのワールドが必要です。監視が
 1 秒ごとに有効な `PalPlayerCharacter` を探し、5 回連続で成功して初めてゲートが開きます。
 
+これらはホットリロードを越えて生き残ります。building ランタイムは定義の索引、ライブインスタンス、
+actor 索引、永続化キャッシュを `_G` 上の 1 つのテーブルに置いており、`core/reload` はワイプの際に
+`object_manager` を残します。そのため F9 を押しても `:instances()` は答え続け、すでに持っていた
+定義に対して building のフックも発火し続けます。この 2 つは必ずセットです。レジストリを落とす
+リロードは、隔離パスから見れば全パックが一斉にアンロードされたのと同じに見えてしまいます。
+押してからおよそ 30 秒後に、です。
+
 ## ライフサイクルイベント
 
 ハンドラは `events` の下に書きます。第 1 引数はイベントが起きた設置物そのものなので、
@@ -509,9 +633,39 @@ events = {
 | `onBreak` | — | 発火しません | — |
 
 <Callout type="warn">
-`onLeftClick` と `onBreak` は書けますが、ゲーム側からこれらを emit するものがないため実行されません。
+`onLeftClick` と `onBreak` は書けますが、emit するものがないため実行されません。これは「まだ
+見つかっていない」ではなく否定として決着済みです。下の **存在しないもの** を参照してください。
 インタラクトには `onRightClick`、設置物が消えたときには `onRemove` を使ってください。
 </Callout>
+
+### 存在しないもの、そしてそれをどう確かめたか
+
+欠けている 2 つのフックは、それを持ち得るすべてのクラスの完全な関数一覧を読むことで探されました。
+つまりこれは未着手の穴ではなく計測結果です。
+
+**`PalBuildObject` にクリック・ヒット・打撃のエントリは存在しません。** リフレクトされた 22 個の
+関数はすべてディスク上にあります。入力らしきエントリはインタラクト系
+（`OnBeginInteractBuilding`、`OnTriggerInteractBuilding`、`OnStartTriggerInteractBuilding`、
+`OnEndTriggerInteractBuilding`）だけで、これは右クリックであり、すでに `onRightClick` です。
+ダメージらしき唯一のエントリ `OnDamage` が最有力候補でしたが、打撃ではありません。記録された
+セッションで、**構造物あたり 12〜13 秒の厳密な周期で 196 回**発火しており、その間プレイヤーは
+どこにもいません。t=306.412 に置かれたワークベンチは t=306.933 に最初の 1 回を受け、その後
+2250 秒で 180 回受けても壊れませんでした。これは劣化タイマーであり、`onLeftClick` をこれに繋いだら、
+拠点中のすべての設置物で 12 秒ごとに永遠にハンドラが呼ばれることになります。
+
+**破壊はデリゲート「フィールド」としてしか存在しません。** `PalBuildObject`（22 関数）、
+`PalMapObjectModel`（18）、`PalMapObjectConcreteModelBase`（25）、`PalNetworkPlayerComponent`（77）
+のいずれにも Destroy / Dismantle / Demolish / Deconstruct / Break の関数はありません。あるのは
+`PalMapObjectModel:OnDestroyDelegate` と `:OnDisposeDelegateInServer` で、`RegisterHook` は
+デリゲートフィールドをパスで指定できません。`PalBuildObject.OnChangeVisualForDismantle` は解体の
+*プレビュー*表示であって完了ではありません。
+
+したがって設置物の消失が表に出る経路は 1 つだけ、スキャンの取りこぼし掃除による
+`ctx.reason = "missing"` の `onRemove` です。これは解体とストリーミングアウトを区別できず、しかも
+6 スキャン遅れて届きます。2 つのフックが宣言可能なまま残っているのは、パック自身の `emit` が動く
+ようにするためと、将来ソースが見つかったときの着地点を用意しておくためです。今日それらを emit する
+ものはありません。ダンプが届いていない唯一の場所は `BP_BuildObject_<Id>_C` サブクラスのグラフ
+イベントで、ダンプは `/Script/Pal.*` しか対象にしていません。
 
 ### onPlace
 
@@ -704,9 +858,31 @@ box:iconOf()        --> a texture ref from DT_BuildObjectIconDataTable, else the
 Building.get("example:Bench"):unlock()
 ```
 
-解決後の id (`example_Bench`) の名前を持つテクノロジ行を `PalCheatManager:UnlockOneTechnology`
-経由で解放します。PalSchema が注入した building のテクノロジをビルドメニューに出すのがこの
-呼び出しです。チートマネージャが使えない場合は `false` を返してログに残します。
+解決後の id (`example_Bench`) の名前を持つテクノロジ行を
+`PalCheatManager:UnlockOneTechnology(FName)` 経由で解放します。PalSchema が注入した building の
+テクノロジをビルドメニューに出すのがこの呼び出しです。
+
+<Callout type="warn">
+**これが動いているところは一度も観測されておらず、構造上検証できません。** `true` はテクノロジが
+解放されたという意味ではありません。読み取れる 2 つのことを意味します。チート呼び出しが例外を出さ
+ずに走ったこと、そしてその解決後の名前を持つテクノロジ行が生きている
+`DT_TechnologyRecipeUnlock` に実在すること。後者は、解放するものが無い building でチートが
+「成功」してしまうのを止めるチェックであり、`Building.get("PalBoxV2"):unlock()` が `false` になる
+理由でもあります（バニラの 501 個の build id のうち、その行を持つのは 115 個だけです）。
+
+読み取れないのは結果です。`UnlockOneTechnology` は何も返さず、「このテクノロジは解放済みか」を
+問える accessor はこのビルドのどこにも存在しません。チートマネージャの表面にも、ヘッダーダンプ
+にも、アイテムのブリッジにもです。しかもこれは、呼び出しを受け付けて黙って何もしないと計測された
+のと同じチートマネージャ経路に乗っており、この呼び出しはまさにその失敗と自分を区別できません。
+
+決着させる唯一の方法は、セーブの中で押してビルドメニューを見ることです。それが宣言済みフック
+`pf_hook building-unlock` で、ワールドとプレイヤーが必要で、プレイヤーのテクノロジ状態を変える
+ため書き込み扱いです。
+</Callout>
+
+`false` はほかに、テクノロジテーブルをそもそも読めなかったときと、呼ぶべきチートマネージャが
+無かったときにも返り、それぞれ別のログ行が出ます。この経路はすでに存在するチートマネージャを
+使うだけで、自分では作りません。
 
 ### instances と render と update
 
@@ -880,9 +1056,10 @@ return Building{
 
 `if` の中身はスポーン呼び出しが発行された時点で走ります。パルが現れるのはその数秒後なので、先に
 カウンターとクールダウンが動き、あとからクリーチャーが出てきます。この台はすでに召喚を確定させて
-いるので、この順序で正しいのです。`PalBoxV2` を定義し直すと `native/buildings.lua` の用意済み定義を置き換えるため、mesh をここで
-書き直しています。バニラのパルボックス UI はそのまま開きます。インタラクトフックは呼び出しを
-見ているだけで、飲み込みはしません。
+いるので、この順序で正しいのです。`native/buildings.lua` は何も登録しないので、これが `PalBoxV2` の
+唯一の定義です。定義は宣言した内容しか持たないため、mesh はここで書き直しています。バニラの
+パルボックス UI はそのまま開きます。インタラクトフックは呼び出しを見ているだけで、飲み込みは
+しません。
 
 ## まとめ
 
@@ -891,10 +1068,13 @@ return Building{
 - 処理は `events` に書きます。第 1 引数は置かれた設置物なので、`self.state`、`self.pos`、
   `self.actor` がそのまま使えます。
 - `onPlace`、`onLoad`、`onRightClick`、`onRemove`、`onTick`、`onBuild`、`onWorldReady`、
-  `onWorldLeft` は動きます。`onLeftClick` と `onBreak` は動きません。
+  `onWorldLeft` は動きます。`onLeftClick` と `onBreak` は動きません。これは保留ではなく計測結果です。
 - 設置物は丸めたワールド座標で見つけ直されるので、`gridCm` が「どれだけ近くに並べられるか」を
-  決めます。
-- `Building.get(id):instances()` で、いまワールドに立っているその定義の設置物をすべて取得できます。
+  決めます。そのキーが指すレコードには、所有する定義とパックが書かれています。
+- building の登録は書き込みです。登録された定義だけが追跡され、追跡された設置物だけが永続化され
+  ます。`native/buildings.lua` は `publish` するまで何も登録しません。
+- `Building.get(id):instances()` で、いまワールドに立っているその定義の設置物をすべて取得でき、
+  `self:neighbors(cm)` で 1 つの設置物から周囲の設置物を取得できます。
 
 次は [Item](/docs/api/item) を読むと、`:give` と `:take` で building からプレイヤーに物を渡せる
 ようになります。

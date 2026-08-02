@@ -121,10 +121,13 @@ end
 ---The class at an engine path. Same as find, named for readability at the call site.
 M.class = M.find
 
----The CDO for a /Script/Pal class name, trying the Default__ form.
-function M.cdo(scriptClass)
-    return M.find("/Script/" .. scriptClass:gsub("^/Script/", ""):gsub("^(.-%.)", "%1Default__"))
-end
+-- There is no M.cdo(scriptClass) any more. It built "/Script/Pal.Default__X" out of
+-- "Pal.X" by pattern substitution and had no caller: every probe in the tree writes the
+-- CDO path out in full instead (test/probes/reflect.lua does it about twenty times —
+-- :329, :401, :453, :464-466, :474-477, :523, :539, :550, :767, :771, :1010), because a
+-- probe's whole job is to say exactly which engine path it asked for, and a mangled one
+-- printed by the helper is one more thing to disbelieve when a lookup reads "absent".
+-- Use M.find with the literal path.
 
 ---The first live instance of a class name, printed. Returns it or nil.
 function M.firstOf(className)
@@ -299,9 +302,19 @@ end
 --
 -- The tree has only ever extracted row NAMES. Reading a row VALUE is the open question
 -- behind every iconOf and recipeOf item, so it gets a dedicated helper.
+--
+-- M.dataTable IS THE FALLBACK, NOT THE FRONT DOOR, and that is a measurement rather than a
+-- preference. It walks M.allOf("DataTable") once per call, and that sweep is the crash-prone
+-- one: tests/catalog.lua:6-10 records FindAllOf("DataTable") touching a stale pointer as an
+-- EXCEPTION_ACCESS_VIOLATION that Lua pcall cannot catch. So nothing calls it in a loop —
+-- test/probes/reflect.lua wants a table by name in nine sections and wrote its own CACHED
+-- dataTableByName (reflect.lua:247-260) that sweeps once for the whole run, and
+-- test/hooks/item_datatable_row_read.lua:87-91 tries the cheap named FindObject first and
+-- only sweeps when that misses. Reach for it the same way: name lookup first, this second.
 --=============================================================================
 
----Find a live UDataTable by its FName. Returns it or nil.
+---Find a live UDataTable by its FName, by sweeping every loaded one. Returns it or nil.
+---Prefer FindObject("DataTable", name) and fall back to this — see the note above.
 function M.dataTable(tableName)
     local found
     for _, o in ipairs(M.allOf("DataTable")) do
