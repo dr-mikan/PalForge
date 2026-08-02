@@ -287,12 +287,19 @@ s:test("the two curated buildings define themselves without registering themselv
     -- load, so every install began persisting a record for every workbench and pal box in every
     -- save, for content no pack requested. They are still declared, in full, with their meshes —
     -- what they no longer do is publish themselves.
+    -- Measured ACROSS the require, for the reason test/cases/registry.lua's twin spells out:
+    -- another part of the session may have published the id on purpose (the streaming hook
+    -- does), and "is it registered right now" then answers a different question than the one
+    -- this check is named for.
+    local was    = om.isRegistered("building", "WorkBench")
+    local wasBox = om.isRegistered("building", "PalBoxV2")
+    package.loaded["palforge.native.buildings"] = nil
     local buildings = require("palforge.native.buildings")
     t:truthy(buildings.WorkBench:mesh(), "the curated declaration must be intact")
     t:truthy(buildings.PalBox:mesh(),    "...for both of them")
-    t:eq(om.isRegistered("building", "WorkBench"), false,
+    t:eq(om.isRegistered("building", "WorkBench"), was,
         "requiring native.buildings must not start tracking every workbench in the save")
-    t:eq(om.isRegistered("building", "PalBoxV2"), false,
+    t:eq(om.isRegistered("building", "PalBoxV2"), wasBox,
         "...nor every pal box")
 end)
 

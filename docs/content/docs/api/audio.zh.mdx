@@ -462,11 +462,18 @@ end
 **自定义音频文件不会播放，而且 `soundFile` 是硬错误。** 写上它，定义调用就会停下，消息里会点名
 待解决项 `audio-custom-file-loader`，以及两个真的能发声的字段。报错而不是忽略正是重点：
 `soundFile` 的转换排在 `soundId` / `soundPath` 之前，所以在一个能正常发声的 `soundId` 旁边加上它，
-会把本来在响的声音弄哑；而且在这棵代码树量过的任何版本上，它从来没有真的播放过。引擎两边的路都是
-封死的——`USoundWave` 没有声明导入器，`USoundWaveProcedural` 更是什么都没声明，正式版里没有任何
-东西能读一个 `.wav`；Wwise 那边的 `UWwiseExternalSourceStatics::SetExternalSourceMediaBy*` 是把
-Wwise 打包时已经准备好的媒体重新绑定，而不是读内容包磁盘上的文件。请从目录里挑一个最接近的
-声音。
+会把本来在响的声音弄哑；而且在这棵代码树量过的任何版本上，它从来没有真的播放过。
+
+**Wwise 那一半已经有了定论**，而且是看出来的：2026-08-02，在一次加载好的存档里，
+`AkExternalMediaAsset` 和 `AkMediaAsset` 都作为类默认对象解析成功，却都声明了**零**个函数，进程里
+也没有它们的任何实例。这个构建上根本不存在外部媒体或 `SetMedia` 这条路，谁再翻 `AkAudio` 也翻
+不出来。
+
+**引擎原生那一半不是封死，而是收窄了。** `USoundWave` 没有声明导入器，所以没有东西能自己去读磁盘
+上的 `.wav`；但 `UGameplayStatics` 的整套音频接口都留在了正式版里（137 个函数里就有
+`PlaySound2D`、`CreateSound2D`、`SpawnSoundAttached`），进程里有真正加载着的 `SoundWave` 和
+`SoundBase` 实例，UE4SS 也提供了 `StaticConstructObject`。还没有人弄清楚的是：能不能用这种方式造出
+一个 `USoundWave`，并从 Lua 把它的采样缓冲填上。在有人弄清楚之前，请从目录里挑一个最接近的声音。
 </Callout>
 
 <Callout type="warn">

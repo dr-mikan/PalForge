@@ -182,8 +182,20 @@ return UI({
     end,
 
     -- Re-assert the injection AND write back what changed. The title screen rebuilds its
-    -- widget tree (returning to the title, for instance) and silently takes our buttons
-    -- with it; every entry whose button is gone is injected again. This is the re-check
+    -- widget tree (returning to the title, for instance) and takes our buttons with it; every
+    -- entry whose button is gone is injected again.
+    --
+    -- ⚠️ AND THIS IS STILL A POLL, FOR A REASON THAT IS NOW SPECIFIC RATHER THAN GENERAL. This
+    -- comment used to say no Palworld UFunction had been observed announcing a rebuild. That is
+    -- false as of 2026-08-02 23:04: CommonActivatableWidget::ActivateWidget, PalHUDService::Push
+    -- and PalHUDService::Close all fire, native/ui/refresh.lua arms them, and :autoRefresh rides
+    -- them. What has NOT changed is this file's situation — the signal is armed only after
+    -- core/event's world.ready, because UE4SS cannot unregister a hook and ActivateWidget fires
+    -- through a world-load storm, and THE TITLE SCREEN IS BEFORE ANY WORLD. So a title-screen
+    -- element runs on the floor alone and the beat is the mechanism here, not a workaround.
+    -- (Once a player has been in a world and returns to the title, the signal is armed and this
+    -- re-check also gets a beat within one heartbeat of each rebuild. Free, and not relied on.)
+    -- This is the re-check
     -- deprecated/titlemenu.lua ran from its own LoopAsync — here the loop belongs to
     -- api/ui (:autoRefresh(2000), or :autoMount(nil, 2000) which also gets it in the
     -- first time). Entries that ARE still alive get their current label/onClick written

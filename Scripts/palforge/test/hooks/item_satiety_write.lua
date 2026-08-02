@@ -1,14 +1,21 @@
 -- test/hooks/item-satiety-write — IS THE SATIETY WRITE REACHABLE FROM LUA AT ALL?
 --
--- plan/TODO.md Open / Item. Marked in the source at native/items.lua's
--- TODO(item-satiety-write) (:559 as this was written), directly above the Berries definition
--- whose handler logs a line and feeds nobody.
+-- ⭐ ANSWERED, AND IMPLEMENTED. `SetFullStomach` takes ONE argument on this build — the walk in
+-- block [2] read it off the running binary, which is the one thing no dump could supply — and
+-- the write LANDS: satiety 31.648 -> 21.648 on a live character, seen by the read-back, and put
+-- back exactly by a second call. AddHPByRate(float) lands too. That answer is now the feature:
+-- `Item.Spec.restores = { satiety = 40, hpRate = 0.25 }` writes through core/character.lua's
+-- vitals section on item.use, and `restores = { hp = 50 }` is refused at define time because
+-- every absolute HP write takes FFixedPoint64, a struct. Confirmed running in a game
+-- 2026-08-02 23:33: `item: satiety 68.247 of 100.0, restored -5 and put back`.
+-- The source marker this header used to point at — native/items.lua's, above Berries — is gone,
+-- replaced by the paragraph that records the result. This hook is now the RE-MEASUREMENT: run
+-- it after a patch and block [2] says in one line whether the setter still declares one scalar.
 --
--- WHAT THIS HOOK CLOSES. The item is "a pack cannot declare an item that FEEDS or HEALS by its
--- own rules", and its marker narrows that to ONE unread fact: what parameter list
--- `SetFullStomach` declares on the live build, and therefore whether it is callable at all.
--- Everything else the marker names is already settled on paper and is only re-read here as the
--- ground the answer stands on:
+-- WHAT THIS HOOK CLOSED. The item was "a pack cannot declare an item that FEEDS or HEALS by its
+-- own rules", and it came down to ONE unread fact: what parameter list `SetFullStomach` declares
+-- on the live build, and therefore whether it is callable at all. Everything else was already
+-- settled on paper and is only re-read here as the ground the answer stands on:
 --   * the object is reachable. UPalIndividualCharacterParameter is what
 --     core.character.paramsOf(actor) hands back, through
 --     PalUtility::GetIndividualCharacterParameterByActor (dumps/cxx/Pal.hpp:32340) — the route
@@ -163,7 +170,7 @@ end
 
 hooks.declare{
     id     = "item-satiety-write",
-    item   = "Open / Item",
+    item   = "Closed 2026-08-02 — became Item.Spec.restores; kept as a regression tripwire",
     -- The marker says needs = { world = true }. `player` is declared as well because every read
     -- and every write below is taken off the PLAYER pawn's parameter object, and "no world" and
     -- "a world that has not finished spawning your character" are two different refusals that

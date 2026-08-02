@@ -64,7 +64,10 @@ local hooks = require("palforge.test.hooks")
 local DOC_MISS_THRESHOLD = 6      -- core/event.lua, consecutive unseen scans before a miss
 local DOC_SCAN_MS        = 500    -- core/event.lua, SCAN_MS == M.TICK_MS
 
-local WATCH_SEC  = 180            -- how long the watch runs
+-- TEN MINUTES. Walking far enough for a base to unload, and then far enough again for it to
+-- come back, is not a three-minute errand — and this hook has never once been run, so its old
+-- 180 s was a guess at how long a person takes rather than a measurement of it.
+local WATCH_SEC  = 600            -- how long the watch runs
 local REPORT_SEC = 1.0            -- one line a second, per the item's own wording
 local DEAD_MAX   = 10             -- consecutive unanswerable samples before the watch gives up
 
@@ -136,8 +139,14 @@ end
 
 hooks.declare{
     id    = "building-actor-streaming",
-    item  = "Foundations / The id model / R-1",
-    needs = { world = true, player = true },
+    item  = "Implemented, never exercised by a game — R-1, the streaming distance",
+    -- writes = true because [3] below PUBLISHES the build ids standing around the player, which
+    -- registers definitions and makes the next flush persist a record per matching actor. That
+    -- is under <Mods>/PalForge/state/ and never in Palworld's save, so it is the mild kind of
+    -- write — but the flag is what the run gate reads, and for a while this declaration and the
+    -- ⚠️ comment at [3] disagreed with each other. The comment was right.
+    writes = true,
+    needs  = { world = true, player = true },
     desc  = "does FindAllOf('PalBuildObject') stop returning a base the player has walked away "
          .. "from, and at what distance — the measurement R-1 was written without",
     run = function(h)
@@ -217,14 +226,72 @@ hooks.declare{
             end
         end
         h:value("records quarantined as why=\"missing\"", missing0)
+        -- THE HOOK MAKES ITS OWN PRECONDITION NOW, and that is the difference between a run
+        -- that measures R-1 and one that watches an empty table for ten minutes.
+        --
+        -- MEASURED 2026-08-02 23:03: this hook ran for 90 s while the operator walked from 40 m
+        -- to 110 m, printed "7 of the original 7 still there" 78 times, and answered NOTHING —
+        -- because F-8 means the native catalogs declare without registering, so PalForge was
+        -- tracking zero of those seven structures and there was no record for a miss to
+        -- quarantine. The old text below asked the OPERATOR to publish from a console they
+        -- cannot reach. An instrument that needs a precondition should establish it.
+        --
+        -- ⚠️ THIS IS WHY THE HOOK DECLARES writes = true. publish() registers a definition, the
+        -- 500 ms scan then binds every matching actor, and the next flush PERSISTS a record for
+        -- each — under <Mods>/PalForge/state/, never in Palworld's own save. That is exactly
+        -- what R-1 is about, so it cannot be measured without it. What gets published is chosen
+        -- from what is actually standing here, and the ids are named before the call.
         if liveInst == 0 then
-            h:note("PalForge is tracking none of these structures, because no REGISTERED "
-                .. "definition claims their build ids (F-8: the native catalogs declare without "
-                .. "registering). The FindAllOf half below is still the measurement that "
-                .. "matters — it is the game's behaviour, not ours. TO SEE R-1 ITSELF FIRE: "
-                .. "require('palforge.native.buildings').publish('WorkBench') in a base with a "
-                .. "workbench, wait for a scan, then run this hook again. ⚠️ That call starts "
-                .. "WRITING state for this save.")
+            -- Tier 1 of core/event's own resolution, run here: the class-name pattern
+            -- BP_BuildObject_<Id>_C (resolveBuildId, core/event.lua). Same derivation
+            -- mesh-actor-identity prints, so the two hooks name the same id for one actor.
+            local counts = {}
+            local okF, live = pcall(FindAllOf, "PalBuildObject")
+            if okF and type(live) == "table" then
+                for _, a in ipairs(live) do
+                    local b = (uo.className(a) or ""):match("BP_BuildObject_([%w_]+)_C")
+                    if b then counts[b] = (counts[b] or 0) + 1 end
+                end
+            end
+            local ids = {}
+            for b in pairs(counts) do ids[#ids + 1] = b end
+            table.sort(ids)
+            h:value("build ids standing here", #ids > 0 and table.concat(ids, ", ") or "none readable")
+            for _, b in ipairs(ids) do h:value("  " .. b, counts[b] .. " actor(s)") end
+
+            local nb = select(2, pcall(require, "palforge.native.buildings"))
+            local published, failed = {}, {}
+            if type(nb) == "table" and type(nb.publish) == "function" then
+                for _, b in ipairs(ids) do
+                    local ok, res = pcall(nb.publish, b)
+                    if ok and res then published[#published + 1] = b
+                    else failed[#failed + 1] = b .. " (" .. tostring(res) .. ")" end
+                end
+            else
+                failed[#failed + 1] = "native.buildings.publish is not callable"
+            end
+            h:value("published so the scan will track them", #published > 0
+                and table.concat(published, ", ") or "none")
+            if #failed > 0 then h:value("refused", table.concat(failed, "; ")) end
+
+            -- ⚠️ RECORDED SO IT CAN BE PUT BACK. Publishing mutates the process-wide registry,
+            -- and this hook is not the only thing in the session that reads it: test/cases/
+            -- registry.lua and test/cases/native.lua both assert that requiring native.buildings
+            -- does NOT register WorkBench — that assertion IS the F-8 publish gate. On
+            -- 2026-08-02 23:33 this hook published three ids and those two checks then failed in
+            -- a game while passing headlessly, which is a test suite catching an instrument that
+            -- changed the thing it was measuring. The watch retracts them when it retires.
+            _G.__PalForgeStreamPublished = published
+            if #published > 0 then
+                h:pass("%d build id(s) are REGISTERED now, so core/event's scan will bind every "
+                    .. "matching actor within one 500 ms sweep and the watch below has records to "
+                    .. "lose. Nothing in Palworld's save changed; the records live under "
+                    .. "<Mods>/PalForge/state/ and `state.uninstall` removes them.", #published)
+            else
+                h:fail("nothing could be published, so this run measures the GAME's streaming "
+                    .. "(the FindAllOf half) and says nothing about R-1. That is a partial "
+                    .. "result and it is named as one rather than read as a pass.")
+            end
         end
 
         --------------------------------------------------------------------
@@ -343,6 +410,23 @@ hooks.declare{
                 .. "far-away base's state survive a session in which it is never approached — "
                 .. "needs a save/quit/reload and the record counts either side of it. "
                 .. "`building-record-orphans` prints those counts.")
+            -- PUT THE REGISTRY BACK. An instrument that leaves the process changed is one the
+            -- next measurement has to work around, and here the change is exactly the F-8
+            -- publish gate two checks in test/cases assert. The records already written under
+            -- <Mods>/PalForge/state/ stay — they are what the watch above was about, and
+            -- `state.uninstall("palforge")` removes them — but nothing is left REGISTERED, so a
+            -- later F1 press sees the same registry a fresh session would.
+            local pub = _G.__PalForgeStreamPublished
+            if type(pub) == "table" and #pub > 0 then
+                local om = require("palforge.core.object_manager")
+                local back = {}
+                for _, id in ipairs(pub) do
+                    if pcall(om.unregister, "building", id) then back[#back + 1] = id end
+                end
+                h:log("VALUE %-38s = %s", "un-published, registry restored",
+                    #back > 0 and table.concat(back, ", ") or "nothing came back")
+                _G.__PalForgeStreamPublished = nil
+            end
             h:endBlock("verdict")
             return true
         end)

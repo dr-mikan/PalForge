@@ -642,19 +642,29 @@ panel:lastError()      -- nil after a success; the reason after a failure
 ## 表示を最新に保つ
 
 <Callout type="warn">
-ポーリングは 2 択の片方ではありません。PalForge にあるリフレッシュの駆動手段はそれだけです。
-パックのために `refresh()` を呼んでくれるものは何もないので、どの要素も、自分の状態が変わった
-ときに自分で `:refresh()` を呼ぶか、500 ms の心拍に乗るかのどちらかです。ゲームが画面を
-組み直したちょうどその瞬間にリフレッシュする方法はありません。見つけてもらう前に言っておく
-価値のある帰結が 3 つあります。
+パックのために `refresh()` を呼んでくれるものはありません。どの要素も、自分の状態が変わった
+ときに自分で `:refresh()` を呼ぶか、`:autoRefresh(ms)` を選ぶかのどちらかです。**そして
+`autoRefresh` が乗っているのは 1 つではなく 2 つです。**このページの以前の版は、PalForge に
+あるリフレッシュの駆動手段はポーリングだけだと書いていました。それは同じ日の計測でくつがえり、
+その訂正がここです。
 
-- パネルは**最大 `ms` ミリ秒だけ古い内容を表示します**。プレイヤーがたった今変えた数を読む
-  バインディングはその分だけ遅れ、`ms` を短くするのが唯一のてこです。
-- `TitleMenu` の再注入戦略全体が、同じ理由でポーリングです。タイトル画面はウィジェットツリーを
-  組み直して私たちのボタンごと持っていきますが、それを教えてくれるものは何も無いので、
-  `update()` が同じ拍で全項目を確認し直します。
-- 何も変わっていないパネルに対する 1 拍は意図的に安上がりです。バインディングは比較し、
-  変わったものだけ書き戻すので、`ms` を短くしてもコストはネイティブ呼び出しではなく比較です。
+- **ゲーム自身の再構築シグナル。**`CommonActivatableWidget::ActivateWidget`、
+  `PalHUDService::Push`、`PalHUDService::Close` はいずれも、Palworld が画面を組み立てるとき・
+  畳むときに発火します。2026-08-02 にパス指定で 21 個の候補を仕掛け、そのうち 3 つが発火しました。
+  `native/ui/refresh.lua` はこの 3 つを、遅延して、1 セッションにつき最大 1 回だけ仕掛けます。
+  再構築から心拍 1 つ以内にリフレッシュが届きます。
+- **その下で床になっているのが心拍です。**これは外せませんし、フォールバックでもありません。
+  その実行で残り 18 個の候補は沈黙しましたが、それは*入力*が無かったということです。操作者が
+  開いた画面は 18 枚ではなく 2 枚でした。つまり、あの 3 つが拾わない再構築こそ、この床が
+  存在する理由です。シグナルは `world.ready` の後にしか仕掛けられません。UE4SS はフックを外せず、
+  `ActivateWidget` はワールドロードの嵐の最中にすべての activatable に対して発火するからです。
+  したがってタイトル画面の要素はポーリングだけで動きます。
+
+つまりパネルは、**何が起きても最大 `ms` ミリ秒だけ古い内容を表示し、画面の再構築後はおよそ
+心拍 1 つぶん古い内容を表示します**。前者を動かすてこは、いまも `ms` を短くすることだけです。
+何も変わっていないパネルに対する 1 拍は意図的に安上がりです。バインディングは比較し、変わった
+ものだけ書き戻すので、`ms` を短くしてもコストはネイティブ呼び出しではなく比較であり、シグナルに
+乗ることが床を遅くすることもありません。
 </Callout>
 
 方法その 1 — 変化が起きた場所でリフレッシュする。正確で、何も変わらない間はコストゼロです。
@@ -670,8 +680,9 @@ event.on("item.obtain", function(ctx)
 end)
 ```
 
-方法その 2 — ポーリングする。どちらのポーラーも `event.every` に乗り、`event.TICK_MS`
-（500 ms）の心拍を丸ごと数えるので、実際の周期は 500 の倍数に切り上がります。
+方法その 2 — 購読する。どちらの購読も `event.every` に乗り、`event.TICK_MS`（500 ms）の心拍を
+丸ごと数えるので、床の実際の周期は 500 の倍数に切り上がります。再構築シグナルは、仕掛かっている
+ときはその拍を置き換えるのではなく、上にリフレッシュを 1 回足します。
 
 ```lua
 panel:mount(root)
@@ -709,16 +720,30 @@ flowchart LR
   要ります。
 
 <Callout type="info">
-Palworld が UI の再構築時に捕捉可能な UFunction を投げるかどうかは**未測定**で、それが判れば
-ポーリングを置き換えられます。ダンプは候補を 4 つ挙げています。Palworld のあらゆる画面が
-派生する基底クラスの `PalUserWidget:OnSetup` と `:OnClosed`、`PalUIHUDLayoutBase:AddHUD`、
-そして `CommonActivatableWidget:ActivateWidget` です。5 つ目の候補 `UPalUIManagerSubsystem` は
-関数を 1 つも宣言していないので除外されました。
+**このページを信じるより、実際に何がリフレッシュを駆動しているかを尋ねてください。**
+`UI.refreshDriver(ms)` はいま仕掛かっているものを読み、答えをデータとして返します。
 
-どれかをフックする前に測るべきことが 2 つ残っています。BlueprintImplementableEvent として
-読める 3 つは、実装したブループリントが同名の**独自の** UFunction を得るので、基底へのフックが
-何も捕まえない可能性があること。そして、ワールドロードの嵐の最中に張ったフックが共有ディスパッチを
-詰まらせた前例があることです。`pf_hook ui-update-event` が両方に決着をつける実行です。
+```lua
+local d = UI.refreshDriver(250)
+
+d.kind     --> "event+poll" when the rebuild signal is armed, "poll" when it is not
+d.event    --> the UFunction path(s) armed right now, or nil
+d.state    --> "armed" | "waiting" | "refused" | "unavailable" — why kind is what it is
+d.staleMs  --> how stale a panel may be when nothing rebuilt a screen (the floor's number)
+d.eventStaleMs --> how long after a rebuild the refresh lands: one heartbeat, or nil
+d.why      --> one sentence naming the measurement, ready for a log line
+```
+
+`kind == "poll"` は失敗を意味しません。シグナルが存在する前に出荷されていたのがこれであり、
+タイトル画面でも、仕掛けが断られたセッションでも、`RegisterHook` そのものが無いヘッドレスの
+テストでも、これが正直な答えです。`kind` で分岐してよいのは、読み出しがどれだけ古くなりうるかを
+*言う*ときだけで、リフレッシュが効くかどうかの判断に使ってはいけません。どの答えの下にも床が
+あります。
+
+計測そのものは `pf_hook ui-update-event` で、これは再実行できます。沈黙した 18 個の候補
+——ポップアップ用の `PalHUDService:ShowCommonUI`、タイトルへ戻るときの `RemoveHUD`、
+ワールド HUD の 2 つ、CommonUI コンテナの追加／削除——は、それらを動かすような操作を与えられて
+いなかっただけなので、切り捨てずにフックの中に名前を残してあります。
 </Callout>
 
 ## 入力: パネルがプレイヤーから受け取るもの
@@ -922,8 +947,8 @@ UI.routeMouse("mid") -> nil, 'mouse "mid" reached none of the 2 mounted element(
 | `:isMounted()` | `boolean` | render が成功を報告し、まだ unmount していないか |
 | `:find(name)` | `userdata?` | `name = "..."` を宣言したノードの生きたウィジェット。マウント前は nil |
 | `:lastError()` | `string?` | 直近のマウント試行が諦めた理由（1 文） |
-| `:autoRefresh(ms)` | `boolean` | 心拍に乗せて `refresh()` をポーリング。`ms` の既定は 500 |
-| `:autoMount(root, ms)` | `boolean` | ライフサイクル全体をポーリング。降りていれば `mount` を再試行、上がっていればリフレッシュ。`ms` の既定は 2000 |
+| `:autoRefresh(ms)` | `boolean` | Palworld の再構築シグナルと、床としての心拍の両方に乗せて `refresh()` を駆動。`ms` の既定は 500 |
+| `:autoMount(root, ms)` | `boolean` | 同じ駆動でライフサイクル全体を見る。降りていれば `mount` を再試行、上がっていればリフレッシュ。`ms` の既定は 2000 |
 | `:state()` | `table` | インスタンスそのもの。継ぎ目とバインディングの中の `self` |
 | `:name()` | `string` | 要素の `name`、無ければ id |
 | `:description()` | `string?` | 要素の `description` |
@@ -940,6 +965,7 @@ UI.routeMouse("mid") -> nil, 'mouse "mid" reached none of the 2 mounted element(
 | `UI.routeKey(name)` | `string?, string` | そのキーを誰が受け取るか、そしてなぜか |
 | `UI.routeMouse(button)` | `string?, string` | マウスボタンについて同じこと |
 | `UI.report()` | `string[]` | スタック、キーバインド、未解放の獲得、生のキーマップ |
+| `UI.refreshDriver(ms)` | `table` | いま実際にパネルをリフレッシュしているもの。`kind`、`event`、`state`、`staleMs`、`why` |
 | `UI.Class` | `table` | すべての要素が継承する基底クラス |
 
 ## 自前のスクリーンを作る
@@ -1495,7 +1521,9 @@ put the Border inside it — Frame{ Border{ color = {...}, ... } }
   PalForge が入力モードを手で書くことはなく、この 2 つのモードも動作は観測されていません。
 - `z` はホストに z があるときだけ描画順を決め、イベントのルーティングは常に決めます。キーは
   最前面の要素へ、マウス押下はそれを欲しがる最前面の要素へ届き、どちらも消費されません。
-- リフレッシュを駆動する手段はポーリングだけです。`:autoMount(root, ms)` が生きている
-  PalForge の UI がすべて通るマウント経路で、パネルは最大 `ms` だけ古くなります。
+- リフレッシュを駆動するのは 2 つです。Palworld 自身の再構築シグナルと、その下で床として
+  効き続けるハートビート。`:autoMount(root, ms)` が生きている PalForge の UI がすべて通る
+  マウント経路で、パネルは最大でも `ms` だけ古くなり、いまどちらが実際に武装されているかは
+  `UI.refreshDriver(ms)` が答えます。
 
 次は [Item](/docs/api/item) を読んで、ボタンが配るものを作りましょう。

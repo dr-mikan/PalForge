@@ -73,9 +73,12 @@ flowchart LR
 
 Every channel in `event.CHANNELS` has a SOURCE armed for it. One of them, `skill.hit`, has
 never carried an event: both of its native candidates registered successfully and stayed
-silent through fights that certainly landed damage, which is the open item
-`skill-hit-source`. Two building hooks have no channel at all, `onLeftClick` and `onBreak`,
-because nothing in the dumps can feed one. The channel table below says which is which.
+silent through fights that certainly landed damage. That is settled negatively now, and
+structurally rather than by exhaustion — `skill-hit-source` read every field of every damage
+struct this build declares (40 + 6 + 12) and **not one of them names a waza**, so there is nothing
+to correlate a hit with and no amount of further hooking can change it. Two building hooks have no
+channel at all, `onLeftClick` and `onBreak`, because nothing in the dumps can feed one. The channel
+table below says which is which.
 
 ### Wiring order at startup
 
@@ -442,11 +445,11 @@ rather than the bound delegate target is the mistake it exists to record. The tw
 that carry are those targets. `PalNPC:OnCompletedInitParam` sees every pal, because
 `APalMonsterCharacter` inherits it without redeclaring, and
 `PalPlayerCharacter:OnCompleteInitializeParameter` sees only the characters the player
-subscribed to, which is the party path. `ctx.via` names which one fired. What is still
-open is narrower than "does it work": every firing recorded so far landed in the same
-second as `world.ready`, the load storm in which every pal in range initialises at once, so
-"this pal did not exist a moment ago" is not yet measured. Keep `onSpawned` idempotent —
-the source already dedupes per actor within one second.
+subscribed to, which is the party path. `ctx.via` names which one fired. **"This pal did not
+exist a moment ago" is now measured too**: `pf_hook pal-spawned-fresh` timestamped every firing
+against `world.ready` on 2026-08-02 and recorded 27 firings, 17 of them nowhere near a world load.
+It does still fire during the load storm as well, so keep `onSpawned` idempotent — the source
+already dedupes per actor within one second.
 </Callout>
 
 <Callout type="info">

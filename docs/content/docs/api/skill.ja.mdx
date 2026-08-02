@@ -578,17 +578,23 @@ end
 
 - **パッシブの書き込みは計測済みです。** `AddPassiveSkill` が生きている `BP_ChickenPal_C` にパッシブを載せ、
   読み戻しがそれを確認しました。`skill.equip` が最初のイベントを得たのもこの経路です。
-- **アクティブ技の書き込みは未計測です。** `AddEquipWaza` / `RemoveEquipWaza` / `ClearEquipWaza` が Pal に
-  載ったところは一度も確認されていません。唯一書き込みを行った実行では、その 1.4 秒後に Palworld が
-  終了しました。ただしその実行は広すぎる `PalCharacter` 検索を使っていたので、対象はおそらく NPC でした。
-  つまり「書き込み先が違った」が最有力の説明であって、公開の根拠にできる事実ではありません。
+- **アクティブ技の書き込みも、2026-08-02 をもって計測済みです。** `pf_hook pal-skills-equip` が実セーブ上で
+  **8 pass / 0 fail** を返しました。`AddEquipWaza` が `Human_Punch`（`EPalWazaID 1`）を装備させ、それが
+  生きた `PalMonsterCharacter` から読み戻せました。`:forget` はそれを外し、`teachAll(pal)` は `2, 2` を
+  返し、`ClearEquipWaza` は手持ちを空にしたうえで、外した技をすべて戻して事後に検証しました。
+  **ゲームは落ちませんでした。**
+- **かつてここにあったクラッシュは、書き込みではなく対象のほうが原因でした。** 以前の実行では、その
+  1.4 秒後に Palworld が終了しました。その実行が使っていた検索は `FindAllOf("PalCharacter")` で、これは
+  広すぎます。階層は `APalMonsterCharacter : APalNPC : APalCharacter` なので、広いほうの名前は村人や商人にも
+  一致し、そのどれもアクティブ技の手持ちを持ちません。`:skillsOn` とこのフックがいまそうしているように、
+  `PalMonsterCharacter` を尋ねてください。
 
 <Callout type="warn">
-ここで唯一まだ計測できていないのが**アクティブ技**を載せることで、未解決項目 `pal-skills-equip` がそれです。
-決めつけずに真偽値を確かめ、失っても構わないセーブで試してください。計測はフレームワークが勝手に行うもの
-ではなく、宣言済みのテストフックです。UE4SS のコンソールから `pf_hook pal-skills-equip` を実行します。
-実行には `env.debug` が必要で、実セーブに書き込むため `env.debugHooks["pal-skills-equip"]` も必要です。
-手持ちを読むこととパッシブを書くことは決着済み、決着していないのはこれだけです。
+実在するキャラクターへ**アクティブ技**を書き込むことは決着済みですが、最初の一度は失っても構わないセーブで
+試す価値があります。`env.debugHooks["pal-skills-equip"]` がフック自身の書き込みを実験ごとのオプトインの
+後ろに置いているのはそのためであって、結果が疑わしいからではありません。決めつけずに、返ってくる真偽値を
+確かめてください。`:teach` はゲームが何をしたかを報告するので、それを読むパックはゲームが変わった日に
+気づけるパックです。
 </Callout>
 
 <Callout type="info">
@@ -922,7 +928,8 @@ PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated"
 - `kind = "passive"` にすると `:activate` は `false` を返します。`:equip` と `:unequip` を使ってください。
 - ハンドラが落ちても戻り値が `false` になるだけでログには出ないので、ログはハンドラの中で出します。
 - `pal:skillsOf()` で読めるのは Pal が*宣言した* id です。`skill:skillsOn(actor)` は生きたキャラクターが
-  実際に持つ 4 本のリストを読み戻し、`skill:teach(actor)` は 1 つ載せます（パッシブは決着済み、アクティブ技は
-  まだ未計測）。`pal:teachAll(actor)` は宣言済みリストをまとめて載せます。
+  実際に持つ 4 本のリストを読み戻し、`skill:teach(actor)` は 1 つ載せます（パッシブは計測済み、アクティブ技も
+  2026-08-02 以降は計測済み）。`pal:teachAll(actor)` は宣言済みリストをまとめて載せ、生きた Pal で
+  `2, 2` を返しました。
 
 次は [Effect](/docs/api/effect) を読むと、パッシブが効き続けるためのタイマーが手に入ります。

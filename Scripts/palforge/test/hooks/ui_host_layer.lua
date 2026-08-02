@@ -30,7 +30,7 @@ local REPORT_S = 12
 
 hooks.declare{
     id    = "ui-host-layer",
-    item  = "Owed work §2 (declared, shipped, never observed working)",
+    item  = "Closed 2026-08-02 — mounted through the game's own CommonUI layer",
     needs = { world = true },
     desc  = "push a panel onto one of Palworld's own CommonUI layers through BP_AddWidget and "
          .. "report whether the game accepted it",

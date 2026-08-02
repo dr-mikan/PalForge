@@ -19,21 +19,39 @@ description: 在游戏里按 F1，确认 PalForge 和你自己的内容是否正
 
 ```text
 [PalForge] tests: running 19 suite(s)
-[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
+[PalForge] tests: 577 passed, 0 failed, 35 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 ```
 
 `0 failed` 就是"我的环境能不能用"的答案：PalForge 已经加载，你写的 api 的行为和 api 页面描述的
 一致，游戏也接受了它发出的调用。出现别的数字时，坏掉的那一块会在屏幕上和日志里被点名。
 
-**没有哪一次按键能跑完所有检查，而汇总会用文字把这件事说出来。** 28 项检查需要已加载的存档，
-在标题画面会跳过。另有 11 项正相反：它们验证的是*拒绝*路径 —— 关着的 ready 闸门、没有归属者可
-挂载的控件、没有 pawn 时的 `Player.coordinate()` —— 所以只能在没有任何东西可以成功的地方运行，
-一旦世界起来了它们就跳过。这两组不可能在一次按键里都跑到。请在标题画面按一次，进存档再按一次；
+**没有哪一次按键能跑完所有检查，而汇总会用文字把这件事说出来。** 31 项检查需要已加载的存档，
+在标题画面会跳过。另有十八项正相反：它们验证的是*拒绝*路径 —— 关着的 ready 闸门、没有归属者可
+挂载的控件、没有 pawn 时的 `Player.coordinate()` —— 所以只能在没有任何东西可以成功的地方运行。
+这十八项里有五项会在世界起来之后跳过，只在标题画面跑；剩下的十三项根本不需要引擎，只会在无头的
+`lua5.4` 进程里跑。没有哪一种会话状态下的一次按键能测完全部。请在标题画面按一次，进存档再按一次；
 一次全绿的运行，其实是两次运行。
 
-上面的数字是 2026-08-02 在一个没有任何引擎的纯 `lua5.4` 进程里跑完整套件的实测结果。在游戏里，
-那 28 项受世界限制的检查会改为运行，`could not be answered by this session` 的三项里也会消失两项
-—— 那两项只是因为纯 Lua 进程既没有 `LoopAsync` 也没有 UE4SS 的 `Key` 表才出现的。
+同样这 612 项检查完全不用游戏也能跑，CI 跑的就是这个：
+
+```bash
+npm test        # cd Scripts && lua5.4 ... palforge.test.run()
+```
+
+```text
+tests: 576 passed, 0 failed, 36 skipped (612 total)
+tests: 36 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session, 1 did not say which)
+```
+
+**两条路之间差着一项检查，而这不是对不上。** `npm test` 直接调用 `run()`；F1 是经由 `install()`
+过去的，而 `install()` 同时也绑定了 F1 —— 于是那项验证*PalForge 已经握着的键会被拒绝、并且拒绝时
+点名说出是谁握着*的 `ui` 检查，在 F1 这条路上有一个真的被绑住的键可以拿来拒绝，在 `npm test` 这条
+路上则无从看起，只能不带方向地跳过。另外 `install()` 会先跑无头的启动测试包，它会在那 612 项之前
+先报出自己那行 `8 passed, 0 failed, 0 skipped`。
+
+上面两组数字都是 2026-08-03 在一个没有任何引擎的纯 `lua5.4` 进程里的实测结果。在游戏里，那 31 项
+受世界限制的检查会改为运行，`could not be answered by this session` 的三项里也会消失两项 —— 那两项
+只是因为纯 Lua 进程既没有 `LoopAsync` 也没有 UE4SS 的 `Key` 表才出现的。
 
 ```mermaid
 flowchart TD
@@ -121,10 +139,10 @@ Scripts/palforge/test/
 
 ## 检查了哪些东西
 
-一共有 **580 项检查**，分成 **19 个**套件。一个套件就是一组检查，覆盖 api 的一个领域。每个套件
+一共有 **612 项检查**，分成 **19 个**套件。一个套件就是一组检查，覆盖 api 的一个领域。每个套件
 是 `Scripts/palforge/test/cases/` 下的一个文件。它们针对你这次会话里真实的游戏运行。
 
-| 套件 | 检查数 | 只在存档里跑 | 只在标题画面跑 |
+| 套件 | 检查数 | 只在存档里跑 | 只在没有引擎时跑 |
 | --- | --- | --- | --- |
 | `schema` | 28 | 0 | 0 |
 | `registry` | 42 | 0 | 0 |
@@ -132,26 +150,34 @@ Scripts/palforge/test/
 | `store_codec` | 19 | 0 | 0 |
 | `store_state` | 36 | 0 | 0 |
 | `store_api` | 12 | 0 | 1 |
-| `store_runtime` | 5 | 0 | 0 |
+| `store_runtime` | 5 | 0 | 5 |
 | `store_disk` | 27 | 0 | 0 |
 | `native` | 26 | 0 | 0 |
 | `pal` | 34 | 5 | 0 |
-| `item` | 23 | 3 | 0 |
+| `item` | 39 | 6 | 0 |
 | `building` | 32 | 3 | 1 |
-| `skill` | 34 | 3 | 0 |
+| `skill` | 39 | 3 | 0 |
 | `effect` | 40 | 2 | 0 |
 | `audio` | 24 | 4 | 1 |
-| `mesh` | 46 | 3 | 0 |
-| `ui` | 105 | 1 | 6 |
+| `mesh` | 46 | 3 | 1 |
+| `ui` | 116 | 1 | 7 |
 | `player` | 10 | 4 | 1 |
 | `events` | 14 | 0 | 1 |
+
+中间那一列就是受世界限制的 31 项，是从一次真实运行里数出来的。右边那一列是游戏加载之后就跑不了的
+十八项，而它其实装着两种不同的闸门：五项调用 `support.needNoWorld`，在标题画面确实会跑
+（`store_api`、`building`、`audio`、`player`、`events`）；另外十三项调用 `support.needNoEngine`，
+只在无头进程里跑（`store_runtime` 的五项、`ui` 的七项，以及 `mesh` 里的一项）—— 它们验证的是没有
+`LoadAsset`、没有归属者、也没有 `FindAllOf` 可以替换时会发生什么，而一个 UE4SS 会话这三样都有。
 
 表格里的顺序就是运行顺序，它就是 `Scripts/palforge/test/init.lua` 里的 `M.CASES` —— 关于 F1 会跑
 哪些套件，那份列表是唯一的权威。只碰 Lua 的套件排在前面，这样基础部分出了问题，会在任何东西碰到
 你的存档之前先报出来。
 
 `pal` 里有一项两列都不属于：`teachAll` 的写入那一半需要一只活着的帕鲁，并且会改动真实存档，
-所以由一个声明过的钩子来测量，而不是 F1；它那行跳过会点出负责测量的钩子名字。
+所以由一个声明过的钩子来测量，而不是 F1；它那行跳过会点出负责测量的钩子名字。那个钩子已经跑过了
+—— `pal-skills-equip`，在真实存档上 8 通过 / 0 失败 —— 所以这条跳过的意思是"在别处测过了"，
+不是"不知道"。
 
 `store_runtime` 里那五项同样两列都不属于，理由更尖锐一点：它们拿一份假的 Actor 列表去驱动建筑
 扫描，而在 UE4SS 已加载的情况下这么做，等于把一个不含玩家任何结构的世界交给真正的 500 ms 扫描
@@ -168,11 +194,11 @@ Scripts/palforge/test/
 ```text
 [PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 19 suite(s): schema, registry, definitions, store_codec, store_state, store_api, store_runtime, store_disk, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
 [PalForge.unittests][info] SKIP [player] coordinate returns the local player's position as numeric x, y, z (world): no world loaded
-[PalForge.unittests][info] tests: 548 passed, 0 failed, 32 skipped (580 total)
-[PalForge.unittests][info] tests: 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
-[PalForge.unittests][info] tests: 28 check(s) were not measured because there is no world - load a save and press the key again.
+[PalForge.unittests][info] tests: 577 passed, 0 failed, 35 skipped (612 total)
+[PalForge.unittests][info] tests: 35 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
+[PalForge.unittests][info] tests: 31 check(s) were not measured because there is no world loaded - load a save and press the key again.
 [PalForge.unittests][info] tests: 1 check(s) can only be measured by a declared hook - `pf_hooks` lists them with the reason each one would skip, and each SKIP line above names the action that runs its own.
-[PalForge.test][info] swept 123 test definition(s)
+[PalForge.test][info] swept 127 test definition(s)
 ```
 
 把它当成五种行来读：
@@ -193,7 +219,7 @@ Scripts/palforge/test/
 
 ```text
 [PalForge] tests: running 19 suite(s)
-[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
+[PalForge] tests: 577 passed, 0 failed, 35 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 [PalForge] FAIL [item] give really adds to the live inventory, measured both ways: the Wood count must RISE across a give (135 -> 135)
 ```
 
@@ -202,7 +228,7 @@ Scripts/palforge/test/
 
 <Callout type="info">
 光一个 `N skipped`，分不出"几乎全都测到了"和"几乎什么都没测到"这两种运行，所以现在每个跳过都带
-方向。`28 need a world` 是一句你能照着做的话，`32 skipped` 不是。
+方向。`31 need a world` 是一句你能照着做的话，`35 skipped` 不是。
 </Callout>
 
 ## 只跑一个套件
@@ -412,37 +438,50 @@ pf_hook_pal_skills_equip
 3. `writes = true` —— 会改动存档的钩子还需要一个逐钩子的同意：`env.debugHooks["<id>"] = true`。
    `debug` 是整个会话范围的开关，而写入是在一个可以丢掉的存档上、针对单次实验做出的决定。
 
-二十四个声明过的钩子，按 `pf_hooks_all` 的运行顺序排列 —— 只读的在前，这样即使中途出事，凡是能打印
+`tools/deploy.sh` 写出的那个覆盖文件会把九个写入同意项**逐行注释掉**列出来，这样每一项都是一个
+单独的决定。当一整次会话就是要把它们扫一遍时，有一个开关能把它们一次全部打开，并且会明说：
+
+```bash
+tools/deploy.sh --writes    # all nine env.debugHooks opt-ins ON. Throwaway save only
+```
+
+它之所以是一个单独的开关而不是默认行为，是因为**这九个里有三个撤不回来**：生成出来的帕鲁没有
+按个体删除的办法；解锁了的科技没有上锁的办法 —— `UPalCheatManager` 声明了四个解锁入口，而整份头
+文件转储里找不到任何反向操作；而教会一个主动技，是这棵树里唯一一次与游戏关闭产生过关联的写入。
+（那次关联现在已经定性了：出事的是目标，不是写入 —— 那是个村民。`pal-skills-equip` 要求的是
+`PalMonsterCharacter`，它返回了 8 通过 / 0 失败，游戏也一直开着。）
+
+二十五个声明过的钩子，按 `pf_hooks_all` 的运行顺序排列 —— 只读的在前，这样即使中途出事，凡是能打印
 的东西都已经在写入发生之前打印完了：
 
 | 钩子 | 需要 | 它把什么问题定下来 |
 | --- | --- | --- |
-| `game-build-live` | world | `GetBuildVersion` / `GetEngineVersion` / `GetGameName` 的原始字符串，好让声明的版本和运行中的版本真正对上 |
+| `game-build-live` | world | `GetBuildVersion` / `GetEngineVersion` / `GetGameName` 的原始字符串，好让声明的版本和运行中的版本真正对上 —— **2026-08-02 跑过三次**：这三个携带的是 *Unreal* 的身份而不是 Palworld 的，版本号来自 `PalGameInstance.DisplayVersion` 和 `PalUtility.GetDisplayVersion`，两者都回答 `v1.0.2.101103` |
 | `keymap-key-coverage` | *无* | `keymap.FKEY` 有没有双向覆盖 UE4SS 那张实时的、165 个名字的 `Key` 表，并把每一处偏差点名 —— 这是 `test/cases/ui.lua` 那道守卫在无头环境下只能跳过的、必须在游戏里跑的那一半。它是这里唯一不声明 `needs` 的钩子，所以在标题画面也能给出答案 |
-| `mesh-actor-identity` | world | 以 UE4SS actor 句柄为键的表，在之后的扫描里还能不能命中 —— 整套按 actor 重新取键的做法都压在这次测量上 |
-| `item-datatable-row-read` | world | `dt:FindRow(id)` 返回的结构体上能不能直接索引标量或 FName 列，还是配方只能一列一列拼出来 |
-| `audio-custom-file-loader` | world | 正式版里到底有没有任何办法，把磁盘上的 `.wav` 变成能播放的东西 |
+| `mesh-actor-identity` | world | 以 UE4SS actor 句柄为键的表，在之后的扫描里还能不能命中 —— 整套按 actor 重新取键的做法都压在这次测量上。**2026-08-02 在三次独立会话里都得到确认**：句柄会落空，全名会命中，`rawequal` 为 false 而 `uo.same` 为 true，所以键只能是名字 |
+| `item-datatable-row-read` | world | `dt:FindRow(id)` 返回的结构体上能不能直接索引标量或 FName 列 —— **2026-08-02 跑过：能**，`Item.Handle:recipeOf` 会去读游戏那一行正是因为这个结果 |
+| `audio-custom-file-loader` | world | 正式版里到底有没有任何办法，把磁盘上的 `.wav` 变成能播放的东西 —— **2026-08-02 跑过**：Wwise 的外部媒体那一半在这个构建上不存在，UE 的播放那一半是活的，剩下的问题是能不能构造一个 `USoundWave` 并把它填上 |
 | `building-record-orphans` | world | 针对真实存档的孤儿隔离往返：读进来多少条记录、多少条没有已注册的归属、多少条被隔离 —— 以及最要紧的那条断言：仅仅是本次会话没有加载的包，**没有**被销毁 |
-| `store-base-load-cost` | world | 一个真实基地让 store 加载起来要付多少：文件数、字节数、按那些字节计时的解码，以及同样这些记录若合成一个文件会是多少 |
-| `building-actor-streaming` | world, player | `FindAllOf("PalBuildObject")` 会不会不再返回玩家已经走远的基地，以及在多远处开始 |
-| `ui-update-event` | world | 给四个 UI 类上的每个 Open/Show/Construct/Refresh/Update/Setup 函数挂钩，报告哪些真的触发、按什么顺序 |
-| `pal-spawned-fresh` | world | 把每次 `pal.spawned` 的触发相对 `world.ready` 打上时间戳，好把新生成和加载风暴区分开 |
-| `skill-hit-source` | world | 确认伤害路径上没有任何东西携带技能 id，并量化为什么把发动和伤害相关联是错的 |
+| `store-base-load-cost` | world | 一个真实基地让 store 加载起来要付多少：文件数、字节数、按那些字节计时的解码，以及同样这些记录若合成一个文件会是多少 —— **2026-08-02 跑过：0 字节、0.00 ms、0 个文件**，因为当时一个建筑定义都没注册 |
+| `building-actor-streaming` | world, player | `FindAllOf("PalBuildObject")` 会不会不再返回玩家已经走远的基地，以及在多远处开始 —— **仍然没有结果**：操作者走到了 287 m，90 次采样里 7 个结构一个不少地全都还在，所以 Palworld 的流送半径根本就比这更大 |
+| `ui-update-event` | world | 给 21 个点名的 UI 函数布上钩子，报告哪些真的触发、按什么顺序 —— **2026-08-02 跑过：其中三个会。** 操作者开关两个界面的过程中，`CommonActivatableWidget:ActivateWidget`、`PalHUDService:Push` 和 `PalHUDService:Close` 都触发了，这就是 `UI.Handle:autoRefresh` 如今搭乘的那个重建信号。另外 18 个一直没有声音，而那是没有输入，不是结论 |
+| `pal-spawned-fresh` | world | 把每次 `pal.spawned` 的触发相对 `world.ready` 打上时间戳，好把新生成和加载风暴区分开 —— **2026-08-02 跑过：27 次触发，其中 17 次离世界加载八竿子打不着**，所以这个事件确实是"来了一只新帕鲁"的意思 |
+| `skill-hit-source` | world | 确认伤害路径上没有任何东西携带技能 id，并量化为什么把发动和伤害相关联是错的 —— **2026-08-02 跑过：这个构建声明的三个伤害结构体里，没有一个字段是在说技能**（40 + 6 + 12 个字段），于是 `onHit` 是被否定地定下来的，而不是悬着 |
 | `ui-host-layer` | world | 把一个面板推到 Palworld 自己的 CommonUI 层上，报告游戏是否接受了它 |
 | `ui-backhandler` | world | 挂载一个声明了 CommonUI back 动作的面板，看看这时 Esc 会做什么 |
 | `building-runtime-reload` | world | 建筑运行时到底扛不扛得住 F9 —— 而且要按在**这个钩子两次运行之间**。现在扫描和派发共用同一张 `_G.__PalForgeBuildingRegistry`，`object_manager` 也进了重载的 KEEP 名单 —— 之后建筑钩子还会不会触发 |
-| `mesh-texture-import-live` | world, player | 有史以来第一次调用 `ImportFileAsTexture2D`，然后对同一个路径再调一次，说清楚新的缓存是不是替代了重新导入 |
-| `mesh-color-change` | world, player, **写入** | 在玩家面前放一个带色的网格，并把颜色改两次 |
-| `audio-setvolume-audible` | world, player | 用四档输出总线音量播放同一个声音，好让人判断 `setVolume` 有没有听得见的效果 |
+| `mesh-texture-import-live` | world, player | 调用 `ImportFileAsTexture2D`，然后对同一个路径再调一次，说清楚缓存是不是替代了重新导入 —— **2026-08-02 跑过**：返回了一个真正的 `Texture2D`，第二次由缓存回答 |
+| `mesh-color-change` | world, player, **写入** | 在玩家面前放一个带色的网格，并把颜色改两次 —— **2026-08-02 跑过，而且操作者亲眼看着**：空中的一个箱子依次变成红 → 绿 → 蓝 → 消失 |
+| `audio-setvolume-audible` | world, player | 用四档输出总线音量播放同一个声音，好让人判断 `setVolume` 有没有听得见的效果 —— **唯一还开着的那一项。** 2026-08-02 跑过：每一档音量下调用都返回 true，而听的人两次都带着保留地报告说 0.00 **不是**静音 |
 | `building-unlock` | world, player, **写入** | 把关于 `Building.Handle:unlock` 能确认的事实全部记下来，剩下确认不了的那一半交给操作者 |
-| `item-satiety-write` | world, player, **写入** | 运行中的版本给 `SetFullStomach` 声明的是什么参数表，以及饱食度 / HP 的写入从 Lua 到底够不够得着 |
-| `skill-projectile-spawn` | world, pal, **写入** | 打印每一条弹道 / 生成路径声明的参数表，只发射那条不吃参数的，并把吃结构体的那些点名拒绝 |
-| `store-save-roundtrip` | world, **写入** | 通过公开接口把一个包的状态写进真实存档的 store，再从真实路径读回来，并在重载之后再跑一次，看它能不能跨过一次世界加载 |
-| `store-crash-recovery` | world, **写入** | 在真实存档的 store 里种下一个写到一半的文件和一个读不了的文件，报告加载器是从哪一份副本恢复的 |
-| `save-survives-pack-removal` | world, player, **写入** | 把 PalForge 让这个存档记下的每一个 id 都点名，然后在卸载内容包并重新加载之后，说清楚它们各自变成了什么 |
-| `pal-skills-equip` | world, pal, **写入** | 主动技的写入会不会落到一只真帕鲁身上，以及游戏能不能撑住 |
+| `item-satiety-write` | world, player, **写入** | 运行中的版本给 `SetFullStomach` 声明的是什么参数表，以及饱食度 / HP 的写入从 Lua 到底够不够得着 —— **2026-08-02 跑过：够得着。** `SetFullStomach` 只吃一个参数，饱食度从 31.648 走到 21.648 又被放了回去，`AddHPByRate` 也落到了。`Item.Spec.restores` 正是建在这次测量上的 |
+| `skill-projectile-spawn` | world, pal, **写入** | 打印每一条弹道 / 生成路径声明的参数表，只发射那条不吃参数的，并把吃结构体的那些点名拒绝 —— **2026-08-02 跑过：走完七份参数表，拒绝了六条路径，每一条都吃结构体。** 结论是否定的，并且作为一条把这六条全都带上的拒绝发布出去 |
+| `store-save-roundtrip` | world, **写入** | 通过公开接口把一个包的状态写进真实存档的 store，再从真实路径读回来，并在重载之后再跑一次，看它能不能跨过一次世界加载。**2026-08-02 第 1 趟：7 通过**，370 字节写进去又逐字段读了回来 —— 在那之前它还抓出了一个 Linux 套件抓不到的真实缺陷（`ensureDir` 拿 `io.open` 去问一个目录；Windows 说不行）。第 2 趟，也就是跨越一次世界加载的那一半，还欠着 |
+| `store-crash-recovery` | world, **写入** | 在真实存档的 store 里种下一个写到一半的文件和一个读不了的文件，报告加载器是从哪一份副本恢复的 —— **2026-08-02 跑过：恢复表的四行在 NTFS 上全部成立**，不只是写在纸上 |
+| `save-survives-pack-removal` | world, player, **写入** | 把 PalForge 让这个存档记下的每一个 id 都点名，然后在卸载内容包并重新加载之后，说清楚它们各自变成了什么。**开过一次，从没跑完**；整轮 store 的工作就是为这次测量才开始的 |
+| `pal-skills-equip` | world, pal, **写入** | 主动技的写入会不会落到一只真帕鲁身上，以及游戏能不能撑住 —— **2026-08-02 跑过：8 通过 / 0 失败，游戏也一直开着。** `AddEquipWaza` 装上了 `Human_Punch`，并且在一只活着的 `PalMonsterCharacter` 上读了回来，`:forget` 把它取下，`teachAll(pal)` 回答 `2, 2`，`ClearEquipWaza` 清空了配置，之后每个招式都恢复了 |
 
-二十四个里有八个声明了 `writes = true`。`audio-setvolume-audible` 刻意不声明：它确实出声，但它改的
+二十五个里有九个声明了 `writes = true`。`audio-setvolume-audible` 刻意不声明：它确实出声，但它改的
 东西既不跨会话存在也不写到文件里，而 `writes` 的意思是"存档被改动"，不是"发生了点什么"。
 `mesh-texture-import-live` 同样出于这个理由不声明：它分配一个 `UTexture2D`，并在自己旁边写下一个
 很小的 PNG，改的是运行中的进程和一个目录，不是玩家的存档。
@@ -452,10 +491,12 @@ pf_hook_pal_skills_equip
 ```text
 #### BEGIN item-datatable-row-read
 NOTE can a scalar / FName column be indexed off the struct dt:FindRow(id) returns ...
-NOTE build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103)
-VALUE row.Rank                          = 3
-PASS  a scalar column reads straight off the struct
-NOTE item-datatable-row-read finished: 4 pass, 0 fail
+NOTE build 2026-08-02 21:32:44 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103)
+VALUE dt:FindRow('Arrow')               = ScriptStruct /Script/Pal.PalItemRecipe
+VALUE Product_Count                     = number(10)
+VALUE Material1_Id                      = userdata(Wood)
+PASS THE STRUCT ROUTE WORKS: all 4 columns came off the row by name.
+NOTE item-datatable-row-read finished: 2 pass, 0 fail
 #### END item-datatable-row-read
 ```
 
@@ -466,7 +507,7 @@ NOTE item-datatable-row-read finished: 4 pass, 0 fail
 
 <Callout type="info">
 F1 套件里每一条"这需要游戏"的跳过，都会点出负责测量它的钩子，所以任何一次跳过都能追到一件你真的
-可以去跑的事情上。`pf_hooks` 会把二十四个全列出来，并附上它们此刻会跳过的理由。
+可以去跑的事情上。`pf_hooks` 会把二十五个全列出来，并附上它们此刻会跳过的理由。
 </Callout>
 
 ## 世界闸门
@@ -713,7 +754,7 @@ support.isTestId("ChickenPal")             -- false
 
 ```text
 [PalForge.test][info] swept 95 test definition(s) after [pal]
-[PalForge.test][info] swept 123 test definition(s)
+[PalForge.test][info] swept 127 test definition(s)
 ```
 
 因为判断是对 `palforge_test:` 的前缀匹配，清扫永远碰不到真实内容 —— 碰不到原生目录，也碰不到
@@ -805,14 +846,17 @@ support.GAME = {
 ## 小结
 
 - 在游戏里按 **F1**。屏幕那一行显示 `0 failed`，就说明你的环境能用。
-- 按两次：标题画面一次，存档里一次。28 项只在存档里跑，10 项只在没有世界时跑，所以没有哪一次按键
+- 按两次：标题画面一次，存档里一次。31 项只在存档里跑，五项只在没有世界时跑，所以没有哪一次按键
   能测完全部 —— 汇总会告诉你是哪一边。
+- `npm test` 完全不用游戏也能跑同样这 612 项检查：**576 通过、0 失败、36 跳过**。走 `install()`
+  ——也就是 F1 那条路 —— 则是 **577 / 0 / 35**，外加启动测试包的 `8/0/0`。
 - 跳过是带方向的。必须保持为零的只有 `failed`。
 - `test.run("pal")` 只跑一个套件，`test.bind("F11", fn)` 能把你想要的任何处理放到一个键上 ——
   前提是 `pf_keys` 告诉过你这个键是空的。
 - 需要 Palworld 在跑才能做的测量，是 `test/hooks/` 下声明过的钩子：只在 `env.debug` 下加载，用
-  `pf_hooks` / `pf_hook <id>` / `pf_hooks_all` 按名字运行，其中会写入存档的八个还需要
-  `env.debugHooks[id] = true`。
+  `pf_hooks` / `pf_hook <id>` / `pf_hooks_all` 按名字运行，其中会写入存档的九个还需要
+  `env.debugHooks[id] = true` —— `tools/deploy.sh --writes` 能在一个可以丢掉的存档上把这九个
+  一次全部打开。
 - 一棵树，五个角落 —— `units/`、`cases/`、`hooks/`、`probes/`、`tools/` —— 而 `--release` 会把它
   整个删掉，所以玩家一个都拿不到。
 - 每条命令都有三个入口：UE4SS 控制台（默认是关着的）、一个键，或者

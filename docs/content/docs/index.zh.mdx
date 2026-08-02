@@ -295,13 +295,16 @@ flowchart LR
 - **Item** —— 四个都会运行。`onObtain` 和 `onUse` 来自背包与使用路径；`onCraft` 来自两个地图对象
   模型的 `OnFinishWorkInServer`；`onDiscard` 来自 `RequestDrop_ToServer` /
   `RequestDispose_ToServer`。后两个是在真实的制作台上制作、从真实的格子里丢弃时实地看到的。
-  `:give`、`:take` 和 `:count` 事后都会把背包再读一遍，所以它们返回的是实测，不是期望。现在还会
-  返回 nil 的只有 `:recipeOf`。
+  `:give`、`:take` 和 `:count` 事后都会把背包再读一遍，所以它们返回的是实测，不是期望。`:recipeOf`
+  返回你声明的配方，没有就返回游戏自己关于这个 id 的那一行 —— 2026-08-02 在一个存档里确认它跑起来
+  了，`Arrow` 返回的是 `Arrow x10, work = 1000.0, from { Stone x2, Wood x2 }`。而且道具还能
+  **喂饱和治疗**：`restores = { satiety = 20, hpRate = 0.25 }` 会在使用时把两样都写进去，这是在一个
+  活着的角色身上实测过的。
 - **Pal** —— 五个都会运行。`onCaptured`、`onDamaged` 和 `onDeath` 来自已经确认的游戏调用。
   `onSpawned` 挂在 `PalNPC:OnCompletedInitParam` 和
-  `PalPlayerCharacter:OnCompleteInitializeParameter` 上，两者都看到过触发 —— 但迄今为止每一次触发
-  都落在世界加载的同一秒里，所以“它代表的是一只刚刚才出现的帕鲁”这一点仍未被证明。请把这个处理函数
-  写成跑两次也没问题。`onTick` 由一个遍历世界里所有帕鲁的扫描驱动，大约每三秒一次。声明的 `mesh`
+  `PalPlayerCharacter:OnCompleteInitializeParameter` 上，而且已经实测到它会为一只真正新出现的帕鲁
+  触发：2026-08-02 共 27 次触发，其中 17 次离世界加载八竿子打不着。它在加载期间同样会触发，所以还是
+  请把这个处理函数写成跑两次也没问题。`onTick` 由一个遍历世界里所有帕鲁的扫描驱动，大约每三秒一次。声明的 `mesh`
   会在同一个生成通道上自动装上去：你不需要自己调用 `renderOn`。
 - **Skill** —— 四个里有三个会运行。`onActivate` 由 `PalActionBase:OnBeginAction` 运来，是在真实
   战斗里看到的；`onEquip` 和 `onUnequip` 来自 `AddPassiveSkill` / `RemovePassiveSkill`。不运行的是
@@ -315,19 +318,21 @@ flowchart LR
   目录会把它解析成真正能播出声的资源路径。`Audio.Handle:stop(actor)` 不是按单个声音来的 —— 它会把
   那个 actor 上正在播放的一切都停掉 —— `:setVolume` 出于同样的原因也是按 actor 来的。
 - **Mesh** —— 没有生命周期事件。原版 `/Game/...` 的静态和骨骼网格能用，交给引擎之前会先做类检查；
-  `.obj` 几何体能从磁盘读进来。自定义贴图的导入按正确的声明签名接好了线，但一次都没被调用过，也还
-  没有人在游戏里亲眼看到过一次改色。
-- **UI** —— 没有生命周期事件，而且没有任何一个原生的“界面变了”信号被确认会触发，所以没有东西会替
-  你刷新元素。用 Palworld 自带的 UMG 组件搭出控件、并挂进游戏本体的游戏内 UI 根节点，这条路是实地
-  确认过的。
+  `.obj` 几何体能从磁盘读进来，自带的 PNG 也能导入并按路径缓存 —— 这一条在 2026-08-02 的一次加载
+  好的存档里被亲眼看着跑通了，改色也一样：一个箱子先变红，再变绿，然后变蓝。
+- **UI** —— 没有生命周期事件，但原生的“界面变了”信号*确实存在*，而且在 2026-08-02 测到了：
+  Palworld 建起或拆掉一个画面时，`CommonActivatableWidget:ActivateWidget`、`PalHUDService:Push`
+  和 `PalHUDService:Close` 都会触发。`:autoRefresh(ms)` 三个都搭，底下还垫着心跳轮询作为下限。用
+  Palworld 自带的 UMG 组件搭出控件、并挂进游戏本体的游戏内 UI 根节点，这条路是实地确认过的。
 - **Player** —— `Player.character()`、`Player.coordinate()` 和
   `Player.coordinateOffset(dx, dy, dz)`。没有事件；它回答玩家在哪里。
 
 <Callout type="error" title="这个版本会直接拒绝的一件事">
-**你自己的声音文件没法播放，而且 `Audio.Spec.soundFile` 现在是定义时的硬错误。** 引擎原生的那一半
-是关死的 —— `USoundWave` 没有声明任何导入器 —— 而 Wwise 那一半做的是把一个烘焙好的媒体 cookie 重新
-绑定，而不是读你磁盘上的 `.wav`。这个字段仍然保留在声明里，好让错误消息能点它的名，并点出未决项
-`audio-custom-file-loader`。能播放的只有游戏里本来就有的声音，一共 1957 个 —— 目录见
+**你自己的声音文件没法播放，而且 `Audio.Spec.soundFile` 现在是定义时的硬错误。** Wwise 那一半已经
+有了定论：这个构建上的 `AkExternalMediaAsset` 和 `AkMediaAsset` 一个函数都没声明，进程里也没有它们
+的任何实例，所以根本不存在外部媒体这条路。引擎原生那一半同样没有导入器 —— `USoundWave` 没声明 ——
+而能不能从 Lua 自己造一个，正是未决项 `audio-custom-file-loader` 剩下的全部问题。这个字段仍然保留在
+声明里，好让错误消息能点它的名。能播放的只有游戏里本来就有的声音，一共 1957 个 —— 目录见
 [Audio](/docs/api/audio)。
 
 本页其余内容今天都能用，只有一个习惯值得养成：碰到游戏的调用返回的是它实测到的结果，所以别假定，
@@ -342,10 +347,11 @@ flowchart LR
   钩子的类的完整函数列表都被读过了，并不存在：`PalBuildObject` 上没有任何点击项，而“摧毁”只以委托
   字段的形式存在，`RegisterHook` 没法按路径去挂它。请改用 `onRightClick`，消失则用 `onRemove`，它会
   带着 `reason = "missing"`。
-- Skill 的 `onHit` —— 它的两个候选来源从两侧测下来都是沉默的。请从你自己的代码里调用
+- Skill 的 `onHit` —— 这也是以否定的方式定下来的，而且是结构上的：这个构建声明的三个伤害结构体里，
+  没有一个字段带着技能 id，所以根本没有东西可以把一次命中关联上去。请从你自己的代码里调用
   `:hit(target)`，比如在帕鲁的处理函数里、建筑物的 `onRightClick` 里，或者一个按键绑定里。
-- 没有东西会替你刷新界面元素。状态变了就自己调用 `:refresh()`，或者用 `:autoRefresh(ms)` 定时
-  轮询。
+- 没有东西会*自动*替你刷新界面元素。状态变了就自己调用 `:refresh()`，或者用 `:autoRefresh(ms)` ——
+  它搭乘 Palworld 自己的重建信号，并回落到心跳上。
 </Callout>
 
 ## 一个更大的例子

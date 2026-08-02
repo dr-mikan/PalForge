@@ -19,22 +19,42 @@ description: ゲーム内で F1 を押して PalForge と自分のコンテン�
 
 ```text
 [PalForge] tests: running 19 suite(s)
-[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
+[PalForge] tests: 577 passed, 0 failed, 35 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 ```
 
 `0 failed` が「自分の環境は動いているか」への答えです。PalForge は読み込まれ、あなたが書く api は
 api ページの説明どおりに動き、ゲームもその呼び出しを受け付けています。0 以外の数字が出たときは、
 壊れている場所が画面とログに名指しで出ます。
 
-**1 回の押下ですべてのチェックが走ることはありません。サマリはそれを言葉で言います。** 28 件は
-ロード済みのセーブを必要とし、タイトル画面ではスキップされます。さらに 11 件は逆向きで、*拒否*の
+**1 回の押下ですべてのチェックが走ることはありません。サマリはそれを言葉で言います。** 31 件は
+ロード済みのセーブを必要とし、タイトル画面ではスキップされます。さらに 18 件は逆向きで、*拒否*の
 経路（閉じたままの ready ゲート、描画先のオーナーがないウィジェット、ポーンのない
-`Player.coordinate()`）を確かめるものなので、成功しうるものが何もない場所でしか走れず、ワールドが
-立ち上がるとスキップされます。この 2 群が 1 回の押下で両方走ることはありません。タイトル画面で
-1 回、セーブデータ内で 1 回押してください。緑の実行結果とは 2 回分の実行のことです。
+`Player.coordinate()`）を確かめるものなので、成功しうるものが何もない場所でしか走れません。この
+18 件のうち 5 件はワールドが立ち上がるとスキップされ、タイトル画面で走ります。残る 13 件は
+エンジンをまったく必要とせず、ヘッドレスの `lua5.4` プロセスでしか走りません。どのセッション状態
+でも、1 回の押下がすべてを計測することはありません。タイトル画面で 1 回、セーブデータ内で 1 回
+押してください。緑の実行結果とは 2 回分の実行のことです。
 
-上の数字は 2026-08-02 に、エンジンのない素の `lua5.4` プロセスでスイート全体を実行した実測値です。
-ゲーム内ではワールド依存の 28 件が代わりに走り、`could not be answered by this session` の 3 件の
+同じ 612 件のチェックは、ゲームがまったく無くても実行できます。CI がやっているのはこれです。
+
+```bash
+npm test        # cd Scripts && lua5.4 ... palforge.test.run()
+```
+
+```text
+tests: 576 passed, 0 failed, 36 skipped (612 total)
+tests: 36 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session, 1 did not say which)
+```
+
+**2 つの経路の差はチェック 1 件で、これは食い違いではありません。** `npm test` は `run()` を直接
+呼びます。F1 は `install()` を経由して到達し、`install()` は F1 の割り当ても行います。そのため
+*PalForge がすでに握っているキーは拒否され、その拒否は握っている側を名指しする*ことを確かめる
+`ui` のチェックは、F1 経路では拒否される相手のキーがありますが、`npm test` 経路では見るものが
+なく、方向を示さずにスキップします。`install()` はさらに先にヘッドレスの起動バンドルを走らせ、
+612 件の前に自分の `8 passed, 0 failed, 0 skipped` の行を出します。
+
+上の 2 つの数字はどちらも、2026-08-03 にエンジンのない素の `lua5.4` プロセスで実際に走らせた値です。
+ゲーム内ではワールド依存の 31 件が代わりに走り、`could not be answered by this session` の 3 件の
 うち 2 件もなくなります。その 2 件は、素の Lua プロセスには `LoopAsync` も UE4SS の `Key` テーブルも
 ないという理由だけで出ているものです。
 
@@ -133,11 +153,11 @@ Scripts/palforge/test/
 
 ## 何がチェックされるのか
 
-チェックは全部で **580 件**あり、**19 個**の**スイート**に分かれています。スイートとは api の
+チェックは全部で **612 件**あり、**19 個**の**スイート**に分かれています。スイートとは api の
 1 領域を受け持つチェックのまとまりで、それぞれ `Scripts/palforge/test/cases/` の 1 ファイル
 です。チェックはあなたのセッションの実際のゲームに対して走ります。
 
-| スイート | チェック数 | セーブ内でしか走らない | タイトル画面でしか走らない |
+| スイート | チェック数 | セーブ内でしか走らない | エンジンが無いときしか走らない |
 | --- | --- | --- | --- |
 | `schema` | 28 | 0 | 0 |
 | `registry` | 42 | 0 | 0 |
@@ -145,19 +165,26 @@ Scripts/palforge/test/
 | `store_codec` | 19 | 0 | 0 |
 | `store_state` | 36 | 0 | 0 |
 | `store_api` | 12 | 0 | 1 |
-| `store_runtime` | 5 | 0 | 0 |
+| `store_runtime` | 5 | 0 | 5 |
 | `store_disk` | 27 | 0 | 0 |
 | `native` | 26 | 0 | 0 |
 | `pal` | 34 | 5 | 0 |
-| `item` | 23 | 3 | 0 |
+| `item` | 39 | 6 | 0 |
 | `building` | 32 | 3 | 1 |
-| `skill` | 34 | 3 | 0 |
+| `skill` | 39 | 3 | 0 |
 | `effect` | 40 | 2 | 0 |
 | `audio` | 24 | 4 | 1 |
-| `mesh` | 46 | 3 | 0 |
-| `ui` | 105 | 1 | 6 |
+| `mesh` | 46 | 3 | 1 |
+| `ui` | 116 | 1 | 7 |
 | `player` | 10 | 4 | 1 |
 | `events` | 14 | 0 | 1 |
+
+真ん中の列が、実際の実行から数えたワールド依存の 31 件です。右の列はゲームがロードされた状態では
+走れない 18 件で、ここには 2 種類のゲートが同居しています。5 件は `support.needNoWorld` を呼び、
+タイトル画面では走ります（`store_api`、`building`、`audio`、`player`、`events`）。13 件は
+`support.needNoEngine` を呼び、ヘッドレスのプロセスでしか走りません（`store_runtime` の 5 件、
+`ui` の 7 件、`mesh` の 1 件）。これらが確かめるのは、`LoadAsset` が無く、オーナーが無く、
+差し替える `FindAllOf` も無いときに何が起きるかで、UE4SS のセッションにはその 3 つが揃っています。
 
 表の並びがそのまま実行順で、その実体は `Scripts/palforge/test/init.lua` の `M.CASES` です。F1 が
 どのスイートを走らせるかについて、権威はそのリストだけです。Lua だけで完結するスイートを先に
@@ -165,7 +192,8 @@ Scripts/palforge/test/
 
 `pal` の 1 件はどちらの列にも入りません。`teachAll` の書き込み側は生きたパルを必要とし、実際の
 セーブを書き換えるため、F1 ではなく宣言済みフックが計測します。そのスキップ行には、計測を行う
-フックの名前が付きます。
+フックの名前が付きます。そのフックはすでに実行済みです——`pal-skills-equip`、実セーブ上で
+8 pass / 0 fail——なので、このスキップは「不明」ではなく「別の場所で計測済み」という意味です。
 
 `store_runtime` の 5 件もどちらの列にも入りません。理由はもっと鋭いものです。これらは偽のアクター
 一覧を相手に建物スキャンを動かすので、UE4SS がロードされた状態でそれをやると、実際の 500 ms の
@@ -185,11 +213,11 @@ Scripts/palforge/test/
 ```text
 [PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 19 suite(s): schema, registry, definitions, store_codec, store_state, store_api, store_runtime, store_disk, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
 [PalForge.unittests][info] SKIP [player] coordinate returns the local player's position as numeric x, y, z (world): no world loaded
-[PalForge.unittests][info] tests: 548 passed, 0 failed, 32 skipped (580 total)
-[PalForge.unittests][info] tests: 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
-[PalForge.unittests][info] tests: 28 check(s) were not measured because there is no world - load a save and press the key again.
+[PalForge.unittests][info] tests: 577 passed, 0 failed, 35 skipped (612 total)
+[PalForge.unittests][info] tests: 35 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
+[PalForge.unittests][info] tests: 31 check(s) were not measured because there is no world loaded - load a save and press the key again.
 [PalForge.unittests][info] tests: 1 check(s) can only be measured by a declared hook - `pf_hooks` lists them with the reason each one would skip, and each SKIP line above names the action that runs its own.
-[PalForge.test][info] swept 123 test definition(s)
+[PalForge.test][info] swept 127 test definition(s)
 ```
 
 行は 5 種類として読みます。
@@ -212,7 +240,7 @@ Scripts/palforge/test/
 
 ```text
 [PalForge] tests: running 19 suite(s)
-[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
+[PalForge] tests: 577 passed, 0 failed, 35 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 [PalForge] FAIL [item] give really adds to the live inventory, measured both ways: the Wood count must RISE across a give (135 -> 135)
 ```
 
@@ -221,7 +249,7 @@ Scripts/palforge/test/
 
 <Callout type="info">
 素の `N skipped` では、ほぼすべてを測れた実行と、ほとんど測れなかった実行を見分けられません。
-だからスキップは方向を持ちます。`28 need a world` は行動に移せる 1 文ですが、`32 skipped` は
+だからスキップは方向を持ちます。`31 need a world` は行動に移せる 1 文ですが、`35 skipped` は
 そうではありません。
 </Callout>
 
@@ -452,37 +480,53 @@ pf_hook_pal_skills_equip
    フックごとの 2 つめの同意が要ります。`debug` はセッション全体のスイッチであり、書き込みは
    使い捨てのセーブで下す実験ごとの判断だからです。
 
+`tools/deploy.sh` が書き出すオーバーレイは、書き込み系のオプトイン 9 つを 1 行ずつ**コメントアウト
+した状態**で並べます。1 つずつが別の判断だからです。セッション全体で意図的にそれらを掃くときは、
+フラグ 1 つでまとめて有効にし、そう宣言します。
+
+```bash
+tools/deploy.sh --writes    # all nine env.debugHooks opt-ins ON. Throwaway save only
+```
+
+これが既定ではなく別のフラグになっているのは、**9 つのうち 3 つが取り消せない**からです。
+スポーンさせたパルには個体単位の削除がありません。解放したテクノロジーには施錠がありません
+（`UPalCheatManager` は解放系の項目を 4 つ宣言していますが、ヘッダのダンプのどこにも逆操作は
+ありません）。そして覚えさせたアクティブ技は、このツリーの中で唯一、ゲームの終了と相関したことの
+ある書き込みです。（その相関はすでに決着しています。原因は書き込みではなく対象が村人だったこと
+でした。`pal-skills-equip` はいま `PalMonsterCharacter` を尋ね、ゲームが動いたまま 8 pass / 0 fail
+を返しています。）
+
 宣言済みの 25 個のフックを、`pf_hooks_all` が実行する順（読み取り専用が先。途中で落ちても、書き込みに
 至る前に出せるものはすべて出ているように）で並べます。
 
 | フック | 必要なもの | 何を決着させるか |
 | --- | --- | --- |
-| `game-build-live` | world | `GetBuildVersion` / `GetEngineVersion` / `GetGameName` の生の文字列。宣言したビルドと動いているビルドを実際に比較するため |
+| `game-build-live` | world | `GetBuildVersion` / `GetEngineVersion` / `GetGameName` の生の文字列。宣言したビルドと動いているビルドを実際に比較するため —— **2026-08-02 に 3 回実行**。この 3 つが運ぶのは *Unreal* の素性であって Palworld のものではなく、ビルド番号は `PalGameInstance.DisplayVersion` と `PalUtility.GetDisplayVersion` から来ます。どちらも `v1.0.2.101103` と答えます |
 | `keymap-key-coverage` | *なし* | `keymap.FKEY` が UE4SS のライブな 165 名の `Key` テーブルを双方向で覆えているか、ずれをすべて名指しする —— `test/cases/ui.lua` のガードのうち、ヘッドレスでは skip されるゲーム内側の半分。ここで唯一 `needs` を宣言しないフックなので、タイトル画面でも答えが出る |
-| `mesh-actor-identity` | world | UE4SS のアクターハンドルをキーにしたテーブルが、後のスイープでも当たるのか —— アクター単位の再キー化全体が乗っている計測 |
-| `item-datatable-row-read` | world | `dt:FindRow(id)` が返す構造体からスカラや FName の列を直接引けるのか、それともレシピは列ごとに組み立てるしかないのか |
-| `audio-custom-file-loader` | world | 製品ビルドに、ディスク上の `.wav` を再生可能なものへ変える手段が 1 つでもあるのか |
+| `mesh-actor-identity` | world | UE4SS のアクターハンドルをキーにしたテーブルが、後のスイープでも当たるのか —— アクター単位の再キー化全体が乗っている計測。**2026-08-02 に別々の 3 セッションで確認**。ハンドルは外れ、フルネームは当たり、`rawequal` は false で `uo.same` は true。つまりキーは名前でなければなりません |
+| `item-datatable-row-read` | world | `dt:FindRow(id)` が返す構造体からスカラや FName の列を直接引けるのか。**2026-08-02 に実行、引けます**。`Item.Handle:recipeOf` がゲームの行を読むのはこの結果によります |
+| `audio-custom-file-loader` | world | 製品ビルドに、ディスク上の `.wav` を再生可能なものへ変える手段が 1 つでもあるのか。**2026-08-02 に実行**。Wwise の外部メディア側はこのビルドに存在せず、UE の再生側は生きており、残るのは `USoundWave` を構築して中身を埋められるかどうかです |
 | `building-record-orphans` | world | 実セーブに対する orphan 隔離の往復。レコードがいくつ読み込まれ、いくつが登録された所有者を持たず、いくつが隔離されたか —— そして肝心の主張として、今回のセッションで単にロードされていないだけのパックが**破棄されていない**こと |
-| `store-base-load-cost` | world | 実際の拠点がストアの読み込みにどれだけかかるか。ファイル数、バイト数、そのバイト列で計測したデコード時間、そして同じレコードを 1 ファイルにまとめていた場合の費用 |
-| `building-actor-streaming` | world, player | `FindAllOf("PalBuildObject")` が、プレイヤーが歩いて離れた拠点を返さなくなるのか。なるなら何メートルで |
-| `ui-update-event` | world | 4 つの UI クラスの Open/Show/Construct/Refresh/Update/Setup 関数をすべて仕掛け、どれがどの順で発火するかを報告する |
-| `pal-spawned-fresh` | world | `pal.spawned` の発火をすべて `world.ready` からの時刻で記録し、新規スポーンをロード直後の嵐と区別する |
-| `skill-hit-source` | world | ダメージ経路に技 id を運ぶものが無いことを確認し、発動とダメージの相関付けがなぜ誤りかを数値で示す |
+| `store-base-load-cost` | world | 実際の拠点がストアの読み込みにどれだけかかるか。ファイル数、バイト数、そのバイト列で計測したデコード時間、そして同じレコードを 1 ファイルにまとめていた場合の費用。**2026-08-02 に実行、0 バイト / 0.00 ms / 0 ファイル**。ビルディング定義が 1 つも登録されていなかったためです |
+| `building-actor-streaming` | world, player | `FindAllOf("PalBuildObject")` が、プレイヤーが歩いて離れた拠点を返さなくなるのか。なるなら何メートルで —— **まだ結果は出ていません**。操作者は 287 m まで離れましたが、7 つの構造物は 90 回のサンプルすべてに残り続けました。Palworld のストリーミング半径がそれより単に大きいということです |
+| `ui-update-event` | world | 名前を挙げた UI 関数 21 個を仕掛け、どれがどの順で発火するかを報告する —— **2026-08-02 に実行、3 つが発火しました。**`CommonActivatableWidget:ActivateWidget`、`PalHUDService:Push`、`PalHUDService:Close` は操作者が画面を 2 枚開閉するあいだにすべて発火しました。これが `UI.Handle:autoRefresh` がいま乗っている再構築シグナルです。残り 18 個は沈黙しましたが、それは発見ではなく入力が無かったということです |
+| `pal-spawned-fresh` | world | `pal.spawned` の発火をすべて `world.ready` からの時刻で記録し、新規スポーンをロード直後の嵐と区別する —— **2026-08-02 に実行、発火 27 回、うち 17 回はワールドロードとまったく無関係な時刻**。このイベントは本当に「新しいパル」を意味します |
+| `skill-hit-source` | world | ダメージ経路に技 id を運ぶものが無いことを確認し、発動とダメージの相関付けがなぜ誤りかを数値で示す —— **2026-08-02 に実行、このビルドが宣言する 3 つのダメージ構造体のどのフィールドも技を名指ししていません**（40 + 6 + 12 フィールド）。`onHit` は未解決ではなく否定側で決着しました |
 | `ui-host-layer` | world | Palworld 自身の CommonUI レイヤーにパネルを積み、ゲームが受け入れたかどうかを報告する |
 | `ui-backhandler` | world | CommonUI の back アクションを主張するパネルをマウントし、そのとき Esc が何をするかを確かめる |
 | `building-runtime-reload` | world | 建築ランタイムが F9 を生き延びるのか。押すのは**このフックの 2 回の実行のあいだ**です。スキャンとディスパッチは 1 つの `_G.__PalForgeBuildingRegistry` を共有するようになり、`object_manager` はリロードの KEEP リストに入りました —— そのあとも建築フックは発火するのか |
-| `mesh-texture-import-live` | world, player | `ImportFileAsTexture2D` を史上初めて呼び、続けて同じパスでもう一度呼んで、新しいキャッシュが再インポートの代わりに答えたかどうかを述べる |
-| `mesh-color-change` | world, player, **書き込み** | 色を付けたメッシュをプレイヤーの前に置き、色を 2 回変える |
-| `audio-setvolume-audible` | world, player | 1 つの音を 4 段階の出力バス音量で鳴らし、`setVolume` に聴こえる効果があるかを人が判断できるようにする |
+| `mesh-texture-import-live` | world, player | `ImportFileAsTexture2D` を呼び、続けて同じパスでもう一度呼んで、キャッシュが再インポートの代わりに答えたかどうかを述べる。**2026-08-02 に実行**。本物の `Texture2D` が返り、2 回目はキャッシュが答えました |
+| `mesh-color-change` | world, player, **書き込み** | 色を付けたメッシュをプレイヤーの前に置き、色を 2 回変える —— **2026-08-02 に実行、操作者がそれを見ました**。空中のチェストが赤 → 緑 → 青 → 消滅と変わりました |
+| `audio-setvolume-audible` | world, player | 1 つの音を 4 段階の出力バス音量で鳴らし、`setVolume` に聴こえる効果があるかを人が判断できるようにする —— **唯一の未解決項目。**2026-08-02 に実行し、呼び出しはどの音量でも true を返し、聴いた人は 2 度、留保付きで、0.00 は無音では**なかった**と報告しました |
 | `building-unlock` | world, player, **書き込み** | `Building.Handle:unlock` について確認できる事実をすべて記録し、確認できない半分は操作者に渡す |
-| `item-satiety-write` | world, player, **書き込み** | 動いているビルドが `SetFullStomach` にどんな引数リストを宣言しているのか、そして満腹度 / HP の書き込みがそもそも Lua から届くのか |
-| `skill-projectile-spawn` | world, pal, **書き込み** | 弾／スポーン系のあらゆる経路について宣言された引数リストを出力し、引数を取らないものだけを実際に撃ち、構造体を取るものは名指しで拒否する |
-| `store-save-roundtrip` | world, **書き込み** | パックの状態を公開サーフェス経由で実セーブのストアへ書き、実際のパスから読み戻し、リロード後にもう一度走らせてワールドロードをまたげるかを見る |
-| `store-crash-recovery` | world, **書き込み** | 実セーブのストアに、途中で切れた書き込みと読めないファイルを仕込み、ローダーがどちらのコピーから復旧するかを報告する |
-| `save-survives-pack-removal` | world, player, **書き込み** | PalForge がこのセーブに記録させた id をすべて名指しし、パックをアンインストールして再ロードしたあと、それぞれがどうなったかを述べる |
-| `pal-skills-equip` | world, pal, **書き込み** | アクティブ技の書き込みが実際のパルに載るのか、そしてゲームが生き延びるのか |
+| `item-satiety-write` | world, player, **書き込み** | 動いているビルドが `SetFullStomach` にどんな引数リストを宣言しているのか、そして満腹度 / HP の書き込みがそもそも Lua から届くのか —— **2026-08-02 に実行、届きます。**`SetFullStomach` は引数を 1 つ取り、満腹度は 31.648 → 21.648 と動いて元に戻され、`AddHPByRate` も届きました。`Item.Spec.restores` はこの計測の上に建っています |
+| `skill-projectile-spawn` | world, pal, **書き込み** | 弾／スポーン系のあらゆる経路について宣言された引数リストを出力し、引数を取らないものだけを実際に撃ち、構造体を取るものは名指しで拒否する —— **2026-08-02 に実行、引数リスト 7 本を歩き、6 経路を拒否、そのすべてが構造体を取ります。**否定側で決着し、6 つすべてを運ぶ拒否として出荷されています |
+| `store-save-roundtrip` | world, **書き込み** | パックの状態を公開サーフェス経由で実セーブのストアへ書き、実際のパスから読み戻し、リロード後にもう一度走らせてワールドロードをまたげるかを見る。**2026-08-02 の 1 回目: 7 pass**、370 バイトを書いてフィールド単位で読み戻しました。その前に、Linux のスイートでは決して見つからない本物の欠陥を捕まえています（`ensureDir` がディレクトリについて `io.open` に尋ねており、Windows は「ない」と答える）。ワールドロードをまたぐ 2 回目はまだ残っています |
+| `store-crash-recovery` | world, **書き込み** | 実セーブのストアに、途中で切れた書き込みと読めないファイルを仕込み、ローダーがどちらのコピーから復旧するかを報告する —— **2026-08-02 に実行、復旧表の 4 行すべてが NTFS 上で成立**。紙の上だけの話ではありません |
+| `save-survives-pack-removal` | world, player, **書き込み** | PalForge がこのセーブに記録させた id をすべて名指しし、パックをアンインストールして再ロードしたあと、それぞれがどうなったかを述べる。**一度始めたきり、終わっていません**。ストアの一連の作業は、そもそもこの計測のために始まりました |
+| `pal-skills-equip` | world, pal, **書き込み** | アクティブ技の書き込みが実際のパルに載るのか、そしてゲームが生き延びるのか —— **2026-08-02 に実行、8 pass / 0 fail、ゲームは動いたままでした。**`AddEquipWaza` が `Human_Punch` を装備させ、生きた `PalMonsterCharacter` から読み戻せました。`:forget` がそれを外し、`teachAll(pal)` は `2, 2` を返し、`ClearEquipWaza` は手持ちを空にしたうえで、外した技をすべて事後に戻しました |
 
-24 個のうち 8 個が `writes = true` を宣言します。`audio-setvolume-audible` は意図的に宣言しません。
+25 個のうち 9 個が `writes = true` を宣言します。`audio-setvolume-audible` は意図的に宣言しません。
 音は鳴りますが、変えたものはセッションを越えず、ファイルにも届きません。`writes` は「何かが起きる」
 ではなく「セーブが書き換わる」という意味だからです。`mesh-texture-import-live` も同じ理由で宣言
 しません。`UTexture2D` を確保し、小さな PNG を自分の隣に書き出しますが、それが変えるのは動いている
@@ -494,10 +538,12 @@ pf_hook_pal_skills_equip
 ```text
 #### BEGIN item-datatable-row-read
 NOTE can a scalar / FName column be indexed off the struct dt:FindRow(id) returns ...
-NOTE build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103)
-VALUE row.Rank                          = 3
-PASS  a scalar column reads straight off the struct
-NOTE item-datatable-row-read finished: 4 pass, 0 fail
+NOTE build 2026-08-02 21:32:44 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103)
+VALUE dt:FindRow('Arrow')               = ScriptStruct /Script/Pal.PalItemRecipe
+VALUE Product_Count                     = number(10)
+VALUE Material1_Id                      = userdata(Wood)
+PASS THE STRUCT ROUTE WORKS: all 4 columns came off the row by name.
+NOTE item-datatable-row-read finished: 2 pass, 0 fail
 #### END item-datatable-row-read
 ```
 
@@ -767,7 +813,7 @@ support.isTestId("ChickenPal")             -- false
 
 ```text
 [PalForge.test][info] swept 95 test definition(s) after [pal]
-[PalForge.test][info] swept 123 test definition(s)
+[PalForge.test][info] swept 127 test definition(s)
 ```
 
 判定が `palforge_test:` の前方一致であるため、スイープが実コンテンツに触れることはありません。
@@ -868,14 +914,17 @@ support.GAME = {
 ## まとめ
 
 - ゲーム中に **F1** を押します。画面の行が `0 failed` なら、あなたの環境は動いています。
-- 2 回押してください。タイトル画面で 1 回、セーブデータ内で 1 回です。28 件はセーブ内でしか走らず、
-  10 件はワールドが無いときしか走らないので、1 回の押下ではすべては測れません。サマリがどちらかを言います。
+- 2 回押してください。タイトル画面で 1 回、セーブデータ内で 1 回です。31 件はセーブ内でしか走らず、
+  5 件はセーブが無いときしか走らないので、1 回の押下ではすべては測れません。サマリがどちらかを言います。
+- `npm test` は同じ 612 件のチェックをゲームなしで実行します。**576 passed, 0 failed, 36 skipped** です。
+  F1 の経路である `install()` 経由なら **577 / 0 / 35** に、起動バンドルの `8/0/0` が加わります。
 - スキップは方向を持ちます。ゼロのままでなければならないのは `failed` だけです。
 - `test.run("pal")` で 1 スイートだけ実行でき、`test.bind("F11", fn)` で好きな処理をキーに置けます。
   ただし `pf_keys` でそのキーが空いていることを確かめてから。
 - 動いている Palworld が要る計測は `test/hooks/` の宣言済みフックです。`env.debug` のときだけ
   読み込まれ、`pf_hooks` / `pf_hook <id>` / `pf_hooks_all` で名前を指定して実行し、セーブに書き込む
-  8 つはさらに `env.debugHooks[id] = true` を必要とします。
+  9 つはさらに `env.debugHooks[id] = true` を必要とします。`tools/deploy.sh --writes` はその 9 つを
+  一度に有効にします。使い捨てのセーブ専用です。
 - ツリーは 1 本、区画は 5 つ（`units/`、`cases/`、`hooks/`、`probes/`、`tools/`）。`--release` は
   それを丸ごと削除するので、プレイヤーには 1 つも届きません。
 - どのコマンドにも入口が 3 つあります。UE4SS のコンソール（既定で切られています）、キー、または

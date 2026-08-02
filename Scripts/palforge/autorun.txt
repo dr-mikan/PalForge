@@ -211,10 +211,45 @@
 #                                  gated checks come in on top.
 #
 # Comment these out again before the next run.
-pf_hooks
-5 pf_hook_store_base_load_cost
-15 pf_hook_building_actor_streaming
-25 pf_tests
+# ================== RUN F — THE LAST ONE. Load, fast-travel far away, leave it. ============
+#
+# Everything that could be settled by reading is settled. Four things are implemented and have
+# never been exercised by a running game, and this queue is all four in one pass.
+#
+#   WHAT YOU DO: load a THROWAWAY save in a base with a few structures, then FAST-TRAVEL to
+#   somewhere far — another base, a distant statue, anywhere the base you started in is not
+#   streamed in. Then leave the game alone. That is the whole of it.
+#
+#   ⚠️ WALKING IS NOT ENOUGH. On 2026-08-02 23:03 the operator walked from 40 m to 110 m and all
+#   seven structures were still in FindAllOf for all 78 samples. Palworld does not unload a base
+#   at that range. Fast travel is the only reliable way to get out of its streaming radius.
+#
+#   t+20s  building-actor-streaming  ⚠️ WRITES. It now PUBLISHES the build ids standing around
+#                                    you before it starts watching — the run above measured
+#                                    nothing because F-8 means the catalogs declare without
+#                                    registering, so PalForge was tracking none of those seven
+#                                    and there was no record for a miss to quarantine. The hook
+#                                    establishes its own precondition instead of asking you to
+#                                    type into a console you cannot reach. Records land under
+#                                    <Mods>/PalForge/state/, never in Palworld's save.
+#
+#   t+60s  ui-update-event           the event driver is SHIPPED now (native/ui/refresh.lua arms
+#                                    ActivateWidget + PalHUDService:Push/Close after world.ready).
+#                                    This run cross-checks UI.refreshDriver() in the same session
+#                                    and asks for the one action the 23:04 run never did — a
+#                                    RETURN TO TITLE — but it is not required for the rest.
+#
+#   t+120s pf_tests                  ★ the point of this run. Two implementations have never been
+#                                    executed by a game: Item.Handle:recipeOf reading the real
+#                                    1414-row recipe table, and Item.Spec.restores writing satiety
+#                                    to a live character. Both are world-gated checks that have
+#                                    only ever skipped. This is where they finally run.
+#
+# The watch runs ten minutes and prints one line a second. Quit whenever you like after the
+# suite line appears — everything after that is the streaming watch finishing its window.
+20 pf_hook_building_actor_streaming
+60 pf_hook_ui_update_event
+120 pf_tests
 
 # =====================================================================================
 # ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Twenty-four measurements that CANNOT be taken
@@ -263,10 +298,13 @@ pf_hooks
 # implementation. Open a crafting bench first if the table is not loaded.
 #20 pf_hook_item_datatable_row_read
 #
-# audio-custom-file-loader — the five-block enumeration that decides whether ANY runtime
-# file loader exists on this build. A run of nils CLOSES the item permanently, so the nils
-# are printed rather than skipped.
-#20 pf_hook_audio_custom_file_loader
+# audio-custom-file-loader — CLOSED NEGATIVELY on 2026-08-02; this is now a three-line
+# REGRESSION TRIPWIRE, not the five-block enumeration it used to be. A .wav cannot be played
+# on this build (a USoundWave exposes no writable buffer to Lua, the Wwise media classes are
+# absent), so all it does is re-check the three facts that refusal rests on and fail if the
+# game ever changes one. It needs NO world — it reads CDOs and reflection, so it answers at
+# the title screen too — and costs nothing, which is why it can sit early with no delay.
+#0 pf_hook_audio_custom_file_loader
 #
 # building-record-orphans — F-7's quarantine round trip, against a REAL save file for the
 # first time (it has only ever been run headlessly, against the "world" fallback bucket).

@@ -369,7 +369,7 @@ That matters because the honest answer for everything else is narrower than it l
 | --- | --- | --- |
 | a static or skeletal mesh | **no** | it must be a vanilla `/Game/...` path; there is no route that puts a new `UStaticMesh` or `USkeletalMesh` into the game from Lua |
 | a procedural model | **yes** | a Wavefront `.obj` off disk, parsed at runtime — the one asset route a pack genuinely ships on |
-| a texture | **untested** | `ImportFileAsTexture2D` is wired with a signature read off the shipping binary, and no run in this tree has ever called it. A `/Game/...` texture works today |
+| a texture | **yes** | `ImportFileAsTexture2D` was called in a loaded save on 2026-08-02 and handed back a real `Texture2D`; a second call for the same path answered from the cache. One imported texture per path per session is allocated and never destroyed, which is what the cache is there to bound. A `/Game/...` texture works too |
 | a material | **only by parenting** | `material` names an already-loaded `UMaterialInterface` to parent a dynamic instance to. Nothing here creates or imports a material |
 | a sound file | **no** | `Audio.Spec.soundFile` is a hard error at define time; see [Audio](/docs/api/audio) |
 
@@ -626,11 +626,13 @@ components too, and follows each material up its `Parent` chain — a dynamic in
 only what has been overridden **on it**, so "vector: (none)" on a MID says nothing about the
 material it came from.
 
-<Callout type="warn">
-Nobody has watched a colour actually change. The writes are declared exactly as they are
-called, so "the write did not execute" is eliminated, and the names above are real rather than
-guessed — but a tint landing on screen is a third observation, and it has not been made. That
-is what `pf_hook mesh-color-change` exists to record.
+<Callout type="info">
+**A colour change has now been watched happening.** `pf_hook mesh-color-change` was run on
+2026-08-02 with an operator looking at the screen: a chest in the air went **red → green → blue →
+gone**. That is the third observation this note was waiting for — the writes were already declared
+exactly as they are called, and the parameter names above were already read off the running game
+rather than guessed. A write to a name the material does not carry is still a silent
+no-op, so `describeMaterials` remains the way to find out which names a given actor answers to.
 </Callout>
 
 <Callout type="warn">
@@ -1043,8 +1045,8 @@ are the mistakes a pack actually makes.
   may be written relative to the `.lua` file that declares it.
 - Hand it over with `mesh = ...` inside a pal or a building, where it is attached for you, or
   put it on an actor yourself with `meshHandle:attachTo(actor)`.
-- The four painting fields reach every backend, and the parameter names they write were read
-  off the running game. Nobody has yet watched a colour change.
+- The four painting fields reach every backend, the parameter names they write were read
+  off the running game, and a colour change has been watched happening: red → green → blue.
 - `setColor` and `detach` follow the actor, and every backend implements both.
 - Nothing throws while the game runs: `attachTo`, `setColor` and `detach` return `false` plus
   the reason, and write to the log.

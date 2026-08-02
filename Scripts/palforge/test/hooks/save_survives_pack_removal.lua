@@ -98,7 +98,7 @@ end
 
 hooks.declare{
     id     = "save-survives-pack-removal",
-    item   = "Foundations / F-7 — the removal contract",
+    item   = "Implemented, never exercised by a game",
     needs  = { world = true, player = true },
     writes = true,
     desc   = "name every id PalForge made THIS save record, then — after you uninstall the pack "

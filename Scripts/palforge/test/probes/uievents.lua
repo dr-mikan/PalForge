@@ -54,12 +54,19 @@ local event   = require("palforge.core.event")
 
 local M = {}
 
--- The four dumps/cxx named, in api/ui.lua's own note at Handle:autoRefresh.
+-- The four dumps/cxx named.
 --   PalUserWidget is the base every Palworld screen derives from (Pal.hpp:31902-31903);
 --   AddHUD is the HUD adding a widget (Pal.hpp:30714);
 --   ActivateWidget is CommonUI's own (CommonUI.hpp:177), the same module as
 --   CommonButtonBase:HandleButtonClicked, which native/ui/_widget.lua already hooks — so hooks
 --   demonstrably take in that module on this build.
+--
+-- ⚠️ SUPERSEDED, 2026-08-02. test/hooks/ui_update_event.lua now names TWENTY-ONE candidates from
+-- the same dumps — CommonUI's whole activatable lifecycle, the CommonUI stack's push and pop,
+-- PalHUDService's Push/Close/ShowCommonUI, the HUD actor and the HUD layout's four — with a
+-- reason and an expected outcome per path. These four are a SUBSET of that list. Prefer the
+-- hook; this probe is kept because it is the only instrument that brackets a world-load storm
+-- (world.left -> world.ready across a SECOND load), which the hook does not do.
 local CANDIDATES = {
     { key = "OnSetup",        path = "/Script/Pal.PalUserWidget:OnSetup" },
     { key = "OnClosed",       path = "/Script/Pal.PalUserWidget:OnClosed" },

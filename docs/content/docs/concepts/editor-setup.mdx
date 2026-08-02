@@ -222,12 +222,12 @@ file describes types rather than real code, and nothing in the framework loads i
 ---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ```
 
-The file holds **37 classes and 30 aliases**, and it is long: the generator reports 8752
-lines. Thirty of the classes are the declared shapes, one per name `schema.all()` returns —
-`Mesh.Spec`, `Pal.Spec` with its `Events` and `Material`, `Item.Spec` with its `Recipe` and
-`Events`, the four `Building.Spec.*`, `Skill.Spec` and its `Events`, `Effect.Spec` and its
-`Events`, `Audio.Spec`, the eleven `UI.Node.*` node shapes, `UI.Spec` and `UI.Spec.Host`,
-and `Coord`.
+The file holds **38 classes and 30 aliases**, and it is long: the generator reports 8759
+lines. Thirty-one of the classes are the declared shapes, one per name `schema.all()`
+returns — `Mesh.Spec`, `Pal.Spec` with its `Events` and `Material`, `Item.Spec` with its
+`Recipe`, `Events` and `Restores`, the four `Building.Spec.*`, `Skill.Spec` and its
+`Events`, `Effect.Spec` and its `Events`, `Audio.Spec`, the eleven `UI.Node.*` node shapes,
+`UI.Spec` and `UI.Spec.Host`, and `Coord`.
 
 The remaining seven, and almost all of the length, are the **native content catalogs**:
 `palforge.native.buildings`, `.items`, `.pals`, `.skills`, `.effects`, `.audio` and the
@@ -256,7 +256,7 @@ lua5.4 tools/gen-types.lua
 It prints one line, and that line is the whole result:
 
 ```text
-wrote ./Scripts/palforge/types.lua (37 classes, 8752 lines, 8293 native catalog names)
+wrote ./Scripts/palforge/types.lua (38 classes, 8759 lines, 8293 native catalog names)
 ```
 
 `classes` counts the `---@class` lines it wrote, `lines` is the length of the file it

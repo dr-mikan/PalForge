@@ -89,7 +89,7 @@ end
 
 hooks.declare{
     id    = "mesh-texture-import-live",
-    item  = "Foundations / Assets / A-5",
+    item  = "Closed 2026-08-02 — 7 pass; ImportFileAsTexture2D returns a real Texture2D",
     needs = { world = true, player = true },
     desc  = "call ImportFileAsTexture2D for the first time ever, then call it again for the same "
          .. "path and say whether the new cache answered instead of re-importing",

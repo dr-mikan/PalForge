@@ -337,7 +337,7 @@ Building{
 | --- | --- | --- |
 | static 或 skeletal 网格 | **不能** | 必须是原版的 `/Game/...` 路径；从 Lua 往游戏里塞一个新的 `UStaticMesh` 或 `USkeletalMesh` 的路线并不存在 |
 | procedural 模型 | **可以** | 磁盘上的 Wavefront `.obj`，运行时解析 —— 这是一个 pack 真正能带得动的唯一资源路线 |
-| 纹理 | **未验证** | `ImportFileAsTexture2D` 已经按出货二进制里读到的签名接好了线，而这棵树里没有任何一次运行调用过它。`/Game/...` 的纹理今天就能用 |
+| 纹理 | **可以** | `ImportFileAsTexture2D` 在 2026-08-02 的一次加载好的存档里真的被调用过，返回了一个真正的 `Texture2D`；同一路径的第二次调用由缓存回答。每条路径每个会话会分配一个导入的纹理，并且不会被销毁 —— 缓存正是用来把这个量兜住的。`/Game/...` 的纹理同样能用 |
 | 材质 | **只能当父级** | `material` 指的是一个**已经加载好**的 `UMaterialInterface`，用来给动态实例当父级。这里既不创建也不导入材质 |
 | 音频文件 | **不能** | `Audio.Spec.soundFile` 在定义时就是硬错误，见 [Audio](/docs/api/audio) |
 
@@ -579,10 +579,12 @@ local painted = Mesh{
 每个材质的 `Parent` 链往上找 —— 一个动态实例只列出**在它身上**被覆盖过的东西，所以 MID 上的
 “vector: (none)”并不能说明它来自的那个材质是什么样。
 
-<Callout type="warn">
-没有人看到颜色真的变过。这些写入是完全照着声明来调用的，所以“写入没跑”已经被排除；上面那些
-名字也是实测而不是猜测 —— 但色调落到屏幕上是第三个观测，而它还没有被做出来。记录它的正是
-`pf_hook mesh-color-change`。
+<Callout type="info">
+**现在已经有人看着颜色变了。** `pf_hook mesh-color-change` 在 2026-08-02 跑过，有一位操作者盯着
+屏幕：空中的一个箱子依次变成**红 → 绿 → 蓝 → 消失**。那正是这条注记一直在等的第三个观测 ——
+这些写入本来就是完全照着声明来调用的，上面那些参数名也本来就是从运行中的游戏里读出来的，而不是
+猜的。往材质没有的名字上写仍然是悄无声息的空操作，所以要弄清某个 actor 认哪些名字，办法依旧是
+`describeMaterials`。
 </Callout>
 
 <Callout type="warn">
@@ -973,8 +975,8 @@ core.mesh.detach: PalForge has no record of dressing this actor
   文件。
 - 在帕鲁或建筑物里写 `mesh = ...` 交出去，那边会替你挂上；或者用 `meshHandle:attachTo(actor)`
   自己把它挂到 actor 上。
-- 那四个上色字段会送到每一个后端，它们写入的参数名是从运行中的游戏里读出来的。至今没有人看到
-  颜色真的变过。
+- 那四个上色字段会送到每一个后端，它们写入的参数名是从运行中的游戏里读出来的，而且已经有人
+  看着颜色变过：红 → 绿 → 蓝。
 - `setColor` 和 `detach` 跟着 actor 走，而且每个后端都实现了这两件事。
 - 游戏运行时不会抛异常：`attachTo`、`setColor` 和 `detach` 返回 `false` 加原因，并写进日志。
 

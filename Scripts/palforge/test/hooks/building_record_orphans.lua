@@ -151,7 +151,7 @@ end
 
 hooks.declare{
     id    = "building-record-orphans",
-    item  = "Foundations / The id model / F-7",
+    item  = "Closed 2026-08-02 — 3 pass; no record was left unclaimed",
     needs = { world = true },
     desc  = "the orphan quarantine round trip against a real save: which pack files loaded, what "
          .. "had no owner, what was quarantined and why, and that nothing belonging to an absent "

@@ -1,80 +1,145 @@
--- PalForge core.sound.file: FileSource — a custom audio file (spec.path). TODO SEAM.
+-- PalForge core.sound.file: FileSource — a custom audio file (spec.path). A CLOSED SEAM.
 --
--- NO DEFINITION REACHES THIS ANY MORE, BY CONSTRUCTION. `Audio.Spec.soundFile` is a HARD ERROR
--- at define time (api/audio.lua): the field is still declared, so the error can name it and say
--- what to use instead, but no Audio{ ... } call can carry one. The reason is the one thing in
--- this seam that was not honest — soundFile took PRECEDENCE over soundId/soundPath, so adding
--- it beside a working soundId SILENCED a sound that had been playing, and :play then returned
--- the false that came from here. A field that makes working audio silent is worse than a field
--- that does not exist, so it refuses at the point where the author can still see it.
+-- ⚠️ THIS IS NOT A TODO. `audio-custom-file-loader` was CLOSED NEGATIVELY on 2026-08-02: a pack
+-- cannot ship a `.wav` on this build, and there is no probe left to run that would change that.
+-- Everything below is the finding and the evidence for it, so that the next person to want this
+-- feature can see what would have to become true rather than repeating the search.
+--
+-- NO DEFINITION REACHES THIS, BY CONSTRUCTION. `Audio.Spec.soundFile` is a HARD ERROR at define
+-- time (api/audio.lua): the field is still declared, so the error can name it and say what to use
+-- instead, but no Audio{ ... } call can carry one. The reason it errors rather than no-ops is the
+-- one thing in this seam that was not honest — soundFile took PRECEDENCE over soundId/soundPath,
+-- so adding it beside a working soundId SILENCED a sound that had been playing, and :play then
+-- returned the false that came from here. A field that makes working audio silent is worse than a
+-- field that does not exist, so it refuses at the point where the author can still see it.
 --
 -- The two ways left in are both deliberate: a definition's own `source` override returning
 -- `{ kind = "file", path = ... }`, and a direct `core.sound.resolve{ kind = "file", ... }`. Both
 -- are code someone wrote on purpose, and both still land on the `return false` below.
 --
--- Everything from here down is the evidence for WHY it is false, and it is what will have to be
--- overturned before soundFile can be accepted again. Palworld routes ALL of its audio through
--- Wwise (every shipped sound is an AkAudioEvent asset, see native/audio.lua), so playing a .wav
--- off disk needs either an engine USoundWave/USoundBase importer that survives in a shipping
--- build, or a Wwise external-source entry point. dumps/cxx answered BOTH halves, and only one of
--- them is still open.
+-- Palworld routes ALL of its audio through Wwise (every shipped sound is an AkAudioEvent asset,
+-- see native/audio.lua), so playing a .wav off disk needed one of two things: an engine
+-- USoundWave/USoundBase route that survives in a shipping build, or a Wwise external-source entry
+-- point. BOTH HALVES ARE NOW MEASURED, and both are negative.
 --
--- THE UE-NATIVE HALF IS CLOSED, and it is closed on declarations, not on absence of evidence:
---   * USoundWave (Engine.hpp:21335) declares exactly two functions, SetSoundAssetCompressionType
---     and GetSoundAssetCompressionType (:21366-:21367). No importer, no InitAudioResource, no
---     way in for bytes.
---   * USoundWaveProcedural (Engine.hpp:21371) — the class whose whole purpose is queued PCM —
---     declares ZERO functions and ZERO properties. QueueAudio is C++-only and is not reachable
---     from Lua on this build.
---   * The consumers survived shipping and are useless without a producer: PlaySound2D
---     (Engine.hpp:13354) and CreateSound2D (:13425) both take a `USoundBase* Sound` we have no
---     way to make. The 6 live SoundWave / 8 live SoundBase are the SkyCreatorPlugin's own assets
---     (dumps/f5-partial-run.txt:150-151, dumps/reflection/05_assets.txt), not a factory.
--- So there is no USoundWave route, and no further probe of Engine.hpp will find one.
+--=============================================================================
+-- HALF ONE — THE UE-NATIVE ROUTE. There is no buffer to fill, and that is a PROPERTY LIST, not
+-- an absence of evidence.
+--=============================================================================
 --
--- THE WWISE HALF EXISTS — and the harvest missed it, because it only ever enumerated /Script/AkAudio.
--- The entry point lives in a different module:
+-- The last open form of this question was narrow and exact: `StaticConstructObject` is a function
+-- on this build (measured live 2026-08-02, hook audio-custom-file-loader), so a USoundWave CAN be
+-- constructed from Lua — can its PCM buffer then be filled from a file? The answer is no, and it
+-- is read off what USoundWave DECLARES:
+--
+--   * dumps/cxx/Engine.hpp:21336-21366 lists USoundWave's COMPLETE own reflected property set:
+--     29 properties, and every one of them is cooked METADATA — CompressionQuality, SampleRate,
+--     NumChannels, SoundGroup, bLooping, bStreaming, Volume, Pitch, CuePoints, Subtitles,
+--     SpokenText, LoadingBehavior, the two curve tables. NOT ONE is a byte buffer. There is no
+--     RawData, no CompressedFormatData, no RawPCMData, and no TArray<uint8> of any name.
+--   * Its parent adds nothing usable either: USoundBase (Engine.hpp:21003-21027) declares 22
+--     properties and ZERO functions, all of them routing — sound class, submix sends, bus sends,
+--     concurrency, attenuation, Duration, TotalSamples. So the whole inherited chain a
+--     constructed USoundWave would expose is 51 reflected properties and not one buffer.
+--   * That is not a Palworld cook stripping them. In the engine those members are
+--     `FByteBulkData RawData` and `FFormatContainer CompressedFormatData` — neither is a
+--     UPROPERTY in any UE build, which is exactly why a dump that lists every reflected member of
+--     every class in the game lists neither. UE4SS Lua reaches reflected properties and
+--     UFunctions and nothing else, so the samples are not merely awkward to write: they are not
+--     addressable from Lua at all, on this build or any other.
+--   * USoundWave declares TWO functions, SetSoundAssetCompressionType and
+--     GetSoundAssetCompressionType (Engine.hpp:21367-21368). Neither takes bytes.
+--   * USoundWaveProcedural (Engine.hpp:21371) — the class whose entire purpose is queued PCM —
+--     declares ZERO properties and ZERO functions. QueueAudio is C++-only and unreachable.
+--
+-- SO THE CONSTRUCTOR IS THE TRAP, NOT THE ROUTE. StaticConstructObject would hand back a real,
+-- live USoundWave with zero samples in it, every reachable member metadata; PlaySound2D
+-- (Engine.hpp:13354) would accept it as a `USoundBase*` and play silence. A constructor with no
+-- buffer is the same negative as no constructor and a considerably worse one, because it returns
+-- an object and looks like it worked. That is precisely the shape `soundFile` already had once
+-- and the reason it is refused rather than accepted-and-quiet.
+--
+-- AND THE BUILD PROVES THE MISSING SHAPE BY SHIPPING IT FOR THE OTHER MEDIA TYPE. The engine's
+-- runtime import surface DID survive cooking — for textures:
+--   dumps/cxx/Engine.hpp:14694  UKismetRenderingLibrary::ImportFileAsTexture2D(UObject*, FString Filename)
+--   dumps/cxx/Engine.hpp:14695  UKismetRenderingLibrary::ImportBufferAsTexture2D(UObject*, const TArray<uint8>&)
+-- Those two are the ONLY Import*As* functions in the entire dumps/cxx tree — 1579 headers, and no
+-- third match — and they are exactly the two signatures `soundFile` needs. No audio counterpart
+-- exists on any class in this build. So this finding is not "we looked and found nothing"; it is
+-- "the build has the shape we need, for images, and does not have it for sound."
+--
+-- AND THE DUMP SAYS WHY, in the one place sound import is still named. The only occurrences of
+-- "Import" beside sound anywhere in the tree are two FIELDS on a struct called
+-- FBuildPromotionImportWorkflowSettings (Engine.hpp:1437-1438) — `Sound` and `SurroundSound`,
+-- sitting beside Diffuse, StaticMesh, SkeletalMesh and Animation, each an
+-- FEditorImportWorkflowDefinition. In this engine, importing a sound is an EDITOR workflow. The
+-- texture importer is the exception that got a Blueprint-callable runtime version; audio never
+-- did, so there was nothing for cooking to preserve.
+--
+-- ONE FUNCTION IN THE WHOLE DUMP RETURNS A USoundWave, and it is not a loader:
+--   dumps/cxx/AudioMixer.hpp:123  UAudioMixerBlueprintLibrary::StopRecordingOutput(
+--       UObject*, EAudioRecordingExportType, FString Name, FString Path,
+--       USoundSubmix* SubmixToRecord, USoundWave* ExistingSoundWaveToOverwrite) -> USoundWave*
+-- Its input is a SUBMIX. It records what the GAME is already playing and hands that back; there
+-- is no parameter anywhere on it that reads a file. It could make a USoundWave of Palworld's own
+-- output. It cannot make one of your .wav, which is the entire feature.
+--
+--=============================================================================
+-- HALF TWO — THE WWISE ROUTE. Dead on this build, measured in game.
+--=============================================================================
+--
+-- Measured live on 2026-08-02 by test/hooks/audio-custom-file-loader, with StaticFindObject
+-- working (so these nils are absences of the CLASS, not of the lookup):
+--   AkExternalMediaAsset  = 0 function(s),  FindAllOf answered nothing
+--   AkMediaAsset          = 0 function(s),  FindAllOf answered nothing
+-- The Wwise external-media / SetMedia route does not exist here, and no argument list would have
+-- helped. UAkGameplayStatics' 58 functions (AkAudio.hpp:725-786, confirmed as the same 58 live in
+-- dumps/f5-partial-run.txt:127-135) contain no *WithExternalSources overload either, so nothing
+-- could post an event with an external source even if one could be bound.
+--
+-- ONE WWISE ENTRY POINT DOES EXIST IN THE DUMP, and it is the wrong input rather than a near miss:
 --   dumps/cxx/WwiseFileHandler.hpp:45  class UWwiseExternalSourceStatics : UBlueprintFunctionLibrary
 --     :48  SetExternalSourceMediaWithIds(const FAkUniqueID Cookie, const int32 MediaId)
 --     :49  SetExternalSourceMediaByName(FString ExternalSourceName, FString MediaName)
 --     :50  SetExternalSourceMediaById(FString ExternalSourceName, const int32 MediaId)
--- Three all-scalar signatures (FString / int32), i.e. shapes core/signature would pass. That
--- retires the old question — "is there ANY Wwise external-source / SetMedia entry point" — as a
--- YES.
+-- Three all-scalar signatures, i.e. shapes core/signature would pass — and they do not ingest a
+-- file. They REBIND an external-source cookie the Wwise cook already declared to a media entry the
+-- cook already staged. The surrounding declarations say so: FWwiseExternalSourceCookieDefaultMedia
+-- and FWwiseExternalSourceMediaInfo are FTableRowBase, i.e. DataTable rows built at cook time
+-- (WwiseSimpleExternalSource.hpp:4, :13), and UWwiseExternalSourceSettings points at them plus an
+-- ExternalSourceStagingDirectory (:25-:29). Even in the best case those calls play a Wwise-encoded
+-- .wem that shipped inside this game's cook. A pack ships a .wav; converting one to the other
+-- needs the Wwise authoring tool and this game's cook project, offline, which PalForge cannot do
+-- at runtime and a pack author cannot do at all. So that branch does not become `soundFile` on any
+-- reading, and whether the cook declares zero external sources or a thousand does not change it.
 --
--- IT IS STILL THE WRONG INPUT, and that is the honest reading of what those three do. They do not
--- ingest a file; they REBIND an external-source cookie that the Wwise cook already declared to a
--- media entry the cook already staged. The surrounding declarations say so plainly:
--- FWwiseExternalSourceCookieDefaultMedia and FWwiseExternalSourceMediaInfo are FTableRowBase, i.e.
--- DataTable rows built at cook time (WwiseSimpleExternalSource.hpp:4, :13), and
--- UWwiseExternalSourceSettings points at them plus an ExternalSourceStagingDirectory (:25-:29).
--- A pack ships a .wav; that pipeline consumes Wwise-encoded media by name. And nothing can post
--- an event WITH external sources anyway: UAkGameplayStatics' 58 functions (AkAudio.hpp:725-786)
--- contain no *WithExternalSources overload, which the live build confirms — the same 58 with no
--- such name (dumps/f5-partial-run.txt:127-135).
+--=============================================================================
+-- WHAT WOULD REOPEN THIS
+--=============================================================================
 --
--- TODO(audio-custom-file-loader): the ONLY route left is Wwise external sources, and what is
--- unknown is now whether this game's cook declares ANY. Two facts settle it, both read-only:
--- whether /Script/WwiseFileHandler.Default__WwiseExternalSourceStatics resolves live, and
--- whether the DataTables named by UWwiseExternalSourceSettings (MediaInfoTable /
--- ExternalSourceDefaultMedia) exist with rows. Zero external sources means SetExternalSourceMedia*
--- has nothing to rebind and this seam is dead for good; even a non-zero answer only makes a
--- .wem in the cook's staging directory playable, never a pack's .wav — so a working `soundFile`
--- would still need an offline Wwise conversion step that PalForge cannot perform at runtime.
+-- Exactly one thing: a byte-buffer member appearing on USoundWave's reflected property list, or an
+-- ImportFileAsSoundWave / ImportBufferAsSoundWave turning up on some class after a game update.
+-- test/hooks/audio-custom-file-loader is no longer a search — it is the TRIPWIRE for those two
+-- facts, it costs three lines of log, and it runs anywhere including the title screen. If it ever
+-- fails, this file is what to rewrite and api/audio.lua's refuseSoundFile is what to delete.
 --
 --   local FileSource = require("palforge.core.sound.file")
---   FileSource:new{ path = "audio/theme.wav" }:play(actor)
+--   FileSource:new{ path = "audio/theme.wav" }:play(actor)   -- false, always, and on purpose
 local SoundSource = require("palforge.core.sound.base.source")
 
 local FileSource = SoundSource:extend("FileSource")
 
 -- Play a custom audio file on `actor`. Fail-soft no-op: returns false, never throws.
 --
+-- THERE IS NOTHING TO CALL. USoundWave declares no writable buffer (Engine.hpp:21336-21366), the
+-- build ships a file importer for textures and none for sound (Engine.hpp:14694-14695), and the
+-- Wwise media classes are absent from this build entirely (measured 2026-08-02, hook
+-- audio-custom-file-loader). The header carries the full reading of each.
+--
 -- It stays `return false` rather than becoming an error, because the two callers that can still
--- reach it (see the header) are code that opted in, and the SoundSource contract this class
--- implements is that a source which could not reach the engine reports false. There is nothing
--- to call: dumps/cxx closed the UE-native half outright and the Wwise half takes cooked media
--- rather than a file, so a `true` here would be a lie in the one place a caller checks.
+-- reach it — a `source` override and a direct core.sound.resolve — are code that opted in, and the
+-- SoundSource contract this class implements is that a source which could not reach the engine
+-- reports false. A `true` here would be a lie in the one place a caller checks.
 function FileSource:play(actor)
     return false
 end

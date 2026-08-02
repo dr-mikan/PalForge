@@ -80,7 +80,7 @@ end
 
 hooks.declare{
     id    = "store-base-load-cost",
-    item  = "Foundations / F-7 — the format-3 store",
+    item  = "Closed 2026-08-02 — 0 bytes, 0.00 ms at a base with 7 structures",
     needs = { world = true },
     desc  = "what a REAL base costs the format-3 store to load: the files, their bytes, the "
          .. "decode timed on those bytes, and what the same records would have cost as one file",

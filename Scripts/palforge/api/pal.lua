@@ -33,10 +33,12 @@
 --                   broadcast fires in the world-load pal-init storm, and a firing there
 --                   wedged the SHARED UE4SS hook dispatch once and took the confirmed hooks
 --                   down with it (core/event.lua:46-53).
---                   WHAT IS STILL UNKNOWN is narrower than "does it fire": every firing seen
---                   so far landed in the same second as world.ready, so it is unshown that
---                   one means a pal that did not exist a moment ago rather than a re-init.
---                   Keep the handler idempotent — TODO(pal-spawned-fresh) on Pal.Spec.Events.
+--                   AND IT FIRES FOR A GENUINELY NEW PAL, settled 2026-08-02 by
+--                   test/hooks/pal_spawned_fresh.lua: 27 firings, 17 of them nowhere near a
+--                   world load. What used to be written here — that every firing landed in
+--                   the same second as world.ready, so a new pal could not be told from a
+--                   re-init — is answered. Keep the handler idempotent anyway; the channel
+--                   may still repeat per pawn (see Pal.Spec.Events).
 --     onTick     <- core/event's pal sweep. There is NO native hook behind this one; the
 --                   sweep is the source, and it is described in full below.
 --   NOT WIRED: nothing. All five declared events have a source.
@@ -177,21 +179,21 @@ local Events = schema.define("Pal.Spec.Events", {
     -- hooked first, registered fine and never carried anything. That is the general lesson:
     -- RegisterHook sees what ProcessEvent runs, and a broadcaster is not it.
     --
-    -- TODO(pal-spawned-fresh): unknown whether it fires for a pal that is genuinely NEW. Every
-    -- firing observed so far landed in the same second as world.ready, i.e. the load storm, when
-    -- every pal in range initialises at once. That proves the hook works and says nothing about
-    -- the case a pack actually cares about — a pal that did not exist a moment ago. The two look
-    -- identical from here because only the FIRST firing per channel is announced.
-    -- To settle it: release a pal from the box well after the world has loaded, or let a wild one
-    -- stream in while travelling, and watch for a pal.spawned line whose timestamp is nowhere
-    -- near world.ready.
+    -- ⭐ IT FIRES FOR A GENUINELY NEW PAL. Settled 2026-08-02 in a loaded save by
+    -- test/hooks/pal_spawned_fresh.lua: 27 firings, and 17 of them nowhere near a world load.
+    -- That was the one open question on this channel. Every firing seen before that run had
+    -- landed in the same second as world.ready — the load storm, when every pal in range
+    -- initialises at once — so a pal that did not exist a moment ago could not be told apart
+    -- from a re-init. It can now, and the case a pack actually cares about is the case that
+    -- was measured.
     --
-    -- WHAT A PACK CAN RELY ON TODAY, since the marker above is about the one thing it cannot:
-    -- the channel FIRES, with ctx.actor being a live pawn of this pal's id, at least once per
-    -- pawn, and it is the earliest moment that pawn's .Mesh component is real — which is why a
-    -- declared `mesh` is attached on exactly this channel (see define()). Write the handler so
-    -- that being called twice for one pawn is harmless, and it is correct under either answer
-    -- to the question above. What it must NOT be used for is counting how many pals appeared.
+    -- WHAT A PACK CAN RELY ON, and the one thing it still must not do: the channel FIRES, with
+    -- ctx.actor being a live pawn of this pal's id, at least once per pawn, and it is the
+    -- earliest moment that pawn's .Mesh component is real — which is why a declared `mesh` is
+    -- attached on exactly this channel (see define()). Write the handler so that being called
+    -- twice for one pawn is harmless: the channel may repeat per pawn, and only the FIRST
+    -- firing is announced in the log, so a repeat is not visible from there. What it must NOT
+    -- be used for is counting how many pals appeared.
     { "onSpawned",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",
                     doc = "LIVE - a pal finished initialising (ctx.actor); may repeat per pawn, keep it idempotent" },
     { "onDamaged",  type = "function", sig = "fun(self: Pal.Handle, ctx: table)",

@@ -1,6 +1,11 @@
 -- test/hooks/skill-hit-source — CONFIRM THE NEGATIVE, SO THE ITEM CAN CLOSE.
 --
--- plan/TODO.md Open / Skill. Marked at api/skill.lua's TODO(skill-hit-source) (:118 as this was written).
+-- plan/TODO.md Open / Skill. The TODO marker this used to point at, on Skill.Spec.Events.onHit
+-- in api/skill.lua, is GONE: the item closed as a negative and the API says so instead. onHit's
+-- doc string now reads "NEVER FIRES on this build ... nothing in the damage path carries a waza
+-- id", and declaring onHit warns at define time. This hook is what would REOPEN it — one
+-- skill.hit firing is all it would take — and block [3] is the measurement the one thing that
+-- was never built (a correlated guess behind another name) is still waiting on.
 --
 -- THIS HOOK IS NOT LOOKING FOR A SOURCE. It exists to make an item that has been open forever
 -- CLOSABLE, by turning "we never found one" into "there is not one, and here is the evidence".
@@ -44,7 +49,12 @@ local STRUCTS = {
     "/Script/Pal.PalDamageRactionInfo",   -- the game's own spelling; not a typo here
     "/Script/Pal.PalDamageResult",
 }
-local WATCH_S = 120
+-- TEN MINUTES, not two. This used to be 120 s and the 2026-08-02 run spent every one of them
+-- with nothing being hit — `pal.damaged` was 0 — because the operator was racing a clock they
+-- had been handed by an autorun delay. A window that expires while the person is still walking
+-- to the fight measures nothing and says so, which is honest and useless. The cost of a long
+-- window is a poller that runs longer; the cost of a short one is a wasted session.
+local WATCH_S = 600
 
 local function state()
     local s = _G.__PalForgeSkillHitHook
@@ -57,7 +67,7 @@ end
 
 hooks.declare{
     id    = "skill-hit-source",
-    item  = "Open / Skill",
+    item  = "Closed 2026-08-02 (negative, structural) — kept as a regression tripwire",
     needs = { world = true },
     desc  = "confirm that nothing in the damage path carries a waza id, and quantify why "
          .. "correlating activation with damage would be wrong",
@@ -204,10 +214,13 @@ hooks.declare{
             else
                 h:log("PASS CONFIRMED NEGATIVE. %d damage event(s) and %d activation(s) landed and "
                     .. "skill.hit carried nothing, on a build whose damage structs declare no "
-                    .. "waza field (block [1]). `skill-hit-source` closes as NO SOURCE EXISTS: "
-                    .. "api/skill.lua's onHit doc must say the game does not report which move "
-                    .. "did the damage, and the TODO marker comes out. It does not become a "
-                    .. "correlated guess.", dmg, act)
+                    .. "waza field (block [1]). `skill-hit-source` closed as NO SOURCE EXISTS, "
+                    .. "and the API already says so: api/skill.lua's onHit doc string reads "
+                    .. "\"NEVER FIRES ... nothing in the damage path carries a waza id\", the "
+                    .. "TODO marker is gone, and declaring onHit WARNS at define time. This run "
+                    .. "is that conclusion holding on one more session. It does not become a "
+                    .. "correlated guess — and the two ambiguity counts above are why not.",
+                    dmg, act)
             end
             h:endBlock("verdict")
             return true

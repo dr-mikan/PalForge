@@ -594,19 +594,23 @@ around either:
 
 - **The passive write is measured.** `AddPassiveSkill` put a passive on a live `BP_ChickenPal_C`
   and the read-back saw it, which is also how `skill.equip` got its first event.
-- **The active-move write is not.** `AddEquipWaza` / `RemoveEquipWaza` / `ClearEquipWaza` have
-  never been shown landing on a pal. The one run that ever wrote one was followed 1.4 seconds
-  later by Palworld closing, and that run used the too-wide `PalCharacter` search, so the target
-  was probably an NPC — which makes "the write went to the wrong thing" the leading explanation
-  and not a fact to publish on.
+- **The active-move write is measured too, as of 2026-08-02.** `pf_hook pal-skills-equip`
+  returned **8 pass / 0 fail** on a real save: `AddEquipWaza` equipped `Human_Punch`
+  (`EPalWazaID 1`) and it read back off a live `PalMonsterCharacter`, `:forget` took it off,
+  `teachAll(pal)` answered `2, 2`, and `ClearEquipWaza` cleared the loadout with every removed
+  move restored and verified afterwards. **The game stayed up.**
+- **The crash that used to sit here was the target, not the write.** An earlier run was followed
+  1.4 seconds later by Palworld closing, and that run searched `FindAllOf("PalCharacter")` — which
+  is too wide. The hierarchy is `APalMonsterCharacter : APalNPC : APalCharacter`, so the wide name
+  also matches villagers and merchants, none of which has an equipped move. Ask for
+  `PalMonsterCharacter`, as `:skillsOn` and the hook now both do.
 
 <Callout type="warn">
-Teaching an **active move** is the one capability here that is still unmeasured, and it is the
-open item `pal-skills-equip`. Check the boolean rather than assuming, and try it in a save you do
-not mind losing. The measurement is a declared test hook rather than something the framework does
-on its own: run `pf_hook pal-skills-equip` from the UE4SS console, which needs `env.debug` and,
-because it writes into a real save, `env.debugHooks["pal-skills-equip"]` as well. Reading a
-loadout and writing a passive are settled; this is the one that is not.
+Writing an **active move** into a real character is settled, and it is still worth doing on a save
+you do not mind losing the first time — `env.debugHooks["pal-skills-equip"]` keeps the hook's own
+write behind a per-experiment opt-in for that reason, not because the outcome is in doubt. Check
+the boolean the call returns rather than assuming: `:teach` reports what the game did, and a pack
+that reads it is a pack that notices the day the game moves.
 </Callout>
 
 <Callout type="info">
@@ -946,8 +950,9 @@ you at once, instead of leaving you with a skill that silently never runs.
 - `kind = "passive"` makes `:activate` return `false`; use `:equip` and `:unequip` for those.
 - A handler that crashes comes back as `false` with nothing in the log, so log inside it.
 - `pal:skillsOf()` gives you the ids a pal *declares*. `skill:skillsOn(actor)` reads back the four
-  lists a live character really has, `skill:teach(actor)` puts one on — settled for a passive,
-  still unmeasured for an active move — and `pal:teachAll(actor)` does the whole declared list.
+  lists a live character really has, `skill:teach(actor)` puts one on — measured for a passive and,
+  since 2026-08-02, for an active move as well — and `pal:teachAll(actor)` does the whole declared
+  list, which answered `2, 2` on a live pal.
 
 Next, read [Effect](/docs/api/effect) — it has the timer a passive skill needs to keep doing
 something.

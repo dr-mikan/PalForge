@@ -18,7 +18,8 @@ Building{
 }
 ```
 
-Full documentation: **https://dr-mikan.github.io/PalForge/**
+Full documentation: **https://dr-mikan.github.io/PalForge/** ·
+Source: **https://github.com/dr-mikan/PalForge** · MIT · measured against Palworld **v1.0.2.101103**
 
 ---
 
@@ -113,7 +114,7 @@ names nothing under `test/` any more.
 **A release install has no test tree at all**, and that is now a fact about the files rather than
 about a runtime switch. `tools/deploy.sh --release` deletes `palforge/test/` from the staged copy
 before the swap. Deploy both modes into a throwaway target and the script counts them for you: a
-dev deploy lands **127 files**, a release deploy **69**. So `requireState("palforge.test")`
+dev deploy lands **130 files**, a release deploy **71**. So `requireState("palforge.test")`
 answering `absent` is the *correct* state for a player's copy, not an incomplete one — there is no
 F1 suite to arm because the files are not there. A dev deploy keeps it, and there it is the whole point.
 
@@ -192,6 +193,16 @@ So: **delete the PalForge folder and your world still loads.** What is lost is t
 for your structures, not the save. Removing one mod is one file — `state/<save>/<mod id>.json` —
 and a mod that is merely absent is never read, so it can cost nothing and be evicted by nothing.
 
+That layout is not a design sketch. It was exercised against a real save on 2026-08-02: a pack's
+state went out through the public surface, 370 bytes landed on disk, and every field read back
+identically off the real path — after the run found a genuine defect that a Linux-only test suite
+could never have caught (`ensureDir` asked `io.open` whether a *directory* existed, and Windows
+says no even for one `mkdir` has just made, so 553 headless checks passed while the game wrote
+nothing). A second hook then planted a torn write and an unreadable file on NTFS and confirmed all
+four rows of the crash-recovery table — `<pack>.json` beside `<pack>.json.bak` with no `.tmp` left
+over. Loading a real base with seven structures and no registered definitions cost **0 bytes and
+0.00 ms**, because a pack that declares nothing is never read.
+
 **What does reach Palworld's own save is what PalForge asks the GAME to do.** Three calls make the
 game record a name, and they are the three the ledger records:
 
@@ -242,28 +253,28 @@ single file, is in the docs under **Concepts → Saved state**.
 
 ## What actually works
 
-PalForge is at **v0.3.0**, and the honest summary is that the *routes into the game* are mostly
-settled and a few *capabilities* are not. 32 capability items have been closed — most of them by
-watching the thing happen in a real save, and the rest by reading the installed binary's own
-function declarations. Eight are open, and every one of them degrades honestly: it returns nil, or
-does not fire, or refuses at define time and says why. Nothing in the list below silently does
-the wrong thing.
+PalForge is at **v0.3.0**, and here is the honest summary in one paragraph. Everything in the
+*Works* column below was measured against Palworld v1.0.2.101103 — either watched happening in a
+real save, or read off the installed binary's own function declarations, and the source comment
+next to each one says which and on what date. **One capability item is still open**
+(`audio-setvolume-audible`: `setVolume` returns true at every volume, and a hedged human report
+that 0.00 was *not silent* is all anyone has), and **seven more are implemented but have never
+been exercised by a running Palworld** — they are shipped code with a declared hook pointing at
+them and no session that ran it. Both lists, with the single action that settles each, are in
+`plan/TODO.md`. Everything that is refused is refused *loudly*: it returns nil, or does not fire,
+or raises at define time and names the measurement. Nothing below silently does the wrong thing.
 
 | Domain | Works | Does not |
 | --- | --- | --- |
-| **Item** | `:give`, `:take`, `:count` — all three observed in a real save, each verified by reading the inventory back. `onObtain` / `onUse` / `onCraft` / `onDiscard` all fire. `:iconOf` reads the game's own artwork | `:recipeOf` returns nil (`item-datatable-row-read`). An item a pack declares itself cannot say what it restores — there is no such field, and the bar moves only when the row it named was already a consumable (`item-satiety-write`) |
-| **Pal** | `:spawn` and placement, both observed end to end. `onCaptured` / `onDamaged` / `onDeath` / `onSpawned` fire. Reading a pal's skills works. `:iconOf` reads 674/674 rows | `onSpawned` may over-report at world load (`pal-spawned-fresh`); `:teachAll` shares the skill-write item below |
+| **Item** | `:give`, `:take`, `:count` — all three observed in a real save, each verified by reading the inventory back. `onObtain` / `onUse` / `onCraft` / `onDiscard` all fire. `:iconOf` reads the game's own artwork. `:recipeOf` reads the game's own recipe row — confirmed running in a game on 2026-08-02: `Arrow -> Arrow x10, work=1000.0, from { Stone x2, Wood x2 }`. **`restores = { satiety = 20, hpRate = 0.25 }` feeds and heals**, wired onto `item.use` and measured on a live character | `restores = { hp = 50 }` — an *absolute* HP amount — is refused at define time: it takes `FFixedPoint64`, a struct UE4SS cannot marshal from Lua. Declare `hpRate` instead |
+| **Pal** | `:spawn` and placement, both observed end to end. `onCaptured` / `onDamaged` / `onDeath` / `onSpawned` fire — and `onSpawned` is now measured firing for a genuinely new pal: 27 firings, 17 of them nowhere near a world load. Reading a pal's skills works. `:iconOf` reads 674/674 rows | whether a spawned pal survives into the save has never been watched (`pal-spawn-persisted`), so nothing records one |
 | **Building** | the most complete domain: placement, per-structure instances, per-world save/load, `onPlace` / `onLoad` / `onRightClick` / `onRemove` / `onTick` / `onBuild` / `onWorldReady` / `onWorldLeft` | `onLeftClick` and `onBreak` are settled **negatively** — the game exposes no such hook. Disappearance surfaces as `onRemove(reason = "missing")` |
 | **Effect** | `nativeStatus` turns the game's real ailments on and off, observed in a save. The duration / interval / stacking runtime is PalForge's own and works without the game | the ailment runs on the game's rules; PalForge does not control its strength |
-| **Skill** | `onActivate` and `onEquip` / `onUnequip` observed firing in real combat. `:skillsOn` reads a pal's real loadout. Manual `:activate` / `:hit` with the cooldown enforced in Lua | `onHit` never fires (`skill-hit-source`); `:teach` / `:forget` are **unproven and opt-in** (`pal-skills-equip`); an active skill's `element` and `power` are framework-side metadata that reach nothing, and a handler has no call available to it that puts an object in the world (`skill-projectile-spawn`) |
-| **Audio** | the vanilla route: a 1957-entry AkAudioEvent catalog, `Audio.get(id):play()`, `:stop`, `:setVolume` | custom sound files. `Audio.Spec.soundFile` is **refused at define time** and names the reason (`audio-custom-file-loader`) — it used to outrank `soundId`, so setting it silenced audio that had been playing |
-| **Mesh** | vanilla `/Game/...` static and skeletal meshes, class-checked before they are handed to the engine; `.obj` geometry from disk; material colour / texture parameter names read off the running game | nobody has yet watched a colour change or a custom texture import in game. See the asset table below |
-| **UI** | building widgets out of Palworld's own UMG kit and mounting them into the game's own UI root — confirmed live | there is no "the UI changed" event to hook, so `:autoRefresh(ms)` polls (`ui-update-event`) |
+| **Skill** | `onActivate` and `onEquip` / `onUnequip` observed firing in real combat. `:skillsOn` reads a pal's real loadout. **`:teach` / `:forget` land on a live pal** — 8 pass / 0 fail on a real save, read back off the character, and the game stayed up. Manual `:activate` / `:hit` with the cooldown enforced in Lua | `onHit` never fires, settled structurally: not one field in the three damage structs this build declares names a waza (`skill-hit-source`). An active skill's `element` and `power` are framework-side metadata that reach nothing, and a handler has no call available to it that puts an object in the world — six routes walked, every one takes a struct, so `:spawnProjectile` is a callable refusal (`skill-projectile-spawn`) |
+| **Audio** | the vanilla route: a 1957-entry AkAudioEvent catalog, `Audio.get(id):play()`, `:stop`, `:setVolume` | custom sound files. `Audio.Spec.soundFile` is **refused at define time** and names the reason (`audio-custom-file-loader`) — it used to outrank `soundId`, so setting it silenced audio that had been playing. `:setVolume` returns true for ISSUED, and says so: nobody has confirmed anything got quieter (`audio-setvolume-audible`, the one open item) |
+| **Mesh** | vanilla `/Game/...` static and skeletal meshes, class-checked before they are handed to the engine; `.obj` geometry from disk; a PNG of your own, imported and cached — `ImportFileAsTexture2D` returned a real `Texture2D` in a loaded save and the second call for the same path came back identical. **A colour change was watched happening**: a chest went red → green → blue | an imported texture is one `UTexture2D` per path per session that nothing in this process can destroy, which is what the cache is for. See the asset table below |
+| **UI** | building widgets out of Palworld's own UMG kit and mounting them into the game's own UI root — confirmed live, through the game's own CommonUI layer. **There is a native rebuild signal and `:autoRefresh(ms)` rides it**: `CommonActivatableWidget::ActivateWidget`, `PalHUDService::Push` and `PalHUDService::Close` all fire when Palworld builds or tears down a screen | the heartbeat poll stays underneath as the floor and is not removable — the signal is armed only after `world.ready`, and 18 of the 21 candidates armed stayed silent, which is an absence of *input* rather than proof they never fire |
 | **Player** | `Player.character()`, `Player.coordinate()`, `Player.coordinateOffset(dx, dy, dz)` | — |
-
-The eight open items in full, with what each measurement needs, are in `plan/TODO.md`. Every one
-of them is also marked in the source at the line an implementer would open, as
-`-- TODO(<item-id>)`.
 
 ## What a pack can ship
 
@@ -273,14 +284,14 @@ This is the part most likely to be assumed rather than read.
 | --- | --- | --- |
 | Static / skeletal mesh | **No** — the loader refuses a path that does not start with `/` | Yes, working, class-checked |
 | Procedural geometry | **Yes** — `.obj` off disk | n/a |
-| Texture | Unproven — the import call is wired with the right declared signature and has never once been called | Yes |
+| Texture | **Yes** — a PNG off disk. `ImportFileAsTexture2D` was called in a loaded save on 2026-08-02 and handed back a real `Texture2D`, cached by path | Yes |
 | Sound | **No** — refused at define time | Yes, 1957-entry catalog |
 | Material | **No** — only "parent a dynamic instance to an already-loaded material" | Yes |
 
-So today **PalForge is a reference-vanilla-assets framework, with an untested custom-PNG side
-door and a working OBJ side door.** If your content is built out of Palworld's own assets plus
-your own behaviour, you are on the road that is measured. If it needs your own art, expect to
-find the edges.
+So today **PalForge is a reference-vanilla-assets framework, with a working OBJ side door and a
+working custom-PNG one.** If your content is built out of Palworld's own assets plus your own
+behaviour, you are on the road that is measured. If it needs your own art, two of the five rows
+above are open to you and the other three are not.
 
 A file your pack ships can be resolved against **your own directory** rather than the game's
 working directory, which is what makes a pack portable between machines instead of correct on
@@ -306,9 +317,10 @@ What `dev` arms: nine keybinds — including **F4, which unlocks every technolog
 save** — the F1 API suite (`test/cases/`; it spawns pals and hands out items), F9
 reload-without-restarting, the `ps_catalog` DataTable dumper (`test/tools/catalog.lua`), and the
 headless unit bundle at boot (`test/units/`). All of it comes out of one `install()` call, so
-either every piece is there or none is. What `debug` additionally arms: the game-required test
-hooks under `test/hooks/`, which are declared rather than run — each has to be asked for by name,
-and the ones that write into a save need `env.debugHooks[id] = true` on top of that.
+either every piece is there or none is. What `debug` additionally arms: the 25 game-required test
+hooks under `test/hooks/`, which are declared rather than run — `pf_hooks` lists them with the
+reason each one would skip right now, `pf_hook <id>` runs one by name, and the nine that write
+into a save need `env.debugHooks[id] = true` on top of that.
 
 None of that reaches a player's copy twice over. `env.dev` is `false`, *and* a release deploy does
 not contain `palforge/test/` at all — the kernel's one `requireState("palforge.test")` answers
@@ -330,13 +342,21 @@ writes it for you:
 ```bash
 tools/deploy.sh                        # dev deploy into the default install; writes the overlay
 tools/deploy.sh "/path/to/Palworld"    # dev deploy somewhere else
+tools/deploy.sh --writes               # dev deploy with ALL NINE write opt-ins on. Throwaway save only
 tools/deploy.sh --release              # no overlay, no test tree, stale copies deleted by name
 ```
 
+The overlay `tools/deploy.sh` writes lists the nine `env.debugHooks` opt-ins **commented out**, one
+per line, because each is a separate decision. `--writes` uncomments all nine at once and prints a
+warning while it does it. That is for the one session deliberately sweeping them with `pf_hooks_all`
+on a save you do not care about: **three of the nine cannot be undone** — a spawned pal has no
+per-individual removal, an unlocked technology has no lock, and a taught active move is the one
+write in this tree that has ever correlated with the game closing.
+
 The script replaces the deployed `Scripts/` wholesale (staging first, then two renames, so the
 game never sees a half-populated tree), stamps the copy with a build timestamp so a stale in-game
-run is visible in the log, and prints which mode it ran in and how many files it wrote — **127 in
-dev, 69 with `--release`**, the difference being `palforge/test/` and the one-file overlay.
+run is visible in the log, and prints which mode it ran in and how many files it wrote — **130 in
+dev, 71 with `--release`**, the difference being `palforge/test/` and the one-file overlay.
 `deprecated/` and `tmp/` are dropped from both. **It never edits `env.lua`**: a
 release toggle that a tool flips on is a release toggle that eventually ships on, which is how
 `dev = true` came to be the shipped default in the first place.
@@ -354,6 +374,33 @@ tools/            deploy.sh, and the generators for types.lua and the skill refe
 e2e/              Playwright checks for the docs site
 ```
 
+## Checking a change
+
+One command runs the whole gate, and it is what CI runs:
+
+```bash
+npm run check      # lint:lua -> lint:sh -> test -> types:check -> lint:docs
+```
+
+`npm test` is the headless Lua suite on its own. It needs no game and no engine — a plain `lua5.4`
+process, in about a second:
+
+```text
+tests: 576 passed, 0 failed, 36 skipped (612 total)
+tests: 36 skipped (31 need a world, 1 need a declared test/hooks run, 3 could not be answered by
+this session, 1 did not say which)
+```
+
+**`0 failed` is the only number that has to hold.** A skip carries a direction rather than being
+an unexplained gap: 31 of them are checks that need a loaded save and can only run in the game
+(press **F1** there), one is measured by a declared hook instead, and the rest are questions a
+process with no engine cannot ask. `npm run package` builds `dist/PalForge.zip` through
+`tools/deploy.sh --package`, which is the same copy and the same drops as a release deploy, so the
+archive is not a second file list that can drift from the first.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE). Copyright (c) 2026 YUYA556223.
+
+Source: **https://github.com/dr-mikan/PalForge** · Documentation:
+**https://dr-mikan.github.io/PalForge/**

@@ -36,6 +36,12 @@ The directory name comes from `core/spatial`, which reads the selected save off 
 and prefixed `w_`, and the shared bucket `world` when neither answers. Measured in a real save
 on 2026-08-02, it answers `w_1DF0E44B4FDDD6196E30819A899C9009`.
 
+That fallback is never remembered. A probe taken before the game will answer — during startup, or
+before a save is chosen — gives `world` for that one call, and the next call asks again. It is
+worth stating because the opposite behaviour was measured happening on 2026-08-02: one early probe
+was cached and a whole session wrote into the shared bucket while a real save was loaded. Only a
+successful answer is kept now.
+
 The file name is your mod id — the same string you pass to `PalForge.pack("mypack")` and the
 same one that becomes the `mypack` half of every `mypack:Thing` you define. There is no second
 identity to declare. It is letters, digits and underscores, because it is now also a file name.
@@ -283,6 +289,21 @@ Every refusal keeps the bytes and says so. Nothing here deletes a file.
 | the header names a different save than the folder | the same refusal, naming both ids — a copied or renamed world is detectable instead of silently adopted. `PalForge.core.state.rebind()` adopts it on purpose |
 | a write fails (disk full, read-only folder, a file held open) | the mod stays dirty and the write is retried on the next flush; the records are still in memory and the log names the mod and the reason |
 | one record's `state` cannot be encoded | that record is skipped by name and the rest of the file is written |
+
+<Callout type="info">
+**That table was checked against a real filesystem, not only reasoned from `os.rename`.** On
+2026-08-02, `pf_hook store-save-roundtrip` wrote a pack's state through the public surface into a
+real save's store — 370 bytes on disk, read back field for field — and `pf_hook
+store-crash-recovery` then planted a torn write and an unreadable file and confirmed **all four
+rows above on NTFS**, ending with `<mod>.json` beside `<mod>.json.bak` and no `.tmp` left over.
+
+The first of those runs found a defect that 553 headless checks could not: `ensureDir` asked
+`io.open` whether a *directory* existed, and Windows answers no even for one `mkdir` has just
+made, while Linux answers yes — so the suite was green while the game wrote nothing. Loading a real
+base with seven structures and no registered definitions cost **0 bytes and 0.00 ms**, because a
+mod that declares nothing is never read. The half that is still owed is the second trip: reading
+back what a *previous session* wrote, which needs one more world load.
+</Callout>
 
 `db.diagnose()` is the one call to make when something looks wrong. It answers a paragraph:
 

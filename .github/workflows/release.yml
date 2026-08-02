@@ -1,0 +1,131 @@
+name: Release
+
+# PUSH A TAG, GET A DOWNLOADABLE ZIP.
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# and this builds the release tree, checks it, and publishes PalForge-<tag>.zip as a GitHub
+# Release. The archive holds one folder named PalForge, which is exactly what a player drags
+# into ue4ss/Mods — the shape of the zip IS the install instruction.
+#
+# THE GATE RUNS FIRST AND THE PUBLISH ONLY SEES A GREEN GATE. It is the same `npm run check`
+# lua.yml runs on every push, plus two things that only matter when something is about to be
+# handed to a stranger:
+#
+#   * the archive must not contain palforge/test/ or palforge_dev.lua. Either one shipping would
+#     arm F4 (unlock every technology in the loaded save) in a copy that is supposed to be a
+#     player's. tools/deploy.sh already drops both under --release; this asserts it rather than
+#     trusting it, because that is the one defect in this build whose blast radius is somebody
+#     else's save file.
+#   * the tag must match the version in package.json. A tag that says v0.4.0 on a tree that says
+#     0.3.0 produces a release nobody can later identify.
+#
+# The zip is built by `tools/deploy.sh --package` — the SAME script that deploys to a real
+# install. A workflow that re-typed the file list into YAML would be a second definition of
+# "what ships", and it would drift.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.3.0). Builds and uploads an artifact; publishes no release.'
+        required: false
+
+permissions:
+  contents: write        # required to create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua 5.4
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 zip
+
+      # The full gate: syntax sweep, headless suite, types.lua freshness, docs content lint.
+      # Identical to what lua.yml runs — one definition, invoked twice.
+      - name: Gate — npm run check
+        run: npm run check
+
+      # A tag is a claim about which tree this is. If package.json disagrees, the claim is
+      # already wrong and no artifact from this run should carry the tag's name.
+      - name: Tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg=$(node -p "require('./package.json').version")
+          echo "tag=$tag package.json=$pkg"
+          [ "$tag" = "$pkg" ] || {
+            echo "::error::tag v$tag does not match package.json version $pkg — bump one of them"
+            exit 1
+          }
+
+      - name: Build the release archive
+        run: npm run package
+
+      # WHAT A PLAYER MUST NOT RECEIVE. deploy.sh --release already deletes both; this fails the
+      # release if it ever stops doing so, which is the only way this check earns its place.
+      - name: The archive is a release, not a dev tree
+        run: |
+          test -d dist/PalForge/Scripts || { echo "::error::no staged tree"; exit 1; }
+
+          if find dist/PalForge -path '*palforge/test*' -print -quit | grep -q .; then
+            echo "::error::palforge/test/ is in the archive — that arms the F1 suite and the hooks"
+            exit 1
+          fi
+          if find dist/PalForge -name 'palforge_dev.lua' -print -quit | grep -q .; then
+            echo "::error::palforge_dev.lua is in the archive — that sets env.dev = true, which arms F4"
+            exit 1
+          fi
+
+          # env.lua ships dev = false / debug = false and nothing in the framework turns them on.
+          # Assert the shipped file still says so: the overlay is the only switch, by design.
+          grep -qE '^\s*dev\s*=\s*false' dist/PalForge/Scripts/palforge/env.lua \
+            || { echo "::error::env.lua does not ship dev = false"; exit 1; }
+          grep -qE '^\s*debug\s*=\s*false' dist/PalForge/Scripts/palforge/env.lua \
+            || { echo "::error::env.lua does not ship debug = false"; exit 1; }
+
+          echo "archive holds $(find dist/PalForge -type f | wc -l) file(s)"
+          test -f dist/PalForge/enabled.txt || { echo "::error::no enabled.txt — UE4SS will not start the mod"; exit 1; }
+
+      # Named for the tag, so a downloaded file still says what it is a month later.
+      - name: Name the archive after the tag
+        id: name
+        run: |
+          ref="${GITHUB_REF#refs/tags/}"
+          name="PalForge-${ref:-$(git rev-parse --short HEAD)}.zip"
+          mv dist/PalForge.zip "dist/$name"
+          echo "zip=dist/$name" >> "$GITHUB_OUTPUT"
+          echo "base=$name" >> "$GITHUB_OUTPUT"
+
+      # Always uploaded, tag or not — a workflow_dispatch run is how you check a build before
+      # committing to a tag.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.base }}
+          path: ${{ steps.name.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Publish the Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.name.outputs.zip }}
+          generate_release_notes: true
+          body: |
+            **Install**: unzip and drop the `PalForge` folder into
+            `Palworld/Pal/Binaries/Win64/ue4ss/Mods/`. Nothing else to configure — `enabled.txt`
+            is already there, which is how UE4SS decides to start a mod.
+
+            **Measured against Palworld `v1.0.2.101103`**, single-player. Other builds are
+            untested rather than unsupported: PalForge resolves every engine call against the
+            live `UFunction` declaration before making it, so a signature that moved is reported
+            instead of faulting — but nobody has run it on another build.
+
+            This is a release build: `env.dev` and `env.debug` are `false`, the dev keybinds
+            (including F4, unlock every technology) are off, and the test tree is not in the
+            archive at all.

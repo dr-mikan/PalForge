@@ -300,8 +300,12 @@ and never edits `env.lua`:
 ```bash
 tools/deploy.sh                        # dev deploy into the default install; writes the overlay
 tools/deploy.sh "/path/to/Palworld"    # dev deploy somewhere else
+tools/deploy.sh --writes               # dev, plus all nine write opt-ins on. Throwaway save only
 tools/deploy.sh --release              # no overlay, and any stale copy is deleted by name
 ```
+
+It prints how many files it wrote, and the two modes differ by the test tree and the one-file
+overlay: **130 in dev, 71 with `--release`**.
 
 So the loop is: **edit a file → `tools/deploy.sh` → press F9 in game (or restart, the first time
 after a fresh deploy) → press F1**. Lua is read at mod load, so a deployed file changes nothing in
@@ -318,7 +322,7 @@ its action table. Nine keys in total:
 
 | Key | What it does | What it needs on screen |
 | --- | --- | --- |
-| **F1** | run the in-game API suite: 19 suites, 580 checks | works anywhere, but 28 checks skip without a loaded save |
+| **F1** | run the in-game API suite: 19 suites, 612 checks | works anywhere, but 31 checks skip without a loaded save |
 | **F2** | probe `title` — the game's own title menu button, so yours can match it | the title screen |
 | **F3** | probe `uislot` — that button's inner slot, read from a world | a loaded save |
 | **F4** | **unlock every technology in the loaded save** | a loaded save |

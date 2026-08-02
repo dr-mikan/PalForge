@@ -28,6 +28,25 @@
 --                  (ctx.itemId, ctx.count, ctx.reason = "drop" | "dispose"). Closed as
 --                  item-discard-source, observed live; the source is core/event.lua:1955-2114.
 --
+-- FOOD AND MEDICINE — `restores`, the one field on this spec that WRITES TO A CHARACTER.
+--   Item{ id = "Berries", restores = { satiety = 20 } }
+--   Item{ id = "pack:Bandage", restores = { hpRate = 0.25 } }   -- a quarter of maximum HP
+-- When that item is USED, PalForge writes the vitals on the character carried by the item.use
+-- channel (ctx.actor, the local player pawn). Both writes were measured landing on a live
+-- character on 2026-08-02 by the hook item-satiety-write — satiety 31.648 -> 21.648 through
+-- SetFullStomach, health through AddHPByRate(float) — and core/character.lua's vitals section
+-- carries the whole measurement. Two things a pack author has to know, and both are in the
+-- field's own doc string so schema.help("Item.Spec") says them too:
+--   * IT IS ADDITIVE, NEVER A REPLACEMENT. item.use is a hook on the game's OWN consume
+--     (UPalItemUseProcessor:UseItemToCharacter_ServerInternal) — a call PalForge watches rather
+--     than makes — so a vanilla food id still restores whatever the game restores, and this
+--     field is added on top of it. Declare it on a vanilla consumable only if you mean "and
+--     also".
+--   * HP IS A RATE, NOT POINTS, because every absolute HP write on this build takes
+--     FFixedPoint64, a struct UE4SS cannot marshal from Lua. `restores = { hp = 50 }` is
+--     REFUSED at define time with that measurement in the message rather than accepted and
+--     quietly ignored.
+--
 -- ACTIONS — read this before planning anything around :give or :take.
 --   * :count WORKS and is measured. It reads the live inventory through the game's own
 --     CountItemNum, observed in a loaded save answering 135 for Wood. nil means "could not
@@ -59,8 +78,13 @@
 -- core.signature is for, and it is why nothing here is called on a dump's word.
 --
 -- WHAT IS DECLARATIVE, NOT LIVE — read this before believing a field did something:
+--   * `restores` IS LIVE, and it is the only field on this spec that is: it writes satiety and
+--     health onto the character an item was used on, through core/character. Everything below
+--     is the declarative half.
 --   * name / description / category / maxStack / recipe are metadata PalForge stores and
---     hands back through the queries below. They are NOT written to the game: an item's real
+--     hands back through the queries below (`recipe` is stored AND, when you declare none, the
+--     game's own row is read for you — see :recipeOf). They are NOT written to the game in
+--     either direction, and that is what this bullet is about: an item's real
 --     stack size, its real recipe and its very existence live in DT_ItemDataTable /
 --     DT_ItemRecipeDataTable rows, which Lua cannot author — that is PalSchema's job (see
 --     PalSmith/packs/ExamplePack/items/example_items.jsonc, where MaxStackCount and the
@@ -70,7 +94,15 @@
 --     2026-07-26 core/icons read DT_ItemIconDataTable in a live save and 1183 of its 1207
 --     rows handed back an icon path (icons-row-read, Closed). So a vanilla item id answers
 --     with the game's own artwork and the declared `icon` really is the fallback it was
---     always described as. :recipeOf is the half that is still declarative — see its marker.
+--     always described as.
+--   * :recipeOf ALSO reaches the game now, through core.recipes, and this bullet used to say
+--     it was "the half that is still declarative". On 2026-08-02 the hook
+--     item-datatable-row-read read DT_ItemRecipeDataTable_Common's 'Arrow' row off the struct
+--     dt:FindRow hands back — Product_Count=10, WorkAmount=1000.0, Material1_Id=Wood(FName),
+--     Material1_Count=2, all four by name, 2 pass / 0 fail. THE PRECEDENCE IS THE OPPOSITE OF
+--     :iconOf's, on purpose; the two fields' own doc strings say so and :recipeOf explains why.
+--     What is still declarative-only, and is not a defect: defining an item does not CREATE the
+--     row. A recipe the game will run is authored as PalSchema JSON.
 --
 --   Item{
 --       id = "Berries", name = "Red Berries", category = "consumable",
@@ -82,10 +114,18 @@
 --   Item.get("Wood"):give(10)      -- true only if the count was seen to rise; see ACTIONS above
 --   Item.get("Wood"):take(3)       -- consumes them; true only if the count was seen to fall
 
-local om     = require("palforge.core.object_manager")
-local icons  = require("palforge.core.icons")
-local items  = require("palforge.utils.items")
-local schema = require("palforge.core.schema")
+local om        = require("palforge.core.object_manager")
+local icons     = require("palforge.core.icons")
+local recipes   = require("palforge.core.recipes")
+local items     = require("palforge.utils.items")
+local schema    = require("palforge.core.schema")
+-- The engine boundary for `restores`. core/character owns the two vitals writes and their
+-- read-backs; this file owns the DECLARATION and the channel it is applied from. core.event is
+-- NOT required here — it is required lazily, on the first define that declares a restore, for
+-- the load-order reason api/effect.lua's ensureDriver spells out (core.event requires
+-- api.building, so requiring it at the top of an api module builds a cycle).
+local character = require("palforge.core.character")
+local log       = require("palforge.utils.log").scope("item")
 -- WHAT THIS PACK MADE THE GAME WRITE. :give is one of the three calls in the whole framework
 -- that puts a name into PALWORLD'S save rather than into PalForge's own sidecar, so a
 -- successful, pack-owned give is recorded in core/ledger. This file does NOT require that
@@ -104,18 +144,27 @@ local schema = require("palforge.core.schema")
 -- Anything not declared here is a hard error at define time, with a did-you-mean.
 --=============================================================================
 
----A crafting recipe, declared on the item it produces. AUTHOR METADATA: PalForge stores it
----and hands it back from :recipeOf, and nothing else in the framework reads it. A recipe the
----game will actually run is a DT_ItemRecipeDataTable row (columns Product_Count / WorkAmount
----/ MaterialN_Id / MaterialN_Count — the shape these fields mirror), and Lua cannot author a
----DataTable row; declare it as PalSchema JSON and use this to describe the same thing to your
----own code and tooling.
+---A crafting recipe. THIS IS ALSO WHAT :recipeOf HANDS BACK WHEN IT READS THE GAME'S OWN ROW,
+---which is why the shape is declared once and used both ways: an accessor that answered "the
+---table you declared, or some other shape from the DataTable" would make every caller branch
+---on where the answer came from, and the `icon` field's note records what that costs.
+---
+---Declaring one is AUTHOR METADATA: PalForge stores it, hands it back, and writes nothing to
+---the game — Lua cannot author a DataTable row, so a recipe the game will actually RUN is
+---declared as PalSchema JSON (PalSmith/packs/ExamplePack/items/example_items.jsonc). What
+---changed on 2026-08-02 is the READ: with nothing declared, :recipeOf now answers the live
+---DT_ItemRecipeDataTable_Common row for the id, mapped onto these same fields
+---(Product_Id -> product, Product_Count -> count, WorkAmount -> work,
+---MaterialN_Id/_Count -> materials). `station` is never filled from the game: the row carries
+---WorkableAttribute, an enum of what KIND of station can run it, and no station id at all.
 local Recipe = schema.define("Item.Spec.Recipe", {
     { "materials", type = "table", mapOf = "number", required = true,
                    doc = "{ <itemId> = <count> } consumed by one craft" },
     { "count",     type = "number", default = 1, doc = "how many of this item one craft yields" },
     { "work",      type = "number", doc = "work amount the station must put in" },
     { "station",   type = "string", doc = "workbench / station id that can craft it" },
+    { "product",   type = "string",
+                   doc = "item id one craft yields (defaults to the item it is declared on)" },
 })
 
 ---The lifecycle handlers an item can respond to. All optional. Each receives THIS item's
@@ -154,6 +203,93 @@ local Events = schema.define("Item.Spec.Events", {
                    doc = "LIVE - dropped or trashed (ctx.count, ctx.reason = \"drop\" | \"dispose\")" },
 })
 
+-- A number that is really a number: NaN and the infinities pass `type(v) == "number"` and are
+-- exactly what a caller reaches by dividing two configuration values, so they are refused here
+-- rather than pushed at a live character as a float.
+local function finite(v)
+    if v ~= v then return false, "must be a number, and NaN is not one" end
+    if v == math.huge or v == -math.huge then return false, "must be a finite number" end
+    return true
+end
+
+local function satietyAmount(v)
+    local ok, why = finite(v)
+    if not ok then return false, why end
+    if v == 0 then
+        return false, "0 restores nothing. Leave the field out rather than declaring a restore "
+            .. "that cannot move the bar"
+    end
+    return true
+end
+
+local function hpRateAmount(v)
+    local ok, why = finite(v)
+    if not ok then return false, why end
+    if v == 0 then
+        return false, "0 heals nothing. Leave the field out rather than declaring a heal that "
+            .. "cannot move the bar"
+    end
+    if v < -1 or v > 1 then
+        return false, string.format("%s is not a rate. hpRate is a FRACTION of the character's "
+            .. "maximum HP — 0.25 is a quarter of full health, 1 is a full heal, -0.1 takes a "
+            .. "tenth off — because UPalCharacterParameterComponent::AddHPByRate(float) "
+            .. "(Pal.hpp:16016) is the only HP write on this build that does not take the "
+            .. "FFixedPoint64 struct (measured 2026-08-02, hook item-satiety-write)", tostring(v))
+    end
+    return true
+end
+
+-- THE REFUSAL, at define time, with the measurement in it. `hp` is declared as a field for one
+-- reason: so that an author who writes the obvious thing gets this sentence while they are
+-- writing it, instead of an "unknown field" that names no cause. It can never validate.
+local function noAbsoluteHP()
+    return false, "an absolute HP amount cannot be written on this build, so PalForge will not "
+        .. "accept a declaration that promises one. Every absolute HP write takes FFixedPoint64, "
+        .. "a STRUCT — UPalCharacterParameterComponent::SetHP (Pal.hpp:15933) and ::AddHP "
+        .. "(:16018), UPalIndividualCharacterParameter::AddHP (:21156) — and a struct argument "
+        .. "faults inside UE4SS's own marshalling where pcall cannot see it. Declare hpRate "
+        .. "instead: a fraction of maximum HP through AddHPByRate(float), which was measured "
+        .. "landing on a live character on 2026-08-02 (hook item-satiety-write)"
+end
+
+---WHAT USING THIS ITEM RESTORES — the live half of Item.Spec, and the two vitals this build was
+---measured writing (2026-08-02, hook item-satiety-write, on a live character):
+---
+---    restores = { satiety = 20 }        -- 20 points of the satiety bar
+---    restores = { hpRate = 0.25 }       -- a quarter of maximum HP
+---    restores = { satiety = 20, hpRate = 0.25 }   -- both; each is measured separately
+---
+---ADDITIVE, NEVER A REPLACEMENT. PalForge does not perform the eating: item.use is a hook on the
+---game's own UPalItemUseProcessor:UseItemToCharacter_ServerInternal, so a vanilla food id still
+---restores everything the game restores and this is applied ON TOP. Declaring
+---`restores = { satiety = 20 }` on Berries means "and 20 more", not "20 instead".
+---
+---WHO IT IS APPLIED TO: ctx.actor from item.use, which is the LOCAL PLAYER PAWN — the character
+---who USED the item, which is the character used ON for self-use (food, potions). Feeding a pal
+---goes to the pal through the game's own path and PalForge's write still lands on the player, so
+---declare this for items a player consumes. Nothing is written when there is no live character;
+---the [PalForge.item] log line says which vital did not land and why.
+---
+---A negative value drains rather than restores, and that is measured too: the -0.1 rate the hook
+---wrote is exactly this call.
+local Restores = schema.define("Item.Spec.Restores", {
+    { "satiety", type = "number", check = satietyAmount,
+                 doc = "satiety POINTS added on use, clamped to the bar (100.0 wide when measured); added to the game's own effect, never instead of it" },
+    { "hpRate",  type = "number", check = hpRateAmount,
+                 doc = "health restored as a FRACTION of maximum HP: 0.25 = a quarter, 1 = a full heal, -0.1 hurts (the only HP write this build allows from Lua)" },
+    { "hp",      type = "number", check = noAbsoluteHP,
+                 doc = "REFUSED at define time, always: an absolute HP amount takes FFixedPoint64, a struct UE4SS cannot marshal from Lua (measured 2026-08-02, hook item-satiety-write). Declare hpRate instead" },
+})
+
+-- A restore that names no vital is a promise with nothing behind it: `restores = {}` would
+-- register, subscribe to item.use and write nothing forever. It is refused where it is written.
+local function declaresAVital(v)
+    if v.satiety ~= nil or v.hpRate ~= nil then return true end
+    return false, "a restore must name at least one vital — { satiety = <points> } and/or "
+        .. "{ hpRate = <fraction of maximum HP> }. An empty restore would subscribe to item.use "
+        .. "and write nothing"
+end
+
 ---What you pass to Item{ ... }. `id` is the only required field.
 -- `id` carries schema.validId, not schema.nonEmpty: a namespaced id has to survive
 -- object_manager.resolve to reach the game at all ("pack:Potion" -> the row spelling
@@ -181,6 +317,8 @@ local Spec = schema.define("Item.Spec", {
                      doc = "/Game/... texture path used when the icon DataTable has no row for this id" },
     { "recipe",      type = "table", of = Recipe,
                      doc = "the recipe that produces THIS item (metadata; see Item.Spec.Recipe)" },
+    { "restores",    type = "table", of = Restores, check = declaresAVital,
+                     doc = "what USING this item restores, ADDED to the game's own effect: { satiety = 20, hpRate = 0.25 } (LIVE - see Item.Spec.Restores)" },
     { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
     { "data",        type = "table", doc = "free-form payload of your own, carried onto the definition" },
 })
@@ -196,18 +334,68 @@ Class.category = "material"
 Class.maxStack = 1
 Class.icon     = nil
 Class.recipe   = nil
+Class.restores = nil
 
 function Class:onObtain(ctx) end
 function Class:onUse(ctx) end
 function Class:onCraft(ctx) end
 function Class:onDiscard(ctx) end
 
--- This item's DECLARED recipe, or nil when none was declared. Override to build one
--- dynamically. It never reads the game: a vanilla id answers nil even though
--- DT_ItemRecipeDataTable_Common has a row for it. That is now the ONLY half of
--- item-datatable-row-read still open — see the marker on :iconOf, which no longer waits on
--- anything itself.
-function Class:recipeOf() return self.recipe end
+-- Write this item's declared restore onto one character, NOW. Every route into the vitals goes
+-- through here — the item.use subscriber below, and Handle:restoreOn for a pack that wants to
+-- feed someone from its own code — so there is one place that decides what a declaration means
+-- and one place a test can watch.
+--
+-- Returns core/character.restore's verdict unchanged: true only when every declared vital was
+-- seen to move in a read-back, false plus the English reason otherwise. An item that declares
+-- no restore is a false with a reason, not an error: dispatch reaches every used item.
+function Class:restoreOn(actor)
+    if type(self.restores) ~= "table" then
+        return false, string.format("%s declares no restores, so using it writes no vitals",
+            tostring(self.id))
+    end
+    return character.restore(actor, self.restores)
+end
+
+-- This item's recipe: the DECLARED one when there is one, else the GAME'S OWN ROW. Override to
+-- build one dynamically. Both halves answer the same shape, Item.Spec.Recipe — see its note.
+--
+-- MEASURED, 2026-08-02, hook item-datatable-row-read, 2 pass / 0 fail. The sentence this
+-- comment replaced said :recipeOf "never reads the game", and the reason it did not was one
+-- open question: core/icons had to abandon the struct FindRow returns because the icon column's
+-- TSoftObjectPtr answers no member name from Lua, and nobody had tried the same index on an
+-- int32 or an FName. That run tried it. `dt:FindRow('Arrow')` handed back a live ScriptStruct
+-- /Script/Pal.PalItemRecipe and all four probed columns came off it BY NAME —
+-- Product_Count=10, WorkAmount=1000.0, Material1_Id=Wood (an FName, needing :ToString()),
+-- Material1_Count=2. So a recipe is ONE call, and core/recipes.lua is that call.
+--
+-- THE DECLARED RECIPE WINS, and this is the one place in this file where the declared value
+-- beats the live one. It is not an inconsistency with :iconOf below, it is each field's own
+-- documented contract being kept:
+--   * `icon` is documented as "used when the icon DataTable has NO ROW for this id" — it says
+--     of itself that it is a fallback, so the live table wins.
+--   * `recipe` is documented as what the author declares ABOUT THEIR OWN ITEM, and an author
+--     who writes one has said something PalForge must not overrule. Overruling it would also
+--     be silent: a pack that gives a vanilla id a recipe of its own for its own crafting
+--     system would get the vanilla numbers back and nothing would say why.
+-- The practical shape of it: declared items cost no engine call at all, and the game read is
+-- what answers for every id nobody declared — which is every vanilla id, the case a pack
+-- author actually asks about.
+--
+-- THE ID IS RESOLVED FIRST (F-3/C5), for the reason spelled out on :iconOf: the live table is
+-- keyed by the row spelling PalSchema writes, so "pack:Potion" has to ask for "pack_Potion",
+-- and `or self.id` — fall back to the LITERAL, never to nothing — is the rule at every engine
+-- boundary. core/recipes deliberately does NOT do this itself; the boundary is here.
+--
+-- Fail-soft: no world, no table, no row, a row that answers nothing -> nil, and the pcall is
+-- the same belt-and-braces :iconOf wears (core/recipes raises nothing on its own).
+function Class:recipeOf()
+    if self.recipe ~= nil then return self.recipe end
+    local id = om.resolve(self.id) or self.id
+    local ok, recipe = pcall(function() return recipes.resolve(id) end)
+    if ok and recipe ~= nil then return recipe end
+    return nil
+end
 
 -- The inventory icon, and THE ROW READ WORKS. This comment used to say that reading a
 -- DataTable row "has never been observed to work from Lua on this build"; that was true when
@@ -222,21 +410,16 @@ function Class:recipeOf() return self.recipe end
 -- why every reflection sweep missed them (dumps/cxx/Engine.hpp shows UDataTable declaring five
 -- properties and ZERO functions). FindRow then works and the measured column IS on the row —
 -- but its value is a TSoftObjectPtr userdata that answers none of the nineteen member names a
--- soft pointer could plausibly expose, so the struct cannot be opened from Lua. What is read
+-- soft pointer could plausibly expose, so THAT value cannot be opened from Lua. What is read
 -- instead is the whole column as text, via UDataTableFunctionLibrary::GetDataTableColumnAsString,
--- zipped against dt:GetRowNames() — two calls per table, cached.
+-- zipped against dt:GetRowNames() — two calls per table, cached. The limit is the SOFT POINTER,
+-- not the struct: :recipeOf indexes ints and FNames straight off a row (2026-08-02).
 --
--- TODO(item-datatable-row-read): THE RECIPE HALF ONLY. :recipeOf still answers the declared
--- recipe and never the game's, and what is unknown is no longer the accessor — it is whether a
--- scalar / FName column can be indexed off the struct FindRow hands back. That was never tried:
--- the TSoftObjectPtr failure that forced the column detour does not apply to an int32 or an
--- FName. If the struct route stays shut, a recipe is assembled the way icons are, with one
--- GetDataTableColumnAsString call per column — thirteen calls per table, once, cached, which is
--- perfectly affordable. Everything around it is measured (dumps/reflection/01_datatables.txt,
--- a real session): DT_ItemRecipeDataTable_Common is loaded under /Game/Pal/DataTable/Item/ with
--- 1414 rows, the row keys are the item ids, and the row struct carries Product_Id,
--- Product_Count, Material1_Id..Material5_Id, Material1_Count..Material5_Count, WorkAmount,
--- CraftExpRate, EnergyType, EnergyAmount, UnlockItemID, WorkableAttribute, DenyRecipeChain.
+-- THE RECIPE HALF IS CLOSED TOO, and the item-datatable-row-read marker that stood here is gone
+-- with it — deliberately, so a grep for open markers no longer stops on this file. What it asked
+-- — can a scalar / FName column be indexed off the struct FindRow hands back — was answered yes
+-- on 2026-08-02 (see :recipeOf above), so the thirteen-call column detour it planned for is not
+-- needed and was not written.
 --
 -- THE ID IS RESOLVED FIRST (F-3/C5). The live table is keyed by the row spelling PalSchema
 -- writes, so `Item{ id = "pack:Potion" }:iconOf()` has to ask for "pack_Potion"; handing
@@ -248,6 +431,78 @@ function Class:iconOf()
     local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, id) end)
     if ok and tex ~= nil then return tex end
     return self.icon
+end
+
+--=============================================================================
+-- the item.use SUBSCRIBER — where a declared `restores` becomes a write
+--
+-- WHY THIS IS A SUBSCRIBER AND NOT Class:onUse. core/event's dispatch calls cls:onUse(ctx), and
+-- an item that declares `events.onUse` REPLACES that method with the author's handler (see the
+-- forwarder in define below). A restore hung off onUse would therefore stop working for exactly
+-- the items that also declare a handler, silently. So the restore listens to the channel in its
+-- own right, beside the dispatch, the way api/effect.lua drives itself off "tick".
+--
+-- core/event.lua is NOT edited for this and does not know it exists: the channel it emits
+-- already carries everything needed — ctx.itemId and ctx.actor, a real player pawn (measured
+-- live; item.use fires off UPalItemUseProcessor:UseItemToCharacter_ServerInternal).
+--
+-- ONE SUBSCRIPTION PER SESSION, and it survives a hot reload the way core/event's own dispatch
+-- does: the handle is parked on _G and the previous one is unsubscribed before a new one is
+-- taken, because a reload that simply subscribed again would apply every restore twice, then
+-- three times.
+--=============================================================================
+
+local restoreDriver = false
+
+-- Resolved the same way core/event's dispatch resolves an item ctx: the exact id first (a
+-- native item defines under the game id), then the namespaced form, because the game emits the
+-- PalSchema row name "pack_Potion" and never the colon form the pack declared.
+local function definitionFor(itemId)
+    if itemId == nil then return nil end
+    local cls = om.get("item", itemId)
+    if cls then return cls end
+    return (om.byResolved("item", itemId))
+end
+
+local function applyRestore(ctx)
+    if type(ctx) ~= "table" then return end
+    local cls = definitionFor(ctx.itemId)
+    if not cls or type(cls.restores) ~= "table" then return end
+    local ok, why = cls:restoreOn(ctx.actor)
+    if ok then
+        log.info(string.format("%s restored %s", tostring(ctx.itemId),
+            table.concat((function()
+                local parts = {}
+                for k, v in pairs(cls.restores) do parts[#parts + 1] = k .. "=" .. tostring(v) end
+                table.sort(parts)
+                return parts
+            end)(), ", ")))
+    else
+        -- A false here is the normal answer at a title screen, on a dedicated server with no
+        -- local pawn, and on a character who is already full. It is logged at warn with the
+        -- reason attached, because "my food item did nothing" needs a sentence, not silence.
+        log.warn(string.format("%s: nothing was restored — %s", tostring(ctx.itemId),
+            tostring(why)))
+    end
+end
+
+-- Subscribe on the FIRST define that declares a restore, so requiring this module costs nothing
+-- and a pack that declares no food never puts a subscriber on the bus.
+local function ensureRestoreDriver()
+    if restoreDriver then return true end
+    local ok = pcall(function()
+        local event = require("palforge.core.event")
+        local prev = _G.__PalForgeItemRestoreSub
+        if prev then pcall(function() prev:unsubscribe() end) end
+        _G.__PalForgeItemRestoreSub = event.on("item.use", function(ctx)
+            -- Pack data drives this, so it stays pcall'd — but the error is LOGGED, never
+            -- swallowed: the same rule core/event's dispatch keeps for a handler that raises.
+            local okRun, err = pcall(applyRestore, ctx)
+            if not okRun then log.err("item.use restore failed: " .. tostring(err)) end
+        end)
+    end)
+    restoreDriver = ok
+    return ok
 end
 
 --=============================================================================
@@ -285,6 +540,7 @@ local function define(spec, opts)
         maxStack    = spec.maxStack,
         icon        = spec.icon,
         recipe      = spec.recipe,
+        restores    = spec.restores,
         data        = spec.data,
     }, Class)
     cls.__index = cls
@@ -295,6 +551,10 @@ local function define(spec, opts)
     for name, handler in pairs(spec.events or {}) do           -- onUse, ...
         cls[name] = function(_, ...) return handler(handle, ...) end
     end
+    -- A declared restore only reaches a character through the item.use subscriber, so the first
+    -- one to be declared is what puts that subscriber on the bus. Before the driver existed this
+    -- was the whole gap: the channel fired, the handler ran, and nothing could write a vital.
+    if spec.restores then ensureRestoreDriver() end
     -- so core/event + get() find it — unless the caller asked for a definition that stays out
     -- of the registry (opts.register == false), which is a build, not a define.
     if register then
@@ -397,6 +657,21 @@ function Handle:take(count) return items.take(self.id, count or 1) end
 ---@return integer?
 function Handle:count() return items.count(self.id) end
 
+---WORKS, and is measured. Write this item's declared `restores` onto `actor` right now, without
+---waiting for the player to use one — for a pack that feeds someone from its own code (a
+---campfire, a quest reward, a passive that ticks).
+---
+---The verdict is the READ-BACK, never the call: true only when every declared vital was seen to
+---move afterwards. false plus an English reason for everything else, and the reasons name the
+---state rather than shrugging — no live character, satiety already full, the game accepted the
+---call and nothing moved. Applying an item that declares no restore is a false saying so.
+---
+---Measured on a live character 2026-08-02 (hook item-satiety-write): satiety through
+---SetFullStomach, health through AddHPByRate. See core/character.lua's vitals section.
+---@param actor userdata  # a live character — the player pawn, or a pal
+---@return boolean ok, string? reason
+function Handle:restoreOn(actor) return self._cls:restoreOn(actor) end
+
 -- ---- lifecycle events (fired by core.event on the definition; forward for manual use) ----
 
 ---@param ctx table  # ctx.count = how many were obtained
@@ -410,6 +685,19 @@ function Handle:onDiscard(ctx) if self._cls.onDiscard then return self._cls:onDi
 
 -- ---- queries ----
 
+---The recipe that produces this item: the DECLARED one if this item declares one, else the
+---game's own DT_ItemRecipeDataTable_Common row for the id, else nil. One shape either way —
+---`{ product, count, work, station, materials = { [itemId] = count } }` (Item.Spec.Recipe).
+---
+---From the game's row: `product` is Product_Id, `count` is Product_Count (how many one craft
+---yields), `work` is WorkAmount, `materials` are the MaterialN_Id/_Count pairs with the empty
+---slots dropped, and `station` is always nil — the row names a work ATTRIBUTE, not a station.
+---`Item.get("Arrow"):recipeOf()` answers `count = 10, work = 1000.0, materials = { Wood = 2 }`
+---on the build this was measured against (2026-08-02).
+---
+---DECLARING A RECIPE WINS over the game's row: it is your statement about your own item, and
+---PalForge does not overrule it. See Class:recipeOf for why this is the opposite way round
+---from :iconOf. nil means nobody declared one and the game has no row to read — never an error.
 ---@return Item.Spec.Recipe?
 function Handle:recipeOf() return self._cls:recipeOf() end
 ---The icon as a /Game/... asset path: the live DataTable's row for this id, else the declared
@@ -424,6 +712,12 @@ function Handle:description() return self._cls.description end
 function Handle:category() return self._cls.category or "material" end
 ---@return integer
 function Handle:maxStack() return self._cls.maxStack or 1 end
+---What using this item restores, as declared — `{ satiety = 20, hpRate = 0.25 }` — or nil when
+---this item restores nothing of PalForge's own (which is every item that declares no such
+---field, including every vanilla consumable: the GAME's own effect is not readable from here
+---and is never reported as ours). The declared table itself, not a copy.
+---@return Item.Spec.Restores?
+function Handle:restores() return self._cls.restores end
 
 Item.Class = Class   -- the base hook table (used for override detection / subclassing)
 return Item

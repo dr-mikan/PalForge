@@ -33,10 +33,10 @@ local spatial = require("palforge.core.spatial")
 
 local s = T.suite("store_state")
 
--- Headless, core.spatial.saveId() falls back to its single "world" bucket (no
--- PalGameInstance to probe), so every key below is "world/<pack>". That is the documented
--- normal case, not an error path, and it is what makes these checks reproducible.
-local SAVE = spatial.saveId()
+-- The save id these checks run against, PINNED rather than probed — see withStore below for
+-- what probing it cost. It is deliberately not "world": that is the real fallback bucket, and a
+-- fixture that shares a name with a production value hides the day they stop agreeing.
+local SAVE = "pf_testsave"
 
 --=============================================================================
 -- the in-memory store backend
@@ -96,12 +96,50 @@ end
 -- back whatever happens — including when an assertion raises, whose sentinel is a TABLE and
 -- must be re-raised unchanged (error(e, 0)) or the runner reports it as a failure with no
 -- message instead of the assertion it was.
+-- THE SAVE ID IS PINNED FOR THE DURATION OF EACH CHECK, and that is a fix rather than
+-- convenience. `SAVE` used to be `spatial.saveId()` captured at MODULE LOAD — which is startup,
+-- before any world exists, so it read the "world" fallback and every key below matched. In a
+-- GAME that snapshot is a lie the moment a save is selected: on 2026-08-02 22:08 this suite
+-- failed 21 checks in a loaded save with `expected world, got w_1DF0E44B4FDDD6196E30819A899C9009`,
+-- and not one of them was about the store — they were about a constant that had gone stale
+-- between require and run.
+--
+-- (It was HIDDEN before that day by a second defect: saveId cached its own fallback, so the
+-- whole session stayed on "world" and the snapshot happened to keep matching. Fixing that one —
+-- a miss is no longer cached — is what made this one visible. Two wrongs had been making a
+-- right.)
+--
+-- These checks are about the store's LOGIC, not about which save is loaded, so pinning is also
+-- the more honest fixture: the keys are deterministic in every environment instead of depending
+-- on what the operator happened to load.
+-- The same pin, for the two checks that ask core.state a pure question and need no fake IO at
+-- all. They still have to run against a KNOWN save id: `keyFor` and `legacyKey` compose one,
+-- and in a loaded game the real one is whatever the operator opened.
+-- ⚠️ THE __reset() CALLS ARE LOAD-BEARING, and leaving them out is how this still failed in a
+-- game after the pin was added. `state.saveDir()` answers `S.save or spatial.saveId()` — the
+-- store CACHES the id it synced to — so in a session where a world had already been loaded,
+-- S.save held the real save and the pin on spatial.saveId was never consulted. Headless S.save
+-- is nil, so the pin worked there and the suite went green while the same two checks failed in
+-- game (2026-08-02 22:21:54). Resetting drops that cache so the pinned probe is what answers.
+local function withSaveId(fn)
+    local prev = spatial.saveId
+    spatial.saveId = function() return SAVE end
+    state.__reset()
+    local ok, e = pcall(fn)
+    spatial.saveId = prev
+    state.__reset()
+    if not ok then error(e, 0) end
+end
+
 local function withStore(fn)
     local fake = fakeIO()
+    local prevSaveId = spatial.saveId
+    spatial.saveId = function() return SAVE end
     local prev = state.__io(fake)
     state.__reset()
     local ok, e = pcall(fn, fake)
     state.__io(prev)
+    spatial.saveId = prevSaveId
     state.__reset()
     if not ok then error(e, 0) end
 end
@@ -129,7 +167,9 @@ end
 --=============================================================================
 
 s:test("a mod id becomes a file name, so the three reserved names are refused", function(t)
-    t:eq(state.keyFor("logi"), SAVE .. "/logi", "a normal mod id keys one file per save")
+    withSaveId(function()
+        t:eq(state.keyFor("logi"), SAVE .. "/logi", "a normal mod id keys one file per save")
+    end)
     for _, bad in ipairs({ "_save", "_unowned", "_quarantine" }) do
         local key, why = state.keyFor(bad)
         t:eq(key, nil, "'" .. bad .. "' is one of the store's own files and cannot be a mod id")
@@ -150,9 +190,11 @@ s:test("a mod id that could escape state/ is refused before it becomes a path", 
 end)
 
 s:test("the legacy key is the single pre-format-3 file and nothing else", function(t)
-    t:eq(state.legacyKey(), "entities_" .. SAVE,
-        "migrate() reads exactly the file the old runtime wrote")
-    t:eq(state.saveDir(), SAVE, "the save directory is core.spatial's save id, unchanged")
+    withSaveId(function()
+        t:eq(state.legacyKey(), "entities_" .. SAVE,
+            "migrate() reads exactly the file the old runtime wrote")
+        t:eq(state.saveDir(), SAVE, "the save directory is core.spatial's save id, unchanged")
+    end)
 end)
 
 --=============================================================================

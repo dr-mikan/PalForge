@@ -291,10 +291,35 @@ local function tryProbe()
         or readPair("GetSelectedWorldName", "SelectedWorldName")
 end
 
+---The per-save identity, or the shared `"world"` bucket when nothing will say.
+---
+---⚠️ POSITIVES-ONLY CACHE, AND THAT IS A FIX RATHER THAN A STYLE. This used to cache whatever
+---came back, fallback included:
+---
+---    cachedSaveId = probed and ("w_" .. …) or "world"      -- ← the defect
+---
+---so ONE probe taken a moment too early — before the PalGameInstance exists, before a save is
+---selected, from anything that touches the store during startup — locked the whole session into
+---the shared bucket, silently, with every later call answering from the cache and never asking
+---again. MEASURED 2026-08-02 21:38:27 on a fresh save: `spatial.saveId() = world`, four minutes
+---after world.ready, on a session that had answered `w_1DF0E44B…` earlier the same evening. The
+---store's per-save isolation and F-7's whole "a different save is handled correctly" claim rest
+---on this one string.
+---
+---So a MISS is not cached. It costs one failed probe per call until the game will answer, which
+---is the same positives-only-and-retry discipline core/mesh/assets and core/icons use for asset
+---lookups — and which `mesh-texture-import-live` confirmed in game on this build: a path that
+---missed once imported fine on the next call because the miss was not remembered.
+---
+---`"world"` remains a legitimate ANSWER, not an error: a build that never exposes the name has
+---one bucket and PalForge says so rather than inventing an id. It is just no longer a permanent
+---one.
+---@return string
 function M.saveId()
     if cachedSaveId then return cachedSaveId end
     local probed = tryProbe()
-    cachedSaveId = probed and ("w_" .. probed:gsub("[^%w_]", "_")) or "world"
+    if not probed then return "world" end        -- not cached: ask again next time
+    cachedSaveId = "w_" .. probed:gsub("[^%w_]", "_")
     return cachedSaveId
 end
 

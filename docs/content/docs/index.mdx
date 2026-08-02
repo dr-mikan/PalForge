@@ -314,12 +314,15 @@ Each api module's header states which of its events are live and what measured t
   `RequestDrop_ToServer` / `RequestDispose_ToServer`. Both of the last two were observed live
   while crafting at a real machine and dropping from a real slot. `:give`, `:take` and `:count`
   each read the inventory back afterwards, so what they return is a measurement rather than a
-  hope. `:recipeOf` is the one that still answers nil.
+  hope. `:recipeOf` answers your declared recipe, or the game's own row for that id — confirmed
+  running in a save on 2026-08-02, where `Arrow` came back as
+  `Arrow x10, work = 1000.0, from { Stone x2, Wood x2 }`. And an item can **feed and heal**:
+  `restores = { satiety = 20, hpRate = 0.25 }` writes both on use, measured on a live character.
 - **Pal** — all five run. `onCaptured`, `onDamaged` and `onDeath` come from confirmed game
   calls. `onSpawned` rides `PalNPC:OnCompletedInitParam` and
-  `PalPlayerCharacter:OnCompleteInitializeParameter`, both observed firing — but every firing so
-  far landed in the same second as the world load, so it is unshown that one means a pal that
-  did not exist a moment ago. Keep that handler safe to run twice. `onTick` is driven by a sweep
+  `PalPlayerCharacter:OnCompleteInitializeParameter`, and it is measured firing for a genuinely
+  new pal: 27 firings on 2026-08-02, 17 of them nowhere near a world load. It still fires during a
+  load as well, so keep that handler safe to run twice. `onTick` is driven by a sweep
   over the pals in the world, roughly every three seconds. A declared `mesh` is attached for you
   on that same spawn channel: you do not call `renderOn` yourself.
 - **Skill** — three of the four run. `onActivate` was observed in real combat, carried by
@@ -336,20 +339,24 @@ Each api module's header states which of its events are live and what measured t
   `Audio.Handle:stop(actor)` is not per-sound — it silences everything on that actor — and
   `:setVolume` is actor-wide for the same reason.
 - **Mesh** — no lifecycle events. Vanilla `/Game/...` static and skeletal meshes work and are
-  class-checked before the engine is handed them, and `.obj` geometry loads from disk. The
-  custom-texture import is wired with the right declared signature and has never once been
-  called, and nobody has yet watched a colour change happen in game.
-- **UI** — no lifecycle events, and no native "the UI changed" signal has been confirmed
-  firing, so nothing refreshes an element for you. Building widgets out of Palworld's own UMG
-  kit and mounting them into the game's own in-game UI root is confirmed live.
+  class-checked before the engine is handed them, `.obj` geometry loads from disk, and a PNG of
+  your own imports and is cached by path — that was watched happening in a loaded save on
+  2026-08-02, and so was a colour change: a chest went red, then green, then blue.
+- **UI** — no lifecycle events, but there *is* a native "the UI changed" signal, and it was
+  measured on 2026-08-02: `CommonActivatableWidget:ActivateWidget`, `PalHUDService:Push` and
+  `PalHUDService:Close` all fire when Palworld builds or tears down a screen. `:autoRefresh(ms)`
+  rides all three, with the heartbeat poll underneath as the floor. Building widgets out of
+  Palworld's own UMG kit and mounting them into the game's own in-game UI root is confirmed live.
 - **Player** — `Player.character()`, `Player.coordinate()` and
   `Player.coordinateOffset(dx, dy, dz)`. No events; it answers where the player is.
 
 <Callout type="error" title="One thing this version refuses outright">
 **A sound file of your own cannot be played, and `Audio.Spec.soundFile` is a hard error at
-define time.** The engine-native half is closed — `USoundWave` declares no importer — and the
-Wwise half rebinds a cooked media cookie rather than reading a `.wav` off your disk. The field
-stays declared so the error can name it and name the open item, `audio-custom-file-loader`. Only
+define time.** The Wwise half is settled: `AkExternalMediaAsset` and `AkMediaAsset` declare zero
+functions on this build and the game holds no instance of either, so there is no external-media
+route to find. The engine-native half has no importer either — `USoundWave` declares none — and
+whether one could be built from Lua instead is the whole of what the open item
+`audio-custom-file-loader` still asks. The field stays declared so the error can name it. Only
 sounds the game already ships can be played, and there are 1957 of them —
 [Audio](/docs/api/audio) has the catalog.
 
@@ -366,11 +373,13 @@ somewhere that does run:
   click entry on `PalBuildObject`, and destruction exists only as delegate fields, which
   `RegisterHook` cannot address by path. Use `onRightClick`, and `onRemove`, which reports
   disappearance as `reason = "missing"`.
-- Skill `onHit` — both of its candidate sources are measured silent from both sides. Call
+- Skill `onHit` — settled negatively, and structurally: not one field in the three damage structs
+  this build declares carries a waza id, so there is nothing to correlate a hit with. Call
   `:hit(target)` from your own code, such as a pal's handler, a building's `onRightClick` or a
   keybind.
-- Nothing refreshes a UI element for you. Call `:refresh()` when your state changes, or
-  `:autoRefresh(ms)` to poll.
+- Nothing refreshes a UI element for you *automatically*. Call `:refresh()` when your own state
+  changes, or `:autoRefresh(ms)`, which rides Palworld's own rebuild signal and falls back on the
+  heartbeat.
 </Callout>
 
 ## A bigger example

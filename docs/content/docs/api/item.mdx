@@ -110,6 +110,10 @@ closest valid field.
       description: 'The recipe that produces THIS item. Shape: Item.Spec.Recipe.',
       type: 'table',
     },
+    restores: {
+      description: 'What USING this item restores, ADDED to whatever the game already does: { satiety = 20, hpRate = 0.25 }. The one field on this spec that writes to a character. hp (an absolute amount) is refused at define time.',
+      type: 'table',
+    },
     events: {
       description: 'Your handlers, grouped. Shape: Item.Spec.Events.',
       type: 'table',
@@ -201,16 +205,85 @@ recipe the game will actually run is a `DT_ItemRecipeDataTable` row, and Lua can
 declare it as PalSchema JSON and use this to describe the same thing to your own code.
 </Callout>
 
-`recipeOf()` reads back only what you declared. It does **not** read the game's table, so a
-vanilla id answers `nil` even though a real recipe for it exists: `DT_ItemRecipeDataTable_Common`
-is loaded under `/Game/Pal/DataTable/Item/` with 1414 rows, keyed by item id, carrying
-`Product_Count`, `Material1_Id` through `Material5_Id`, `WorkAmount` and nine more columns. What
-is not known is whether a scalar or FName column can be indexed straight off the struct
-`FindRow` hands back — the only row value ever read here was a `TSoftObjectPtr`, which cannot be
-opened from Lua, and that is what forced the column-as-text detour the icon lookup uses. Reading
-the recipe column by column would work today at thirteen calls per table, once, cached. The
-question is measured by `pf_hook item-datatable-row-read`, which needs `env.debug` and a loaded
-world.
+`recipeOf()` answers your declared recipe when there is one, and otherwise reads the game's own
+row: `DT_ItemRecipeDataTable_Common` is loaded under `/Game/Pal/DataTable/Item/` with 1414 rows,
+keyed by item id, carrying `Product_Count`, `Material1_Id` through `Material5_Id`, `WorkAmount` and
+nine more columns. That read is one `FindRow` call with the columns indexed off the row struct by
+name — measured working in a loaded save on 2026-08-02 by `pf_hook item-datatable-row-read`, which
+is also why there is no column-by-column fallback in the code. **What it hands back is declared
+beside the function in `api/item.lua`**, and the table below says the same thing in one line.
+
+The declared recipe wins on purpose, and it is the one place on this handle where a declaration
+beats the live table. `icon` documents itself as a fallback for an id the icon table has no row
+for, so there the game wins; a recipe is what you said about your own item, and a pack describing
+its own crafting for a vanilla id must get its own numbers back. Everything is fail-soft: no world,
+no table, no row, or a row that answers nothing, all come back `nil` rather than raising.
+
+`recipeOf()` has been watched answering out of the game, not only measured as a route: in a save on
+2026-08-02 it reported `Arrow -> Arrow x10, work = 1000.0, from { Stone x2, Wood x2 }`.
+
+### Food and medicine: the restores shape
+
+`restores` is the one field on this spec that **writes to a character**. Declare it and using the
+item feeds or heals whoever used it, on top of whatever the game already does for that id.
+
+<TypeTable
+  type={{
+    satiety: {
+      description: 'Satiety POINTS added on use, clamped to the bar (100.0 wide on the measured build). Added to the game\'s own effect, never instead of it.',
+      type: 'number',
+    },
+    hpRate: {
+      description: 'A FRACTION of maximum HP: 0.25 is a quarter. Negative drains rather than restores, and that is measured too.',
+      type: 'number',
+    },
+    hp: {
+      description: 'REFUSED at define time, always. An absolute HP amount takes FFixedPoint64, a struct UE4SS cannot marshal from Lua. Declare hpRate instead.',
+      type: 'number',
+    },
+  }}
+/>
+
+```lua
+Item{
+    id       = "Berries",
+    category = "consumable",
+    restores = { satiety = 20 },              -- 20 points of the satiety bar
+}
+
+Item{
+    id       = "pack:Bandage",
+    category = "consumable",
+    restores = { hpRate = 0.25 },             -- a quarter of maximum HP
+}
+
+Item{
+    id       = "pack:Feast",
+    restores = { satiety = 40, hpRate = 0.5 },  -- both; each is measured separately
+}
+```
+
+This is measured, on a live character, by `pf_hook item-satiety-write` on 2026-08-02: satiety went
+`31.648 -> 21.648` and was put back, `SetFullStomach` takes **one** argument on this build, and
+`AddHPByRate` lands. It was then confirmed running in a game the same evening —
+`item: satiety 68.247 of 100.0, restored -5 and put back`.
+
+<Callout type="warn">
+`restores = { hp = 50 }` — an **absolute** HP amount — raises at define time and names why: that
+call takes `FFixedPoint64`, a struct UE4SS cannot marshal from Lua, and a bad argument there faults
+inside UE4SS's own marshalling where `pcall` cannot see it. Declare `hpRate` instead.
+
+`restores` is **added to** the game's own effect, not substituted for it. Declaring
+`restores = { satiety = 20 }` on `Berries` means "and 20 more", not "20 instead" — a vanilla
+consumable still restores whatever the game restores. An empty `restores = {}` is refused as well:
+a restore that names no vital would subscribe to `item.use` and then do nothing.
+</Callout>
+
+`Handle:restoreOn(actor)` writes the same declared table onto a character right now, without
+waiting for anyone to use the item — for a campfire that feeds you, a quest reward, an effect that
+ticks. Its verdict is the read-back rather than the call: `true` only when every declared vital was
+seen to move, and otherwise `false` plus an English reason that names the state (no live character,
+satiety already full, the game accepted the call and nothing moved).
 
 ### The second argument
 
@@ -520,7 +593,9 @@ vanilla item can be given, taken and queried without being described first.
 | `:count()` | number \| nil | How many of this item the local player is carrying right now. `nil` means the count could not be read, never that the player has none. |
 | `:give(count)` | boolean | Adds `count` (default 1) to the local player's inventory. `true` only when the inventory count was seen to rise. |
 | `:take(count)` | boolean | Consumes `count` (default 1) out of the local player's inventory. `count` is treated as a magnitude. `true` only when the count was seen to fall. |
-| `:recipeOf()` | table \| nil | The recipe you declared, or `nil`. It never reads the game's recipe table. |
+| `:recipeOf()` | table \| nil | The recipe you declared; failing that, the game's own row for this id, read live. `nil` when there is neither. |
+| `:restores()` | table \| nil | What this item declares it restores — `{ satiety = 20, hpRate = 0.25 }` — or `nil` when it declares none. The game's own effect is not readable from here and is never reported as ours. |
+| `:restoreOn(actor)` | boolean, string \| nil | Writes the declared `restores` onto a live character now. `true` only when every declared vital was seen to move; otherwise `false` and the reason. |
 | `:iconOf()` | string \| nil | A `/Game/...` path from the item icon DataTable, else the declared `icon`. |
 | `:name()` | string | The declared name, else the id. |
 | `:description()` | string \| nil | The declared description. |
@@ -857,8 +932,10 @@ nobody has created is an id the game will not show.
 resolve to an item id. Both channels are live and both were seen firing; those two gaps are the
 honest edges rather than an outage.
 
-**`recipeOf` does not read the game's recipe table.** It answers the recipe you declared and
-`nil` for a vanilla id, even though the game has a real row for that item.
+**A recipe read has been made in a running game, and it answered.** `Arrow` came back as
+`Arrow x10, work = 1000.0, from { Stone x2, Wood x2 }` in a save on 2026-08-02. A `nil` from a
+vanilla id is therefore a question about whether the recipe DataTable was loaded in that session,
+which `[PalForge.recipes]` says once in the log — not a question about the route.
 
 **A namespaced id is matched through the resolved-id index.** The event carries the game's data
 row name, so an item registered as `"example:Potion"` is not found by the exact lookup and the
@@ -877,8 +954,9 @@ feeding a pal they are not.
 
 **`category`, `maxStack` and `recipe` are PalForge's own notes.** You read them back through the
 handle and from your own code. Nothing writes them into the game's item table, so
-`maxStack = 9999` does not change how the game stacks that item. `icon` is the exception in one
-direction only: the live table is read first, and your declared path is the fallback.
+`maxStack = 9999` does not change how the game stacks that item. There are two exceptions, in
+opposite directions: `icon` reads the live table first and falls back to your declared path, and
+`restores` is not a note at all — it is the one field here that writes to a character.
 
 **An item cannot save data.** Saved `state` and `:save()` belong to buildings, so whatever a
 handler counts up lives for this session only. Write it to a file yourself if you want it
@@ -915,9 +993,9 @@ runs once. A genuine second pickup of the same item that fast is lost.
   `onCraft` when a machine finishes one, `onDiscard` on a drop or a trash.
 - In `onUse`, `ctx.actor` is the player who used the item — the right target for food and
   potions.
-- `category`, `maxStack` and `recipe` are notes for your own code; the game does not read them,
-  and `recipeOf` does not read the game's recipe table either. `icon` is only the fallback for a
-  lookup that really does reach the game's icon rows.
+- `category` and `maxStack` are notes for your own code and the game does not read them; a
+  declared `recipe` is a note too, but `recipeOf` falls through to the game's own row when you
+  declared none. `icon` is the fallback for a lookup that really does reach the game's icon rows.
 - An item cannot save data. Keep totals in a Lua variable, or write them yourself with
   `palforge.utils.file`.
 

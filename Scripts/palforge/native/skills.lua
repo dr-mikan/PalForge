@@ -10,7 +10,7 @@
 --   skills.BOSS_FireKirin:kind()     --> "active"
 --   skills.get("BOSS_FireKirin")     -- the same handle, by id string
 --   skills.CraftSpeed_3              -- an ALIAS: the row's real id is "CraftSpeed*3"
---   skills.Fireball:activate(owner)  -- curated
+--   skills.Fireball:activate(owner)  -- curated --> false, "no projectile can be spawned ..."
 --
 --   (a) M.PASSIVE / M.PARTNER — the two source tables, each its own list.
 --   (b) M.CATALOG  — both of them, merged, in that order. The shape this file has always
@@ -53,14 +53,19 @@
 --     row is named after a PAL ("BOSS_FireKirin"), which is not an EPalWazaID, so :teach on one
 --     asks the game for a passive of that name and will normally be refused. It reports false
 --     rather than pretending.
---   * :element() / :power() / :cooldown() answer nil for a lazy handle, deliberately. They are
---     framework-side metadata; the game's own numbers are DataTable row VALUES and reading one
---     from Lua is still unsolved on this build (the marker in api/item.lua). No guesses here.
+--   * :element() / :power() answer nil for a lazy handle, and its cooldown is nil too, so
+--     :cooldownLeft is always 0 — deliberately, in all three cases. They are framework-side
+--     metadata; the game's own numbers are DataTable row VALUES and reading one from Lua is
+--     still unsolved on this build (the marker in api/item.lua). No guesses here.
 --   * :activate / :hit / :equip / :unequip run YOUR handlers, and a lazy handle declares none.
 --     Declare your own Skill{ id = "...", events = ... } under the same id to be dispatched to.
+--     A lazy handle's :activate therefore answers true — the honest answer, because an empty
+--     handler really did run to completion. It is the CURATED definition below that answers
+--     false, because it asks for a projectile and is refused; see :spawnProjectile in
+--     api/skill.lua for why nothing on this build can answer that ask.
 --   * :iconOf() answers only for the pal-named partner rows, and that is a KEYING fact, not a
 --     failure: DT_partnerSkillIconDataTable is keyed by PAL id (311 rows), so 303 of the 2587
---     ids can ever hit it and every passive row misses by construction. See api/skill.lua:190.
+--     ids can ever hit it and every passive row misses by construction. See the Skill.Spec `icon` note in api/skill.lua.
 
 local Skill   = require("palforge.api.skill")
 local catalog = require("palforge.native._catalog")
@@ -630,15 +635,19 @@ end
 -- (contract C3) so a pack that declares "FlameThrower" replaces something whose previous owner
 -- can be named.
 --
--- WHAT THIS DEFINITION DOES WHEN YOU ACTIVATE IT: it logs, once, that nothing was spawned. That
--- is the whole of it, and the log line exists because the return value cannot say it —
--- Skill.Handle:activate (api/skill.lua:382-389) stamps the cooldown, runs the handler under
--- pcall and returns pcall's own ok, so `true` there means "the handler did not raise", never
--- "a skill happened". A handler that quietly did nothing was therefore indistinguishable from
--- one that fired a projectile, which is the specific dishonesty this replaces. Making the
--- RETURN honest needs api/skill.lua to let a handler report "nothing happened" (activate would
--- have to consult the handler's return, which today it discards); until then the log line is
--- the honest channel, and it names what it refused.
+-- WHAT THIS DEFINITION DOES WHEN YOU ACTIVATE IT: it asks for the projectile it is named after,
+-- is REFUSED with the measurement behind the refusal, and hands that refusal back — so
+-- `:activate` answers `false, "no projectile can be spawned from Lua on this build ..."` and
+-- the log carries the same sentence once per session.
+--
+-- IT USED TO ANSWER TRUE. The handler logged that it had spawned nothing and returned nothing,
+-- api/skill's :activate returned pcall's own ok, and a demo that produced no fireball was
+-- indistinguishable from one that produced a fireball — with a cooldown stamped for it. That
+-- was the one place in this tree where a return value said yes to something that did not
+-- happen. It is fixed on both sides now: :activate consults a handler's `false` (api/skill.lua,
+-- and plan/TODO.md Owed work §1 asked for exactly that), and Skill.Handle:spawnProjectile is
+-- the named refusal this handler asks. Copy the two lines below into your own onActivate and
+-- your skill is honest for free.
 local warnedNoProjectile = false
 
 M.Fireball = Skill({
@@ -649,89 +658,60 @@ M.Fireball = Skill({
     power    = 50,
     events = {
         onActivate = function(self, owner, ctx)
-            -- TODO(skill-projectile-spawn): a declared active skill can decide WHEN it fires and
-            -- nothing about WHAT comes out. This marker used to say no projectile class and no
-            -- spawn route had been found; both halves of that were wrong and are corrected here.
+            -- MEASURED AND SETTLED, 2026-08-02, hook skill-projectile-spawn, in a live save.
+            -- There is no TODO marker here any more: a pack CANNOT spawn a projectile on this
+            -- build, that is an answer rather than a gap, and the answer is now implemented as a
+            -- refusal you can call instead of a paragraph you have to find.
             --
-            -- WHAT A PACK AUTHOR SEES. `Skill{ kind = "active", element = "fire", power = 50 }`
-            -- defines, registers and dispatches, and `onActivate` runs at exactly the right
-            -- moment on a REAL activation — that half is measured: core/event hooks
-            -- PalActionBase:OnBeginAction and skill.activate carries the waza id (the
-            -- skill-hit-source marker at api/skill.lua:118 records that session). But element,
-            -- power and cooldown are framework-side metadata that reach nothing, and the handler
-            -- has no call available to it that puts an object in the world. So a pack's active
-            -- skill is a well-timed Lua function, and that is all it is. This definition exists
-            -- to demonstrate exactly that, which is why it logs instead of pretending.
+            -- WHAT WAS MEASURED. The hook asked the running build to DESCRIBE, never to call,
+            -- every route that could put something in the world, and the build answered: it
+            -- walked seven UFunction parameter lists (so "declared" evidence is reachable on
+            -- this UE4SS build, which is itself the finding core/spawn.lua's M.actor was always
+            -- gated on). Six of the seven were then refused BY NAME, each with the build's own
+            -- parameter list attached, because each carries a struct: ShootOneBullet (FVector
+            -- muzzle location, FRotator), APalSkillEffectBase::Initialize (FVector offset,
+            -- FRandomStream), CreateChildSkillEffect (FTransform, FRandomStream),
+            -- BeginDeferredActorSpawnFromClass and FinishSpawningActor (FTransform — these two
+            -- ARE core/spawn.lua's M.actor), and FindWazaForBP (an out-struct by reference,
+            -- which is the row that would have NAMED the class to spawn). A struct marshals by
+            -- layout: a mismatch faults inside UE4SS below Lua, where pcall cannot see it, and
+            -- takes the process with it. The process survived that session precisely because the
+            -- hook refused rather than called. The seventh, ShootOneBulletDefault(), takes no
+            -- arguments at all — and needs a live APalMonsterEquipWeaponBase, which onActivate is
+            -- never handed (it gets an owner and a ctx), so it is not a route a pack has either.
             --
-            -- THE SINGLE UNKNOWN FACT: whether a STRUCT argument can be marshalled into a
-            -- Palworld UFunction on this build. Everything else on this path is already read:
-            --   * the actor class exists — APalSkillEffectBase : AActor (dumps/cxx/Pal.hpp:11345),
-            --     with Initialize(const AActor* SkillOwner, const FVector& MyOffset,
-            --     AActor* Target, FRandomStream RandomStream) at :11370 and
-            --     CreateChildSkillEffect(TSubclassOf<APalSkillEffectBase>, FTransform,
-            --     FRandomStream, ESpawnActorCollisionHandlingMethod, AActor*) at :11374;
-            --   * the waza row NAMES a class to spawn — FPalWazaDatabaseRaw (Pal.hpp:7534)
-            --     carries TSubclassOf<UPalWazaBulletEmiiterOverlapBase> BulletEmiiterOverlapClass
-            --     (:7558), reachable through UPalWazaDatabase::FindWazaForBP (:32646);
-            --   * PalForge ALREADY HAS the generic spawn — core/spawn.lua:152 M.actor is
-            --     BeginDeferredActorSpawnFromClass + FinishSpawningActor, both read off the dump.
-            -- What blocks it is that every one of those calls carries an FVector, an FTransform,
-            -- an FRandomStream or an out-struct by reference, and core/signature refuses a struct
-            -- on "present" evidence because a struct pushed against an unread declaration is the
-            -- failure shape that kills the process. M.actor is gated on precisely this and has
-            -- therefore never run. The bullet route is the same story: APalBullet (Pal.hpp:8849),
-            -- with ShootOneBullet(TSubclassOf<APalBullet>, UNiagaraSystem*, FVector, FRotator,
-            -- float) on APalMonsterEquipWeaponBase (:10186) — and ONE argument-free sibling,
-            -- ShootOneBulletDefault() (:10185), which is the only entry on this whole surface
-            -- that needs no struct at all.
+            -- WHAT IS STILL GENUINELY UNKNOWN, stated so nobody mistakes this for "impossible
+            -- forever": whether a struct argument can be marshalled into a Palworld UFunction on
+            -- this build AT ALL. Nothing in this tree has ever pushed one. The walk succeeding
+            -- means core/signature would no longer refuse on "present" evidence, so the gate CAN
+            -- open — but opening it is a deliberate experiment (one struct, once, on a throwaway
+            -- save, from a hook that does nothing else, so a fault costs one line of log and no
+            -- findings), not a side effect of a skill definition. That question belongs to
+            -- core/spawn.lua's M.actor, which is where the first struct would be pushed; it is
+            -- not a Skill item and it is not marked here.
             --
-            -- WHAT MEASURES IT — test/hooks/skill_projectile_spawn.lua, declared as the hook
-            -- `skill-projectile-spawn` and written to this paragraph. needs = { world = true,
-            -- pal = true }, writes = true, so it runs only with
-            -- `env.debugHooks["skill-projectile-spawn"] = true` in Scripts/palforge_dev.lua, on
-            -- a throwaway save. `pf_hook skill-projectile-spawn` in the UE4SS console, or
-            -- `20 pf_hook_skill_projectile_spawn` in autorun.txt. What it does:
-            --   1. ask core/signature to DESCRIBE, not call, each of ShootOneBulletDefault,
-            --      ShootOneBullet, CreateChildSkillEffect and BeginDeferredActorSpawnFromClass on
-            --      live objects, and print the parameter list the running build reports for each.
-            --      Whether the walk answers "declared" for a StructProperty is the finding, and it
-            --      settles core/spawn.lua's M.actor at the same time.
-            --   2. call ShootOneBulletDefault() on a live APalMonsterEquipWeaponBase and report
-            --      whether an APalBullet comes back. Zero arguments, so this is the safe call, and
-            --      it is the one thing on this surface that can be tried before step 1 answers.
-            --   3. REFUSE every remaining route BY NAME, printing for each one the parameter
-            --      that stopped it — ShootOneBullet's FVector muzzle location, Initialize's
-            --      FVector offset and FRandomStream, CreateChildSkillEffect's FTransform,
-            --      M.actor's FTransform, FindWazaForBP's out-struct.
-            --      ⚠️ THIS STEP USED TO READ "only if step 1 reported declared for a struct
-            --      parameter: spawn an APalSkillEffectBase through core/spawn.lua's M.actor and
-            --      Initialize it". The hook does NOT do that, deliberately. A wrong-typed
-            --      argument faults inside UE4SS's marshalling where pcall cannot see it, and a
-            --      hook that dies mid-block destroys the log it was writing — so a crash is not
-            --      a worse result than a refusal, it is NO result. A refusal that names what the
-            --      build declared is a complete answer for this item; pushing the first struct
-            --      this tree has ever pushed is a separate decision, taken deliberately with
-            --      that log block in front of you, and not a side effect of a measurement.
-            --   ⚠️ Do not push a hand-built FVector or FTransform at a call whose declaration the
-            --   walk could not read. That is the one failure shape pcall cannot see.
-            --
-            -- IS THE CURRENT RETURN HONEST? The return itself is not the problem — the DOC is what
-            -- carries the meaning, and it does: api/skill.lua:427-434 defines the value of
-            -- Handle:activate (body at :435-442) as false for a passive, false when the cooldown
-            -- blocked it, false when the handler raised, and otherwise "the handler ran to
-            -- completion". It promises nothing about the world, and reading it as "a skill
-            -- happened" is a misreading rather than a lie. What a boolean CANNOT express is the
-            -- case this definition is in — the handler ran, deliberately, and produced nothing —
-            -- so that is said in the log line below instead, once per session. If activate is
-            -- ever made to consult the handler's return (today it discards it), this is the
-            -- distinction it should carry.
-            if not warnedNoProjectile then
-                warnedNoProjectile = true
-                log.warn("native.skills.Fireball (\"FlameThrower\") was activated and spawned "
-                    .. "NOTHING: this demo definition carries element/power/cooldown metadata "
-                    .. "and no projectile route -- that is the open item skill-projectile-spawn. "
-                    .. ":activate() still answers true, which per its doc means only that this "
-                    .. "handler ran to completion. Logged once per session.")
+            -- WHAT A PACK AUTHOR GETS TODAY, and it is the whole point of this definition being
+            -- in the shipped catalog rather than in a test: `Skill{ kind = "active", element =
+            -- "fire", power = 50 }` defines, registers and dispatches, and onActivate runs at
+            -- exactly the right moment on a REAL activation — that half is measured (core/event
+            -- hooks PalActionBase:OnBeginAction and skill.activate carries the waza id). element
+            -- and power are author metadata that reach nothing and say so in their own doc
+            -- strings; cooldown is real and enforced here in Lua. So an active skill is a
+            -- well-timed Lua function. This handler demonstrates the honest shape for one:
+            local spawned, why = self:spawnProjectile(owner, ctx)
+            if not spawned then
+                if not warnedNoProjectile then
+                    warnedNoProjectile = true
+                    log.warn("native.skills.Fireball (\"FlameThrower\") was activated and "
+                        .. "spawned NOTHING, and now SAYS SO: " .. tostring(why)
+                        .. " -- so :activate() answers false with that reason instead of true, "
+                        .. "and the cooldown it stamped is the only thing that happened. Logged "
+                        .. "once per session; the return value says it every time.")
+                end
+                -- The two lines that make the return honest. A handler returning false is how
+                -- api/skill's :activate learns it produced nothing (everything else a handler
+                -- returns still means "ran"), and the reason travels out with it.
+                return false, why
             end
         end,
     },

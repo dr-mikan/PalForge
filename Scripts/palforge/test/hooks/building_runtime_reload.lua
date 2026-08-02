@@ -117,7 +117,7 @@ end
 
 hooks.declare{
     id    = "building-runtime-reload",
-    item  = "Foundations / The id model / F-5",
+    item  = "Implemented, never exercised by a game",
     needs = { world = true },
     desc  = "press F9 between two runs: does the building registry the scan writes into stay "
          .. "the one the dispatch reads, and does a building hook fire afterwards",

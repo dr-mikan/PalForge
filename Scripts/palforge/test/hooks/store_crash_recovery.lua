@@ -80,7 +80,7 @@ end
 
 hooks.declare{
     id     = "store-crash-recovery",
-    item   = "Foundations / F-7 — the format-3 store",
+    item   = "Closed 2026-08-02 — all four §7.3 rows hold on NTFS",
     needs  = { world = true },
     writes = true,
     desc   = "plant a torn write and an unreadable file in a real save's store and see which "

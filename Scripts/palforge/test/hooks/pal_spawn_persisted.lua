@@ -45,7 +45,7 @@ local ARRIVE_WAIT_S = 10
 
 hooks.declare{
     id     = "pal-spawn-persisted",
-    item   = "Open / Events",
+    item   = "Implemented, never exercised by a game — the ledger's unwritten `pal` kind",
     writes = true,
     needs  = { world = true, player = true },
     desc   = "spawn one pal, wait for it to arrive, and report whether anything about it is "
@@ -79,7 +79,11 @@ hooks.declare{
                 .. "stand somewhere with room around you")
             return
         end
-        h:value("player at", string.format("(%d,%d,%d)", at.x, at.y, at.z))
+        -- %.0f, not %d. A world location is a FLOAT and Lua 5.4's %d raises
+        -- "number has no integer representation" on one — which is exactly how this hook
+        -- failed on its first run (2026-08-02 22:06:32), before it had spawned anything.
+        -- The one mercy is that it raised BEFORE the write, so nothing was left in the save.
+        h:value("player at", string.format("(%.0f,%.0f,%.0f)", at.x, at.y, at.z))
 
         h:section("[2] the spawn — ISSUED is all the call can report")
         local issued = spawn.palAt("ChickenPal", 1, at.x, at.y, at.z)

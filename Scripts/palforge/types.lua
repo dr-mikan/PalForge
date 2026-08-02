@@ -68,12 +68,18 @@
 ---@field count? number # how many of this item one craft yields (default 1)
 ---@field work? number # work amount the station must put in
 ---@field station? string # workbench / station id that can craft it
+---@field product? string # item id one craft yields (defaults to the item it is declared on)
 
 ---@class Item.Spec.Events
 ---@field onObtain? fun(self: Item.Handle, ctx: table) # LIVE - entered the inventory (ctx.count, ctx.via)
 ---@field onUse? fun(self: Item.Handle, ctx: table) # LIVE - used / consumed (ctx.actor = the local player pawn)
 ---@field onCraft? fun(self: Item.Handle, ctx: table) # LIVE - a crafting machine finished it (ctx.recipeId, ctx.via; ctx.count is nil)
 ---@field onDiscard? fun(self: Item.Handle, ctx: table) # LIVE - dropped or trashed (ctx.count, ctx.reason = "drop" | "dispose")
+
+---@class Item.Spec.Restores
+---@field satiety? number # satiety POINTS added on use, clamped to the bar (100.0 wide when measured); added to the game's own effect, never instead of it
+---@field hpRate? number # health restored as a FRACTION of maximum HP: 0.25 = a quarter, 1 = a full heal, -0.1 hurts (the only HP write this build allows from Lua)
+---@field hp? number # REFUSED at define time, always: an absolute HP amount takes FFixedPoint64, a struct UE4SS cannot marshal from Lua (measured 2026-08-02, hook item-satiety-write). Declare hpRate instead
 
 ---@alias Item.Spec.Category "material"|"consumable"|"equipment"|"ammo"|"ingredient"|"other"
 ---@class Item.Spec
@@ -84,6 +90,7 @@
 ---@field maxStack? number # stack ceiling you declare; the GAME's ceiling is a DataTable column (default 1)
 ---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field recipe? Item.Spec.Recipe # the recipe that produces THIS item (metadata; see Item.Spec.Recipe)
+---@field restores? Item.Spec.Restores # what USING this item restores, ADDED to the game's own effect: { satiety = 20, hpRate = 0.25 } (LIVE - see Item.Spec.Restores)
 ---@field events? Item.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
 
@@ -144,7 +151,7 @@
 
 ---@class Skill.Spec.Events
 ---@field onActivate? fun(self: Skill.Handle, owner: any, ctx: table) # LIVE - an active skill fired (self, owner, ctx); via = "PalActionBase:OnBeginAction"
----@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # NOT LIVE - both sources measured silent (skill-hit-source); only :hit() runs it
+---@field onHit? fun(self: Skill.Handle, target: any, ctx: table) # NEVER FIRES on this build and not for want of a hook: nothing in the damage path carries a waza id, so the game cannot say which move did the damage (skill-hit-source, measured). Declaring it warns at define time; only :hit(target) runs it
 ---@field onEquip? fun(self: Skill.Handle, owner: any, ctx: table) # LIVE - a passive was attached (self, owner, ctx); via names the source
 ---@field onUnequip? fun(self: Skill.Handle, owner: any, ctx: table) # LIVE - a passive was removed (self, owner, ctx); via names the source
 
@@ -196,7 +203,7 @@
 ---@field kind? Audio.Spec.Kind # descriptive only - the native play route is the same for both (default se)
 ---@field soundId? string # native AkAudioEvent name - its asset path is filled in from the native catalog when you do not pass one
 ---@field soundPath? string # native AkAudioEvent asset path (the route that actually plays); overrides the catalog lookup
----@field soundFile? string # REFUSED at define time: custom audio files do not play on this build (open item audio-custom-file-loader) - use soundId or soundPath
+---@field soundFile? string # REFUSED at define time: a .wav on disk cannot be played on this build - a USoundWave exposes no writable audio buffer to Lua and the Wwise media classes are absent (measured 2026-08-02, hook audio-custom-file-loader). Use soundId or soundPath
 ---@field source? fun(self: Audio.Definition): table|nil # override that returns the core.sound spec yourself; `self` is the DEFINITION, not the handle
 ---@field data? table # free-form payload of your own, carried onto the definition
 
@@ -346,7 +353,7 @@
 ---@field root? UI.Node # the widget tree, DECLARED: UI.VBox{ UI.Label{ text = ... }, UI.Button{ ... } }. Mutually exclusive with `render` — they are two answers to one question. Any node that declared `name = "..."` is reachable afterwards as UI.Handle:find("<name>"), which is the imperative escape hatch out of a declared tree. It also decides what `input`, `backHandler` and host = "layer" may declare: all three need the root to be a UI.Frame, because that is the one node here that builds a Palworld activatable
 ---@field host? UI.Spec.Host|"screen"|"game"|"layer" # where to mount when mount() is given no root: "screen" (a viewport layer of our own, stacked by AddToViewport), "game" (the game's own in-game UI root canvas, CanvasPanel_Root in WBP_PalOverallUILayout — the one host with a real ZOrder), "layer" (⚠️ the GAME's own route — pushed onto a CommonUI layer through BP_AddWidget so the action router owns its activation, focus and input mode; REQUIRES a UI.Frame root and is refused at define time without one, and it has NEVER BEEN OBSERVED WORKING — pf_uiz's LAYER panel is the run that would settle it, test/hooks/ui-host-layer), or { widget = <class>, panel = <member> } for a panel the game already draws. mount(root) with an explicit root wins over this field. A host that is not up yet is not a failure — it is what :autoMount retries
 ---@field render? fun(self: UI.Handle, root: any): boolean? # build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted
----@field update? fun(self: UI.Handle) # refresh the already-built widgets (self); runs on each :refresh()
+---@field update? fun(self: UI.Handle) # refresh the already-built widgets (self); runs on each :refresh(). ⚠️ NOTHING CALLS :refresh() FOR YOU: an element either calls :refresh() itself when its own state changes, or rides UI.Handle:autoRefresh(ms). autoRefresh drives on TWO things and says which one drove it — the game's own rebuild signal (CommonActivatableWidget::ActivateWidget, PalHUDService::Push, PalHUDService::Close all FIRE when Palworld builds or tears down a screen: 21 candidates armed, 3 fired, 18 silent, measured 2026-08-02 23:04 on v1.0.2.101103, hook ui-update-event) and core/event's heartbeat underneath it as the floor. So a panel refreshes within one heartbeat of a rebuild AND no worse than every `ms` whatever else changed. The floor is not removable: the event is armed only after world.ready (UE4SS cannot unregister a hook and ActivateWidget fires during a load storm), so a title-screen element and a session where arming was refused run on the poll alone. UI.refreshDriver(ms) returns kind/event/state/hz/staleMs as data
 ---@field destroy? fun(self: UI.Handle) # remove the widgets render() built (self); runs on :unmount()
 ---@field input? UI.Spec.Input # how much of the player's input this element takes while it is mounted. "none" (default) takes nothing: it is clickable only while the game has already given the mouse away, i.e. with a menu open (press Esc). "cursor" shows the cursor and nothing else, by writing bShowMouseCursor (Engine.hpp:9035) and restoring exactly what it found. "clicks" and "exclusive" are the GAME's own GameAndMenu and Menu modes, declared on the element's activatable widget the way every Palworld screen declares them (UPalActivatableWidget.InputConfig, Pal.hpp:13369) and put back by the CommonUI action router on unmount — so both REQUIRE a UI.Frame root and are refused at define time without one. PalForge never calls SetInputMode itself; doing that broke Esc twice. ⚠️ NEITHER MODE HAS BEEN OBSERVED WORKING: no run has watched the router read a declaration off a widget of ours (pf_uiroute, test/hooks/ui-backhandler) (default none)
 ---@field backHandler? boolean # ⚠️ claim the CommonUI BACK action (that is Esc) on this element's window: sets bIsBackHandler (CommonUI.hpp:149) before the widget is activated, which is how a Palworld screen says "Esc closes ME", and answers BP_OnHandleBackAction (:172). REQUIRES a UI.Frame root and is refused at define time without one. DECLARED, SHIPPED AND NEVER ONCE OBSERVED WORKING — whether the action router registers a widget of ours at all is the open question, pf_uiroute is the instrument, test/hooks/ui-backhandler is the hook that records the answer — so a panel that declares it must still have another way down

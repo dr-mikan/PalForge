@@ -50,7 +50,7 @@ end
 
 hooks.declare{
     id    = "keymap-key-coverage",
-    item  = "Owed work §3 (test blind spots that remain)",
+    item  = "Owed work §2 (test blind spots that remain)",
     desc  = "cross keymap.FKEY against UE4SS's live Key table, one row per name, and name every "
          .. "drift in both directions — the half test/cases/ui.lua has to skip",
     run = function(h)

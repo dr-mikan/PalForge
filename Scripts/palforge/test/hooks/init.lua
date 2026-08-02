@@ -14,7 +14,11 @@
 --   local hooks = require("palforge.test.hooks")
 --   hooks.declare{
 --       id     = "pal-skills-equip",           -- the plan/TODO.md item id, verbatim
---       item   = "Open / Pal",             -- where it sits in that file
+--       item   = "Open (1) — ...",         -- where it sits in that file. Spell it so it
+--                                          -- survives the file being reorganised: a section
+--                                          -- number goes stale, "Closed <date> — <finding>"
+--                                          -- does not, and this string is printed by every
+--                                          -- `pf_hooks` and every run.
 --       needs  = { world = true, pal = true }, -- world | player | pal | title
 --       writes = true,                         -- mutates a save -> needs env.debugHooks[id]
 --       desc   = "one sentence",

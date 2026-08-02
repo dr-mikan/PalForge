@@ -250,8 +250,10 @@ material instance.
 What a `true` from `:renderOn` does not say is that anything looks different. The parameter
 names it writes were read off a running game and are real — `BaseColor`, `Base Texture`,
 `Normal Map` and the rest of the list are on [Mesh](/docs/api/mesh) — but a write to a name a
-material does not carry is a silent no-op, and no run has yet watched a pal's colour change.
-Read a `true` as "the mesh was swapped and the material write ran".
+material does not carry is a silent no-op. A colour change *has* been watched landing on screen,
+on a build object rather than a pal (`mesh-color-change`, 2026-08-02: red → green → blue), so read
+a `true` as "the mesh was swapped and the material write ran" and check the result with your eyes
+the first time.
 </Callout>
 
 ### skills
@@ -895,12 +897,12 @@ they turn up over the following handful of seconds.
 - **A broken `onTick` gets switched off.** Five failures in a row and PalForge logs it and
   stops calling that definition's `onTick` for the rest of the session — for every creature of
   that id, not just the one that failed.
-- **`onSpawned` fires, but nobody has watched it fire for a genuinely NEW pal.** Every firing
-  observed so far landed in the same second as `world.ready` — the load storm, when every pal
-  in range initialises at once. That proves the channel works and says nothing about the case
-  a pack cares about: a pal that did not exist a moment ago. The hook `pf_hook
-  pal-spawned-fresh` is what settles it. Until then, write the handler so being called twice
-  for one pawn is harmless, and do not use it to count how many pals appeared.
+- **`onSpawned` fires for a genuinely NEW pal, and that is measured.** `pf_hook
+  pal-spawned-fresh` was run on 2026-08-02 and timestamped every firing against `world.ready`:
+  **27 firings, 17 of them nowhere near a world load.** So the event means what a pack wants it
+  to mean. It *also* fires during the load storm, when every pal in range initialises at once, so
+  a handler still has to be safe when it is called for a pawn it has already seen — key your own
+  bookkeeping on `ctx.actor` rather than counting firings.
 - **`onSpawned`'s sources arm at `world.ready`, never at load.** The initialise broadcast
   fires in the world-load pal-init storm, and a firing there once wedged the shared UE4SS hook
   dispatch and took the three confirmed hooks down with it. Late arming protects capture,

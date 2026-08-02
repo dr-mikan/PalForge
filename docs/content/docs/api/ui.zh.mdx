@@ -524,11 +524,12 @@ panel:lastError()      -- nil after a success; the reason after a failure
 ## 让画面保持最新
 
 <Callout type="warn">
-轮询不是两个选项之一，它是 PalForge 唯一的刷新驱动。没有任何东西会替整合包调 `refresh()`，所以每个元素要么在自己状态变化时自己调 `:refresh()`，要么搭上 500 ms 的心跳 —— 而且没有办法恰好在游戏重建某个画面的那一刻刷新。有三个后果值得直说，而不是留给你自己撞上：
+没有任何东西会替整合包调 `refresh()`。一个元素要么在自己状态变化时自己调 `:refresh()`，要么选择 `:autoRefresh(ms)` —— **而 `autoRefresh` 搭乘的是两样东西，不是一样。** 本页早先的版本说过轮询是 PalForge 唯一的驱动；那个说法在同一天被一次测量推翻了，更正就写在这里。
 
-- 面板显示的内容**最多会旧 `ms` 毫秒**。一条读取玩家刚刚改过的数量的绑定就落后这么多，唯一的杠杆是把 `ms` 调小。
-- `TitleMenu` 整套重新注入的策略，就是因为同样的原因而做成轮询的：标题画面会重建它的控件树并把我们的按钮一起带走，没有任何东西会告诉我们它做了，所以它的 `update()` 在同一个拍子上把每个项目重新检查一遍。
-- 对一块闲着的面板来说，一拍是特意做得很便宜的 —— 绑定只做比较，只写回变了的东西 —— 所以 `ms` 调快，代价是比较，不是原生调用。
+- **游戏自己的重建信号。** Palworld 建起或拆掉一个画面时，`CommonActivatableWidget::ActivateWidget`、`PalHUDService::Push` 和 `PalHUDService::Close` 都会触发 —— 2026-08-02 按路径布上了 21 个候选，其中三个触发了。`native/ui/refresh.lua` 会给这三个布钩，惰性地、每次会话至多一次，而刷新会在一次重建之后一拍之内落地。
+- **底下那层心跳，作为下限。** 它拆不掉，也不是备用方案。那次运行里 21 个候选中有 18 个一直没有声音，而那是缺少*输入*—— 操作者打开的是两个画面，不是十八个 —— 所以这三个盖不到的重建，恰恰就是这条下限存在的理由。而且这个信号只在 `world.ready` 之后才布上，因为 UE4SS 没法注销一个钩子，而 `ActivateWidget` 会在世界加载风暴里为每一个 activatable 触发；所以标题画面上的元素只靠轮询跑。
+
+于是一块面板**无论如何最多旧 `ms` 毫秒，而在一次画面重建之后大约旧一拍**。把 `ms` 调小，仍然是对前一个数字唯一的杠杆。对一块闲着的面板来说，一拍是特意做得很便宜的 —— 绑定只做比较，只写回变了的东西 —— 所以 `ms` 调快，代价是比较，不是原生调用，而搭上这个信号也不会把下限拖慢。
 </Callout>
 
 办法一 —— 在变化发生的地方刷新。精确，而且什么都没变的时候不花任何代价：
@@ -544,7 +545,7 @@ event.on("item.obtain", function(ctx)
 end)
 ```
 
-办法二 —— 轮询。两个轮询器都搭在 `event.every` 上，它按整拍数 `event.TICK_MS`（500 ms）计数，所以真实周期会向上取整到 500 的倍数。
+办法二 —— 订阅。两个订阅都搭在 `event.every` 上，它按整拍数 `event.TICK_MS`（500 ms）计数，所以这条下限的真实周期会向上取整到 500 的倍数；而重建信号在布上的时候，是在这个拍子之外再加一次刷新，而不是取代它。
 
 ```lua
 panel:mount(root)
@@ -574,9 +575,22 @@ flowchart LR
 - 每一个都只驱动那个句柄背后的那一份副本。另一份副本要自己调一次。
 
 <Callout type="info">
-Palworld 在界面被重建时会不会抛出一个可以挂钩的 UFunction，目前**没有测过**，而那正是能取代轮询的东西。dump 里列出了四个候选 —— Palworld 每个画面都继承的基类上的 `PalUserWidget:OnSetup` 和 `:OnClosed`、`PalUIHUDLayoutBase:AddHUD`，以及 `CommonActivatableWidget:ActivateWidget` —— 并排除了第五个：`UPalUIManagerSubsystem` 一个函数都没声明。
+**别信这一页，直接问现在到底是什么在驱动刷新。** `UI.refreshDriver(ms)` 会读取实时的布钩状态，把答案作为数据交回来：
 
-在挂钩其中任何一个之前，还有两件事要先量：读起来像 BlueprintImplementableEvent 的那三个，实现了它的蓝图会拿到一个同名的**自己的** UFunction，所以挂在基类上的钩子可能一个都抓不到；另外，在世界加载风暴期间装上的钩子曾经把共享分发卡死过。`pf_hook ui-update-event` 就是给这两件事下结论的那次运行。
+```lua
+local d = UI.refreshDriver(250)
+
+d.kind     --> "event+poll" when the rebuild signal is armed, "poll" when it is not
+d.event    --> the UFunction path(s) armed right now, or nil
+d.state    --> "armed" | "waiting" | "refused" | "unavailable" — why kind is what it is
+d.staleMs  --> how stale a panel may be when nothing rebuilt a screen (the floor's number)
+d.eventStaleMs --> how long after a rebuild the refresh lands: one heartbeat, or nil
+d.why      --> one sentence naming the measurement, ready for a log line
+```
+
+`kind == "poll"` 从来都不是故障状态 —— 它是这个信号出现之前就在跑的东西，而且在标题画面上、在布钩被拒绝的会话里、在根本没有 `RegisterHook` 的无头测试里，它都是诚实的答案。只用 `kind` 去*说明*一份读数可能有多旧，绝不要用它来判断刷新还能不能工作：下限在每一个答案底下都在。
+
+测量本身是 `pf_hook ui-update-event`，而且它可以再跑：那 18 个一直没有声音的候选 —— 弹窗用的 `PalHUDService:ShowCommonUI`、回标题用的 `RemoveHUD`、世界 HUD 那一对、CommonUI 容器的 add/remove —— 从来就没有被给过能触动它们的动作，所以它们仍然点名留在这个钩子里，而不是被划掉。
 </Callout>
 
 ## 输入：面板从玩家那里拿走什么
@@ -712,8 +726,8 @@ UI.routeMouse("mid") -> nil, 'mouse "mid" reached none of the 2 mounted element(
 | `:isMounted()` | `boolean` | render 是否报告了成功，且还没有 unmount |
 | `:find(name)` | `userdata?` | 某个声明了 `name = "..."` 的节点对应的活控件；挂载之前是 nil |
 | `:lastError()` | `string?` | 上一次挂载尝试放弃的原因，一句话 |
-| `:autoRefresh(ms)` | `boolean` | 搭在心跳上轮询 `refresh()`；`ms` 默认是 500 |
-| `:autoMount(root, ms)` | `boolean` | 轮询整个生命周期：下来时重试 `mount`，上去后刷新；`ms` 默认是 2000 |
+| `:autoRefresh(ms)` | `boolean` | 让 `refresh()` 同时搭乘 Palworld 的重建信号和作为下限的心跳；`ms` 默认是 500 |
+| `:autoMount(root, ms)` | `boolean` | 整个生命周期都搭在同一个驱动上：下来时重试 `mount`，上去后刷新；`ms` 默认是 2000 |
 | `:state()` | `table` | 这份副本本身，也就是那几条缝和绑定里的 `self` |
 | `:name()` | `string` | 元素的 `name`，没有就是 id |
 | `:description()` | `string?` | 元素的 `description` |
@@ -730,6 +744,7 @@ UI.routeMouse("mid") -> nil, 'mouse "mid" reached none of the 2 mounted element(
 | `UI.routeKey(name)` | `string?, string` | 那个键会归谁，以及为什么 |
 | `UI.routeMouse(button)` | `string?, string` | 鼠标键的同一件事 |
 | `UI.report()` | `string[]` | 栈、按键绑定、未释放的获取，以及当前键位表 |
+| `UI.refreshDriver(ms)` | `table` | 此刻究竟是什么在刷新一块面板：`kind`、`event`、`state`、`staleMs`、`why` |
 | `UI.Class` | `table` | 每个元素都继承的基类 |
 
 ## 自己造一个画面
@@ -1216,4 +1231,4 @@ put the Border inside it — Frame{ Border{ color = {...}, ... } }
 - 没有显式 root 时，`host` 决定它去哪儿：`"screen"`、`"game"`、一张点名活控件类和面板的表，或者 `"layer"` —— 最后这个已声明、已随包发布，但从没被观测到起作用。
 - `input` 决定它从玩家那里拿走什么。`"clicks"` 和 `"exclusive"` 按 Palworld 自己的方式声明在 `UI.Frame` 的 root 上，由动作路由器负责应用和还原。PalForge 绝不手写输入模式，而这两个模式同样没有被观测到起作用。
 - `z` 只在宿主有 z 时决定绘制，但永远决定事件路由：按键落到最上面的元素，鼠标按下落到最上面那个想要它的元素，而且两者都不会被消费。
-- 刷新的唯一驱动就是轮询。`:autoMount(root, ms)` 是每个活着的 PalForge 界面都会走的挂载路径，而面板最多会旧 `ms` 毫秒。
+- 刷新搭乘两个驱动：Palworld 自己的画面重建信号，以及在它下面兜底的心跳。`:autoMount(root, ms)` 是每个活着的 PalForge 界面都会走的挂载路径，面板最多旧 `ms` 毫秒，而当下真正武装的是哪一个，`UI.refreshDriver(ms)` 会告诉你。

@@ -487,11 +487,20 @@ than you asked for.
 call, and the message names the open item `audio-custom-file-loader` plus the two fields that do
 play. Erroring rather than ignoring is the point: `soundFile` is lowered ahead of
 `soundId`/`soundPath`, so a pack that added one beside a working `soundId` silenced a sound that
-was playing, and it has never been playable on any build this tree has measured. Both halves of
-the engine are closed to it — `USoundWave` declares no importer and `USoundWaveProcedural`
-declares nothing at all, so nothing survives shipping to read a `.wav`, and the Wwise half
-(`UWwiseExternalSourceStatics::SetExternalSourceMediaBy*`) rebinds media the Wwise cook already
-staged, which is not a file on a pack's disk. Pick the closest sound from the catalog instead.
+was playing, and it has never been playable on any build this tree has measured.
+
+**The Wwise half of that is settled**, and it was settled by looking: on 2026-08-02, in a loaded
+save, `AkExternalMediaAsset` and `AkMediaAsset` both resolved as class defaults, both declared
+**zero** functions, and the game held no loaded instance of either. There is no external-media or
+`SetMedia` route on this build to be found by anyone, however hard they look, so nobody needs to
+sweep `AkAudio` for one again.
+
+**The engine-native half is narrower than closed.** `USoundWave` declares no importer, so nothing
+reads a `.wav` off disk by itself — but `UGameplayStatics` keeps its whole audio surface in
+shipping (`PlaySound2D`, `CreateSound2D`, `SpawnSoundAttached` among 137 functions), the game has
+real `SoundWave` and `SoundBase` instances loaded, and UE4SS offers `StaticConstructObject`. What
+nobody has established is whether a `USoundWave` can be built that way and its sample buffer
+filled from Lua. Until somebody has, pick the closest sound from the catalog instead.
 </Callout>
 
 <Callout type="warn">

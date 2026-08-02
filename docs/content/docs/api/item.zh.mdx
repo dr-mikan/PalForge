@@ -95,6 +95,10 @@ items.Arrow
       description: '生产这个道具的配方。形状见 Item.Spec.Recipe。',
       type: 'table',
     },
+    restores: {
+      description: '使用这个道具会恢复什么，是在游戏本来的效果之上再加的：{ satiety = 20, hpRate = 0.25 }。这是本 spec 上唯一一个会写到角色身上的字段。hp（绝对数值）在定义时会被拒绝。',
+      type: 'table',
+    },
     events: {
       description: '你的处理函数，集中放在这里。形状见 Item.Spec.Events。',
       type: 'table',
@@ -181,7 +185,61 @@ print(r.materials.Wood)       -- 2
 配方只是一条记录，不是真的合成。PalForge 不会把它注册进游戏的合成系统，能把它读回来的只有 `Handle:recipeOf()`。写了配方并不会让这个道具在游戏里可以合成，它只是给你自己的代码一个存放数值的地方。游戏真正会跑的配方是 `DT_ItemRecipeDataTable` 里的一行，而 Lua 写不了那一行 —— 真正的配方用 PalSchema 的 JSON 声明，这里的字段是把同一件事讲给你自己的代码和工具听。
 </Callout>
 
-`recipeOf()` 读回来的只有你声明过的东西，它**不读游戏那张表**。所以即使游戏里确实有这一行，原版 ID 得到的也是 `nil`：`DT_ItemRecipeDataTable_Common` 加载在 `/Game/Pal/DataTable/Item/` 下，共 1414 行，按道具 ID 做键，列有 `Product_Count`、`Material1_Id` 到 `Material5_Id`、`WorkAmount` 以及另外九个。还不清楚的是：能不能直接从 `FindRow` 返回的结构体上按名字取出一个标量或 FName 列。这里唯一读到过的行值是一个 `TSoftObjectPtr`，它没法从 Lua 打开，图标查找绕道去整列读文本正是因为这个。按列去读今天就能用，一张表十三次调用、只做一次、缓存起来。这个问题由 `pf_hook item-datatable-row-read` 来测，它需要 `env.debug` 和一个已加载的世界。
+`recipeOf()` 有你声明过的配方就返回它，没有就去读**游戏自己的那一行**：`DT_ItemRecipeDataTable_Common` 加载在 `/Game/Pal/DataTable/Item/` 下，共 1414 行，按道具 ID 做键，列有 `Product_Count`、`Material1_Id` 到 `Material5_Id`、`WorkAmount` 以及另外九个。读法是一次 `FindRow`，再按列名直接从返回的行结构体上取值 —— 2026-08-02 在一次加载好的存档里由 `pf_hook item-datatable-row-read` 实测过，这也是代码里没有逐列读取那条备用路线的原因。**它返回的形状写在 `api/item.lua` 里那个函数旁边**，下面的表用一行说的是同一件事。
+
+声明过的配方会赢，这是有意的，也是这个句柄上唯一一处声明压过实时数据的地方。`icon` 自己就写明是「图标表里没有这一行时的备用」，所以那边是游戏赢；而配方是你对自己道具说的话，一个为原版 ID 描述了自家合成的内容包，必须拿回自己的数字。所有情况都是软失败：没有世界、没有表、没有那一行、行什么都不答，都返回 `nil`，不会抛错。
+
+`recipeOf()` 已经被看着在游戏里给出答案了，而不只是把路线测通：2026-08-02 在一个存档里，它报出 `Arrow -> Arrow x10, work = 1000.0, from { Stone x2, Wood x2 }`。
+
+### 食物与药品：restores 的形状
+
+`restores` 是本 spec 上唯一一个**会写到角色身上**的字段。声明了它，使用这个道具就会给使用者补给或治疗，而且是加在游戏本来针对这个 ID 所做的事情之上。
+
+<TypeTable
+  type={{
+    satiety: {
+      description: '使用时增加的饱食度点数，会被夹在饱食度条内（在实测的构建上条宽是 100.0）。是加在游戏自己的效果之上，而不是取代它。',
+      type: 'number',
+    },
+    hpRate: {
+      description: '最大 HP 的一个比例：0.25 就是四分之一。负数是扣血而不是回血，这一点也实测过。',
+      type: 'number',
+    },
+    hp: {
+      description: '在定义时一律被拒绝。绝对 HP 数值要传 FFixedPoint64，那是一个 UE4SS 没法从 Lua 编组的结构体。请改用 hpRate。',
+      type: 'number',
+    },
+  }}
+/>
+
+```lua
+Item{
+    id       = "Berries",
+    category = "consumable",
+    restores = { satiety = 20 },              -- 20 points of the satiety bar
+}
+
+Item{
+    id       = "pack:Bandage",
+    category = "consumable",
+    restores = { hpRate = 0.25 },             -- a quarter of maximum HP
+}
+
+Item{
+    id       = "pack:Feast",
+    restores = { satiety = 40, hpRate = 0.5 },  -- both; each is measured separately
+}
+```
+
+这是 2026-08-02 由 `pf_hook item-satiety-write` 在一个活着的角色身上实测出来的：饱食度从 `31.648 -> 21.648` 又被放了回去，`SetFullStomach` 在这个构建上只吃**一个**参数，`AddHPByRate` 也落到了。当天晚上它又在游戏里被确认在运行 —— `item: satiety 68.247 of 100.0, restored -5 and put back`。
+
+<Callout type="warn">
+`restores = { hp = 50 }` —— 也就是**绝对**的 HP 数值 —— 在定义时就会抛错，并说明原因：那个调用要的是 `FFixedPoint64`，一个 UE4SS 没法从 Lua 编组的结构体，而在那里传错参数会在 UE4SS 自己的编组过程内部出错，`pcall` 看不见。请改为声明 `hpRate`。
+
+`restores` 是**加在**游戏自己的效果之上，而不是替换它。在 `Berries` 上声明 `restores = { satiety = 20 }` 的意思是「再多 20」，不是「改成 20」—— 原版消耗品照样恢复游戏本来恢复的量。空的 `restores = {}` 同样会被拒绝：一个不点名任何生命指标的恢复，会订阅 `item.use` 然后什么都不做。
+</Callout>
+
+`Handle:restoreOn(actor)` 会把同一张声明的表当场写到一个角色身上，不用等谁去使用这个道具 —— 给会让你回饱的篝火、给任务奖励、给按时跳动的效果用。它的判定看的是回读而不是调用本身：只有每一个声明过的生命指标都被看见动了，才返回 `true`；否则返回 `false`，外加一句点出当前状态的英文理由（没有活着的角色、饱食度已经满了、游戏接受了调用但什么都没动）。
 
 ### 第二个参数
 
@@ -436,7 +494,9 @@ Item.get("Berries"):onUse({ itemId = "Berries" })
 | `:count()` | number \| nil | 本地玩家现在身上带着多少个。`nil` 的意思是读不出来，绝不是“一个都没有”。 |
 | `:give(count)` | boolean | 往本地玩家的背包里加 `count` 个（默认 1）。只有观察到背包数量确实上升时才是 `true`。 |
 | `:take(count)` | boolean | 从本地玩家的背包里消耗 `count` 个（默认 1）；`count` 按绝对值处理。只有观察到数量确实下降时才是 `true`。 |
-| `:recipeOf()` | table \| nil | 你声明过的配方；没有就是 `nil`。它不读游戏的配方表。 |
+| `:recipeOf()` | table \| nil | 你声明过的配方；没有的话，就实时读游戏自己关于这个 id 的那一行。两者都没有才是 `nil`。 |
+| `:restores()` | table \| nil | 这个道具声明它会恢复什么 —— `{ satiety = 20, hpRate = 0.25 }` —— 没有声明就是 `nil`。游戏自己的效果从这里读不到，也绝不会被当成我们的报出来。 |
+| `:restoreOn(actor)` | boolean, string \| nil | 当场把声明的 `restores` 写到一个活着的角色身上。只有每一个声明过的生命指标都被看见动了才是 `true`；否则是 `false` 加上理由。 |
 | `:iconOf()` | string \| nil | 从道具图标 DataTable 得到的 `/Game/...` 路径，查不到就用声明的 `icon`。 |
 | `:name()` | string | 声明的名字，没有就用 ID。 |
 | `:description()` | string \| nil | 声明的说明。 |
@@ -713,7 +773,7 @@ Building{
 
 **`onCraft` 不会带来数量**，而 `onDiscard` 对那种解析不出道具 ID 的丢弃是无声的。两个频道都是活的，也都被看到触发过；这两处缺口是诚实的边界，不是停摆。
 
-**`recipeOf` 不读游戏的配方表。** 它返回的是你声明过的配方；即使游戏里确实有那一行，原版 ID 得到的也是 `nil`。
+**配方读取已经在运行中的游戏里做过了，而且它给出了答案。** 2026-08-02 在一个存档里，`Arrow` 返回的是 `Arrow x10, work = 1000.0, from { Stone x2, Wood x2 }`。所以原版 ID 返回 `nil` 时，那是关于「这个会话有没有加载配方 DataTable」的问题 —— 日志里的 `[PalForge.recipes]` 会说一次 —— 而不是关于这条路线本身的问题。
 
 **带命名空间的 ID 是靠解析后 id 的索引匹配到的。** 事件带的是游戏的数据行名，所以注册成 `"example:Potion"` 的道具精确查找找不到，是第二次按解析形式做的查找找到它的。每个解析形式只对应一条注册，所以两个解析到同一行名的内容包 ID 仍然会冲突 —— 但注册第二个时会发出一条指名两者的警告。
 
@@ -721,7 +781,7 @@ Building{
 
 **`onUse` 不会直接告诉你目标是谁。** `ctx.actor` 是本地玩家的 pawn，也就是使用道具的那个。被用上的角色在 `ctx.targetId` 里，是一个原始实例 ID，这里没有东西会把它变成 actor。食物和药水两者相同，喂帕鲁时就不同。
 
-**`category`、`maxStack` 和 `recipe` 是 PalForge 自己的记录。** 你通过句柄和自己的代码把它们读回来。没有任何东西会把它们写进游戏的道具表，所以 `maxStack = 9999` 不会改变游戏怎么堆叠这个道具。`icon` 只在一个方向上是例外：先读真正的表，你声明的路径是它的备用。
+**`category`、`maxStack` 和 `recipe` 是 PalForge 自己的记录。** 你通过句柄和自己的代码把它们读回来。没有任何东西会把它们写进游戏的道具表，所以 `maxStack = 9999` 不会改变游戏怎么堆叠这个道具。例外有两个，方向正好相反：`icon` 先读真正的表，你声明的路径是它的备用；而 `restores` 根本不是记录 —— 它是这里唯一一个会写到角色身上的字段。
 
 **道具保存不了数据。** 存档 `state` 和 `:save()` 是建筑物的东西，所以处理函数数出来的东西只在本次游玩里有效。想要它回来，自己写进文件。
 
@@ -741,7 +801,7 @@ Building{
 - `Item.get("Wood")` 会给你任意道具的句柄。`:count()` 读出玩家现在带着多少，`:give` 往里加，`:take` 消耗掉 —— 三者返回的都是“实测到了什么”，而不是“试着做了什么”。`:take` 需要玩家身上装备着东西。
 - 把你的代码放进 `events`，四个处理函数都会运行：`onObtain` 在拾取时，`onUse` 在使用时，`onCraft` 在机器做完时，`onDiscard` 在丢弃或销毁时。
 - 在 `onUse` 里，`ctx.actor` 是使用道具的玩家 —— 食物和药水要作用的正是他。
-- `category`、`maxStack` 和 `recipe` 是给你自己代码用的记录，游戏不会读它们，`recipeOf` 也不读游戏的配方表。`icon` 只是那次真正能读到游戏图标行的查找的备用。
+- `category` 和 `maxStack` 是给你自己代码用的记录，游戏不会读它们；声明的 `recipe` 也是记录，但你没声明时 `recipeOf` 会一路读到游戏自己的那一行。`icon` 是那次真正能读到游戏图标行的查找的备用。
 - 道具保存不了数据。把累计放在 Lua 变量里，或者用 `palforge.utils.file` 自己写出去。
 
 接下来读 [Effect](/docs/api/effect)，做一个用掉之后还会持续起作用的道具 —— 或者读 [Lifecycle](/docs/concepts/lifecycle) 了解完整的事件流程，以及 [Pal](/docs/api/pal) 和 [Building](/docs/api/building) 了解上面用到的两个领域。

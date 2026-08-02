@@ -5,6 +5,12 @@
 #   tools/deploy.sh "/path/to/Palworld"      # dev deploy somewhere else
 #   tools/deploy.sh --release                # what a player gets: no dev overlay, no keys
 #   tools/deploy.sh --release "/path/to/Palworld"
+#   tools/deploy.sh --package                # build dist/PalForge.zip — no game required
+#   tools/deploy.sh --package "/some/outdir"
+#
+# --package is --release into a directory instead of an install, plus a zip. It is what the
+# release workflow runs, so the archive people download is built by the same script that builds
+# the copy this machine tests — not by a file list re-typed into YAML.
 #
 # THE TWO MODES DIFFER BY ONE FILE, and that file is the whole dev/release switch.
 #
@@ -32,31 +38,50 @@
 set -euo pipefail
 
 MODE="dev"
+WRITES=0
+PACKAGE=0
 GAME=""
 for arg in "$@"; do
     case "$arg" in
         --release) MODE="release" ;;
         --dev)     MODE="dev" ;;
+        --writes)  WRITES=1 ;;
+        --package) MODE="release"; PACKAGE=1 ;;
         -h|--help)
-            sed -n '2,30p' "${BASH_SOURCE[0]}"
+            sed -n '2,36p' "${BASH_SOURCE[0]}"
             exit 0 ;;
         -*)
-            echo "unknown option: $arg (expected --release, --dev or a Palworld path)" >&2
+            echo "unknown option: $arg (expected --release, --dev, --package or a path)" >&2
             exit 2 ;;
         *)
             GAME="$arg" ;;
     esac
 done
 
-GAME="${GAME:-/mnt/e/SteamLibrary/steamapps/common/Palworld}"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEST="$GAME/Pal/Binaries/Win64/ue4ss/Mods/PalForge"
-
 [ -d "$SRC/Scripts/palforge" ] || { echo "not a PalForge tree: $SRC" >&2; exit 1; }
-[ -d "$GAME/Pal/Binaries/Win64/ue4ss/Mods" ] || {
-    echo "no UE4SS Mods directory under $GAME" >&2; exit 1; }
 
-echo "mode:   $MODE"
+# --package BUILDS THE SAME TREE WITHOUT A GAME. Everything below this line is shared with a
+# real deploy: same copy, same drops, same --release overlay hunt, so the zip a release publishes
+# is not a second definition of "what ships" that can drift from the one people actually run.
+# The only differences are where DEST points and the zip step at the end.
+#
+# It exists because CI has no Palworld install, and because the alternative — a workflow that
+# re-implements the file list in YAML — is exactly how a release starts shipping a file the
+# deploy script stopped copying three commits ago.
+if [ "$PACKAGE" = "1" ]; then
+    OUT="${GAME:-$SRC/dist}"
+    DEST="$OUT/PalForge"
+    rm -rf "$DEST"
+    mkdir -p "$DEST"
+else
+    GAME="${GAME:-/mnt/e/SteamLibrary/steamapps/common/Palworld}"
+    DEST="$GAME/Pal/Binaries/Win64/ue4ss/Mods/PalForge"
+    [ -d "$GAME/Pal/Binaries/Win64/ue4ss/Mods" ] || {
+        echo "no UE4SS Mods directory under $GAME" >&2; exit 1; }
+fi
+
+echo "mode:   $MODE$([ "$PACKAGE" = "1" ] && echo " (package)")"
 echo "source: $SRC/Scripts"
 echo "target: $DEST/Scripts"
 
@@ -132,11 +157,45 @@ if [ "$MODE" = "dev" ]; then
 local env   = require("palforge.env")
 env.dev     = true
 env.debug   = true
--- Per-hook opt-in for the hooks that write into a real save. Uncomment deliberately, on a
--- throwaway save — pal-skills-equip is the one whose single run so far was followed 1.4
--- seconds later by Palworld closing.
--- env.debugHooks["pal-skills-equip"] = true
+-- PER-HOOK OPT-IN FOR THE TEN HOOKS THAT WRITE. env.debug alone loads them and lets
+-- `pf_hooks` list them; it does not let one run. Each line below is a separate decision.
+--
+-- ⚠️ ON A THROWAWAY SAVE. Every one of these changes something in the world or on disk, and
+-- three of them cannot be undone at all: a spawned pal has no per-individual removal, an
+-- unlocked technology has no lock (UPalCheatManager declares four unlock entries and no
+-- reverse), and a taught active move is the one write in this tree that has ever correlated
+-- with the game closing — 1.4 seconds after the only run that did it, which is why it is last.
+--
+-- Uncomment ONE at a time and read its block before the next, or uncomment the lot if the save
+-- is genuinely disposable and you want `pf_hooks_all` to sweep them.
+--
+-- The four that only touch PalForge's own files under <Mods>/PalForge/state/ — they create,
+-- corrupt and rewrite them on purpose — and never Palworld's save:
+-- env.debugHooks["store-save-roundtrip"]        = true
+-- env.debugHooks["store-crash-recovery"]        = true
+-- env.debugHooks["save-survives-pack-removal"]  = true
+-- env.debugHooks["building-actor-streaming"]    = true  -- publishes the ids standing near you
+--
+-- These change the running world or the player, and each says in its own header what it
+-- restores and what it cannot:
+-- env.debugHooks["mesh-color-change"]     = true   -- tints a pal, then puts the material back
+-- env.debugHooks["item-satiety-write"]    = true   -- writes satiety, then the value it read
+-- env.debugHooks["skill-projectile-spawn"] = true  -- fires one bullet; refuses any struct arg
+-- env.debugHooks["building-unlock"]       = true   -- ⚠️ NO LOCK EXISTS. One-way.
+-- env.debugHooks["pal-spawn-persisted"]   = true   -- ⚠️ the pal STAYS. No per-individual removal.
+-- env.debugHooks["pal-skills-equip"]      = true   -- ⚠️ LAST. See the 1.4 s note above.
 LUA
+fi
+
+# --writes: TURN ON EVERY PER-HOOK WRITE OPT-IN. The overlay above lists all ten commented out,
+# one decision per line, which is right for a normal dev session. This flag is for the one session
+# that is deliberately sweeping them — a throwaway save and `pf_hooks_all` — and it is a separate
+# flag rather than the default precisely because three of the ten cannot be undone: a spawned pal
+# has no per-individual removal, an unlocked technology has no lock, and the waza write is the one
+# call in this tree that has ever correlated with the game closing.
+if [ "$MODE" = "dev" ] && [ "$WRITES" = "1" ]; then
+    sed -i 's/^-- env\.debugHooks/env.debugHooks/' "$STAGE/palforge_dev.lua"
+    echo "⚠️  --writes: all ten env.debugHooks opt-ins are ON in this deploy. THROWAWAY SAVE ONLY."
 fi
 
 # The swap. Two renames, so the only moment Scripts/ does not exist is between them.
@@ -160,6 +219,31 @@ fi
 
 files=$(find "$DEST/Scripts" -type f | wc -l)
 echo "deployed $files file(s) in $MODE mode"
+
+# THE ZIP. One folder named PalForge at the root, which is what a player drags into
+# ue4ss/Mods — so the archive's shape IS the install instruction and there is nothing to
+# explain. LICENSE and README ride along at the root beside it, not inside the mod folder,
+# where UE4SS would try to make sense of them.
+#
+# -X drops the extended attributes; without it, the archive built on one runner differs from
+# the same tree zipped on another and "is this the build I tested" stops being answerable.
+if [ "$PACKAGE" = "1" ]; then
+    for extra in LICENSE README.md; do
+        [ -f "$SRC/$extra" ] && cp "$SRC/$extra" "$OUT/$extra"
+    done
+    # No zip binary is not an error worth failing the staged tree over — the tree in $OUT is
+    # complete and inspectable either way, and that is what a person checking the build wants.
+    # CI has zip; a WSL shell often does not.
+    if ! command -v zip >/dev/null 2>&1; then
+        echo "staged $DEST — no 'zip' on PATH, so no archive was written"
+        exit 0
+    fi
+    ZIP="$OUT/PalForge.zip"
+    rm -f "$ZIP"
+    (cd "$OUT" && zip -qrX "PalForge.zip" PalForge $(cd "$OUT" && ls LICENSE README.md 2>/dev/null))
+    echo "packaged $ZIP ($(du -h "$ZIP" | cut -f1))"
+    exit 0
+fi
 
 if [ "$MODE" = "dev" ]; then
     echo "wrote Scripts/palforge_dev.lua (env.dev = true, env.debug = true)"

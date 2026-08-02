@@ -556,81 +556,28 @@ M.Wood = Item({
 -- HOOKS, not one it makes — so this handler runs alongside that and adds a log line. It is a
 -- lifecycle demo, and it is worth being exact about which half is PalForge's.
 --
--- TODO(item-satiety-write): a pack cannot declare an item that FEEDS or HEALS by its own rules.
--- This marker used to say no accessor had ever been found. That was wrong and is corrected
--- here — the accessors are in the dumps this tree already ships, and what is actually missing is
--- one unread parameter list.
+-- ⭐ A PACK CAN NOW DECLARE AN ITEM THAT FEEDS OR HEALS — and this berry deliberately does not.
+-- `Item.Spec.restores` went in on 2026-08-02, and both writes behind it were measured landing on
+-- a live character the same day by test/hooks/item_satiety_write.lua (the hook
+-- `item-satiety-write`): satiety 31.648 -> 21.648 -> restored exactly, through SetFullStomach,
+-- whose parameter list is ONE argument READ OFF THE RUNNING BUILD because the CXX dump has no
+-- body for the setter at all; and health through AddHPByRate(float), on the parameter COMPONENT
+-- hanging off the actor rather than on the individual parameter object. So
+--     Item{ id = "pack:Stew", restores = { satiety = 40, hpRate = 0.25 } }
+-- works today, confirmed running in a game 2026-08-02 23:33. HP IS A RATE AND NEVER POINTS:
+-- `restores = { hp = 50 }` is REFUSED at define time, because every absolute HP write on this
+-- build takes FFixedPoint64, a struct (`{ int64 Value; }`, Pal.hpp:120-124), and a struct
+-- argument is the shape that faults inside UE4SS marshalling where pcall cannot see it.
+-- api/item.lua carries the field and its rules; core/character.lua's vitals section carries the
+-- measurement in full.
 --
--- WHAT A PACK AUTHOR SEES. Item.Spec carries nine fields — id, name, description, category,
--- maxStack, icon, recipe, events, data — and not one of them is a restore amount, so the only
--- way to react to a use is `events.onUse`, which is handed a ctx and whose return value is
--- discarded. The berry above restores satiety because the GAME restores it: item.use is
--- dispatched off UseItemToCharacter_ServerInternal, a call PalForge HOOKS rather than makes. So
--- an author's own food item logs, and the bar moves only when the row it named was already a
--- consumable. There is no way to write "restores 40 satiety" and have it mean anything.
---
--- THE SINGLE UNKNOWN FACT: what argument `SetFullStomach` takes. The live reflection listing
--- names it on /Script/Pal.PalIndividualCharacterParameter
--- (dumps/reflection/02_reflection.txt:1298, inside the class block that opens at :1107), and
--- that is the SAME object core.character.paramsOf(actor) already hands back — through
--- PalUtility::GetIndividualCharacterParameterByActor (dumps/cxx/Pal.hpp:32340), a route this
--- tree proved by reading a real pal's four move lists. But the CXX dump's class body for it
--- (Pal.hpp:20822-21161) declares only the READERS — GetMaxFullStomach (:21095),
--- GetFullStomachRate (:21106), GetFullStomach (:21108). The setter is reflected and undeclared,
--- so its parameter list has never been read and core/signature has nothing to check a call
--- against. That is the whole of the gap.
---
--- HP IS A SEPARATE AND WORSE CASE, kept apart because the two fail for different reasons. The
--- HP writes ARE declared: UPalCharacterParameterComponent::SetHP (Pal.hpp:15933) and ::AddHP
--- (:16018), and UPalIndividualCharacterParameter::AddHP (:21156). All three take FFixedPoint64,
--- which is a STRUCT — `{ int64 Value; }`, Pal.hpp:120-124 — and a struct argument is the shape
--- that faults inside UE4SS marshalling where pcall cannot see it. That is the same refusal that
--- gates core/spawn.lua:152's M.actor and that ended ui-menubutton-inner-slot. The one exception
--- is ::AddHPByRate(float Rate) (Pal.hpp:16016): a single plain float, no struct, callable today,
--- and never once called.
---
--- WHAT MEASURES IT — test/hooks/item_satiety_write.lua, declared as the hook `item-satiety-write`
--- and written to this paragraph. It needs a loaded world and a player pawn, it declares
--- writes = true, and it therefore runs only with `env.debugHooks["item-satiety-write"] = true`
--- set in Scripts/palforge_dev.lua, on a throwaway save. Run it with `pf_hook item-satiety-write`
--- in the UE4SS console, or by uncommenting `20 pf_hook_item_satiety_write` in autorun.txt.
--- The order below is the order it runs, and no other:
---   1. read GetFullStomach (Pal.hpp:21108) / GetMaxFullStomach (:21095) / GetMaxHP (:21094) /
---      GetHP (:21102) off core.character.paramsOf(pawn) and print all four. Pure reads on a
---      proved route; if they do not answer, nothing below is worth attempting. Note the return
---      TYPES differ and the hook must say which it got: the three floats and the int32 come back
---      as numbers, but GetHP returns FFixedPoint64, so what arrives is the struct and the number
---      is behind its one `Value` field. A struct RETURN is not the marshalling hazard a struct
---      ARGUMENT is — nothing is being pushed — but it is the difference between reading an HP
---      and reading a wrapper, which is the same trap RemoteUnrealParam set for the icon column.
---   2. ask core/signature to DESCRIBE SetFullStomach on that live object — the parameter walk,
---      not a call — and print the parameter list the running build reports. That list IS the
---      finding, and it is the one thing the CXX dump cannot supply.
---   3. call AddHPByRate(-0.1) and read GetHP back. One float, so it is the safe write, and it
---      settles whether this surface writes at all independently of the struct question.
---      ⚠️ ON A DIFFERENT OBJECT FROM STEPS 1-2, and the hook found this out the hard way round:
---      AddHPByRate is declared on UPalCharacterParameterComponent (Pal.hpp:16016), the component
---      hanging off the actor (APalCharacter::CharacterParameterComponent, :8960; getter at
---      :9078), NOT on the individual parameter object. Asking the wrong one of the two is how a
---      present function reads as absent.
---   4. ONLY IF step 2 reported a non-struct parameter list, call SetFullStomach and read back.
---      ⚠️ Nothing taking FFixedPoint64 may be called here. A wrong-typed argument is the single
---      failure shape pcall cannot see, and it has closed the game in this tree before.
---      When step 2 could not read the list — the setter is absent, or this UE4SS build will not
---      walk a UFunction's properties — the hook REFUSES step 4 and says which of the two it was.
---      That refusal, with the build's own words in it, is a complete answer for this item: it
---      turns "nobody has tried" into a named limitation.
---
--- IS THE CURRENT RETURN HONEST? Yes, and that is why this is a missing capability rather than a
--- defect. No field and no method on the item surface claims to feed or heal; the handler below
--- returns nothing and the paragraph above it says exactly which half of the berry's effect is
--- PalForge's. The honesty risk is entirely in the future: an `Item.Spec.restores` field added
--- before step 4 answers would be a promise this build has not been shown to keep.
---
--- (For the record, since the old text leaned on a grep: Satiety / FullStomach / HP / Health
--- across core/, api/ and utils/ hits THREE places today, not two, and none of them is a write —
--- core/status.lua:62's GainHP and :98's HPLock are EPalStatusID enum VALUES, i.e. names for
--- ailment slots, and api/pal.lua:200 is the doc string of the onDeath event.)
+-- WHY BERRIES DECLARES NONE OF IT, which is a decision and not an omission. `restores` is
+-- ADDITIVE, never a replacement — item.use is a hook on the game's OWN consume
+-- (UseItemToCharacter_ServerInternal, a call PalForge watches rather than makes), so
+-- `restores = { satiety = 20 }` on a vanilla food id means "and 20 more" on top of whatever the
+-- row already restores. Re-balancing a vanilla consumable is a PACK's decision to make, not this
+-- catalog's. The berry therefore stays what it has always been: a lifecycle demo whose handler
+-- logs, while the bar that moves is the game's own.
 M.Berries = Item({
     id          = "Berries",
     name        = "Red Berries",

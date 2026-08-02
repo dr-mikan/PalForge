@@ -1,9 +1,13 @@
--- test/hooks/pal-skills-equip — THE ONE MEASUREMENT THAT GATES A RELEASE.
+-- test/hooks/pal-skills-equip — THE MEASUREMENT THAT GATED A RELEASE, AND IT PASSED.
 --
--- plan/TODO.md "Before publish" §1 and Open / Pal. Marked in the source at
--- core/character.lua's TODO(pal-skills-equip) (:79 as this was written). Every other Open item ships honestly — recipeOf returns nil, onHit
--- never fires, autoRefresh polls — but this one WRITES INTO A CHARACTER IN A REAL SAVE, and the
--- one run that ever did it was followed 1.4 seconds later by Palworld closing.
+-- ⭐ 8 pass / 0 fail, 2026-08-02, in a real save on a live PalMonsterCharacter. AddEquipWaza
+-- landed and read back, :forget took it off, teachAll answered `2, 2`, ClearEquipWaza worked and
+-- every move was restored and verified. THE GAME STAYED UP. The source marker it used to point
+-- at, in core/character.lua's skills section, is gone — replaced there by the finding. What is
+-- left here is the instrument, and the paragraphs below are the reasoning it was built on.
+--
+-- This one WRITES INTO A CHARACTER IN A REAL SAVE, which is why it is gated and why it stays
+-- gated: the earlier run that ever did it was followed 1.4 seconds later by Palworld closing.
 --
 -- ⚠️ THE CRASH, AND WHY IT MAY SAY NOTHING ABOUT THIS CAPABILITY. That run used the old search,
 -- `FindAllOf("PalCharacter")`. The hierarchy is APalMonsterCharacter : APalNPC : APalCharacter
@@ -67,7 +71,7 @@ end
 
 hooks.declare{
     id     = "pal-skills-equip",
-    item   = "Before publish §1 / Open / Pal",
+    item   = "Closed 2026-08-02 — 8 pass / 0 fail on a live PalMonsterCharacter",
     needs  = { world = true, pal = true },
     writes = true,
     desc   = "the publish blocker: does an active-move write land on a real pal, and does the "

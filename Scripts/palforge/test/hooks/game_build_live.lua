@@ -100,7 +100,7 @@ end
 
 hooks.declare{
     id    = "game-build-live",
-    item  = "Before publish §2 (the game build is declared but never read back)",
+    item  = "Closed 2026-08-02 — both readers answer v1.0.2.101103",
     needs = { world = true },
     desc  = "settle whether ANY call carries Palworld's own patch version — the two "
          .. "PalGameInstance/PalUtility DisplayVersion routes, plus the three Kismet strings "

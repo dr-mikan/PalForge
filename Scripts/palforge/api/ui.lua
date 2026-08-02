@@ -21,12 +21,16 @@
 -- widgets through native/ui/_widget.lua — that part is LIVE and injects into the real
 -- game UI.
 --
--- REFRESH DRIVING: no native "the UI updated" event has been confirmed FIRING, so nothing
--- calls refresh() for you. Two honest options: call :refresh() yourself when your state
--- changes, or opt into polling with :autoRefresh(ms) (built on core/event's heartbeat).
--- No async policy is imposed by default. dumps/cxx has since named four candidate signals
--- and eliminated a fifth — see the note on :autoRefresh for the four and for the two things
--- that still have to be measured before any of them is hooked.
+-- REFRESH DRIVING: AN EVENT, WITH THE POLL AS THE FLOOR. Nothing calls refresh() for you, so an
+-- element either calls :refresh() itself when its own state changes, or opts into
+-- :autoRefresh(ms) / :autoMount(root, ms). Those two now ride BOTH: the three UFunctions Palworld
+-- really does call when it builds and tears down a screen (ActivateWidget, PalHUDService::Push,
+-- PalHUDService::Close — measured 2026-08-02 23:04, armed by native/ui/refresh.lua) AND the
+-- heartbeat, which stays underneath as the guarantee. An earlier pass on the same day concluded
+-- "polling is the answer" and shipped that sentence in this header; a measurement taken hours
+-- later overturned it, and the correction is written where the claim was. :autoRefresh has the
+-- long form, UI.refreshDriver(ms) hands the same answer back as data so a pack can ask instead of
+-- read, and both say which of the two actually drove a refresh rather than describing the pair.
 --
 -- WHERE TO MOUNT: native/ui/_widget.lua gives three roots — widget.screen() for a viewport
 -- layer of your own, TitleMenu for the title screen, and widget.gameUIRoot() for the game's
@@ -656,6 +660,16 @@ local function uiTree()
     return nil, "palforge.native.ui.tree is unavailable: " .. tostring(tree)
 end
 
+-- The rebuild signal, reached exactly the way the widget seam is and for the same two reasons: it
+-- is engine-facing (it registers native hooks) and this file must stay loadable and provable with
+-- no UE4SS at all. A session that cannot load it is not a failure — it is the poll running alone,
+-- which is what shipped before the signal existed, and refreshDriver reports it as such.
+local function refreshSource()
+    local ok, src = pcall(require, "palforge.native.ui.refresh")
+    if ok and type(src) == "table" then return src end
+    return nil, "palforge.native.ui.refresh is unavailable: " .. tostring(src)
+end
+
 -- Record why a mount did not happen, and log it the FIRST time that reason appears. A
 -- :autoMount retry runs every couple of seconds; logging every attempt would bury the log, and
 -- logging none of them is how "the host is not up yet" and "the host is up and rejected us"
@@ -817,7 +831,7 @@ local Spec = schema.define("UI.Spec", {
     { "render",      type = "function", sig = "fun(self: UI.Handle, root: any): boolean?",
                      doc = "build the widget tree under `root` (self, root); runs once per mount. Return false if it could not build — the element then stays unmounted" },
     { "update",      type = "function", sig = "fun(self: UI.Handle)",
-                     doc = "refresh the already-built widgets (self); runs on each :refresh()" },
+                     doc = "refresh the already-built widgets (self); runs on each :refresh(). ⚠️ NOTHING CALLS :refresh() FOR YOU: an element either calls :refresh() itself when its own state changes, or rides UI.Handle:autoRefresh(ms). autoRefresh drives on TWO things and says which one drove it — the game's own rebuild signal (CommonActivatableWidget::ActivateWidget, PalHUDService::Push, PalHUDService::Close all FIRE when Palworld builds or tears down a screen: 21 candidates armed, 3 fired, 18 silent, measured 2026-08-02 23:04 on v1.0.2.101103, hook ui-update-event) and core/event's heartbeat underneath it as the floor. So a panel refreshes within one heartbeat of a rebuild AND no worse than every `ms` whatever else changed. The floor is not removable: the event is armed only after world.ready (UE4SS cannot unregister a hook and ActivateWidget fires during a load storm), so a title-screen element and a session where arming was refused run on the poll alone. UI.refreshDriver(ms) returns kind/event/state/hz/staleMs as data" },
     { "destroy",     type = "function", sig = "fun(self: UI.Handle)",
                      doc = "remove the widgets render() built (self); runs on :unmount()" },
     { "input",       type = "string", default = "none",
@@ -1523,6 +1537,16 @@ function UI.report()
                 (row.buttons and #row.buttons > 0) and table.concat(row.buttons, ",") or "-")
         end
     end
+    -- WHAT REFRESHES THEM, before the key questions, because it is the shortest answer here and
+    -- the one that changed most recently. It is its own seam rather than the tree's: the rebuild
+    -- signal registers native hooks and has nothing to do with building widgets.
+    local src = refreshSource()
+    if src then
+        local okR, lines = pcall(src.report)
+        if okR and type(lines) == "table" then
+            for _, line in ipairs(lines) do out[#out + 1] = line end
+        end
+    end
     local tree = uiTree()
     if not tree then
         out[#out + 1] = "ui: the engine seam is unavailable, so nothing can be said about whether "
@@ -1569,17 +1593,233 @@ end
 local Handle = {}
 Handle.__index = Handle
 
--- The one heartbeat subscription behind autoRefresh/autoMount. Kept on the INSTANCE (not on
--- the handle) so :unmount() can cancel it and a second call cannot install a duplicate. A
--- raising render is swallowed here on purpose: event.every already pcalls its body, and a
--- retry loop that dies on the first bad frame is worse than one that keeps trying.
-local function poll(st, ms, remount, root)
+--=============================================================================
+-- THE REFRESH DRIVER — one record, because "what refreshes a panel" is a question a pack
+-- should be able to ASK rather than infer from a comment.
+--
+-- IT IS AN EVENT WITH A POLL UNDERNEATH IT, and both halves are load-bearing. The long form is on
+-- Handle:autoRefresh; this is the machine-readable half, published as UI.refreshDriver(ms).
+--
+-- ⚠️ THE ORDER THE PREVIOUS VERSION OF THIS BLOCK DEMANDED IS THE ORDER THIS ONE WAS WRITTEN IN,
+-- and the demand is kept here because it is what makes the record trustworthy. It read:
+--
+--   1. poll() gains the subscription — a hook on the winning path, whose handler only marks
+--      something and lets the heartbeat do the actual refresh, because a hook handler that
+--      renders during a world-load storm is what wedged the shared dispatch once already
+--      (core/event.lua). The heartbeat STAYS as the fallback; nothing becomes event-only.
+--   2. this record starts reporting it, and only then.
+--
+-- Both are done. (1) is native/ui/refresh.lua — three hooks, each handler three integer writes —
+-- read by poll() below once per heartbeat. (2) is UI.refreshDriver, which reports `kind` from
+-- WHAT IS ACTUALLY ARMED at the moment it is asked, not from a constant: a session where arming
+-- was deferred or refused gets kind = "poll" and the reason, because an API that claims an event
+-- nothing is subscribed to is the exact silent lie this tree refuses everywhere else.
+--=============================================================================
+
+-- The measurement the driver rests on. Named here once, quoted by the driver record and the
+-- once-per-session notice, so the two can never drift apart. ⚠️ THE PREVIOUS VALUE OF THIS
+-- CONSTANT DATED A 21:57 RUN THAT ARMED TWO SUBSTRING FALSE POSITIVES AND CONCLUDED "no event
+-- exists" from their silence. The 23:04 run of the same hook, with 21 named candidates, measured
+-- three firings. Same day, same build, opposite answer — which is why every claim in this file now
+-- carries the time as well as the date.
+local DRIVER_MEASURED = "measured 2026-08-02 23:04 on Palworld v1.0.2.101103 by "
+    .. "test/hooks/ui-update-event (21 armed, 3 fired, 18 silent)"
+
+-- Notices are once per PROCESS, not once per element: a pack with six panels would otherwise
+-- print six identical paragraphs, and a heartbeat that logs per beat is how a log dies.
+-- Two flags rather than one, because a fast rate is a SECOND fact and an author who starts at
+-- 2000 ms and later asks for 50 ms deserves to hear about the second one too.
+local said = { driver = false, fast = false }
+
+-- Above this, a poll is worth naming as a rate in its own right: 100 ms is ten passes a second
+-- over every binding of every mounted element, which is a choice and not a default.
+local FAST_HZ = 10
+
+-- The heartbeat quantum, read from core/event rather than written down twice. It is the finest
+-- grain anything in PalForge has: an event that fires between two beats is acted on at the next
+-- one, which is what `eventStaleMs` reports and why riding the event is an improvement in
+-- LATENCY-TO-A-REBUILD rather than in frequency.
+local function beatMs()
+    local ms
+    pcall(function() ms = require("palforge.core.event").TICK_MS end)
+    return math.floor(tonumber(ms) or 500)
+end
+
+---WHAT REFRESHES A PALFORGE PANEL, as data. Ask this instead of trusting a comment.
+---
+---  local d = UI.refreshDriver(250)
+---  d.kind    "event+poll" — the game's rebuild signal drives it AND the heartbeat is the floor.
+---                        "poll" means the signal is not armed in THIS session (see d.state) —
+---                        never a failure state, it is what shipped before the signal existed.
+---  d.event   "/Script/...ActivateWidget + ..." — the UFunction path(s) actually armed, nil when
+---                        none is. This field is read from the live arming, never from a constant.
+---  d.events  { { path, from, what, armed, fired, firstAt }, ... } — all three, armed or not, so
+---                        a report can say WHICH signal has carried and which has not been given
+---                        an action that would exercise it
+---  d.state   "armed" | "waiting" | "refused" | "unavailable" — why `kind` is what it is
+---  d.ms      250         — the interval that was asked for (defaults to autoRefresh's 500)
+---  d.hz      4.0         — polls per second, which is the number worth looking at
+---  d.staleMs 250         — how long a panel may show content that is already wrong when nothing
+---                        rebuilt a screen (a count that changed, a timer) — the FLOOR's number
+---  d.eventStaleMs 500    — how long after Palworld rebuilds a screen the refresh lands, when the
+---                        signal is armed: one heartbeat, because the hook handler deliberately
+---                        does no work of its own. nil when nothing is armed.
+---  d.why     "..."       — one sentence naming the measurement, for a log line or a message
+---  d.measured "..."      — date, TIME, build and hook id of the run that settled it
+---
+---A pack that wants to be robust branches on `kind` and stops caring which one it got: the poll
+---is the floor under every answer, so `kind == "poll"` never has to be handled specially — it is
+---the thing to SAY, in a readout that admits it is up to `staleMs` behind.
+---@param ms integer?  # the interval you would pass to :autoRefresh (default 500)
+---@return table driver
+function UI.refreshDriver(ms)
+    -- FLOORED TO A WHOLE MILLISECOND, and not for tidiness: `%d` on a fractional number is a
+    -- hard error in Lua 5.4 ("number has no integer representation"), so a pack that asked for
+    -- 16.7 ms would take the notice down with it. The poll quantizes to the 500 ms heartbeat
+    -- regardless, so the fraction was never going to be honoured anyway.
+    ms = math.floor(tonumber(ms) or 500)
+    if ms < 1 then ms = 1 end
+
+    -- ASKED, NOT ASSUMED. The state comes from the seam that owns the hooks, at the moment of the
+    -- call, so this record cannot claim an event that is not armed — including in a headless test,
+    -- where there is no RegisterHook and the honest answer is "poll".
+    local src = refreshSource()
+    local status = src and src.status() or nil
+    local armed = (status and status.armed) or {}
+    local live  = #armed > 0
+
+    local why
+    if live then
+        why = string.format("THE GAME'S OWN REBUILD SIGNAL DRIVES THIS, WITH THE POLL AS THE "
+            .. "FLOOR: %s fire when Palworld builds or tears down a screen (%s), so a refresh "
+            .. "lands within %d ms of a rebuild AND no worse than every %d ms whatever else "
+            .. "changed. ⚠️ The 18 candidates that stayed silent in that run are not proven dead — "
+            .. "the operator opened two screens, not eighteen — so a rebuild these three do not "
+            .. "cover is exactly what the floor is for.",
+            table.concat(armed, " + "), DRIVER_MEASURED, beatMs(), ms)
+    else
+        why = string.format("THE POLL IS DRIVING THIS ALONE, and a panel is up to %d ms stale. The "
+            .. "rebuild signal EXISTS and is named — CommonActivatableWidget::ActivateWidget, "
+            .. "PalHUDService::Push and PalHUDService::Close all fired (%s) — but it is %s in this "
+            .. "session%s. It is armed at most once, after world.ready, because UE4SS cannot "
+            .. "unregister a hook and ActivateWidget fires for every activatable during a "
+            .. "world-load storm.", ms, DRIVER_MEASURED,
+            (status and status.state) or "unavailable",
+            (status and status.why) and (" (" .. status.why .. ")") or "")
+    end
+
+    return {
+        kind         = live and "event+poll" or "poll",
+        event        = live and table.concat(armed, " + ") or nil,
+        events       = (status and status.signals) or {},
+        state        = (status and status.state) or "unavailable",
+        ms           = ms,
+        hz           = 1000 / ms,
+        staleMs      = ms,
+        eventStaleMs = live and beatMs() or nil,
+        why          = why,
+        measured     = DRIVER_MEASURED,
+    }
+end
+
+local function notice(ms, what)
+    local d = UI.refreshDriver(ms)
+    if not said.driver then
+        said.driver = true
+        log.info(string.format("%s(%d ms) = driver %q, floor %.1f poll(s) a second. %s "
+            .. "UI.refreshDriver() returns this as data.", what, d.ms, d.kind, d.hz, d.why))
+    end
+    if not said.fast and d.hz >= FAST_HZ then
+        said.fast = true
+        log.warn(string.format("%s(%d ms) polls %.1f times a second — every mounted element's "
+            .. "bindings are re-evaluated on each pass. Riding the rebuild signal does NOT remove "
+            .. "that cost: it adds a refresh at a rebuild, it does not slow the floor down. If the "
+            .. "fast rate was chosen so a panel would notice a screen opening, %s is what you "
+            .. "actually needed and the floor can go back up.", what, d.ms, d.hz,
+            (d.kind == "event+poll") and "the signal you now have" or "the rebuild signal"))
+    end
+end
+
+-- WHICH OF THE TWO DROVE A REFRESH, said once per session per driver. Not per beat — a heartbeat
+-- that logs per beat is how a log dies — and not merely described at subscription time either,
+-- because "an event is armed" and "an event actually drove a refresh in this session" are
+-- different facts and only the second one closes the question this file was wrong about once.
+local drove = {}
+local function announceDriver(kind, st)
+    if drove[kind] then return end
+    drove[kind] = true
+    local d = UI.refreshDriver()
+    if kind == "event" then
+        log.info(string.format("ui refresh: the FIRST event-driven refresh of this session just "
+            .. "ran (%s) on %s — the game rebuilt a screen and PalForge refreshed because of it, "
+            .. "not because a timer expired. %s", tostring(d.event or "?"),
+            tostring(st.id or "ui element"), DRIVER_MEASURED))
+    else
+        log.info(string.format("ui refresh: the first refresh of this session was driven by the "
+            .. "POLL floor on %s (driver = %q) — which is the floor doing its job, whether or not "
+            .. "the rebuild signal is armed.", tostring(st.id or "ui element"), d.kind))
+    end
+end
+
+-- The one heartbeat subscription behind autoRefresh/autoMount, riding BOTH drivers. Kept on the
+-- INSTANCE (not on the handle) so :unmount() can cancel it and a second call cannot install a
+-- duplicate.
+--
+-- WHY IT SUBSCRIBES TO "tick" DIRECTLY INSTEAD OF CALLING event.every(ms, fn). event.every is a
+-- pure interval and this is no longer purely one: a beat fires the body when the interval is up OR
+-- when the rebuild signal's generation moved since the last beat. The accumulator below is
+-- event.every's own, kept identical (add TICK_MS, fire at >= ms, reset to 0) so a poll-only
+-- session behaves exactly as it did before this change.
+--
+-- WHY THE EVENT IS READ HERE AND NOT ACTED ON IN THE HOOK. A hook handler that renders during a
+-- world-load storm is what wedged the shared UE4SS dispatch once already (core/event.lua:46-53).
+-- native/ui/refresh.lua's handler is three integer writes; ALL of the work happens on this beat,
+-- which means a storm that fires the signal four thousand times costs four thousand increments and
+-- exactly one refresh. That bound is the whole design and it is why the event can be ridden at all.
+--
+-- WHY THE ACCUMULATOR IS NOT RESET BY AN EVENT REFRESH. The floor is a promise about the WORST
+-- case ("no worse than every ms"), and resetting it on an unrelated event would silently stretch
+-- the interval a pack asked for. An extra refresh costs a pass of comparisons over the bindings —
+-- native/ui/tree's update writes back only what changed — so paying it is cheaper than weakening
+-- the guarantee.
+--
+-- A raising body is swallowed on purpose, and it is pcall'd HERE rather than relying on the
+-- caller: event.every wrapped its own body, but a raw "tick" subscriber that throws aborts the
+-- rest of the heartbeat's subscribers for that beat, which would make one bad element everyone's
+-- problem. A retry loop that dies on the first bad frame is worse than one that keeps trying.
+local function poll(st, ms, remount, root, what)
     if st._refreshSub then return true end
+    ms = math.floor(tonumber(ms) or 500)
+    if ms < 1 then ms = 1 end
+    -- ASK FOR THE SIGNAL, ONCE, AND ONLY BECAUSE SOMEBODY WANTED A REFRESH DRIVER. arm() is
+    -- idempotent and defers itself to world.ready while no world is up, so this line cannot arm a
+    -- hook into a load storm and cannot arm a second copy of one.
+    local src = refreshSource()
+    if src then pcall(src.arm) end
+    pcall(notice, ms, what or "autoRefresh")
     local ok = pcall(function()
-        local event = require("palforge.core.event")
-        st._refreshSub = event.every(ms, function()
-            if st._mounted then st:refresh()
-            elseif remount then pcall(function() st:mount(root) end) end
+        local event  = require("palforge.core.event")
+        local tickMs = math.floor(tonumber(event.TICK_MS) or 500)
+        local acc    = 0
+        -- The generation last acted on. Read at subscription time rather than started at 0, so an
+        -- element that mounts into a session where screens have already opened does not treat that
+        -- history as one pending rebuild.
+        local seen   = (src and src.generation()) or 0
+        st._refreshSub = event.on("tick", function()
+            pcall(function()
+                local by
+                if src then
+                    local g = src.generation()
+                    if g ~= seen then seen, by = g, "event" end
+                end
+                acc = acc + tickMs
+                if acc >= ms then acc = 0; by = by or "poll" end
+                if not by then return end
+                st._refreshDrivenBy = by
+                pcall(announceDriver, by, st)
+                if st._mounted then st:refresh()
+                elseif remount then pcall(function() st:mount(root) end) end
+            end)
         end)
     end)
     return ok and st._refreshSub ~= nil
@@ -1634,64 +1874,69 @@ function Handle:find(name) return self._st:find(name) end
 ---@return string?
 function Handle:lastError() return self._st._mountError end
 
----Poll refresh() every `ms` milliseconds off core/event's heartbeat.
+---Refresh this element WHEN THE GAME REBUILDS A SCREEN, and in any case at least every `ms`
+---milliseconds. Two drivers, one subscription, and the log says which one actually drove it.
 ---
----⚠️ READ THIS BEFORE DECIDING WHAT `ms` SHOULD BE, BECAUSE POLLING IS NOT ONE OF TWO OPTIONS —
----IT IS THE ONLY REFRESH DRIVER PALFORGE HAS. Nothing calls refresh() for a pack. No native "the
----UI was rebuilt" event has been confirmed FIRING, so every element either calls :refresh() by
----hand when its own state changes or rides this heartbeat, and there is no way to refresh exactly
----when the game rebuilds a screen. The consequences are worth stating plainly rather than leaving
----to be discovered:
+---⚠️ THIS DOC SAID THE OPPOSITE THIS MORNING, AND THAT IS THE MOST USEFUL THING ON IT. It read
+---"THIS IS A POLL, AND A POLL IS THE ANSWER — not a stand-in for an event that is still being
+---looked for", on the strength of a 21:57 run in which 2 of 14 candidates were armed and both
+---stayed silent. Both were substring false positives (`ShouldShowGlobalPalStorageNewMark`,
+---`RequestUpdatePlayerStatusPoint`) and neither has anything to do with rebuilding a screen. The
+---23:04 run of the same hook, with 21 candidates named by hand from dumps/cxx and armed by path,
+---measured three firings while the operator opened and closed the inventory and the build menu:
 ---
----  * a panel shows STALE CONTENT for up to `ms` milliseconds. A binding that reads a count the
----    player just changed is behind by that much, and shortening `ms` is the only lever.
----  * TitleMenu's whole re-injection strategy is a poll for the same reason: the title screen
----    rebuilds its widget tree and takes our buttons with it, nothing tells us it did, so
----    native/ui/title_menu.lua's update() re-checks every entry on this same beat.
+---    armed = 21 of 21; 0 refused      fired = 3      armed and SILENT = 18
+---    /Script/CommonUI.CommonActivatableWidget:ActivateWidget  CommonUI.hpp:177  at +22.4 s
+---    /Script/Pal.PalHUDService:Push                           Pal.hpp:20487     at +25.6 s
+---    /Script/Pal.PalHUDService:Close                          Pal.hpp:20518     at +27.8 s
+---
+---Those three are what native/ui/refresh.lua arms and what this function rides.
+---
+---⚠️ AND THE POLL STAYS AS THE FLOOR, which is not timidity — it is four measured limits:
+---
+---  * THE SIGNAL IS NOT ALWAYS ARMED. UE4SS cannot unregister a hook and ActivateWidget fires for
+---    every activatable during a world-load storm, so arming is deferred to core/event's
+---    world.ready. Before a world is up — the title screen, which is exactly where TitleMenu lives
+---    — there is no signal and the floor is the whole driver.
+---  * THE 18 SILENT CANDIDATES ARE NOT PROVEN DEAD. The operator opened two screens, not eighteen;
+---    popups (`ShowCommonUI`), the return to title (`RemoveHUD`) and the CommonUI container's own
+---    push/pop were never exercised. A rebuild these three do not cover is invisible to the event
+---    and caught by the floor.
+---  * MOST STATE CHANGES ARE NOT REBUILDS AT ALL. A binding that reads a count the player just
+---    changed has no rebuild behind it, and the event would never fire for it.
+---  * THE STORM ITSELF IS UNMEASURED. The hook needed a world, so it armed after one was up;
+---    ActivateWidget's one call in 30 s says nothing about how hard it fires during a load.
+---    test/probes/uievents.lua is what brackets that, and until it reports, the design assumes the
+---    worst — which costs nothing, because the hook handler is three integer writes and this beat
+---    refreshes at most once however many times the signal fired.
+---
+---⚠️ WHAT IT COSTS, because `ms` is still the lever for everything the event does not cover:
+---
+---  * a panel shows STALE CONTENT for up to `ms` milliseconds when nothing rebuilt a screen, and
+---    for one heartbeat (500 ms) after one did. `autoRefresh(100)` is TEN passes a second over
+---    every binding of every mounted element; PalForge says so once per session in the log.
 ---  * a beat over an idle panel is cheap ON PURPOSE — bindings compare and write back only what
 ---    CHANGED (native/ui/tree.lua's update) — so a fast `ms` costs comparisons, not native calls.
+---    500 ms (the default) is right for a readout; 100 ms for something that has to feel live;
+---    below that you are paying for frames nobody looks at.
+---  * TitleMenu's re-injection rides the same beat: the title screen rebuilds its widget tree and
+---    takes our buttons with it, and the signal is not armed at the title screen, so re-checking
+---    every entry on the floor's beat is what gets them back.
+---
+---UI.refreshDriver(ms) hands all of the above back as data — kind, event, events, state, hz,
+---staleMs, eventStaleMs — read from what is ACTUALLY armed at the moment you ask, so a pack can
+---branch on it instead of trusting this paragraph to stay true.
 ---
 ---No-op while the element is unmounted — use :autoMount when the host UI may not be up yet.
 ---Cancelled by :unmount(). Returns true if the subscription was installed.
----@param ms integer?  # default 500
+---@param ms integer?  # default 500 — the FLOOR, not the refresh rate
 ---@return boolean ok
 function Handle:autoRefresh(ms)
-    -- The old question here was "does Palworld raise a catchable UFunction when a UI is
-    -- (re)built". dumps/cxx answers YES and names four, so that half is no longer unknown:
-    --
-    --   /Script/Pal.PalUserWidget:OnSetup            Pal.hpp:31902   } on the base class EVERY
-    --   /Script/Pal.PalUserWidget:OnClosed           Pal.hpp:31903   } Palworld screen derives
-    --     from, PalUITitleBase included (:31652 -> :31927 -> :31910 -> :31888).
-    --   /Script/Pal.PalUIHUDLayoutBase:AddHUD        Pal.hpp:30714   the HUD adding a widget.
-    --   /Script/CommonUI.CommonActivatableWidget:ActivateWidget   CommonUI.hpp:177 — the same
-    --     module as CommonButtonBase:HandleButtonClicked (CommonUI.hpp:346), which is the hook
-    --     native/ui/_widget.lua's click router already installs, so hooks DO take in this module.
-    --
-    -- It also eliminated the recipe's first target: UPalUIManagerSubsystem (Pal.hpp:30988)
-    -- declares zero functions. Do not enumerate it again.
-    --
-    -- TODO(ui-update-event): MEASURED BY test/hooks/ui-update-event — that hook id and this
-    -- marker are the pair, so one grep finds both the question and the instrument that answers it.
-    -- What is unknown is now narrower and is about HOOKING, not existence.
-    -- (a) OnSetup / OnClosed / AddHUD read as BlueprintImplementableEvents, and a blueprint that
-    --     implements one gets its OWN UFunction of that name — a hook on the base never sees the
-    --     override, so it is unmeasured which screens such a hook would actually catch.
-    -- (b) whether arming a UI-wide hook is SAFE here: core/event.lua records a shared-dispatch
-    --     wedge from a hook armed during the world-load storm, and a UI hook fires hardest
-    --     exactly then. Nothing is hooked from this module until one probe run says which of the
-    --     four fires, how often, and at what moment. Until then polling is the driver, and it is
-    --     a deliberate choice rather than the only option left.
-    --
-    -- NARROWED, 2026-07-26: (a) and (b) are both COUNTING questions now, and test/probes/
-    -- uievents.lua takes the count — four hooks whose entire body is one integer increment, plus
-    -- a report on core/poll's heartbeat. (a) falls out of the totals: a candidate that stays at
-    -- zero while menus open and close is one whose base UFunction nothing calls. (b) needs the
-    -- storm, and a hook armed at world.ready misses ITS OWN world's storm by definition — so the
-    -- measurement is taken across a SECOND load: core/event.lua:33 and :2161 record that UE4SS has no
-    -- unregister and a hook stays armed into the next world load, which turns that warning into
-    -- the instrument. Autorun `pf_uievents`, then quit to the title and load a save again; the
-    -- window between world.left and world.ready IS the storm.
-    return poll(self._st, tonumber(ms) or 500, false, nil)
+    -- MEASURED BY test/hooks/ui-update-event — that hook id and this function are the pair, so
+    -- one grep finds both the question and the instrument. The hook is still declared and still
+    -- worth running: three of its twenty-one candidates are now shipped as a driver, and the other
+    -- eighteen are the ones nobody has yet given an action that would exercise them.
+    return poll(self._st, tonumber(ms) or 500, false, nil, "autoRefresh")
 end
 
 ---Poll every `ms` milliseconds off the same heartbeat, but drive the WHOLE lifecycle: while
@@ -1710,11 +1955,19 @@ end
 ---A retry that keeps failing is NOT silent: mount() records the reason on the instance and logs
 ---it once per DISTINCT reason, so :lastError() answers "why is my panel not up" at any moment
 ---and the log does not fill with one line per beat.
+---
+---It is the same subscription, so :autoRefresh's ⚠️ blocks apply here in full — and one of them
+---bites hardest exactly here. The rebuild signal is armed only after world.ready, and the two
+---screens this retry loop is most often waiting for are the TITLE screen (no world) and the
+---in-game layout during the first load (the storm the arming deliberately avoids). So a retry
+---loop is what gets a PalForge element on screen, and the event, when it is armed, makes the
+---retry PROMPT rather than making it unnecessary: `autoMount(nil, 2000)` still retries every two
+---seconds, and additionally within one heartbeat of any screen the game builds.
 ---@param root any?      # the root handed to each mount attempt (nil for elements that find their own)
----@param ms integer?    # default 2000 — a retry loop wants a slower beat than a refresh
+---@param ms integer?    # default 2000 — the retry FLOOR; a rebuild retries sooner
 ---@return boolean ok
 function Handle:autoMount(root, ms)
-    return poll(self._st, tonumber(ms) or 2000, true, root)
+    return poll(self._st, tonumber(ms) or 2000, true, root, "autoMount")
 end
 
 -- ---- queries ----

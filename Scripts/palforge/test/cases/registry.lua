@@ -686,12 +686,28 @@ end)
 -- The two ids stay in support.GAME because they are still the real ids everything else in the
 -- suites uses; what changed is who has to ask for them to be live.
 s:test("the curated BUILDINGS are declared but not registered until published", function(t)
+    -- THE CLAIM IS ABOUT REQUIRING, so it is measured across the require rather than against an
+    -- empty registry. `package.loaded` means the module is usually already in memory, and — this
+    -- is the case that broke it — something ELSE in the session may legitimately have published
+    -- the same id: test/hooks/building-actor-streaming does exactly that so it has records to
+    -- watch. On 2026-08-02 23:33 this check failed in a game for that reason while passing
+    -- headlessly, and the failure said nothing about F-8. Comparing before with after asks the
+    -- question the name promises: does requiring the catalog register anything.
+    local before = {
+        [support.GAME.building] = om.isRegistered("building", support.GAME.building),
+        [support.GAME.palbox]   = om.isRegistered("building", support.GAME.palbox),
+    }
+    package.loaded["palforge.native.buildings"] = nil
     local nb = require("palforge.native.buildings")
-    local snap = registry.registered()
-    t:eq(snap.building[support.GAME.building], nil,
+    t:eq(om.isRegistered("building", support.GAME.building), before[support.GAME.building],
         support.GAME.building .. " is NOT registered by requiring the catalog")
-    t:eq(snap.building[support.GAME.palbox], nil,
+    t:eq(om.isRegistered("building", support.GAME.palbox), before[support.GAME.palbox],
         support.GAME.palbox .. " is NOT registered by requiring the catalog")
+    if before[support.GAME.building] then
+        t:skipUnanswerable("something in this session has already published "
+            .. support.GAME.building .. " (the streaming hook does, deliberately), so the "
+            .. "publish half below would measure a no-op. The require half above still held.")
+    end
     t:truthy(nb.WorkBench, "the curated handle is still declared and readable")
     t:eq(nb.WorkBench.id, support.GAME.building, "and it still carries the real build id")
 

@@ -8,13 +8,13 @@ logs/
 # Dev-only trees: scratch references and the legacy PalSmith code kept on disk for
 # reference while porting.
 #
-# NEITHER Scripts/palforge/test/ NOR Scripts/palforge/tests/ IS HERE, and the second of those
-# was a real defect rather than a judgement call. `Scripts/palforge/tests/` used to be listed on
-# this line, and it is LIVE CODE: core/registry.lua requires `palforge.tests` and runs its 8
-# checks at startup under dev, and `require("palforge.tests.catalog")` is the body of the
-# `ps_catalog` console command registered in the same file. A clone therefore had a boot path
-# and a console command pointing at four files the repository did not carry, and the install
-# tree in the docs could not be right about it either. Both directories ship.
+# Scripts/palforge/test/ IS NOT HERE, and it was once a real defect rather than a judgement
+# call. There used to be two trees one character apart — test/ and tests/ — and tests/ was
+# listed on this line while being LIVE CODE that core/registry.lua required at startup. A clone
+# therefore had a boot path and a console command pointing at files the repository did not
+# carry. There is ONE tree now, it ships, and `tools/deploy.sh --release` is what keeps it out
+# of a player's copy — a build step rather than an ignore rule, which is the right altitude for
+# "this is not part of a release".
 #
 # /tests/ below is ROOT-anchored and is a different tree entirely — the Python/Mojo scratch
 # harness at the repo root — so it stays ignored and does not reach anything under Scripts/.
@@ -71,3 +71,8 @@ Scripts/palforge/build.lua
 # file that tools/deploy.sh writes into a DEPLOYED tree (default mode), deletes with --release,
 # and that can never travel to a player through the repository.
 Scripts/palforge_dev.lua
+
+# Build output. `tools/deploy.sh --package` (npm run package) stages the release tree and the
+# zip here; the release workflow builds it fresh on every run and uploads it, so a copy checked
+# in would only ever be an out-of-date one claiming to be the download.
+/dist/

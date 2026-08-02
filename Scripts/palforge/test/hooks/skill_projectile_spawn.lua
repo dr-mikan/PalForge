@@ -1,14 +1,18 @@
 -- test/hooks/skill-projectile-spawn — READ THE DECLARATIONS, FIRE THE ONE CALL THAT CARRIES NO
 -- STRUCT, AND REFUSE THE REST BY NAME.
 --
--- plan/TODO.md Open / Skill. Marked in the source at native/skills.lua's
--- TODO(skill-projectile-spawn) (:652 as this was written), inside the FlameThrower demo's
--- onActivate — the handler that logs, once per session, that it spawned nothing.
+-- plan/TODO.md Open / Skill. This hook RAN on 2026-08-02 and the item closed on what it printed:
+-- 7 parameter lists walked, 6 routes refused by name, every one of them for a struct argument.
+-- The source marker it used to point at, inside native/skills.lua's
+-- FlameThrower demo, is GONE — that demo now asks Skill.Handle:spawnProjectile, is refused with
+-- the measurement below, and returns false so :activate answers `false, reason` instead of true.
+-- What is left here is the instrument: re-run it on another build and block [1] says in one line
+-- whether that build's answer is different.
 --
 -- WHAT THE ITEM IS. `Skill{ kind = "active", element = "fire", power = 50 }` defines, registers
 -- and dispatches, and `onActivate` runs at exactly the right moment on a real activation — that
 -- half is MEASURED (core/event hooks PalActionBase:OnBeginAction and skill.activate carries the
--- waza id; see the skill-hit-source marker at api/skill.lua:118). But element, power and
+-- waza id; see the skill-hit-source block on Skill.Spec.Events.onHit). But element, power and
 -- cooldown are framework-side metadata that reach nothing, and the handler has no call available
 -- to it that puts an object in the world. So a pack's active skill is a well-timed Lua function
 -- and that is all it is.
@@ -139,7 +143,7 @@ end
 
 hooks.declare{
     id     = "skill-projectile-spawn",
-    item   = "Open / Skill",
+    item   = "Closed 2026-08-02 (negative) — six routes, every one takes a struct",
     needs  = { world = true, pal = true },
     writes = true,
     desc   = "print the declared parameter list of every projectile / spawn route, fire the one "
@@ -358,14 +362,24 @@ hooks.declare{
         local pal = support.nearbyPal()
         local handle = Skill.get("FlameThrower")
         local fired
-        local okAct = pcall(function() fired = handle:activate(pal, { via = "skill-projectile-spawn" }) end)
+        local why
+        local okAct = pcall(function()
+            fired, why = handle:activate(pal, { via = "skill-projectile-spawn" })
+        end)
         h:value("Skill.get('FlameThrower'):activate(pal)", okAct and tostring(fired) or "raised")
-        h:note("a `true` there means ONLY that the handler ran to completion — that is what "
-            .. "api/skill.lua's Handle:activate is documented to return (false for a passive, "
-            .. "false when the cooldown blocked it, false when the handler raised). Nothing "
-            .. "came out of it, and the [skills] warning above this line is the demo definition "
-            .. "saying so in the one channel that can. Watch your pal: nothing happened, and "
-            .. "that is the item.")
+        h:value("...and its reason", okAct and tostring(why) or "raised")
+        h:note("THAT `false` IS THE ITEM, IMPLEMENTED. It used to be `true`: the handler logged "
+            .. "that it had spawned nothing and api/skill's :activate returned pcall's own ok, "
+            .. "so a demo that produced no fireball was indistinguishable from one that did — "
+            .. "with a cooldown stamped for it. :activate now answers `ran, reason`, a handler "
+            .. "reports its own failure by returning false, and the curated definition asks "
+            .. "Skill.Handle:spawnProjectile and hands that refusal straight back out. Watch "
+            .. "your pal: nothing happened, and now the return value says so too.")
+        if fired ~= false then
+            h:fail("this build's api/skill returned %s for a skill that spawned nothing. That is "
+                .. "the dishonesty this item closed on 2026-08-02 — check that "
+                .. "Handle:activate still consults a handler's `false` return.", tostring(fired))
+        end
         h:note("if the second activation in one session prints no [skills] warning, that is "
             .. "correct and not a missed log — native/skills.lua warns once per session on "
             .. "purpose (its `warnedNoProjectile` flag).")

@@ -56,7 +56,7 @@ local DETACH_S = 40
 
 hooks.declare{
     id     = "mesh-color-change",
-    item   = "Owed work §2 (declared, shipped, never observed working)",
+    item   = "Closed 2026-08-02 — the operator watched a chest go red, green, blue",
     needs  = { world = true, player = true },
     writes = true,
     desc   = "put a tinted mesh in front of the player and change its colour twice, so the one "

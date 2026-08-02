@@ -224,10 +224,10 @@ Building{
 ---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ```
 
-このファイルには **37 個のクラスと 30 個のエイリアス**が入っていて、長さもあります。
-ジェネレータの申告で 8752 行です。クラスのうち 30 個は宣言済みの形で、`schema.all()` が返す
+このファイルには **38 個のクラスと 30 個のエイリアス**が入っていて、長さもあります。
+ジェネレータの申告で 8759 行です。クラスのうち 31 個は宣言済みの形で、`schema.all()` が返す
 名前と 1 対 1 に対応します。`Mesh.Spec`、`Pal.Spec` とその `Events`・`Material`、`Item.Spec`
-とその `Recipe`・`Events`、4 つの `Building.Spec.*`、`Skill.Spec` とその `Events`、
+とその `Recipe`・`Events`・`Restores`、4 つの `Building.Spec.*`、`Skill.Spec` とその `Events`、
 `Effect.Spec` とその `Events`、`Audio.Spec`、11 個の `UI.Node.*`、`UI.Spec` と
 `UI.Spec.Host`、そして `Coord` です。
 
@@ -259,7 +259,7 @@ lua5.4 tools/gen-types.lua
 出力は 1 行だけで、それが結果のすべてです。
 
 ```text
-wrote ./Scripts/palforge/types.lua (37 classes, 8752 lines, 8293 native catalog names)
+wrote ./Scripts/palforge/types.lua (38 classes, 8759 lines, 8293 native catalog names)
 ```
 
 `classes` は書き出した `---@class` 行の数、`lines` は書き出したファイルの行数、

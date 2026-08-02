@@ -45,10 +45,33 @@ local function readFile(path)
     return content
 end
 
+-- Does a FILE exist and open for reading?
 local function exists(path)
     local f = io.open(path, "rb")
     if f then f:close(); return true end
     return false
+end
+
+---Does this path exist, FILE OR DIRECTORY? `os.rename(p, p)` is the portable probe: it
+---succeeds for anything the filesystem has and fails for anything it does not, and renaming a
+---path onto itself changes nothing on either platform.
+---
+---⚠️ IT IS NOT `io.open`, AND THE DIFFERENCE COST THIS TREE ITS FIRST REAL WRITE. `ensureDir`
+---used `exists()` above, which opens the path as a FILE — that succeeds for a directory on
+---Linux and FAILS for one on Windows. So on Windows `ensureDir` ran mkdir, asked "is it there
+---now?", was told no by a probe that cannot see directories, and reported
+---`could not create <dir>` for a directory it had just created. Every per-save write the store
+---attempted in game failed that way, with the log blaming the filesystem.
+---
+---The headless suite could not catch it: it runs under Linux Lua, where `io.open` on a
+---directory succeeds, so `ensureDir` answered correctly there and 553 checks passed while the
+---game wrote nothing. MEASURED 2026-08-02 22:05-22:06 (hook `store-save-roundtrip`, and every
+---`[file][warn] write failed` line in that session).
+---@param path string
+---@return boolean
+local function pathExists(path)
+    if type(path) ~= "string" or path == "" then return false end
+    return os.rename(path, path) == true
 end
 
 local SEP = package.config:sub(1, 1)   -- "\\" on Windows, "/" elsewhere
@@ -63,10 +86,18 @@ local dirsMade = {}
 -- the real target (UE4SS), but the POSIX branch keeps headless runs working too.
 -- Both branches create intermediate directories, which is what format 3's
 -- state/<save>/ layer needs.
+-- BOTH PROBES ARE pathExists, NOT exists. See pathExists for what using the file probe here
+-- cost: on Windows it cannot see a directory, so this function reported "could not create" for
+-- a directory mkdir had just made, and every per-save store write in the game failed.
+--
+-- A MISS IS NOT MEMOISED (`made or nil`), which is the same positives-only rule the asset and
+-- icon caches use and which `mesh-texture-import-live` confirmed in game: a directory that was
+-- not creatable a moment ago — a drive still mounting, a folder the player was renaming — must
+-- not be unwriteable for the rest of the session.
 local function ensureDir(dir)
     if dir == nil or dir == "" then return false end
     if dirsMade[dir] then return true end
-    if exists(dir) then dirsMade[dir] = true; return true end
+    if pathExists(dir) then dirsMade[dir] = true; return true end
     local ok = pcall(function()
         if SEP == "\\" then
             os.execute('if not exist "' .. dir .. '" mkdir "' .. dir .. '" 2>nul')
@@ -74,7 +105,7 @@ local function ensureDir(dir)
             os.execute('mkdir -p "' .. dir .. '" 2>/dev/null')
         end
     end)
-    local made = ok and exists(dir)
+    local made = ok and pathExists(dir)
     dirsMade[dir] = made or nil
     return made
 end

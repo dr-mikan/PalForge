@@ -6,13 +6,19 @@
 -- spec: the id fallback, a path-only definition (which used to resolve to nothing and now
 -- resolves), and an empty sound id, which still resolves to nil. :setVolume is asserted the way
 -- :play and :stop are: false with no actor, true once the native call has been issued — and
--- "issued" is the whole claim, because nobody has heard it (test/hooks/audio-setvolume-audible).
+-- "issued" is the whole claim. One operator has since reported, hedged, that it sounded quieter
+-- (2026-08-02), which is a direction and not a measurement; whether volume 0.00 is SILENT is
+-- still unestablished, so test/hooks/audio-setvolume-audible stays open and nothing here asserts
+-- audibility.
 --
 -- TWO THINGS THIS FILE USED TO ASSERT ARE GONE, and they were both about soundFile. It used to
 -- prove that a soundFile OUTRANKS a soundId in the lowering, and that the resulting source plays
 -- nothing — an accurate description of a field that silenced working audio. soundFile is a hard
 -- error at define time now, so the tests are the refusal itself: the error fires, it names the
--- open item, and neither of the two working fields is reachable past it.
+-- finding AND ITS DATE, and neither of the two working fields is reachable past it. That the
+-- message carries a date is asserted rather than assumed, because `audio-custom-file-loader` is
+-- CLOSED (negatively, 2026-08-02) and a refusal that cannot say when it was measured reads as an
+-- excuse rather than a boundary.
 --
 -- Only :play, :stop, :setVolume on a real actor and the wrong-class refusal need a world, so
 -- those SKIP at the title screen. ONE test here skips the other way round — ":setVolume reports
@@ -248,13 +254,21 @@ s:test("soundFile is a HARD ERROR at define time, on every constructor", functio
     -- been playing, and :play handed back the false that came out of the file seam. Nothing else
     -- in this framework degrades that way. It refuses at the point the author can still see it.
     --
-    -- This test is the tripwire for audio-custom-file-loader: the day a runtime loader is found,
-    -- this is what says "and now unrefuse the field".
+    -- WHAT THE MESSAGE HAS TO CARRY. audio-custom-file-loader closed NEGATIVELY on 2026-08-02:
+    -- a USoundWave exposes no writable sample buffer to Lua and the Wwise media classes are absent
+    -- from this build (core/sound/file.lua has the full reading). So the refusal is permanent, and
+    -- a permanent refusal owes the reader three things — the item id to search for, the DATE the
+    -- measurement was taken so they can judge how stale it is, and the field that does work. All
+    -- three are asserted here, because each has a different way of rotting: the id can be renamed,
+    -- the date can be quietly dropped when someone rewords the message, and the alternative can be
+    -- left out by whoever writes the next version of it.
     local msg = t:errors(function()
         Audio{ id = support.id("audio"), soundFile = "audio/theme.wav" }
     end, "soundFile is not accepted")
     t:truthy(msg:find("audio-custom-file-loader", 1, true),
-        "the refusal names the open item, so it reads as a boundary rather than a bug")
+        "the refusal names the item, so it reads as a boundary rather than a bug")
+    t:truthy(msg:find("2026-08-02", 1, true),
+        "...and DATES the measurement it rests on, so it is a finding and not an excuse")
     t:truthy(msg:find("soundId", 1, true),
         "...and names what to use instead, so the fix is one line")
 
@@ -303,8 +317,13 @@ s:test("the file route still exists below the api, and still plays nothing", fun
     -- core.sound still DISPATCHES kind = "file", because two callers can still produce one: a
     -- definition's own `source` override, and a direct core.sound call. Both are code someone
     -- wrote on purpose, and both must get the same honest false rather than a silent true.
-    -- Palworld exposes no confirmed loader for a file on disk; when one is found, this test
-    -- fails and that is the signal that audio-custom-file-loader can close.
+    --
+    -- THE FALSE IS PERMANENT AND THIS TEST ASSERTS EXACTLY THAT. There is nothing for FileSource
+    -- to call on this build: USoundWave declares no writable sample buffer anywhere on its
+    -- reflected chain, the build ships a runtime file importer for textures and none for sound,
+    -- and the Wwise media classes have no functions and no instances (measured 2026-08-02).
+    -- test/hooks/audio-custom-file-loader is now the tripwire for those three facts rather than a
+    -- search; if it ever fails, this test is the second thing to rewrite.
     t:truthy(sound.resolve({ kind = "file", path = "audio/theme.wav" }),
         "core.sound still resolves a file spec to a FileSource")
     t:eq(sound.play({ kind = "file", path = "audio/theme.wav" }, STUB_ACTOR), false,

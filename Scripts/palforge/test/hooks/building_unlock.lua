@@ -48,7 +48,7 @@ local ALT_TARGET = "PalBoxV2"
 
 hooks.declare{
     id     = "building-unlock",
-    item   = "Owed work §2 (declared, shipped, never observed working)",
+    item   = "Implemented, never exercised by a game",
     needs  = { world = true, player = true },
     writes = true,
     desc   = "record every establishable fact about Building.Handle:unlock, then hand the "

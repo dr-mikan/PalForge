@@ -32,6 +32,12 @@ local native  = require("palforge.native.ui")
 -- element: whether a definition went in at all (`register = false`), and who owns the id it went
 -- in under. Everything else here reaches the registry through UI.get / UI.get_all.
 local om      = require("palforge.core.object_manager")
+-- The rebuild-signal seam, for the cases that measure the EVENT half of :autoRefresh. Required
+-- here for its SIGNALS list and its state-table shape only — no case below calls refresh.arm(),
+-- because UE4SS cannot unregister a hook and a test must not leave one behind. (:autoRefresh
+-- itself asks for the signal, in game as well as headless; that is the same arming any pack's
+-- first autoMount does, it happens at most once per session, and it is deferred to world.ready.)
+local refresh = require("palforge.native.ui.refresh")
 
 local s = T.suite("ui")
 
@@ -515,6 +521,268 @@ s:test("a slower poll skips heartbeats instead of firing on every one", function
     el:unmount()
     beat(5)
     t:eq(updated, 2, "cancelled")
+end)
+
+--=============================================================================
+-- UI.refreshDriver — "what actually refreshes a panel", as data rather than as a comment
+--
+-- ⚠️ WHY THIS IS A TEST AND NOT JUST A DOC STRING, AND WHY THAT MATTERED TODAY. This section used
+-- to open with "`ui-update-event` closes with polling as the IMPLEMENTED answer" and pin
+-- `kind == "poll"`, `event == nil` as facts about the build. They were facts about a 21:57 run
+-- that armed two substring false positives and read their silence as an absence. The 23:04 run of
+-- the same hook armed 21 named candidates and measured THREE firings —
+-- CommonActivatableWidget::ActivateWidget, PalHUDService::Push, PalHUDService::Close — so the
+-- assertions below now pin something different, and deliberately weaker in one specific way:
+--
+--   the driver is read from WHAT IS ARMED AT THE MOMENT OF THE CALL, not from a constant.
+--
+-- That is what makes it impossible for this record to claim an event again while nothing is
+-- subscribed to anything. Headless there is no RegisterHook, so `kind` really is "poll" here —
+-- and the case that proves the OTHER branch fakes an armed source on _G rather than arming a hook
+-- from a test, because UE4SS cannot unregister one.
+--
+-- Headless on purpose apart from that: it reads a record and does arithmetic. No widget, no game.
+--=============================================================================
+
+-- The rebuild signal's own state table (native/ui/refresh.lua keeps it on _G so it survives a hot
+-- reload). Faking it is how the "armed" branch is measured without registering a native hook that
+-- could never be taken back — and it is restored afterwards, because an "armed" state leaking out
+-- of one case would change what every later case is told about the driver.
+local SIGNAL_PATH = refresh.SIGNALS[1].path
+
+local function withArmedSignal(fn)
+    local saved = _G.__PalForgeUIRefresh
+    _G.__PalForgeUIRefresh = {
+        gen = 0, state = "armed", why = nil, t0 = os.clock(), watching = true,
+        counts = { [SIGNAL_PATH] = 0 }, firstAt = {}, armedPaths = { [SIGNAL_PATH] = true },
+        refusals = {},
+    }
+    -- What the hook handler does, spelled the same way native/ui/refresh.lua's bump() spells it:
+    -- one integer, one counter. A case calls it to say "Palworld just rebuilt a screen".
+    local function fire()
+        local st = _G.__PalForgeUIRefresh
+        st.gen = st.gen + 1
+        st.counts[SIGNAL_PATH] = (st.counts[SIGNAL_PATH] or 0) + 1
+    end
+    local ok, err = pcall(fn, fire)
+    _G.__PalForgeUIRefresh = saved
+    if not ok then error(err, 0) end
+end
+
+-- The inverse of withArmedSignal, and it exists for the same reason. `UI.refreshDriver` reads
+-- what is ARMED AT THE MOMENT OF THE CALL — deliberately, so it can never claim an event nothing
+-- is subscribed to — which means the unarmed case is a STATE, not a default. Headless nothing is
+-- ever armed and this check passed by accident; in a game where any pack has called
+-- :autoRefresh the signal is up and the same check failed (2026-08-02 23:33). A case that only
+-- holds when nobody has used the feature is not measuring the feature.
+local function withNoSignal(fn)
+    local saved = _G.__PalForgeUIRefresh
+    _G.__PalForgeUIRefresh = nil
+    local ok, err = pcall(fn)
+    _G.__PalForgeUIRefresh = saved
+    if not ok then error(err, 0) end
+end
+
+s:test("UI.refreshDriver reports the POLL when nothing is armed — and still names the event",
+function(t)
+  withNoSignal(function()
+    local d = UI.refreshDriver(250)
+    t:eq(d.kind, "poll", "with no hook armed the driver is the floor, and the API says so")
+    t:eq(d.event, nil, "and `event` is nil, because it reports what IS armed, never what exists")
+    t:truthy(d.state ~= "armed", "the state says why: " .. tostring(d.state))
+    t:eq(d.eventStaleMs, nil, "there is no rebuild latency to quote when nothing is riding one")
+    t:eq(d.ms, 250, "the interval comes back as asked")
+    t:eq(d.hz, 4, "250 ms is four polls a second")
+    t:eq(d.staleMs, 250, "and a panel is stale for exactly that long in the worst case")
+  end)
+end)
+
+s:test("UI.refreshDriver lists all three measured signals whether or not they are armed",
+function(t)
+    -- The list is the finding, and it has to survive being unarmed: a pack asking "why is my
+    -- panel only polling" needs the three paths and their dump lines in the same answer.
+    local d = UI.refreshDriver()
+    t:type(d.events, "table", "the signals come back as data")
+    t:eq(#d.events, 3, "all three that fired on 2026-08-02 23:04")
+    local paths = {}
+    for _, e in ipairs(d.events) do
+        paths[e.path] = true
+        t:type(e.from, "string", e.path .. " carries the dump line it was read from")
+    end
+    t:truthy(paths["/Script/CommonUI.CommonActivatableWidget:ActivateWidget"],
+        "the CommonUI activation, which covers every menu in the game")
+    t:truthy(paths["/Script/Pal.PalHUDService:Push"], "Palworld's own screen push")
+    t:truthy(paths["/Script/Pal.PalHUDService:Close"], "and its close half")
+end)
+
+s:test("UI.refreshDriver says event+poll while the signal IS armed, and names the path",
+function(t)
+    withArmedSignal(function()
+        local d = UI.refreshDriver(2000)
+        t:eq(d.kind, "event+poll", "an armed signal is reported as a driver WITH the floor kept")
+        t:eq(d.state, "armed", "and the state agrees")
+        t:truthy(d.event and d.event:find(SIGNAL_PATH, 1, true),
+            "`event` names the UFunction actually armed")
+        t:eq(d.staleMs, 2000, "the floor is still the interval that was asked for")
+        t:eq(d.eventStaleMs, event.TICK_MS,
+            "and a rebuild is acted on one heartbeat later, because the hook body does no work")
+    end)
+    -- The restore is asserted against what was there BEFORE, not against "poll": in a game a
+    -- pack may legitimately have the signal armed, and demanding "poll" here made this case fail
+    -- for a session that was working correctly (2026-08-02 23:33). What matters is that the fake
+    -- did not leak.
+    withNoSignal(function()
+        t:eq(UI.refreshDriver().kind, "poll",
+            "with the signal explicitly absent the driver is the floor, so the fake did not leak")
+    end)
+end)
+
+s:test("UI.refreshDriver defaults to autoRefresh's own 500 ms", function(t)
+    -- The default has to agree with Handle:autoRefresh's default or the number a pack is shown
+    -- is not the number it gets. That is the whole reason this check exists.
+    local d = UI.refreshDriver()
+    t:eq(d.ms, 500, "no argument means autoRefresh's default")
+    t:eq(d.hz, 2, "which is two polls a second")
+end)
+
+s:test("UI.refreshDriver's `why` names the measurement, not just the behaviour", function(t)
+    -- A claim in this tree must name the run that justifies it, and this item is the reason that
+    -- rule exists: the previous text named a run whose two armed candidates were false positives.
+    -- So the sentence now carries the TIME as well as the date, on both branches.
+    local d = UI.refreshDriver(100)
+    t:type(d.why, "string", "there is a sentence to show a user")
+    t:truthy(d.why:find("ui-update-event", 1, true), "and it names the hook that measured it")
+    t:truthy(d.measured:find("2026%-08%-02"), "the date the measurement was taken")
+    t:truthy(d.measured:find("23:04", 1, true), "and the TIME, because 21:57 said the opposite")
+    t:truthy(d.measured:find("ui-update-event", 1, true), "and the instrument that took it")
+    t:eq(d.hz, 10, "autoRefresh(100) is ten polls a second — the number the doc warns about")
+
+    withArmedSignal(function()
+        local armed = UI.refreshDriver(500)
+        t:truthy(armed.why:find("ui-update-event", 1, true),
+            "the armed branch names the same measurement")
+        t:truthy(armed.why:find("18", 1, true),
+            "and says the 18 silent candidates are not proven dead — the operator opened two "
+            .. "screens, not eighteen, which is the whole reason the floor stays")
+    end)
+end)
+
+s:test("UI.refreshDriver refuses to divide by zero on a nonsense interval", function(t)
+    -- ms = 0 is a plausible typo for "as fast as possible" and must not hand back inf Hz, which
+    -- is a number nobody can print or compare.
+    local d = UI.refreshDriver(0)
+    t:eq(d.ms, 1, "floored at 1 ms")
+    t:eq(d.hz, 1000, "so the rate stays a finite number")
+end)
+
+s:test("a FRACTIONAL interval is floored, because %d on one is a Lua 5.4 error", function(t)
+    -- Not a hypothetical: `string.format("%d", 16.7)` raises "number has no integer
+    -- representation", and that string is built for the once-per-session log line. A pack that
+    -- typed a frame time instead of a millisecond count must not take a log line down with it,
+    -- and event.every quantizes to the heartbeat anyway so the fraction meant nothing.
+    local d = UI.refreshDriver(16.7)
+    t:eq(d.ms, 16, "floored to a whole millisecond")
+    t:type(d.why, "string", "and the sentence it formats still builds")
+end)
+
+--=============================================================================
+-- autoRefresh RIDING THE REBUILD SIGNAL — the half that did not exist this morning
+--
+-- ⚠️ WHAT THESE FOUR PIN, and they are the reason the wiring is trustworthy rather than merely
+-- present. The rule is: a refresh happens when the game rebuilds a screen, AND no worse than every
+-- `ms` — in that order of priority, with neither able to cancel the other. The four failure modes
+-- that would each look like working code are pinned one per case:
+--
+--   1. the event does nothing and the poll silently carries it (the "wired" that is not wired);
+--   2. the event fires and the floor stops (an event-only driver by accident — every rebuild the
+--      three signals do NOT cover would then never refresh, and 18 candidates went unexercised);
+--   3. a burst of firings turns into a burst of refreshes (the load-storm cost, which is exactly
+--      what wedged the shared dispatch once and is bounded HERE, on the consumer side);
+--   4. an event refresh resets the interval, quietly stretching the floor a pack asked for.
+--
+-- The signal is FAKED on _G rather than armed: see withArmedSignal above.
+--=============================================================================
+
+s:test("a rebuild refreshes the element even though the poll interval is nowhere near up",
+function(t)
+    withArmedSignal(function(fire)
+        local updated = 0
+        local El = UI{ id = support.id("ui_evt1"), update = function() updated = updated + 1 end }
+        local el = El:new{}
+        el:mount(fakeRoot())
+        -- A floor ten beats away, so nothing the poll does can explain what follows.
+        t:eq(el:autoRefresh(event.TICK_MS * 10), true, "subscribed with a five-second floor")
+
+        beat(1)
+        t:eq(updated, 0, "one beat with no rebuild refreshes nothing")
+        fire()
+        beat(2)
+        t:eq(updated, 1, "the game rebuilt a screen and the very next beat refreshed the panel")
+        beat(3)
+        t:eq(updated, 1, "and it does not keep refreshing for a rebuild it already acted on")
+        el:unmount()
+    end)
+end)
+
+s:test("the poll is still the FLOOR while the signal is armed and silent", function(t)
+    withArmedSignal(function()
+        local updated = 0
+        local El = UI{ id = support.id("ui_evt2"), update = function() updated = updated + 1 end }
+        local el = El:new{}
+        el:mount(fakeRoot())
+        t:eq(el:autoRefresh(event.TICK_MS * 3), true, "subscribed with a three-beat floor")
+
+        beat(1); beat(2)
+        t:eq(updated, 0, "no rebuild, and the floor has not come round")
+        beat(3)
+        t:eq(updated, 1, "the floor fires on its own schedule — riding an event did not remove it")
+        el:unmount()
+    end)
+end)
+
+s:test("a BURST of rebuilds costs one refresh per beat, not one per firing", function(t)
+    -- The load-storm bound, on the consumer side. core/event.lua records a hook armed into the
+    -- world-load storm wedging the shared dispatch; native/ui/refresh.lua's answer is a handler of
+    -- three integer writes, and THIS is the other half of it — however many times the signal fired
+    -- between two heartbeats, the panel is rendered once.
+    withArmedSignal(function(fire)
+        local updated = 0
+        local El = UI{ id = support.id("ui_evt3"), update = function() updated = updated + 1 end }
+        local el = El:new{}
+        el:mount(fakeRoot())
+        t:eq(el:autoRefresh(event.TICK_MS * 10), true, "subscribed with a distant floor")
+
+        for _ = 1, 400 do fire() end
+        beat(1)
+        t:eq(updated, 1, "four hundred firings in one beat drove exactly one refresh")
+        beat(2)
+        t:eq(updated, 1, "and the beat after the storm does nothing at all")
+        el:unmount()
+    end)
+end)
+
+s:test("an event refresh does not reset the floor's interval", function(t)
+    -- The floor is a promise about the WORST case. If an unrelated rebuild restarted the
+    -- accumulator, a pack that asked for 2 s could quietly get 4, and only in sessions where the
+    -- game happened to open a screen — the worst possible shape of bug to reproduce.
+    withArmedSignal(function(fire)
+        local updated = 0
+        local El = UI{ id = support.id("ui_evt4"), update = function() updated = updated + 1 end }
+        local el = El:new{}
+        el:mount(fakeRoot())
+        t:eq(el:autoRefresh(event.TICK_MS * 4), true, "subscribed with a four-beat floor")
+
+        beat(1)
+        fire()
+        beat(2)
+        t:eq(updated, 1, "the rebuild refreshed it on beat 2")
+        beat(3)
+        t:eq(updated, 1, "beat 3 is neither")
+        beat(4)
+        t:eq(updated, 2, "and the floor still lands on beat 4, exactly where it would have "
+            .. "without the event")
+        el:unmount()
+    end)
 end)
 
 --=============================================================================

@@ -120,7 +120,7 @@ end
 
 hooks.declare{
     id     = "store-save-roundtrip",
-    item   = "Foundations / F-7 — the format-3 store",
+    item   = "Closed 2026-08-02 run 1 — run 2 (a PREVIOUS session's bytes) is still owed",
     needs  = { world = true },
     writes = true,
     desc   = "write a pack's state through the public surface into a REAL save's store, read it "

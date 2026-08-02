@@ -69,9 +69,11 @@ flowchart LR
 ```
 
 `event.CHANNELS` 里的每条频道都备有 SOURCE。只有一条 `skill.hit` 从来没有运过事件：它的两个原生
-候选都注册成功，却在确实打出伤害的战斗中始终沉默，这就是未决项 `skill-hit-source`。建筑物的
-`onLeftClick` 和 `onBreak` 则连频道都没有，因为翻遍转储也找不到能喂给它的东西。哪条是哪种，下面
-的频道表都写了。
+候选都注册成功，却在确实打出伤害的战斗中始终沉默。这一条现在是以否定的方式定下来的，而且是结构上
+的定论，不是“试到累了” —— `skill-hit-source` 读遍了这个构建声明的每一个伤害结构体的每一个字段
+（40 + 6 + 12 个），**没有一个是在说技能**，所以根本没有东西可以把一次命中关联上去，再挂多少钩子
+也改不了。建筑物的 `onLeftClick` 和 `onBreak` 则连频道都没有，因为翻遍转储也找不到能喂给它的东西。
+哪条是哪种，下面的频道表都写了。
 
 ### 启动时的接线顺序
 
@@ -407,9 +409,10 @@ end)
 正是它留下来记录的那个错误。真正会运的是那两个目标。`PalNPC:OnCompletedInitParam` 能看到每只
 帕鲁，因为 `APalMonsterCharacter` 继承了它而没有重新声明；
 `PalPlayerCharacter:OnCompleteInitializeParameter` 只看到玩家订阅过的角色，也就是队伍那条路径。
-是哪一个发火了由 `ctx.via` 说明。仍然未决的问题比“它能不能用”更窄：至今记录到的每一次发火都落在
-和 `world.ready` 同一秒内，也就是周围帕鲁一起初始化的加载风暴里，所以“这只帕鲁刚才还不存在”还
-没有被量到。请把 `onSpawned` 写成幂等的 —— SOURCE 侧也已经按 actor 做了一秒内的去重。
+是哪一个发火了由 `ctx.via` 说明。**“这只帕鲁刚才还不存在”现在也量到了**：`pf_hook
+pal-spawned-fresh` 在 2026-08-02 把每一次发火都相对 `world.ready` 打了时间戳，记录到 27 次发火，
+其中 17 次离世界加载八竿子打不着。它在加载风暴里同样还会发火，所以请把 `onSpawned` 写成幂等的
+—— SOURCE 侧也已经按 actor 做了一秒内的去重。
 </Callout>
 
 <Callout type="info">

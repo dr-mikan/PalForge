@@ -37,21 +37,40 @@
 --
 -- ONE THING HERE IS REFUSED OUTRIGHT, and refusing is the whole point.
 --
--- Custom audio FILES are not playable. The in-game F5 harvest (dumps/f5-partial-run.txt) and
--- then dumps/cxx narrowed it to a shape no call in this build can satisfy: the UE-native half is
--- CLOSED — USoundWave declares no importer and USoundWaveProcedural declares nothing at all
--- (Engine.hpp:21335 / :21371), so PlaySound2D survives with nothing to be handed — and the Wwise
--- half exists but takes the wrong input: UWwiseExternalSourceStatics::SetExternalSourceMediaBy*
--- (WwiseFileHandler.hpp:48-50) REBINDS a cooked external-source cookie to media the Wwise cook
--- already staged, which is not a .wav on a pack's disk. core/sound/file.lua carries the full
--- evidence and the one question left open (audio-custom-file-loader in plan/TODO.md).
+-- CUSTOM AUDIO FILES ARE NOT PLAYABLE ON THIS BUILD. That is settled, not pending: the item
+-- `audio-custom-file-loader` closed NEGATIVELY on 2026-08-02 and there is no probe left to run.
+-- Both routes a .wav could have taken are measured:
+--
+--   UE-native. A USoundWave CAN be constructed here — `StaticConstructObject` is a function on
+--   this build, measured live 2026-08-02 by test/hooks/audio-custom-file-loader — and it would
+--   come back EMPTY and stay empty. USoundWave's complete reflected property set is 29 cooked
+--   metadata fields (Engine.hpp:21336-21366) plus USoundBase's 22 routing fields
+--   (:21003-:21027), and not one of the 51 is a byte buffer; the samples live in members that are
+--   not UPROPERTYs in any UE build, so Lua cannot address them. USoundWaveProcedural declares
+--   zero properties and zero functions. PlaySound2D would happily accept the empty wave and play
+--   silence — the constructor is the trap, not the route. And the build proves the missing shape
+--   by shipping it for the other media type: ImportFileAsTexture2D / ImportBufferAsTexture2D
+--   (Engine.hpp:14694-14695) are the only Import*As* functions in the whole dump, and there is no
+--   audio counterpart anywhere.
+--
+--   Wwise. AkExternalMediaAsset and AkMediaAsset both declare 0 functions and FindAllOf answers
+--   nothing for either (measured live 2026-08-02, same hook, with StaticFindObject working — so
+--   those are absent CLASSES, not a failed lookup). UAkGameplayStatics' 58 functions carry no
+--   *WithExternalSources overload. The one entry point that does exist,
+--   UWwiseExternalSourceStatics::SetExternalSourceMediaBy* (WwiseFileHandler.hpp:48-50), REBINDS a
+--   cooked external-source cookie to media the Wwise cook already staged — it never reads a file,
+--   and at best plays a .wem from this game's own cook, not a pack's .wav.
+--
+-- core/sound/file.lua carries the full reading of both halves and names the two facts that would
+-- reopen it. TO SHIP SOUND, NAME A GAME EVENT: soundId or soundPath, from
+-- PalForge.native.audio.CATALOG.
 --
 -- `soundFile` USED TO BE ACCEPTED AND THAT WAS THE WORST OF BOTH. It was validated, documented,
 -- and it took PRECEDENCE over soundId/soundPath in the lowering below — so a pack that added a
 -- soundFile beside a working soundId silenced a sound that had been playing, and :play handed
 -- back the false that came out of the file seam. Every other unfinished thing in this framework
 -- degrades honestly; that one made working audio silent. So it is now a HARD ERROR at define
--- time, naming the open item and saying what to use instead. The field stays DECLARED in the
+-- time, naming the finding, ITS DATE and what to use instead. The field stays DECLARED in the
 -- spec so the error can name it and so tooling still lists it — a field that errors where you
 -- typed it costs you a minute; a field that silences your sound costs you an afternoon.
 --
@@ -119,7 +138,7 @@ local Spec = schema.define("Audio.Spec", {
     -- soundId/soundPath, so accepting it silenced sounds that worked. It stays in the spec
     -- rather than being deleted so that `schema.help("Audio.Spec")`, the generated types and
     -- the did-you-mean list all still know the name a pack author is about to type.
-    { "soundFile",   type = "string", doc = "REFUSED at define time: custom audio files do not play on this build (open item audio-custom-file-loader) - use soundId or soundPath" },
+    { "soundFile",   type = "string", doc = "REFUSED at define time: a .wav on disk cannot be played on this build - a USoundWave exposes no writable audio buffer to Lua and the Wwise media classes are absent (measured 2026-08-02, hook audio-custom-file-loader). Use soundId or soundPath" },
     { "source",      type = "function", sig = "fun(self: Audio.Definition): table|nil",
                      doc = "override that returns the core.sound spec yourself; `self` is the DEFINITION, not the handle" },
     { "data",        type = "table",  doc = "free-form payload of your own, carried onto the definition" },
@@ -211,23 +230,31 @@ local Audio = {}
 local wrap  -- forward decl; the Audio.Handle wrapper is defined in the BOTTOM section
 
 -- THE soundFile PUBLISH GATE. Declared, validated, documented — and refused, loudly, here.
--- See the header for why this is an error rather than a warning: soundFile outranked
--- soundId/soundPath in the lowering, so accepting it silenced sounds that were working, and it
--- has never been playable on any build this tree has measured. The message names the open item
--- (audio-custom-file-loader) so nobody has to guess whether it is a bug or a boundary, and it
--- names the two fields that DO play so the fix is one line.
+--
+-- The message has to do a specific job: tell someone who has just typed `soundFile = "theme.wav"`
+-- that this is a BOUNDARY and not a bug, name the measurement that makes it one, give its date so
+-- they can tell how old the finding is, and put the working alternative close enough to copy. It
+-- deliberately does NOT say "not yet supported" or point at an open question — nothing is coming.
+-- See the header for the full reading; this is the short form of it.
+--
+-- It is an error rather than a warning because soundFile outranked soundId/soundPath in the
+-- lowering, so accepting it silenced sounds that were working.
 local function refuseSoundFile(spec, who)
     if spec.soundFile == nil then return end
     error(string.format(
-        "PalForge: %s: soundFile is not accepted (id %q, soundFile %q). Custom audio files do "
-        .. "not play on this build: the UE-native route has no importer that survives shipping "
-        .. "(USoundWave declares none, USoundWaveProcedural declares nothing at all) and the "
-        .. "Wwise route rebinds media the cook already staged rather than reading a file. This "
-        .. "is the open item audio-custom-file-loader. It is an ERROR rather than a no-op "
-        .. "because soundFile used to OUTRANK soundId/soundPath, so setting it beside a working "
-        .. "soundId silenced a sound that was playing. Name a game sound instead: "
+        "PalForge: %s: soundFile is not accepted (id %q, soundFile %q). A .wav on disk CANNOT be "
+        .. "played on this build, and that is settled rather than pending - item "
+        .. "audio-custom-file-loader, closed 2026-08-02. Two routes, both measured: (1) UE-native "
+        .. "- a USoundWave can be constructed here but never filled, because its 51 reflected "
+        .. "properties are all cooked metadata and the sample buffer is not reachable from Lua at "
+        .. "all (the build ships ImportFileAsTexture2D for images and has no audio counterpart); "
+        .. "(2) Wwise - AkExternalMediaAsset and AkMediaAsset declare 0 functions and have no "
+        .. "instances on this build, and the one external-source call that exists rebinds media "
+        .. "the game's own cook already staged rather than reading a file. It is an ERROR rather "
+        .. "than a no-op because soundFile used to OUTRANK soundId/soundPath, so setting it beside "
+        .. "a working soundId silenced a sound that was playing. Name a game sound instead: "
         .. "soundId = \"AKE_UI_Common_Menu_Close\", or soundPath = the asset path from "
-        .. "PalForge.native.audio.CATALOG.",
+        .. "PalForge.native.audio.CATALOG. See core/sound/file.lua for the evidence.",
         who, tostring(spec.id), tostring(spec.soundFile)), 0)
 end
 
@@ -394,12 +421,18 @@ end
 ---
 ---Returns true only when the native call was ISSUED — there is no world, or no actor, or the
 ---live declaration disagreed with the dump's and core/signature refused, and you get false.
----True is not a promise that anything got quieter: nothing here has been heard in game. That is
----not a shrug, it is the one thing left owed on this call, and it is owed as a named hook —
----`test/hooks/audio-setvolume-audible`, which needs a loaded world and a person listening:
----play a catalog event, set 0.2, play it again, say whether the second one was quieter. The log
----line the call writes says ISSUED in those words so a reader never mistakes it for a
----measurement (audio-bus-volume in plan/TODO.md closed on the DECLARATION, not on audibility).
+---True is not a promise that anything got quieter.
+---
+---WHAT HAS BEEN HEARD, EXACTLY. `pf_hook audio-setvolume-audible` ran on 2026-08-02 at 21:39:
+---the same explosion four times, 8 s apart, at bus volume 1.0 / 0.25 / 0.0 / 1.0, with setVolume
+---and play both returning true on all four and unity restored at the end. Asked whether steps 2
+---and 3 were quieter, one operator answered — hedged — that they seemed to be. The direction
+---matched the prediction, which is more than this call had before: nobody had heard the parameter
+---do anything at all. It is ONE hedged observation on ONE run, and it does NOT establish that
+---step 3, at volume 0.00, was SILENT — which is the difference between "the parameter works" and
+---"the parameter does something". So `audio-setvolume-audible` stays OPEN, and a `true` from this
+---function still means ISSUED and nothing more. The log line the call writes says ISSUED in those
+---words for the same reason (audio-bus-volume closed on the DECLARATION, not on audibility).
 ---@param volume number   # linear multiplier, 1.0 = unchanged; negative is refused
 ---@param actor any?
 ---@return boolean ok

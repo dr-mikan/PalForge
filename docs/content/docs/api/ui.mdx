@@ -641,18 +641,28 @@ clears, a later `mount()` builds a second copy, and the first one stays on scree
 ## Keeping the screen up to date
 
 <Callout type="warn">
-Polling is not one of two options. It is the only refresh driver PalForge has. Nothing calls
-`refresh()` for a pack, so every element either calls `:refresh()` by hand when its own state
-changes or rides the 500 ms heartbeat — and there is no way to refresh exactly when the game
-rebuilds a screen. Three consequences worth stating rather than leaving to be discovered:
+Nothing calls `refresh()` for a pack. An element either calls `:refresh()` by hand when its own
+state changes, or opts into `:autoRefresh(ms)` — **and `autoRefresh` rides two things, not one.**
+An earlier version of this page said polling was the only driver PalForge had; that was overturned
+by a measurement on the same day, and the correction is here.
 
-- a panel shows **stale content for up to `ms` milliseconds**. A binding that reads a count the
-  player just changed is behind by that much, and shortening `ms` is the only lever.
-- `TitleMenu`'s whole re-injection strategy is a poll for the same reason: the title screen
-  rebuilds its widget tree and takes our buttons with it, nothing tells us it did, so its
-  `update()` re-checks every entry on this same beat.
-- a beat over an idle panel is cheap on purpose — bindings compare and write back only what
-  changed — so a fast `ms` costs comparisons, not native calls.
+- **The game's own rebuild signal.** `CommonActivatableWidget::ActivateWidget`,
+  `PalHUDService::Push` and `PalHUDService::Close` all fire when Palworld builds or tears down a
+  screen — 21 candidates armed by path on 2026-08-02, three of them fired. `native/ui/refresh.lua`
+  arms those three, lazily and at most once per session, and a refresh lands within one heartbeat
+  of a rebuild.
+- **The heartbeat, underneath, as the floor.** It is not removable and it is not a fallback. 18 of
+  the 21 candidates stayed silent in that run, and that is an absence of *input* — the operator
+  opened two screens, not eighteen — so a rebuild those three do not cover is exactly what the
+  floor is for. The signal is also armed only after `world.ready`, because UE4SS cannot unregister
+  a hook and `ActivateWidget` fires for every activatable during a world-load storm; a title-screen
+  element therefore runs on the poll alone.
+
+So a panel shows **stale content for at most `ms` milliseconds whatever happens, and for about one
+heartbeat after a screen rebuild**. Shortening `ms` is still the only lever on the first number. A
+beat over an idle panel is cheap on purpose — bindings compare and write back only what changed —
+so a fast `ms` costs comparisons, not native calls, and riding the signal does not slow the floor
+down.
 </Callout>
 
 Option one — refresh where the change happens. Exact, and costs nothing while nothing changes:
@@ -668,8 +678,9 @@ event.on("item.obtain", function(ctx)
 end)
 ```
 
-Option two — poll. Both pollers ride `event.every`, which counts whole heartbeats of
-`event.TICK_MS` (500 ms), so the real period rounds up to a multiple of 500.
+Option two — subscribe. Both subscriptions ride `event.every`, which counts whole heartbeats of
+`event.TICK_MS` (500 ms), so the floor's real period rounds up to a multiple of 500; the rebuild
+signal, when it is armed, adds a refresh on top of that beat rather than replacing it.
 
 ```lua
 panel:mount(root)
@@ -706,16 +717,29 @@ Details that matter:
 - Each drives the one copy behind that handle. Another copy needs its own call.
 
 <Callout type="info">
-Whether Palworld raises a catchable UFunction when a UI is rebuilt is **unmeasured**, and it is
-what would replace the poll. The dump names four candidates —
-`PalUserWidget:OnSetup` and `:OnClosed` on the base class every Palworld screen derives from,
-`PalUIHUDLayoutBase:AddHUD`, and `CommonActivatableWidget:ActivateWidget` — and eliminates a
-fifth, `UPalUIManagerSubsystem`, which declares zero functions.
+**Ask what is actually driving a refresh rather than trusting this page.** `UI.refreshDriver(ms)`
+reads the live arming and hands the answer back as data:
 
-Two things still have to be measured before any of them is hooked: the three that read as
-BlueprintImplementableEvents give a blueprint that implements one its **own** UFunction of that
-name, so a hook on the base may catch nothing; and a hook armed during the world-load storm has
-wedged the shared dispatch before. `pf_hook ui-update-event` is the run that settles both.
+```lua
+local d = UI.refreshDriver(250)
+
+d.kind     --> "event+poll" when the rebuild signal is armed, "poll" when it is not
+d.event    --> the UFunction path(s) armed right now, or nil
+d.state    --> "armed" | "waiting" | "refused" | "unavailable" — why kind is what it is
+d.staleMs  --> how stale a panel may be when nothing rebuilt a screen (the floor's number)
+d.eventStaleMs --> how long after a rebuild the refresh lands: one heartbeat, or nil
+d.why      --> one sentence naming the measurement, ready for a log line
+```
+
+`kind == "poll"` is never a failure state — it is what shipped before the signal existed, and it
+is the honest answer at the title screen, in a session where arming was refused, and in a headless
+test where there is no `RegisterHook` at all. Branch on `kind` only to *say* how stale a readout
+may be, never to decide whether refreshing works: the floor is under every answer.
+
+The measurement itself is `pf_hook ui-update-event`, and it can be re-run: the 18 candidates that
+stayed silent — `PalHUDService:ShowCommonUI` for popups, `RemoveHUD` for a return to title, the
+world-HUD pair, the CommonUI container's add/remove — were never given an action that would
+exercise them, so they stay named in the hook rather than written off.
 </Callout>
 
 ## Input: what a panel takes from the player
@@ -916,8 +940,8 @@ two rather than shrugged at.
 | `:isMounted()` | `boolean` | whether a render reported success and `unmount` has not run |
 | `:find(name)` | `userdata?` | the live widget a node claimed with `name = "..."`; nil until mounted |
 | `:lastError()` | `string?` | why the last mount attempt gave up, as a sentence |
-| `:autoRefresh(ms)` | `boolean` | poll `refresh()` off the heartbeat; `ms` defaults to 500 |
-| `:autoMount(root, ms)` | `boolean` | poll the whole lifecycle: retry `mount` while down, refresh while up; `ms` defaults to 2000 |
+| `:autoRefresh(ms)` | `boolean` | drive `refresh()` off Palworld's rebuild signal AND the heartbeat as the floor; `ms` defaults to 500 |
+| `:autoMount(root, ms)` | `boolean` | the whole lifecycle on the same driver: retry `mount` while down, refresh while up; `ms` defaults to 2000 |
 | `:state()` | `table` | the instance — what `self` is inside the seams and the bindings |
 | `:name()` | `string` | the element's `name`, or its id |
 | `:description()` | `string?` | the element's `description` |
@@ -934,6 +958,7 @@ And on the module itself:
 | `UI.routeKey(name)` | `string?, string` | who would take that key, and why |
 | `UI.routeMouse(button)` | `string?, string` | the same for a mouse button |
 | `UI.report()` | `string[]` | the stack, the key binds, the outstanding grabs and the live keymap |
+| `UI.refreshDriver(ms)` | `table` | what actually refreshes a panel right now: `kind`, `event`, `state`, `staleMs`, `why` |
 | `UI.Class` | `table` | the base class every element extends |
 
 ## Building your own screen
@@ -1493,7 +1518,8 @@ put the Border inside it — Frame{ Border{ color = {...}, ... } }
   working either.
 - `z` decides drawing only where the host has a z, and event routing always: a key reaches the
   topmost element, a mouse press the topmost that wants it, and neither is consumed.
-- Polling is the only refresh driver there is. `:autoMount(root, ms)` is the mount path every
-  live PalForge UI takes, and a panel is stale by up to `ms`.
+- Refreshing rides two drivers: Palworld's own rebuild signal, and the heartbeat as the floor
+  underneath it. `:autoMount(root, ms)` is the mount path every live PalForge UI takes, a panel is
+  stale by at most `ms`, and `UI.refreshDriver(ms)` says which driver is actually armed.
 
 Next, read [Item](/docs/api/item) to make the things your button hands out.

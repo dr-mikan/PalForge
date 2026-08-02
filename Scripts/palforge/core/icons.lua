@@ -89,6 +89,12 @@ M.TABLES = {
 -- fallback rather than promoted to the primary route because a table that IS loaded is found
 -- more cheaply by name, and this path costs one LoadAsset per name per retry window; its real
 -- job is the case discovery cannot cover — a table not loaded yet.
+--
+-- THE LAST TWO ARE NOT ICON TABLES, and they are here because findTable is now shared (see
+-- M.findTable at the bottom of the discovery section): core/recipes.lua asks for the item
+-- RECIPE table, and that is precisely a table a session may not have loaded yet — the
+-- item-datatable-row-read hook says as much, "try again after opening a crafting bench". Both
+-- spellings are in 01_datatables.txt:54127 and :86788 under the same directory as the icons.
 local PACKAGE_DIRS = {
     DT_ItemIconDataTable                = "/Game/Pal/DataTable/Item/",
     DT_ItemIconDataTable_Common         = "/Game/Pal/DataTable/Item/",
@@ -97,6 +103,8 @@ local PACKAGE_DIRS = {
     DT_partnerSkillIconDataTable        = "/Game/Pal/DataTable/PartnerSkill/",
     DT_BuildObjectIconDataTable         = "/Game/Pal/DataTable/MapObject/Building/",
     DT_BuildObjectIconDataTable_Common  = "/Game/Pal/DataTable/MapObject/Building/",
+    DT_ItemRecipeDataTable              = "/Game/Pal/DataTable/Item/",
+    DT_ItemRecipeDataTable_Common       = "/Game/Pal/DataTable/Item/",
 }
 
 -- The column each icon table carries its texture ref under. MEASURED, one column per table:
@@ -310,6 +318,20 @@ local function findTable(name)
     if tbl then return noteTable(name, tbl, "path") end
     return nil
 end
+
+-- EXPORTED, because core/recipes.lua needs exactly this and nothing else about icons.
+--
+-- Nothing in findTable is icon-specific: it never reads a column, and the four routes it tries
+-- in order (session cache -> targeted FindObject -> rate-limited sweep -> path fallback) are the
+-- only DataTable discovery this tree has. The alternative was a second copy inside the recipe
+-- reader, and this codebase has already had to merge three near-identical copies of a liveness
+-- check back together (core/uobject's header records what the drift between them cost). The
+-- cache it hands out is the one described above: positives only, misses retried after
+-- RETRY_COOLDOWN — which is what lets a caller run before the table is loaded and answer later.
+--
+---@param name string   # the table's OBJECT name, "DT_ItemRecipeDataTable_Common"
+---@return any          # the live UDataTable, or nil
+M.findTable = findTable
 
 -- ---------------------------------------------------------------------------
 -- reading the icon

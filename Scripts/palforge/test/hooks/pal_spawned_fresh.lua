@@ -1,15 +1,17 @@
 -- test/hooks/pal-spawned-fresh — DOES pal.spawned MEAN "A PAL THAT DID NOT EXIST A MOMENT AGO"?
 --
--- plan/TODO.md Open / Events. Marked at api/pal.lua's TODO(pal-spawned-fresh) (:180 as this was written).
+-- ⭐ IT RAN, AND IT ANSWERED YES: 27 firings on 2026-08-02, 17 of them nowhere near a world
+-- load. The source marker it used to point at, in api/pal.lua's onSpawned block, is gone —
+-- replaced there by the finding. What is left here is the instrument.
 --
--- The channel FIRES — that half closed as `pal-spawned-hook`. What a pack cannot tell is whether
--- a firing means a FRESH pal. Every firing observed so far landed in the same second as
--- world.ready, i.e. the load storm, when every pal in range initialises at once. That proves the
--- hook works and says nothing about the case a pack actually cares about, and the two look
--- identical from here because only the FIRST firing per channel is announced.
+-- THE QUESTION IT ASKED. The channel FIRES — that half closed as `pal-spawned-hook`. What a pack
+-- could not tell was whether a firing means a FRESH pal: every firing observed before this run
+-- landed in the same second as world.ready, i.e. the load storm, when every pal in range
+-- initialises at once, and the two look identical from here because only the FIRST firing per
+-- channel is announced.
 --
 -- So the measurement is a TIMESTAMP, not a hook: a firing whose timestamp sits nowhere near
--- world.ready is the whole answer.
+-- world.ready is the whole answer, and seventeen of them did.
 --
 -- ⚠️ DO NOT RE-PROBE PalCharacter:BroadcastOnCompleteInitializeParameter. It is MEASURED SILENT
 -- (core/event.lua:1683 records the measurement) — armed after world.ready in a real save, pals caught
@@ -57,7 +59,7 @@ end
 
 hooks.declare{
     id    = "pal-spawned-fresh",
-    item  = "Open / Events",
+    item  = "Closed 2026-08-02 — 27 firings, 17 of them clear of a world load",
     needs = { world = true },
     desc  = "timestamp every pal.spawned firing against world.ready, so a fresh spawn can be "
          .. "told from the load storm",

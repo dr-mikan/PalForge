@@ -16,9 +16,11 @@
 --   * onActivate — observed in real combat, carried by PalActionBase:OnBeginAction, with the
 --     move's own EPalWazaID on `self` (skill-activate-source, Closed);
 --   * onEquip / onUnequip — observed from AddPassiveSkill (skill-passive-source, Closed);
---   * onHit — the one that does NOT fire. Both of its sources are measured silent from both
---     sides, and that is the Open item skill-hit-source; the marker on the field says what
---     the measurements rule out and why inference must not be wired in its place.
+--   * onHit — the one that CANNOT fire, and that is SETTLED rather than pending. Both of its
+--     sources are measured silent from both sides, and nothing in the damage path carries a
+--     waza id at all, so there is no third source left to find. skill-hit-source closes as a
+--     negative; declaring onHit now WARNS at define time, and :hit(target) is the only thing
+--     that runs it. The comment on the field carries the measurement.
 -- This header used to say, in capitals, that none of the four had ever been seen firing. It
 -- was written before the runs and left standing after them — which is the expensive kind of
 -- stale comment, because the failure is silent: a pack author who believes it writes around a
@@ -39,6 +41,22 @@
 -- full account, including the one route the dumps CLOSED, is in core/event.lua's SOURCE skill
 -- block.
 --
+-- WHAT AN ACTIVE SKILL CAN AND CANNOT DO, and it is a boundary rather than a gap
+-- (skill-projectile-spawn, measured 2026-08-02). A handler decides WHEN it runs and nothing
+-- about WHAT comes out: no call reachable from Lua on this build puts a projectile, an effect
+-- actor or anything else in the world. Six routes were walked in a real save — the running
+-- build DECLARED all six parameter lists — and every one of them takes a struct
+-- (FVector / FTransform / FRandomStream / an out-struct by reference), which is the argument
+-- shape that faults inside UE4SS's own marshalling where pcall cannot see it. So all six were
+-- refused by name and the process survived because the hook refused rather than called.
+-- Two consequences are IMPLEMENTED here rather than left as prose:
+--   * :spawnProjectile() exists and always answers false with that reason, so the refusal has
+--     a name and a measurement instead of being a function a pack author cannot find;
+--   * :activate answers `ran, reason` and no longer returns true for a handler that reported
+--     it produced nothing — a handler says so by returning false, which is what the curated
+--     native/skills.lua FlameThrower now does. `true` means the cooldown was stamped and the
+--     handler ran; it has never meant, and cannot mean, that the world changed.
+--
 --   local Fireball = Skill{
 --       id = "example:Fireball", kind = "active", element = "fire",
 --       cooldown = 3.0, power = 50,
@@ -51,6 +69,7 @@ local icons     = require("palforge.core.icons")
 local schema    = require("palforge.core.schema")
 local character = require("palforge.core.character")
 local uo        = require("palforge.core.uobject")
+local log       = require("palforge.utils.log").scope("skill")
 
 --=============================================================================
 -- SPEC — the shape of Skill{ ... }, declared as data so it is enforced on every call and
@@ -115,32 +134,48 @@ local Events = schema.define("Skill.Spec.Events", {
     -- and neither has an EPalWazaID. So no amount of struct walking on the damage hook could
     -- ever have named the skill, and the attacker side is the only side that can. Do not
     -- re-probe those structs.
-    -- TODO(skill-hit-source): BOTH hooks are now MEASURED SILENT, and the two measurements are
-    -- worth keeping apart because they rule out different things.
-    --   * MakeDamageInfoByWazaType: silent while a pal fought and killed another pal.
-    --   * PalAnimNotifyState_AttackCollision:OnHit: silent in the same session, and silent
-    --     again on 2026-07-26 in a session where the player killed a pal by hand — pal.damaged
-    --     and pal.death both carried, so a blow certainly connected and certainly did damage.
-    -- So a hit does not reach either, from either side.
+    -- skill-hit-source, CLOSED AS A NEGATIVE. There is no TODO marker here any more, because
+    -- the item is not waiting on a measurement: it is waiting on nothing. Three things were
+    -- measured, and they rule out different halves of the question.
+    --   * MakeDamageInfoByWazaType: armed, silent while a pal fought and killed another pal.
+    --   * PalAnimNotifyState_AttackCollision:OnHit: armed, silent in that same session, and
+    --     silent again on 2026-07-26 in a session where the player killed a pal by hand —
+    --     pal.damaged and pal.death both carried, so a blow certainly connected and certainly
+    --     did damage. A hit reaches neither hook, from either side.
+    --   * AND THE DAMAGE PATH CARRIES NO WAZA AT ALL, which is why a third hook would not help.
+    --     FPalDamageInfo has 40 fields, FPalDamageRactionInfo 6, FPalDamageResult 12, and not
+    --     one of the 58 is an EPalWazaID — the closest are EPalWazaCategory (a Melee/Shot
+    --     bucket, not an identity) and FName AttackStaticItemID (the weapon). The victim side
+    --     cannot answer "which skill" at any depth of struct walking, so the silence above is
+    --     not a hook that was pointed at the wrong function. Do not re-probe those structs.
+    -- THAT IS WHY THE doc STRING SAYS "never fires" AND NOT "not yet wired". The two read the
+    -- same to a pack author skimming schema.help and mean opposite things: one is a channel
+    -- that will light up on some later build or some later pass, and the other is a handler
+    -- that can never run because the game does not know what to tell it. Declaring onHit is
+    -- WARNED at define time for the same reason Audio.Spec.soundFile is refused at define time
+    -- (api/audio.lua's refuseSoundFile) — an author who writes a handler that can never be
+    -- called deserves to hear about it while they are writing it, not from a silence.
     --
-    -- WHAT THAT LEAVES, and it is not another hook. skill.activate DOES work and it carries the
-    -- waza id (source "PalActionBase:OnBeginAction", measured). pal.damaged works. Nothing in
-    -- the damage path carries a waza at all — FPalDamageInfo has 40 fields, FPalDamageRactionInfo
-    -- 6, FPalDamageResult 12, and not one is an EPalWazaID — so the id can only reach a hit by
-    -- being remembered from the activation that preceded it and attributed to the damage that
-    -- follows.
-    --
-    -- That is INFERENCE, not a source, and it must not be wired as if it were one: a pal whose
-    -- move misses, a second pal attacking in the same window, or damage from anything else would
-    -- all be attributed to whatever activated last. If it is ever built it belongs behind a name
-    -- that says so — a correlated guess a pack opts into — and never on onHit, which promises the
-    -- game told us.
-    -- The doc string is the only one of the four that still says a channel does not carry, and
-    -- it says it because that is the measurement. onActivate / onEquip / onUnequip were
-    -- corrected upwards on the same pass; this one must not be, or the correction is just a
-    -- mood. :hit(target) is the working entry point.
+    -- WHY THERE IS NO CORRELATED GUESS BEHIND ANOTHER NAME EITHER, and this was designed and
+    -- then declined rather than forgotten. The id could reach a hit by being REMEMBERED from
+    -- the activation before it and attributed to the damage after it — skill.activate works and
+    -- carries the waza id (source "PalActionBase:OnBeginAction", measured), pal.damaged works,
+    -- and a window of a second or so between them is all a correlator would need. That is
+    -- INFERENCE, not a source, so it could never live on onHit, which promises the game told
+    -- us; it would have to be a separate channel whose NAME says it is a guess. It is not
+    -- offered because the one number that would justify it has never been measured: how often
+    -- the guess would be wrong. test/hooks/skill_hit_source.lua block [3] exists to count
+    -- exactly that — damage events with NO activation in the preceding second (damage a
+    -- correlator would blame on a move that had already finished) and damage events with MORE
+    -- THAN ONE (damage it would have to pick between) — and the run that would have produced
+    -- those two counts measured nothing, because nobody hit anything inside its window. So
+    -- PalForge would be shipping a guess with an unmeasured error rate, to authors who cannot
+    -- see the error rate, in place of a source. Run that hook in a real fight first; the
+    -- numbers it prints are the whole decision, and a channel named for what it is
+    -- ("skill.attributedHit", opted into, ctx carrying the gap and the count of candidates) is
+    -- the only shape it may ever take. Never onHit.
     { "onHit",      type = "function", sig = "fun(self: Skill.Handle, target: any, ctx: table)",
-                    doc = "NOT LIVE - both sources measured silent (skill-hit-source); only :hit() runs it" },
+                    doc = "NEVER FIRES on this build and not for want of a hook: nothing in the damage path carries a waza id, so the game cannot say which move did the damage (skill-hit-source, measured). Declaring it warns at define time; only :hit(target) runs it" },
     -- TWO SOURCES for the pair, and again the first is measured rather than assumed.
     --   1. /Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill(FName AddSkill, FName
     --      OverrideSkill) — Pal.hpp:21155 — and :RemovePassiveSkill(FName SkillId) — :21003.
@@ -346,6 +381,27 @@ local Skill = {}
 
 local wrap  -- forward decl; the Skill.Handle wrapper is defined in the BOTTOM section
 
+-- THE onHit DEFINE-TIME WARNING. A WARNING and not an error, and the difference is the whole
+-- design: Audio.Spec.soundFile is refused outright because it was ACTIVELY HARMFUL (it outranked
+-- soundId, so declaring it silenced audio that was playing), while onHit is merely never
+-- dispatched to — :hit(target) runs it, on any value, and a pack that drives its own combat
+-- bookkeeping is entitled to declare one. Erasing that would break working packs to punish a
+-- misunderstanding. So the author is TOLD, once per definition, at the moment they wrote it,
+-- with the id in the line so a pack with fifty skills knows which one to look at. This is the
+-- half of the item a doc string cannot do: schema.help("Skill.Spec.Events") is read by someone
+-- who already suspects, and this reaches someone who does not.
+local function warnUndispatchableOnHit(spec)
+    if type(spec.events) ~= "table" or spec.events.onHit == nil then return end
+    log.warn(string.format(
+        "Skill{ id = %q } declares onHit, and NOTHING WILL EVER CALL IT for you. The game does "
+        .. "not report which move did a hit on this build: both candidate sources are measured "
+        .. "silent and the damage path carries no waza id at all (FPalDamageInfo 40 fields, "
+        .. "FPalDamageRactionInfo 6, FPalDamageResult 12, not one an EPalWazaID) -- the closed "
+        .. "negative skill-hit-source. Your handler runs ONLY when you call skill:hit(target) "
+        .. "yourself. If you wanted 'the game fired my skill', that is onActivate, which does "
+        .. "fire (via PalActionBase:OnBeginAction, measured).", tostring(spec.id)))
+end
+
 ---Define a skill and register it.
 ---`spec` is validated against Skill.Spec: `id` is required, unknown fields are an error.
 ---
@@ -362,6 +418,7 @@ local wrap  -- forward decl; the Skill.Handle wrapper is defined in the BOTTOM s
 local function define(spec, opts)
     local register, pack = schema.defineOpts(opts, "Skill")
     spec = Spec:validate(spec, "Skill")
+    warnUndispatchableOnHit(spec)
     local cls = setmetatable({
         id          = spec.id,
         name        = spec.name or spec.id,
@@ -424,24 +481,110 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 
 -- ---- actions (the working entry points — see the header on why these are manual) ----
 
----Fire this skill for `owner` NOW, unless it is still cooling down. Returns false when the
----skill is passive (nothing is touched, not even the cooldown), false when the cooldown
----blocked it, and otherwise true — the handler ran to completion. A handler that RAISES is
----swallowed here (fail-soft) and reported as false too, with the cooldown already stamped:
----the clock is stamped before the handler runs, so a raising handler still consumed it.
+---Fire this skill for `owner` NOW, unless it is still cooling down. Answers `ran, reason`.
+---
+---`true` means EXACTLY this: the cooldown was stamped and this skill's onActivate ran to
+---completion without raising and without reporting a failure of its own. It does NOT mean
+---anything happened in the world, and on this build it cannot: no call reachable from a skill
+---handler puts a projectile or any other actor into Palworld — all six candidate routes take a
+---struct argument and are refused (measured 2026-08-02, hook skill-projectile-spawn; the
+---refusal is :spawnProjectile below). An active skill is a well-timed Lua function, and what
+---it does is whatever your handler does.
+---
+---`false` NEVER comes alone — the second return is an English reason, one of:
+---  * the skill is passive (nothing is touched, not even the cooldown);
+---  * the cooldown blocked it, with the remainder;
+---  * the handler raised, with the error (swallowed here, fail-soft);
+---  * THE HANDLER REPORTED THAT IT COULD NOT DO THE THING. That is the case a boolean used to
+---    swallow, and it is now how a handler stays honest: `return false` from onActivate — with
+---    an optional reason string — and :activate answers false with it. Anything else the
+---    handler returns (a number, a string, true, nothing at all) still means "ran", so no
+---    existing handler changes meaning. native/skills.lua's curated FlameThrower is the worked
+---    example: it asks :spawnProjectile, is refused, and returns that refusal.
+---The clock is stamped BEFORE the handler runs, so a raiser — and a handler that reports
+---failure — still consumed the cooldown.
 ---@param owner any?   # the Pal / character using the skill
 ---@param ctx   table? # extra context handed to onActivate
----@return boolean fired
+---@return boolean ran
+---@return string? reason  # always present when `ran` is false
 function Handle:activate(owner, ctx)
     local cls = self._cls
-    if cls.kind == "passive" then return false end
-    if cooling(cls, owner) then return false end
+    if cls.kind == "passive" then
+        return false, "this skill is kind = \"passive\": a passive is equipped, not fired "
+            .. "(:equip / :teach), so nothing was run and the cooldown was not touched"
+    end
+    if cooling(cls, owner) then
+        return false, string.format("still cooling down: %.2fs left of the declared %ss",
+            self:cooldownLeft(owner), tostring(cls.cooldown))
+    end
     stamp(cls, owner)
-    local ok = pcall(function() cls:onActivate(owner, ctx or {}) end)
-    return ok
+    -- The handler's OWN return is consulted now, and only a literal `false` counts. nil (a
+    -- handler that ends without a return) is by far the commonest value and must keep meaning
+    -- "ran"; so must a truthy value a handler happens to compute. Opting in by returning false
+    -- is what makes "ran and produced nothing" expressible at all, which a single boolean never
+    -- could — see plan/TODO.md Owed work §1, which asked for exactly this distinction.
+    local ok, reported, why = pcall(function() return cls:onActivate(owner, ctx or {}) end)
+    if not ok then
+        return false, "the handler raised (caught here, not propagated): " .. tostring(reported)
+    end
+    if reported == false then
+        return false, (type(why) == "string" and #why > 0) and why
+            or "the handler reported that it could not produce its effect, and named no reason"
+    end
+    return true
 end
 
+-- The measured reason, written once so :spawnProjectile and anything that grows beside it
+-- cannot drift from each other or from the hook that produced it.
+local NO_PROJECTILE_ROUTE =
+    "no projectile can be spawned from Lua on this build. Measured 2026-08-02 by hook "
+    .. "skill-projectile-spawn in a live save: the running build DECLARED the parameter list of "
+    .. "every candidate (ShootOneBullet, CreateChildSkillEffect, APalSkillEffectBase::Initialize, "
+    .. "BeginDeferredActorSpawnFromClass, FinishSpawningActor, FindWazaForBP) and all six carry a "
+    .. "struct argument -- an FVector, an FTransform, an FRandomStream or an out-struct by "
+    .. "reference. A struct marshals by layout, so a mismatch faults inside UE4SS below Lua where "
+    .. "pcall cannot see it and takes the process with it, and PalForge has never pushed one. The "
+    .. "one argument-free entry on the whole surface, ShootOneBulletDefault(), needs a live "
+    .. "APalMonsterEquipWeaponBase, which a skill handler is never handed. This is a refusal, not "
+    .. "a bug: nothing about it fails quietly"
+
+---Put a projectile in the world for this skill. ALWAYS answers `false, reason` on this build.
+---
+---It exists so the boundary has a NAME. A pack author writing onActivate goes looking for the
+---call that makes something come out, and the honest answer to that search is a function that
+---refuses and says why — measured, dated and attributed to the hook that measured it — rather
+---than no function at all, which reads as "I have not found it yet" and costs an evening.
+---
+---Use it as the curated native/skills.lua FlameThrower does: ask it, and hand its refusal
+---straight back out of your handler, so `:activate` answers false with the reason instead of
+---true for a fireball nobody saw:
+---```lua
+---  onActivate = function(self, owner) return self:spawnProjectile(owner) end
+---```
+---If the route ever opens, this is the one function that changes and every handler shaped like
+---that starts working; nothing else in the API has to move.
+---@param owner any?  # the Pal / character the projectile would come from
+---@param opts table? # accepted and ignored: there is nothing yet to configure
+---@return boolean spawned  # always false
+---@return string reason
+function Handle:spawnProjectile(owner, opts)
+    -- The arguments are named and unread on purpose: they are the shape the call WILL have if
+    -- the route ever opens, so a handler written against it today does not have to be rewritten
+    -- then. Refusing with the signature already right is cheaper than refusing with no signature.
+    return false, NO_PROJECTILE_ROUTE
+end
+
+---The same refusal as a plain string, for a UI, a log line or a pack that wants to explain
+---itself in its own words. Never nil — when a route exists this stops being a constant.
+---@return string
+function Skill.projectileRefusal() return NO_PROJECTILE_ROUTE end
+
 ---Report a hit on `target`: runs onHit. Ignores the cooldown and `kind`.
+---
+---THE ONLY THING THAT EVER RUNS onHit, and that is measured rather than provisional: the game
+---does not report which move did a hit on this build — both candidate sources are silent and
+---the damage path carries no waza id at all (skill-hit-source). So "report" is literal. YOU
+---decide a hit happened and YOU say so; nothing here watches the world for one.
 ---@param target any
 ---@param ctx table?
 ---@return boolean ok  # false only when the handler raised

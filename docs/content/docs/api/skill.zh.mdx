@@ -560,15 +560,20 @@ end
 
 - **被动的写入是测过的。** `AddPassiveSkill` 把一个被动装到了活着的 `BP_ChickenPal_C` 上，读回来也看到了；
   `skill.equip` 的第一个事件也正是这么来的。
-- **主动技能的写入没有测过。** `AddEquipWaza` / `RemoveEquipWaza` / `ClearEquipWaza` 从来没有被看到成功
-  装到一只帕鲁身上。唯一一次真的写入之后 1.4 秒，Palworld 就关闭了；而那次用的是过宽的 `PalCharacter`
-  检索，目标很可能是个 NPC —— 所以“写错了对象”是目前最有力的解释，但那不是可以拿来发布的事实。
+- **主动技能的写入同样是测过的，自 2026-08-02 起。** `pf_hook pal-skills-equip` 在一个真实存档上返回
+  **8 通过 / 0 失败**：`AddEquipWaza` 装上了 `Human_Punch`（`EPalWazaID 1`），并在一只活着的
+  `PalMonsterCharacter` 上读了回来，`:forget` 把它取下，`teachAll(pal)` 回答 `2, 2`，`ClearEquipWaza`
+  清空了配置，之后每一个被取下的招式都被恢复并核对过。**游戏一直开着。**
+- **曾经摆在这里的那次崩溃，问题出在目标，不在写入。** 更早的一次运行在 1.4 秒之后就伴随着 Palworld
+  关闭，而那次检索用的是 `FindAllOf("PalCharacter")` —— 这个名字太宽了。继承关系是
+  `APalMonsterCharacter : APalNPC : APalCharacter`，所以更宽的那个名字也会匹配到村民和商人，而它们
+  一个装备技能都没有。要就要 `PalMonsterCharacter`，`:skillsOn` 和这个钩子现在都是这么做的。
 
 <Callout type="warn">
-装上**主动技能**是这里唯一还没被测量的能力，对应未决项目 `pal-skills-equip`。别假定，去看那个布尔值，
-并且在一个丢了也不心疼的存档里试。这个测量不是框架自己会做的事，而是一个声明好的测试钩子：在 UE4SS
-控制台里运行 `pf_hook pal-skills-equip`，它需要 `env.debug`，而且因为它会写进真实存档，还需要
-`env.debugHooks["pal-skills-equip"]`。读配置和写被动都已定下来，没定下来的只有这一件。
+往一个真实角色里写**主动技能**已经定下来了，但第一次仍然值得在一个丢了也不心疼的存档上做 ——
+`env.debugHooks["pal-skills-equip"]` 把这个钩子自己的写入挡在一道逐次实验的同意后面，理由正是这个，
+而不是因为结果还有疑问。别假定，去看那个调用返回的布尔值：`:teach` 报告的是游戏做了什么，而读它的
+整合包，就是游戏哪天变了会立刻发现的整合包。
 </Callout>
 
 <Callout type="info">
@@ -896,7 +901,7 @@ PalForge: Skill: field "events" (Skill.Spec.Events): unknown field "onActivated"
 - `kind = "passive"` 会让 `:activate` 返回 `false`；这类技能请用 `:equip` 和 `:unequip`。
 - 处理函数崩溃只会得到 `false`，日志里什么都没有，所以要在里面自己打日志。
 - `pal:skillsOf()` 给出的是一只帕鲁*声明*的 id。`skill:skillsOn(actor)` 读回活着的角色真正带着的那四个
-  列表，`skill:teach(actor)` 装上一个（被动已定下来，主动技能仍未测量），`pal:teachAll(actor)` 一次装上
-  整份声明列表。
+  列表，`skill:teach(actor)` 装上一个 —— 被动已经测过，自 2026-08-02 起主动技能也测过了 ——
+  `pal:teachAll(actor)` 一次装上整份声明列表，它在一只活着的帕鲁上回答了 `2, 2`。
 
 接下来读 [Effect](/docs/api/effect) —— 被动技能要持续做事，需要的计时器就在那里。

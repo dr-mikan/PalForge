@@ -1,15 +1,21 @@
 -- test/hooks/item-datatable-row-read — CAN A SCALAR COLUMN BE INDEXED OFF A ROW STRUCT?
 --
--- plan/TODO.md Open / `item-datatable-row-read`. Marked at api/item.lua's TODO(item-datatable-row-read) (:223 as this was written).
+-- ⭐ ANSWERED, AND IMPLEMENTED. The struct route WORKS: 2 pass on this hook, and `Item.Handle:
+-- recipeOf` now reads the game's own row through core/recipes.lua instead of handing back what
+-- a pack declared. CONFIRMED RUNNING IN A GAME 2026-08-02 23:33:
+--     recipes: Arrow -> Arrow x10, work=1000.0, from { Stone x2, Wood x2 }
+-- The source marker this header used to point at is gone, because the implementation replaced
+-- the comment that carried it. What remains below is the measurement that got there, and this
+-- hook is now the RE-MEASUREMENT: run it against another save or another patch and block [2]
+-- says in one line whether the struct route still answers.
 --
--- ⚠️ THIS HOOK ALSO CARRIES `item-recipe-of`, which is folded in rather than given a file of its
--- own. The two are one measurement: `Item.Handle:recipeOf` returns `self.recipe` and never
--- reaches the game (Class:recipeOf, api/item.lua:204; Handle:recipeOf at :392), and the ONLY reason it does not reach the game is the
--- question below. Block [4] calls recipeOf on a vanilla id and prints what a pack author gets
--- today, so the item's user-facing half is in the same log block as its cause. Splitting them
--- would mean two runs to answer one question.
+-- ⚠️ THIS HOOK ALSO CARRIES `item-recipe-of`, folded in rather than given a file of its own,
+-- and the two were always one measurement: recipeOf reached no further than `self.recipe`, and
+-- the ONLY reason it did not reach the game was the question below. Block [4] calls recipeOf on
+-- a vanilla id and prints what a pack author gets, so the item's user-facing half stays in the
+-- same log block as its cause. Splitting them would mean two runs to answer one question.
 --
--- WHAT IS ALREADY SETTLED, so this hook does not re-ask it:
+-- WHAT WAS ALREADY SETTLED BEFORE THIS RUN, so the hook does not re-ask it:
 --   * The ACCESSORS exist and are UE4SS's own bindings on UDataTable, not UFunctions — which is
 --     why every reflection sweep missed them (dumps/cxx/Engine.hpp shows UDataTable declaring
 --     five properties and ZERO functions). `dt:FindRow(<plain Lua STRING>)`, `dt:GetRowNames()`,
@@ -23,11 +29,12 @@
 --     GetDataTableColumnAsString zipped against GetRowNames, so the CONTROL below is a route
 --     this tree has already proved.
 --
--- WHAT IS NOT SETTLED, and is the whole hook: the only row VALUE ever read here was a
+-- WHAT THIS HOOK ASKED, and the answer it got: the only row VALUE ever read here had been a
 -- TSoftObjectPtr, and that userdata answers none of the nineteen member names a soft pointer
--- could plausibly expose — which forced the column-as-string detour. THE TSoftObjectPtr FAILURE
--- DOES NOT APPLY TO AN int32 OR AN FName, and nobody has tried one. A recipe row is a 15-field
--- struct of ints and FNames.
+-- could plausibly expose — which forced the column-as-string detour. The guess was that the
+-- TSoftObjectPtr failure does NOT apply to an int32 or an FName, and a recipe row is a 15-field
+-- struct of ints and FNames. That guess held: indexing the struct by column name answers, so a
+-- recipe is ONE call rather than the thirteen-call column detour block [3] plans for.
 --
 -- ⚠️ AND THE TRAP THAT COST THREE WRONG TURNS: array elements come back wrapped in
 -- RemoteUnrealParam and the real value is behind `:get()`. Without unwrapping, the array reads
@@ -72,7 +79,7 @@ end
 
 hooks.declare{
     id    = "item-datatable-row-read",
-    item  = "Open / Item  (+ item-recipe-of, folded in)",
+    item  = "Closed 2026-08-02 — kept as a regression tripwire (recipeOf reaches the game)",
     needs = { world = true },
     desc  = "can a scalar / FName column be indexed off the struct dt:FindRow(id) returns, or "
          .. "must a recipe be assembled column-by-column the way icons are",
@@ -222,19 +229,20 @@ hooks.declare{
         end
 
         --------------------------------------------------------------------
-        h:section("[4] item-recipe-of: what a pack author gets TODAY")
+        h:section("[4] item-recipe-of: what a pack author gets")
         --------------------------------------------------------------------
         local Item = require("palforge.api.item")
         local handle = Item.get(ROW)
         local recipe
         local okRecipe = pcall(function() recipe = handle:recipeOf() end)
         h:value("Item.get('" .. ROW .. "'):recipeOf()",
-            okRecipe and (recipe == nil and "nil — this is the reported defect" or probe.describe(recipe))
+            okRecipe and (recipe == nil and "nil — with nothing declared, that now means the ROW "
+                .. "could not be read; compare block [2]" or probe.describe(recipe))
                 or "raised")
-        h:note("recipeOf returns the DECLARED `self.recipe` and never reaches the game "
-            .. "(Class:recipeOf). Whichever of [2] or [3] answered above is what it should "
-            .. "call instead. api/item.lua:207 additionally still says reading a row 'has "
-            .. "never been observed to work from Lua on this build' — icons-row-read closed that "
-            .. "claim on 1183 rows and the comment is stale whatever this run says.")
+        h:note("recipeOf reads the game's own row through core/recipes.lua when a pack declared "
+            .. "none — the route block [2] proved — and falls back to the declared `self.recipe` "
+            .. "when there is one (Class:recipeOf). It answered in a game on 2026-08-02 23:33: "
+            .. "Arrow -> Arrow x10, work=1000.0, from { Stone x2, Wood x2 }. A nil here is "
+            .. "therefore news about THIS save, not the standing behaviour.")
     end,
 }

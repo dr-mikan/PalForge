@@ -20,16 +20,16 @@ Palworld's own pak.
 | --- | --- | --- |
 | Static / skeletal mesh | **No** | Yes — working, and class-checked |
 | Procedural geometry | **Yes** — a `.obj` off disk | not applicable |
-| Texture | Unproven — wired, never once called | Yes |
+| Texture | **Yes** — a PNG off disk, imported and cached | Yes |
 | Sound | **No** | Yes — a catalog of 1957 event names |
 | Material | **No** | Yes — parent a dynamic instance to a loaded one |
 
 Read the two "No" rows as a statement about the engine, not about the framework. Nothing about
 those routes is half-written; there is no call to make.
 
-So PalForge today is a framework for **reusing the game's own assets**, with one working
-disk route (OBJ) and one wired-but-unobserved one (PNG textures). That is worth knowing before
-you model anything.
+So PalForge today is a framework for **reusing the game's own assets**, with two working disk
+routes — OBJ geometry and PNG textures, both watched working — and three rows that no call
+exists for. That is worth knowing before you model anything.
 
 ## Meshes: the vanilla route only
 
@@ -98,7 +98,7 @@ or from C, and one made from inside PalForge's own test suite. A relative path t
 fails at `io.open` with the string you wrote, which is readable; a path joined to a guessed
 directory is not.
 
-## Textures: wired, never called
+## Textures: measured, and what one costs
 
 `Renderer.importTexture` calls `UKismetRenderingLibrary::ImportFileAsTexture2D(UObject*
 WorldContextObject, FString Filename)`. Both arguments are read off the shipping binary, the world
@@ -106,8 +106,16 @@ context really is a plain `UObject*` so an actor qualifies, and the path really 
 rather than an `FName`. The call goes through `core.signature`, so a build that does not declare
 the function refuses without ever touching the game.
 
-**No run has ever called it.** Nothing has watched a texture come back. Treat a PNG of your own as
-unproven rather than broken, and expect to have to find out yourself.
+**It was called in a loaded save on 2026-08-02, and it answered.** A pack-supplied PNG came back as
+a real `Texture2D` — the class chain is `Texture2D : Texture : StreamableRenderAsset : Object`, so
+it satisfies the `UTexture*` the material setter declares — and the second call for the same path
+returned the identical value, which only the cache can do. It also imported fine on a path that had
+missed a moment earlier, so a file written after the first attempt is not written off.
+
+What that route costs you is one `UTexture2D` per distinct path per session, allocated and never
+freed: UE4SS's Lua layer has no destroy call, so nothing in this process can release it. That is
+the cache's real job — a texture named by a mesh that attaches once per spawned pal is imported
+once, not once per pal.
 
 The `/Game/...` half of the same field is the stronger of the two by evidence — it is
 `LoadAsset` and `StaticFindObject`, which this tree uses successfully every session. `texture`
@@ -119,7 +127,7 @@ tried:
 Mesh{ id = "mypack:Heli", model = Mesh.assets.SK.AttackHelicopter,
       texture = Mesh.assets.T.HelicopterBase }
 
--- unproven: a PNG of your own, relative to this file
+-- measured: a PNG of your own, relative to this file
 Mesh{ id = "mypack:Body", kind = "obj", model = "body.obj", texture = "body.png" }
 ```
 
@@ -149,11 +157,11 @@ dynamic material instance on a component and parent it to a material that is alr
 write parameters into it. `Mesh.assets.MI` carries one measured material instance path for that,
 and `material` on a mesh spec is where it goes.
 
-<Callout type="warn">
+<Callout type="info">
 The parameter *names* a Palworld material answers to were read off the running game
-(`BaseColor`, `Base Texture`, `Normal Map`, and the rest), and the writes are declared exactly as
-called — but no run has yet watched a colour change on screen. `mesh-color-change` is the declared
-hook that measures it.
+(`BaseColor`, `Base Texture`, `Normal Map`, and the rest), the writes are declared exactly as
+called, and on 2026-08-02 `mesh-color-change` was run with someone watching: a chest went
+**red → green → blue**. The whole route is measured end to end.
 </Callout>
 
 ## Summary
@@ -161,7 +169,7 @@ hook that measures it.
 - Meshes, sounds and materials cannot come out of your folder; point at a `/Game/...` path instead.
 - A `.obj` can, and a relative path in `model` or `texture` resolves against the `.lua` file that declared it.
 - `file.packDir()` and `file.resolvePackPath()` are the same rule for paths you build yourself.
-- A PNG texture is wired with the right signature and has never been called; treat it as unproven.
+- A PNG texture imports and is cached by path; each distinct path costs one texture that lives as long as the session.
 - `soundFile` raises at define time rather than silencing a sound that was working.
 - The vanilla side of every row is real, and [Vanilla assets](/docs/guides/vanilla-assets) lists what is known to exist.
 

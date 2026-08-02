@@ -1,5 +1,10 @@
--- palforge/core/character.lua — a pal's or player's own parameter object, and the two things
--- worth writing to it: its active skills and its passive skills.
+-- palforge/core/character.lua — a pal's or player's own parameter object, and the four things
+-- worth writing to it: its active skills, its passive skills, its SATIETY and its HP.
+--
+-- The two halves of this file are two different questions and they are kept apart below:
+-- the SKILL writes (AddEquipWaza / AddPassiveSkill, measured 2026-08-02, 8 pass / 0 fail) and
+-- the VITALS writes (SetFullStomach / AddHPByRate, measured 2026-08-02 by the hook
+-- item-satiety-write — see the "vitals" section at the bottom, which carries its own header).
 --
 -- Palworld keeps everything per-CHARACTER on a UPalIndividualCharacterParameter, one per
 -- individual, reached from any actor in a single call (dumps/cxx/Pal.hpp:32340, on the
@@ -76,20 +81,25 @@
 -- merchants too, and an NPC has no equipped move. Asking one of those reported zeros that looked
 -- exactly like a broken reader. Ask PalMonsterCharacter.
 --
--- TODO(pal-skills-equip): unknown whether the ACTIVE writes land — AddEquipWaza, RemoveEquipWaza
--- and ClearEquipWaza. AddEquipWaza fires with evidence "declared" and the read-back did not show
--- the move, but that read-back came from an NPC, so it proved nothing either way and the question
--- is open again on its own terms. Note the same correction applies to the crash: the one run that
--- performed a write was followed by the game closing 1.4 s later, and that write also went to a
--- probably-NPC target. Putting an equipped MOVE on a villager is a far more plausible way to
--- destabilise the game than putting one on a pal. The write test is opt-in behind
--- _G.PALFORGE_TEST_WRITE_WAZA until someone chooses to spend a throwaway save on it, and
--- test/hooks/pal-skills-equip is where that run belongs (writes = true, so it is gated on
--- env.debugHooks["pal-skills-equip"] as well).
--- THE PASSIVE HALF IS NO LONGER PART OF THIS. Closing skill-passive-source needed M.addSkill to
+-- ⭐ THE ACTIVE WRITES LAND — AddEquipWaza, RemoveEquipWaza and ClearEquipWaza, all three.
+-- 8 pass / 0 fail, 2026-08-02, in a real save on a live PalMonsterCharacter, measured by
+-- test/hooks/pal_skills_equip.lua: AddEquipWaza put Human_Punch (EPalWazaID 1, evidence
+-- "declared") on the pal and the read-back saw it, RemoveEquipWaza took it back off,
+-- Pal.Handle:teachAll answered `2, 2`, and ClearEquipWaza cleared the loadout and every move it
+-- removed was taught back and verified. THE GAME STAYED UP.
+-- THE CRASH BELONGED TO THE TARGET, NOT TO THE WRITE, and that is the lesson to keep. The one
+-- earlier run that wrote was followed by Palworld closing 1.4 s later, and it had found its
+-- target through FindAllOf("PalCharacter") — too wide, exactly as the paragraph above says — so
+-- what it wrote to was probably a villager, and the empty read-back that made the write look
+-- lost was an NPC's. Putting an equipped MOVE on a villager is a far more plausible way to
+-- destabilise the game than putting one on a pal. Ask PalMonsterCharacter.
+-- THE WRITE TEST STAYS OPT-IN, behind env.debugHooks["pal-skills-equip"] (or the older
+-- _G.PALFORGE_TEST_WRITE_WAZA) — not because the answer is in doubt now, but because it mutates
+-- a loaded save and block [4] of that hook clears a real pal's moves before putting them back.
+-- THE PASSIVE HALF WAS NEVER PART OF THIS. Closing skill-passive-source needed M.addSkill to
 -- put a passive on a live BP_ChickenPal_C and read it back, and it did: "skill.equip carried its
--- first event from source AddPassiveSkill". So AddPassiveSkill LANDS on this build, measured, and
--- what is left open is the EPalWazaID trio above.
+-- first event from source AddPassiveSkill". So AddPassiveSkill LANDS on this build too, and the
+-- whole skill surface in this file is measured rather than assumed.
 local log            = require("palforge.utils.log").scope("character")
 local object_manager = require("palforge.core.object_manager")
 local signature      = require("palforge.core.signature")
@@ -736,14 +746,15 @@ end
 ---Clear every ACTIVE skill from `actor`. Passives are untouched — the game has no equivalent
 ---bulk call for them, and inventing one out of a loop would hide a partial failure.
 ---
----⚠️ TODO(pal-skills-equip): NO CALLER, NO CHECK, NEVER RUN. Nothing in this tree calls this and
----no test covers it, so it is in the same unverified-write class as AddEquipWaza — one wrap of
----ClearEquipWaza with a read-back that has never been read. It is kept rather than deleted
----because it is the only bulk clear the game declares and because deleting it would lose the
----read-back shape; it is marked so nobody reads the read-back as evidence. The run that settles
----it is test/hooks/pal-skills-equip (needs = { world, pal }, writes = true — so it is gated on
----env.debugHooks["pal-skills-equip"] and on a throwaway save), which should clear a live pal's
----moves and assert `#skillsOn(pal).active == 0` afterwards.
+---⭐ IT HAS A CALLER AND A CHECK NOW. Run 2026-08-02 in a real save on a live
+---PalMonsterCharacter by test/hooks/pal_skills_equip.lua, block [4]: ClearEquipWaza ran, the
+---read-back showed no active skills, and every move it removed was taught back and verified —
+---part of that hook's 8 pass / 0 fail. The comment this replaces said "NO CALLER, NO CHECK,
+---NEVER RUN", and none of those three is true any more.
+---⚠️ IT IS STILL DESTRUCTIVE AND CARRIES NO UNDO. The moves it clears are gone unless the caller
+---wrote them down first, which is exactly what the hook does before calling it. That hook is
+---needs = { world, pal }, writes = true — gated on env.debugHooks["pal-skills-equip"] and meant
+---for a throwaway save — and the same care applies to any other caller.
 ---@return boolean ok
 function M.clearSkills(actor)
     local p = M.paramsOf(actor)
@@ -756,6 +767,380 @@ function M.clearSkills(actor)
         and "the read-back shows no active skills"
         or "the read-back still shows active skills (or could not be taken)"))
     return cleared
+end
+
+--=============================================================================
+-- VITALS — satiety and HP
+--
+-- MEASURED IN A LIVE SAVE, 2026-08-02, by test/hooks/item_satiety_write.lua (the hook
+-- `item-satiety-write`), on the player pawn. Everything below is written against that run and
+-- nothing below is written against a dump alone:
+--   * THE READ ANSWERS:  GetFullStomach 31.648391723633 of GetMaxFullStomach 100.0.
+--   * THE DECLARATION IS READABLE: SetFullStomach takes ONE argument on this build. That fact
+--     had to be measured — the CXX dump has no body for the setter at all (its class body is
+--     Pal.hpp:20822-21161 and declares only the readers), and only the reflection listing
+--     carries the name (dumps/reflection/02_reflection.txt:1298). So the argument's PROPERTY
+--     CLASS is READ OFF THE RUNNING BUILD here, exactly as the hook read it, and is never
+--     assumed — see oneArgumentKind.
+--   * ⭐ THE SATIETY WRITE LANDS: 31.648391723633 -> 21.648391723633 on a live character, seen
+--     by the read-back, and put back exactly by a second call.
+--   * THE HP WRITE LANDS: a plain float pushed at AddHPByRate moved a live character's health
+--     and the read-back saw it.
+--
+-- TWO OBJECTS, and asking the wrong one is how a present function reads as absent:
+--   satiety  -> UPalIndividualCharacterParameter — M.paramsOf(actor), the same object the
+--               skill writes above use.
+--   HP rate  -> UPalCharacterParameterComponent — M.parameterComponentOf(actor), the component
+--               hanging off the ACTOR (APalCharacter::CharacterParameterComponent, Pal.hpp:8960;
+--               getter at :9078). AddHPByRate is declared there (Pal.hpp:16016) and nowhere else.
+--
+-- WHY THERE IS NO ABSOLUTE HP WRITE IN THIS FILE, and why callers are given a RATE instead.
+-- Every declared absolute HP write takes FFixedPoint64, a STRUCT (`{ int64 Value; }`,
+-- Pal.hpp:120-124) — UPalCharacterParameterComponent::SetHP (:15933) and ::AddHP (:16018),
+-- UPalIndividualCharacterParameter::AddHP (:21156) — and a struct argument is the one shape that
+-- faults inside UE4SS's own marshalling, where pcall cannot see it and the process dies
+-- (core/signature.lua:5-17). AddHPByRate(float Rate) is the single exception on the whole HP
+-- surface. So HP is written here as a FRACTION of maximum and never as points, and a caller who
+-- asks for points is REFUSED with that measurement rather than served something that faults.
+--
+-- READ-BACK OR IT DID NOT HAPPEN. Every function below returns true only when a read taken
+-- AFTER the write saw the value it was supposed to see; anything else is `false, reason`, and
+-- the reason is an English sentence naming which of the four things went wrong (no object, no
+-- read, no declaration, no movement). That is the same contract M.addSkill keeps, and it is the
+-- only reason :teach and :restoreOn are worth trusting.
+--=============================================================================
+
+-- Property classes core/signature will not marshal on anything short of a successful walk
+-- (core/signature.lua:77-80), mirrored here because THIS file reads SetFullStomach's
+-- declaration itself rather than handing signature.check an expectation to compare against —
+-- there is no dump to write an expectation from.
+local UNVERIFIABLE = {
+    StructProperty = true, ArrayProperty = true, MapProperty = true, SetProperty = true,
+    DelegateProperty = true, MulticastDelegateProperty = true, TextProperty = true,
+}
+
+-- Satiety is compared in POINTS (the bar was 100.0 wide on the character this was measured on)
+-- and an HP rate in FRACTIONS, so the two "did it move" tolerances are not the same number.
+local SATIETY_EPS = 0.01
+local RATE_EPS    = 1e-4
+
+-- What arrived, and what number is inside it. A float getter answers a plain Lua number;
+-- GetHP answers FFixedPoint64, so what arrives is the STRUCT and the number is behind its one
+-- `Value` field. A struct RETURN is not the hazard a struct ARGUMENT is — nothing is being
+-- pushed — but it is the difference between reading an HP and reading a wrapper, which is the
+-- same trap RemoteUnrealParam set for the icon column (core/icons.lua).
+local function numberOf(v)
+    if type(v) == "number" then return v end
+    if type(v) ~= "userdata" then return nil end
+    for _, field in ipairs({ "Value", "value" }) do
+        local inner; pcall(function() inner = v[field] end)
+        if type(inner) == "number" then return inner end
+    end
+    return nil
+end
+
+-- One zero-argument getter, through core/signature so a name this build does not declare is
+-- refused rather than called. nil means "could not read", never a zero.
+local function readNumber(owner, fnName)
+    if owner == nil then return nil end
+    local ok, ret = signature.call(owner, fnName, {})
+    if not ok then return nil end
+    return numberOf(ret)
+end
+
+-- DESCRIBE, THEN CALL — NEVER THE REVERSE, for the one function in this tree whose declaration
+-- no dump carries. Walks `fnName` on the live object and answers the property class of its
+-- SINGLE argument, or nil plus the English reason it may not be called: absent, unwalkable,
+-- the wrong arity, or an argument of a kind that marshals by layout.
+--
+-- Memoized per function NAME, because a declaration is a property of the class and cannot
+-- change inside a session — and only ever from a walk that really happened: a refusal caused by
+-- having no object to ask is not a fact about the build and is never cached.
+local declaredKind, declaredWhy = {}, {}
+local function oneArgumentKind(owner, fnName)
+    if declaredKind[fnName] then return declaredKind[fnName] end
+    if declaredWhy[fnName] then return nil, declaredWhy[fnName] end
+    if owner == nil then
+        return nil, fnName .. ": no live object to read the declaration off"
+    end
+
+    local fn, how = signature.find(owner, fnName)
+    if not fn then
+        declaredWhy[fnName] = string.format("%s is not declared on this build, so it was not "
+            .. "called (measured route: the reflection listing names it on "
+            .. "/Script/Pal.PalIndividualCharacterParameter, and this build must agree before "
+            .. "anything is pushed at it)", fnName)
+        return nil, declaredWhy[fnName]
+    end
+
+    local params = signature.paramsOf(fn)
+    if not params then
+        declaredWhy[fnName] = string.format("%s exists (%s) and this UE4SS build will not walk "
+            .. "a UFunction's properties, so its parameter list was NOT read and nothing may be "
+            .. "pushed at it — a call written against a list nobody read is the one failure "
+            .. "shape pcall cannot see", fnName, tostring(how))
+        return nil, declaredWhy[fnName]
+    end
+
+    local args, shape = {}, {}
+    for i, p in ipairs(params) do
+        shape[i] = string.format("%s:%s", tostring(p.name), tostring(p.kind))
+        if not (i == #params and p.name == "ReturnValue") then args[#args + 1] = p end
+    end
+    if #args ~= 1 then
+        declaredWhy[fnName] = string.format("%s declares %d arguments on this build and PalForge "
+            .. "only knows what ONE of them would mean — [%s]", fnName, #args,
+            table.concat(shape, ", "))
+        return nil, declaredWhy[fnName]
+    end
+    if UNVERIFIABLE[args[1].kind] then
+        declaredWhy[fnName] = string.format("%s declares %s:%s, and a %s marshals BY LAYOUT — "
+            .. "the shape that faults inside UE4SS where pcall cannot see it. It is not called",
+            fnName, tostring(args[1].name), tostring(args[1].kind), args[1].kind)
+        return nil, declaredWhy[fnName]
+    end
+
+    log.info(string.format("%s declaration read off the live build: [%s]", fnName,
+        table.concat(shape, ", ")))
+    declaredKind[fnName] = args[1].kind
+    return args[1].kind
+end
+
+---The UPalCharacterParameterComponent hanging off `actor`, or nil when it cannot be reached.
+---This is a DIFFERENT object from M.paramsOf's: AddHPByRate is declared here (Pal.hpp:16016)
+---and GetHPRate is read here, while satiety and the skill lists are on the individual
+---parameter object. nil is UNKNOWN, never "this character has no health".
+function M.parameterComponentOf(actor)
+    if actor == nil then return nil end
+    local comp
+    pcall(function() comp = actor.CharacterParameterComponent end)
+    local okv, valid = pcall(function() return comp ~= nil and comp.IsValid and comp:IsValid() end)
+    if okv and valid then return comp end
+    -- The property is not readable on every build; the getter (Pal.hpp:9078) is the fallback.
+    local ok, got = signature.call(actor, "GetCharacterParameterComponent", {})
+    if not ok or got == nil then return nil end
+    local okv2, valid2 = pcall(function() return got.IsValid and got:IsValid() end)
+    if okv2 and valid2 then return got end
+    return nil
+end
+
+---This character's satiety and the maximum it can hold, as two numbers — 31.648391723633 of
+---100.0 on the pawn this was measured on. nil means the read did not answer (no world, not a
+---PalCharacter, the parameter object out of reach); nil is UNKNOWN, never "not hungry".
+---@return number? current, number? max
+function M.satietyOf(actor)
+    local p = M.paramsOf(actor)
+    if not p then return nil end
+    local current = readNumber(p, "GetFullStomach")
+    if current == nil then return nil end
+    return current, readNumber(p, "GetMaxFullStomach")
+end
+
+---This character's health as a FRACTION of its maximum (1.0 = full), or nil when the component
+---could not be reached or did not answer. This is the read-back M.addHPByRate is measured with.
+---@return number?
+function M.hpRateOf(actor)
+    return readNumber(M.parameterComponentOf(actor), "GetHPRate")
+end
+
+---Where a satiety restore of `amount` LANDS: current + amount, clamped to [0, max]. PURE — no
+---engine, no actor — so the arithmetic every food item in every pack depends on is decidable
+---headless, and it is asserted there rather than only in a save. `max` may be nil (the maximum
+---did not read), in which case only the floor is applied.
+---@return number
+function M.satietyTarget(current, max, amount)
+    local target = (tonumber(current) or 0) + (tonumber(amount) or 0)
+    if max and target > max then target = max end
+    if target < 0 then target = 0 end
+    return target
+end
+
+---Write `value` as this character's satiety and report WHAT THE READ-BACK SAW.
+---
+---true only when GetFullStomach reads back the value that was asked for. false plus an English
+---reason for every other outcome, including the one that matters most: the game accepted the
+---call and the value did not move. The value is written as given — clamping is
+---M.satietyTarget's job and M.addSatiety's — so asking for more than the maximum is answered
+---by whatever the game then reports, named in the reason rather than smoothed over.
+---@return boolean ok, string? reason
+function M.setSatiety(actor, value)
+    if type(value) ~= "number" or value ~= value then
+        return false, "setSatiety: a satiety value must be a number, got " .. type(value)
+    end
+    local p = M.paramsOf(actor)
+    if not p then
+        return false, "no character parameters on that actor (not a PalCharacter, or no world)"
+    end
+    local before = readNumber(p, "GetFullStomach")
+    if before == nil then
+        return false, "GetFullStomach did not answer on this character, so there is nothing to "
+            .. "measure a write against and nothing was written — a write with no read-back is "
+            .. "not a measurement"
+    end
+    local kind, why = oneArgumentKind(p, "SetFullStomach")
+    if not kind then return false, why end
+
+    local ok = signature.call(p, "SetFullStomach", { kind }, value)
+    if not ok then
+        return false, string.format("SetFullStomach(%s) was refused or raised — the "
+            .. "[PalForge.signature] line above names which", tostring(value))
+    end
+    local after = readNumber(p, "GetFullStomach")
+    if after == nil then
+        return false, "SetFullStomach was issued and GetFullStomach stopped answering, so "
+            .. "nothing was measured. That is UNKNOWN, and it is not reported as success"
+    end
+    if math.abs(after - value) > SATIETY_EPS then
+        return false, string.format("SetFullStomach(%s) ran and the read-back says %s (it was "
+            .. "%s). The call reached the game and the value is not what was asked for",
+            tostring(value), tostring(after), tostring(before))
+    end
+    log.info(string.format("setSatiety: %s -> %s", tostring(before), tostring(after)))
+    return true
+end
+
+---Restore (or, with a negative `amount`, drain) satiety POINTS, clamped to [0, max].
+---
+---true only when the read-back moved. A character who is already full is `false` with a reason
+---saying so and NOTHING is written: there is no change to measure, and reporting success for a
+---write that could not have done anything is the exact dishonesty this file exists to avoid.
+---@return boolean ok, string? reason
+function M.addSatiety(actor, amount)
+    if type(amount) ~= "number" or amount ~= amount then
+        return false, "addSatiety: an amount of satiety must be a number, got " .. type(amount)
+    end
+    local current, max = M.satietyOf(actor)
+    if current == nil then
+        return false, "satiety could not be read on that actor (no world, not a PalCharacter, "
+            .. "or GetFullStomach did not answer), so nothing was written"
+    end
+    local target = M.satietyTarget(current, max, amount)
+    if math.abs(target - current) <= SATIETY_EPS then
+        return false, string.format("satiety is already %s of %s, so restoring %s changes "
+            .. "nothing and nothing was written", tostring(current), tostring(max),
+            tostring(amount))
+    end
+    local ok, why = M.setSatiety(actor, target)
+    if not ok then return false, why end
+    log.info(string.format("addSatiety %s: %s -> %s (max %s)", tostring(amount),
+        tostring(current), tostring(target), tostring(max)))
+    return true
+end
+
+---Heal (or, with a negative rate, hurt) by a FRACTION of maximum HP: 0.25 is a quarter of full
+---health, 1 a full heal, -0.1 the write the 2026-08-02 hook made and put back.
+---
+---A RATE, not points, and that is a property of this build rather than a style choice: every
+---absolute HP write declares FFixedPoint64, a struct, and AddHPByRate(float) is the only entry
+---on the whole HP surface that takes a scalar (see this section's header). A points value is
+---REFUSED here with that measurement rather than converted behind the caller's back.
+---
+---true only when GetHPRate or GetHP was read before and after and MOVED.
+---@return boolean ok, string? reason
+function M.addHPByRate(actor, rate)
+    if type(rate) ~= "number" or rate ~= rate then
+        return false, "addHPByRate: a rate must be a number, got " .. type(rate)
+    end
+    if rate == 0 then
+        return false, "addHPByRate: a rate of 0 heals nothing, so nothing was written"
+    end
+    if rate < -1 or rate > 1 then
+        return false, string.format("addHPByRate: %s is not a rate. A rate is a FRACTION of "
+            .. "maximum HP — 0.25 is a quarter of full health, 1 is a full heal — because "
+            .. "UPalCharacterParameterComponent::AddHPByRate(float) (Pal.hpp:16016) is the only "
+            .. "HP write on this build that does not take the FFixedPoint64 struct, and there "
+            .. "is no points-based route to fall back on (measured 2026-08-02, hook "
+            .. "item-satiety-write)", tostring(rate))
+    end
+
+    local comp = M.parameterComponentOf(actor)
+    if not comp then
+        return false, "no UPalCharacterParameterComponent on that actor. AddHPByRate is declared "
+            .. "there (Pal.hpp:16016) and NOT on the individual parameter object, so this is a "
+            .. "miss rather than an absent function, and nothing was written"
+    end
+    local p = M.paramsOf(actor)
+    local beforeRate, beforeHP = readNumber(comp, "GetHPRate"), readNumber(p, "GetHP")
+    if beforeRate == nil and beforeHP == nil then
+        return false, "neither GetHPRate nor GetHP answered on this character, so a write could "
+            .. "not have been measured and none was made"
+    end
+
+    local ok = signature.call(comp, "AddHPByRate", { "FloatProperty" }, rate)
+    if not ok then
+        return false, string.format("AddHPByRate(%s) was refused or raised — the "
+            .. "[PalForge.signature] line above names which", tostring(rate))
+    end
+    local afterRate, afterHP = readNumber(comp, "GetHPRate"), readNumber(p, "GetHP")
+    local moved = (beforeRate ~= nil and afterRate ~= nil
+                   and math.abs(afterRate - beforeRate) > RATE_EPS)
+        or (beforeHP ~= nil and afterHP ~= nil and beforeHP ~= afterHP)
+    if not moved then
+        if rate > 0 and (afterRate or beforeRate or 0) >= 1 - RATE_EPS then
+            return false, "the character was already at full health, so healing changed nothing"
+        end
+        return false, string.format("AddHPByRate(%s) was issued and nothing moved (rate %s -> "
+            .. "%s, hp %s -> %s). The call ran and reached nothing", tostring(rate),
+            tostring(beforeRate), tostring(afterRate), tostring(beforeHP), tostring(afterHP))
+    end
+    log.info(string.format("addHPByRate %s: rate %s -> %s", tostring(rate),
+        tostring(beforeRate), tostring(afterRate)))
+    return true
+end
+
+-- The vitals M.restore knows how to write, and the function that writes each. Adding a vital is
+-- adding a row here plus a field on Item.Spec.Restores — and it may only be added once a hook
+-- has watched a read-back move, which is what these two have (2026-08-02).
+local VITALS = {
+    satiety = { apply = function(actor, v) return M.addSatiety(actor, v) end,
+                doc = "satiety points" },
+    hpRate  = { apply = function(actor, v) return M.addHPByRate(actor, v) end,
+                doc = "health as a fraction of maximum" },
+}
+
+---Apply a whole restore — `{ satiety = 20, hpRate = 0.25 }` — to one character.
+---
+---This is the shape `Item.Spec.restores` declares and the call api/item routes item.use
+---through, so a pack's food item and a direct core call take exactly the same path.
+---
+---true only when EVERY vital named was measured to land. A partial result is false, and the
+---reason names each vital that did not land AND each that did — a half-applied restore is a
+---thing a caller has to be told about rather than a thing to average into one boolean.
+---An unknown key is refused outright: silently ignoring `{ stamina = 10 }` would be a promise
+---this build has never been shown to keep.
+---@return boolean ok, string? reason
+function M.restore(actor, restores)
+    if type(restores) ~= "table" then
+        return false, "restore: a table of vitals is required, e.g. { satiety = 20 }"
+    end
+    local named = {}
+    for key in pairs(restores) do
+        if not VITALS[key] then
+            local known = {}
+            for k, v in pairs(VITALS) do known[#known + 1] = k .. " (" .. v.doc .. ")" end
+            table.sort(known)
+            return false, string.format("restore: %q is not a vital PalForge can write. "
+                .. "Measured and writable on this build: %s", tostring(key),
+                table.concat(known, ", "))
+        end
+        named[#named + 1] = key
+    end
+    if #named == 0 then
+        return false, "restore: nothing was declared — a restore names at least one vital"
+    end
+    table.sort(named)
+
+    local landed, failed = {}, {}
+    for _, key in ipairs(named) do
+        local ok, why = VITALS[key].apply(actor, restores[key])
+        if ok then landed[#landed + 1] = key
+        else failed[#failed + 1] = string.format("%s: %s", key, tostring(why)) end
+    end
+    if #failed > 0 then
+        return false, table.concat(failed, "; ")
+            .. (#landed > 0 and (" — but " .. table.concat(landed, " and ") .. " did land") or "")
+    end
+    return true
 end
 
 return M

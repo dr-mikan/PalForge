@@ -219,9 +219,9 @@ Building{
 ---@field model string # a /Game/... USkeletalMesh or UStaticMesh path (see Mesh.assets); for procedural / obj, an .obj file path - absolute, or relative to the .lua file that declares it
 ```
 
-文件里有 **37 个类和 30 个别名**，而且它很长：生成器报的是 8752 行。其中 30 个类是已声明的
+文件里有 **38 个类和 30 个别名**，而且它很长：生成器报的是 8759 行。其中 31 个类是已声明的
 结构，和 `schema.all()` 返回的名字一一对应：`Mesh.Spec`，`Pal.Spec` 及其 `Events`、
-`Material`，`Item.Spec` 及其 `Recipe`、`Events`，四个 `Building.Spec.*`，`Skill.Spec` 及其
+`Material`，`Item.Spec` 及其 `Recipe`、`Events`、`Restores`，四个 `Building.Spec.*`，`Skill.Spec` 及其
 `Events`，`Effect.Spec` 及其 `Events`，`Audio.Spec`，十一个 `UI.Node.*`，`UI.Spec` 和
 `UI.Spec.Host`，以及 `Coord`。
 
@@ -250,7 +250,7 @@ lua5.4 tools/gen-types.lua
 它只打印一行，那一行就是全部结果：
 
 ```text
-wrote ./Scripts/palforge/types.lua (37 classes, 8752 lines, 8293 native catalog names)
+wrote ./Scripts/palforge/types.lua (38 classes, 8759 lines, 8293 native catalog names)
 ```
 
 `classes` 是它写出的 `---@class` 行数，`lines` 是它写出的文件行数，`native catalog names`

@@ -76,7 +76,7 @@ local SWEEPS  = 3
 
 hooks.declare{
     id    = "mesh-actor-identity",
-    item  = "Foundations / Assets / A-1 (and A-2)",
+    item  = "Closed 2026-08-02 — A-1 confirmed in three separate sessions",
     needs = { world = true },
     desc  = "does a table keyed on a UE4SS actor handle still hit on a later sweep — the "
          .. "measurement the whole per-actor re-key depends on",

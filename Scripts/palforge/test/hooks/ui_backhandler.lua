@@ -35,7 +35,7 @@ local DOWN_S   = 60
 
 hooks.declare{
     id    = "ui-backhandler",
-    item  = "Owed work §2 (declared, shipped, never observed working)",
+    item  = "Closed 2026-08-02 — the healthy negative: input is not swallowed",
     needs = { world = true },
     desc  = "mount a panel that claims the CommonUI BACK action and find out what Esc then does",
     run = function(h)

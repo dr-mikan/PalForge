@@ -253,13 +253,16 @@ end
 -- and refuses rather than calling when the declaration disagrees. Both arguments are the shapes
 -- signature is willing to pass: a float and a live UObject.
 --
--- NOT OBSERVED: nobody has heard this change a volume. Wwise's own SetGameObjectOutputBusVolume
--- takes a LINEAR multiplier where 1.0 is unity, so that is what `volume` is treated as; the
--- header says only "float", so linear-vs-dB is read off the Wwise API, not off this build.
+-- HEARD ONCE, HEDGED, AND STILL NOT SETTLED. Wwise's own SetGameObjectOutputBusVolume takes a
+-- LINEAR multiplier where 1.0 is unity, so that is what `volume` is treated as; the header says
+-- only "float", so linear-vs-dB is read off the Wwise API, not off this build.
+-- test/hooks/audio-setvolume-audible ran on 2026-08-02 at 21:39 — four plays 8 s apart at
+-- 1.0 / 0.25 / 0.0 / 1.0, every call returning true, unity restored — and the operator reported,
+-- hedged, that steps 2 and 3 seemed quieter. The direction matched the prediction. What that run
+-- did NOT establish is whether 0.00 was SILENT, so the hook stays open and a second run, with the
+-- listener told in advance that the question is silence rather than loudness, is what closes it.
 -- Returns true only when the call was ISSUED, never a promise that anything got quieter — and
--- the log line below says "ISSUED" in those words for the same reason. The measurement that
--- would close it needs the game running and a pair of human ears, so it is owed as the declared
--- hook test/hooks/audio-setvolume-audible (C7): play a catalog event, set 0.2, play it again.
+-- the log line below says "ISSUED" in those words for the same reason.
 function NativeSource:setActorVolume(actor, volume)
     -- The VALUE is checked before anything else, including the actor: a FloatProperty is only
     -- safe to marshal when what reaches it is really a finite non-negative number, and refusing
@@ -279,11 +282,12 @@ function NativeSource:setActorVolume(actor, volume)
         -- ONCE per session, deliberately: a fade calls this every frame, and a per-call line
         -- would bury the log. The word that matters is ISSUED — the engine returns nothing, so
         -- this line is a record that the call was made and NOT a claim that anything got
-        -- quieter. Nobody has heard it (see the note above and audio-bus-volume in plan/TODO.md).
+        -- quieter. One hedged listener report is all there is (see the note above).
         volumeNoted = true
         log.info(string.format("SetOutputBusVolume x%.3f ISSUED on the actor's Wwise game object "
-            .. "[%s] - actor-wide, and issued is all it means: no session has confirmed a volume "
-            .. "change, which is what test/hooks/audio-setvolume-audible is for. Said once.",
+            .. "[%s] - actor-wide, and issued is all it means: one hedged listener report "
+            .. "(2026-08-02) matched the direction, and nothing has established that 0.00 is "
+            .. "SILENT, which is what test/hooks/audio-setvolume-audible is still for. Said once.",
             volume, tostring(level)))
     end
     return ok == true

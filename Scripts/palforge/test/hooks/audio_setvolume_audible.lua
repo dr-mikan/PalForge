@@ -1,20 +1,24 @@
--- test/hooks/audio-setvolume-audible — setVolume HAS NEVER BEEN HEARD.
---
--- plan/TODO.md "Owed work" §4, fourth bullet: *"`setVolume` has never been heard —
--- `audio-bus-volume` closed on the declaration."*
+-- test/hooks/audio-setvolume-audible — setVolume HAS BEEN HEARD ONCE, HEDGED. THE QUESTION LEFT
+-- IS WHETHER 0.00 IS SILENT.
 --
 -- WHAT "CLOSED ON THE DECLARATION" MEANS, and why that is not the same as working. The native
 -- call is `UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)`
 -- (dumps/cxx/AkAudio.hpp:748), the Blueprint wrapper for Wwise's SetGameObjectOutputBusVolume.
 -- core/signature checked the live build's declaration against that and let the call through, and
 -- the call did not raise. That eliminates "PalForge called the wrong thing" and eliminates
--- nothing else. api/audio.lua:397's own doc says it: *"True is not a promise that anything got
--- quieter: nothing here has been heard in game."*
+-- nothing else.
 --
--- So this hook plays the SAME sound four times at four bus volumes and asks a person whether it
--- got quieter. There is no engine read that can answer this — Wwise's mixer state is not
--- reflected — so the operator IS the instrument, and the verdict this hook prints is a form for
--- them to fill in rather than a judgement it makes for them.
+-- ⚠️ RUN ONCE ALREADY, on 2026-08-02 at 21:39. All four steps below issued, `setVolume` and
+-- `play` both true on every one, unity restored. Asked whether steps 2 and 3 were quieter, the
+-- operator answered — hedged — that they seemed to be. THE DIRECTION MATCHED THE PREDICTION, and
+-- that is why this hook is not simply repeated: what one hedged "seemed quieter" cannot separate
+-- is a bus volume that WORKS from one that merely wobbles. The discriminating step is number 3,
+-- at 0.00, and the question for the listener is SILENCE — not "was it quieter". A sound that is
+-- still faintly audible at 0.00 and a sound that is gone are different findings.
+--
+-- There is no engine read that can answer this — Wwise's mixer state is not reflected — so the
+-- operator IS the instrument, and the verdict this hook prints is a form for them to fill in
+-- rather than a judgement it makes for them.
 --
 -- ⚠️ WHAT IT MOVES, AND WHAT IT PUTS BACK. SetOutputBusVolume scales what ONE emitter — the
 -- player actor's Wwise game object — sends to its output bus. It is ACTOR-WIDE: it moves every
@@ -41,7 +45,7 @@ local STEPS = {
 
 hooks.declare{
     id    = "audio-setvolume-audible",
-    item  = "Owed work §2 (declared, shipped, never observed working)",
+    item  = "Open (1) — the one item nothing has settled",
     needs = { world = true, player = true },
     desc  = "play one sound at four output-bus volumes so a person can say whether setVolume "
          .. "does anything audible",
@@ -86,8 +90,9 @@ hooks.declare{
         --------------------------------------------------------------------
         h:section("[2] four volumes, eight seconds apart")
         --------------------------------------------------------------------
-        h:ask("LISTEN. The same explosion plays four times, 8 s apart, at bus volume 1.0, 0.25, "
-            .. "0.0 and 1.0. Say afterwards whether steps 2 and 3 were quieter.")
+        h:ask("LISTEN, AND THE QUESTION IS STEP 3. The same explosion plays four times, 8 s apart, "
+            .. "at bus volume 1.0, 0.25, 0.0 and 1.0. A previous run already answered 'quieter, I "
+            .. "think'. What is needed this time: was the THIRD one SILENT, or just quiet?")
         for i, s in ipairs(STEPS) do
             h:note("step %d at t+%ds: volume %.2f — %s", i, s.at, s.volume, s.expect)
         end
@@ -125,9 +130,11 @@ hooks.declare{
             end
             h:log("NOTE THE ANSWER IS NOT IN THIS LOG. Every `true` above means the native call "
                 .. "was ISSUED and core/signature let it through. What is owed is one of these:")
-            h:log("NOTE   (1) steps 2 and 3 were audibly quieter -> audio-setvolume-audible "
-                .. "CLOSES, and api/audio.lua:397's 'nothing here has been heard in game' "
-                .. "sentence must be rewritten to say it has.")
+            h:log("NOTE   (1) step 3 was SILENT (not merely quiet) -> audio-setvolume-audible "
+                .. "CLOSES, and Handle:setVolume's doc string in api/audio.lua — which currently "
+                .. "records one hedged report and says the 0.00 case is unestablished — must be "
+                .. "rewritten to say the parameter is confirmed. 'Quieter, I think' is what the "
+                .. "run of 2026-08-02 already produced and is NOT this answer.")
             h:log("NOTE   (2) all four sounded identical, with true on every line -> the call "
                 .. "runs and does nothing. That is the same shape as the two cheat-manager calls "
                 .. "in 'What the first F1 run already settled' (SpawnMonster and GetItem both ran "
