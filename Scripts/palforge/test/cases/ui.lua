@@ -8,18 +8,19 @@
 -- one, so the polling cases are deterministic too.
 --
 -- Only one case needs anything real and it draws nothing: _widget.owner() must not throw with a
--- world loaded. Every other engine-shaped case is INVERSE-gated — _widget.screen(), the native
--- Button, a declared tree that cannot build, a "screen" host, an input grab and :autoMount's
--- lastError are exercised ONLY when there is no owner to build with, because mounting a real
--- widget on someone's screen from a test is exactly the thing this file refuses to do. TitleMenu
--- is mounted with an EMPTY entry list, which can never inject anything even standing on the
--- title screen.
+-- world loaded. Every other engine-shaped case is gated the other way — _widget.screen(), the
+-- native Button, a declared tree that cannot build, a "screen" host, an input grab and
+-- :autoMount's lastError are exercised ONLY when there is no owner to build with, because
+-- mounting a real widget on someone's screen from a test is exactly the thing this file refuses
+-- to do. TitleMenu is mounted with an EMPTY entry list, which can never inject anything even
+-- standing on the title screen.
 --
--- ⚠️ SO TWO RUNS ARE NEEDED AND NEITHER ONE ALONE COVERS THIS FILE: the refusal paths only run in
--- a session with no world, the success paths only in a world, and the summary line reports "N
--- skipped" without saying which direction. Every gated skip below therefore names its own
--- direction in its reason — see skipNeedsNoGame — so the skips list reads as "these need the
--- other session" rather than as an unexplained shortfall.
+-- ⚠️ AND "NO OWNER TO BUILD WITH" MEANS NO ENGINE, NOT NO WORLD. An owner is a
+-- PalPlayerController or, failing that, a GameInstance, and both are up on the title screen —
+-- measured 2026-08-02 16:39:05, where all six of those cases skipped in the very state they had
+-- been written to run in. They carry NEEDS.NOENGINE now and only a headless lua5.4 run measures
+-- them; the world-gated cases still need a save. THREE RUNS COVER THIS FILE, not two, and the
+-- summary line names all three environments the same way (core/unittests: ENVIRONMENT).
 local T       = require("palforge.core.unittests")
 local support = require("palforge.test.support")
 local UI      = require("palforge.api.ui")
@@ -38,28 +39,43 @@ local s = T.suite("ui")
 -- table is as good as a VerticalBox everywhere the lifecycle itself is under test.
 local function fakeRoot(name) return { __root = name or "root" } end
 
--- ⚠️ WHICH DIRECTION A SKIP WENT, SAID IN THE SKIP ITSELF.
+-- ⚠️ WHICH ENVIRONMENT A SKIP WENT TO, SAID IN THE SKIP ITSELF — AND "NO GAME" MEANT THE ENGINE
+-- ALL ALONG.
 --
 -- No single F1 press can run every check in this tree. Most gated cases are WORLD-GATED — they
--- need a save loaded and skip at the title screen — but a handful are INVERSE-gated: they prove a
--- REFUSAL path (no controller, no owner, no viewport), so they can only run where there is
--- nothing to succeed with, and they skip when a world IS up. There are TEN inverse-gated checks
--- in the whole API suite and six of them are below; the other four are cases/player.lua:151,
--- cases/building.lua:473, cases/events.lua:215 and cases/audio.lua:325. (This said "nine" for
--- as long as there were nine; it is counted from the call sites, not remembered.)
+-- need a save loaded and skip at the title screen. The six below are the opposite, and for a
+-- long time they were called INVERSE-gated and counted as "need no world", which was WRONG in a
+-- way no headless run could show: every one of them asks whether there is an OWNER, a
+-- PlayerController or a viewport to build under, and all three of those are up the moment the
+-- game process is, save or no save.
 --
--- The summary line counts skips per DIRECTION, and this helper is what puts these six in the
--- right bucket. It used to call the bare t:skip, which meant a reason that spelled the direction
--- out in prose still landed in the summary's "did not say which" bucket — so a run inside a save
--- reported "1 need no world, 9 did not say which" while all ten were the same kind of skip.
--- It goes through skipNeedsNoWorld now, so the count and the prose agree. TWO RUNS ARE NEEDED —
--- one at the title screen, one inside a save — and that is what both halves say.
-local function skipNeedsNoGame(t, what)
-    t:skipNeedsNoWorld("SKIPPED THE NO-GAME DIRECTION — " .. what .. ". This is an INVERSE-gated check: it "
-        .. "proves a REFUSAL path, so it only runs in a session with NO world loaded, and it "
-        .. "skips here because one IS. The world-gated checks skip the other way. Run F1 once at "
-        .. "the title screen as well as inside a save; neither run alone covers this file.")
-end
+-- MEASURED 2026-08-02 AT THE TITLE SCREEN, 16:39:05. That run was made specifically to cover
+-- this direction, and all six skipped anyway. The Button case gates on
+-- `widget.findFirst("PalPlayerController")` and it skipped, so a PalPlayerController is up on
+-- the TITLE SCREEN — which also settles `widget.owner()`, whose first branch is that same
+-- lookup and whose last is a GameInstance that exists from process start
+-- (native/ui/_widget.lua:595-598). No world loaded, no pawn anywhere, and the run still
+-- reported "6 need no world" while standing in the exact state "no world" names. Both
+-- directions were closed at once because the two gates were asking different questions:
+-- support.needWorld asks for a PAWN, this helper was asking for an OWNER, and an owner is not a
+-- world — it is an ENGINE.
+--
+-- So these six are NEEDS.NOENGINE now (core/unittests: skipNeedsNoEngine), which is the honest
+-- statement: they can only run in a headless lua5.4 process, no key press in any session state
+-- reaches them, and the summary says so instead of implying a title-screen run would help. The
+-- four checks that really are world-inverse — cases/player.lua, cases/building.lua,
+-- cases/events.lua, cases/audio.lua — all gate on support.player() and all four DID run at the
+-- title screen on that same press, which is what a correctly-typed no-world skip looks like.
+--
+-- The gate is also the SAFETY interlock and stays at least as tight as it was: with no engine
+-- there is no owner and no controller, so nothing here can construct a widget or take the
+-- player's cursor. support.needNoEngine skips a strict superset of what `if widget.owner()`
+-- skipped, and it skips FIRST — the old spelling sat after the setup in one case, so an
+-- :autoMount had already been armed and beaten before the gate was reached.
+--
+-- There is no local wrapper any more. The call is support.needNoEngine(t, what) at the top of
+-- the case, spelled the same way the other four case files spell support.needNoWorld, because a
+-- wrapper is where the direction and the prose got to disagree in the first place.
 
 --=============================================================================
 -- define / get / get_all
@@ -617,6 +633,13 @@ end)
 
 s:test(":autoMount keeps the reason the last attempt gave up, for a loop that never gets in",
 function(t)
+    -- With an engine there is an owner, so host = "screen" resolves and really draws, which is
+    -- the one thing this file will not do. The gate is FIRST now: it used to sit after the
+    -- autoMount and one beat, so in a live session the retry loop was armed and run once before
+    -- the case decided it should not have been.
+    support.needNoEngine(t, "an owner exists, so host = \"screen\" would resolve and put a real "
+        .. "viewport layer on the player's screen instead of failing to")
+
     -- The half that makes a silent retry loop debuggable: :lastError() is what tells an author
     -- why the panel is not up, and it has to survive every beat rather than being reset by the
     -- next attempt.
@@ -625,12 +648,6 @@ function(t)
     t:eq(el:lastError(), nil, "nothing has failed yet")
     el:autoMount(nil, event.TICK_MS)
     beat(1)
-    -- With an owner this resolves and really draws, which is the one thing this file will not do.
-    if widget.owner() then
-        el:unmount()
-        skipNeedsNoGame(t, "an owner exists, so host = \"screen\" would resolve and put a real "
-            .. "viewport layer on the player's screen instead of failing to")
-    end
     t:type(el:lastError(), "string", "a failed attempt records why: " .. tostring(el:lastError()))
     local first = el:lastError()
     beat(2)
@@ -655,10 +672,10 @@ s:test("TitleMenu with no entries reports it injected nothing and never latches"
 end)
 
 s:test("Button's render reports false rather than throwing when there is no controller", function(t)
-    if widget.findFirst("PalPlayerController") then
-        skipNeedsNoGame(t, "a PalPlayerController exists, so Button's render would build a real "
-            .. "widget instead of reporting that it could not")
-    end
+    -- A PalPlayerController is up on the title screen too (measured 2026-08-02 16:39:05), so the
+    -- question is whether there is an ENGINE, not whether there is a world.
+    support.needNoEngine(t, "a PalPlayerController exists, so Button's render would build a real "
+        .. "widget instead of reporting that it could not")
     local btn = native.Button:new{ label = "test", onClick = function() end }
     t:eq(btn:mount(fakeRoot()), false, "no controller means nothing was built")
     t:eq(btn:isMounted(), false, "so the mount does not latch")
@@ -699,11 +716,11 @@ end)
 
 s:test("_widget.screen returns nil and a reason when there is no owner to build under", function(t)
     -- Only run this where screen() cannot succeed: with a real owner it would construct a
-    -- UserWidget and put it on the player's viewport, which no test may do.
-    if widget.owner() then
-        skipNeedsNoGame(t, "an owner exists, so screen() would really construct a UserWidget and "
-            .. "put it on the player's viewport")
-    end
+    -- UserWidget and put it on the player's viewport, which no test may do. widget.owner() falls
+    -- back to the GameInstance (native/ui/_widget.lua:595-598), which exists from process start,
+    -- so "there is no owner" is a statement about the ENGINE and only a headless run satisfies it.
+    support.needNoEngine(t, "an owner exists, so screen() would really construct a UserWidget and "
+        .. "put it on the player's viewport")
     local screen, why = widget.screen()
     t:eq(screen, nil, "no screen without an owner")
     t:type(why, "string", "and a reason rather than a raised error")
@@ -869,10 +886,8 @@ s:test("update and destroy COMPOSE with the tree instead of replacing it", funct
 end)
 
 s:test("a declared element that cannot build reports false and says why", function(t)
-    if widget.owner() then
-        skipNeedsNoGame(t, "an owner exists, and building a real tree from a test is what this "
-            .. "file refuses to do")
-    end
+    support.needNoEngine(t, "an owner exists, and building a real tree from a test is what this "
+        .. "file refuses to do")
     local El = UI{ id = support.id("ui_nobuild"), root = VBox{ Label{ text = "hi" } } }
     local el = El:new{}
     t:eq(el:lastError(), nil, "nothing has failed yet")
@@ -885,10 +900,8 @@ s:test("a declared element that cannot build reports false and says why", functi
 end)
 
 s:test("`host` is resolved by mount, and a host that is not up leaves render unreached", function(t)
-    if widget.owner() then
-        skipNeedsNoGame(t, "an owner exists, so host = \"screen\" would resolve and really draw "
-            .. "a viewport layer instead of leaving render unreached")
-    end
+    support.needNoEngine(t, "an owner exists, so host = \"screen\" would resolve and really draw "
+        .. "a viewport layer instead of leaving render unreached")
     local rendered = 0
     local El = UI{ id = support.id("ui_host"), host = "screen",
                    render = function() rendered = rendered + 1 end }
@@ -1128,10 +1141,8 @@ end)
 
 s:test("an element that asks for the mouse and cannot get it says so and stays clean",
 function(t)
-    if widget.owner() then
-        skipNeedsNoGame(t, "an owner exists, so the grab would succeed and really move the "
-            .. "player's cursor rather than reporting that it could not be taken")
-    end
+    support.needNoEngine(t, "an owner exists, so the grab would succeed and really move the "
+        .. "player's cursor rather than reporting that it could not be taken")
     local El = UI{ id = support.id("ui_input_nogame"), input = "clicks",
                    render = function() end }
     local el = El:new{}
@@ -1692,7 +1703,24 @@ function(t)
     local names, rec = actionNames.names()
     t:truthy(#names >= 244, "at least the 244 shipped UI action names are available: " .. #names)
     t:type(rec.source, "string", "and the record says which copy answered: " .. tostring(rec.source))
-    t:eq(rec.source, "shipped", "headless there is no live table, so the shipped copy answers")
+
+    -- ⚠️ THE SOURCE IS AN ENVIRONMENT READING, AND THIS CASE IS NOT GATED ON IT. This was the
+    -- third of the four checks that failed in both game states on 2026-08-02 — the assertion was
+    -- the bare `t:eq(rec.source, "shipped", "headless there is no live table...")`, which is a
+    -- claim about the ENGINE and is false the moment DT_UIInputAction can be resolved, save or
+    -- no save. Everything ELSE this case asserts (non-empty, unique, really Palworld's actions)
+    -- holds of whichever list answered and is worth MORE against the live one, so the case is
+    -- not skipped in game: only the source claim is asked per environment, which is what
+    -- _widget.gameUIRoot's case a few hundred lines up already does with its host.
+    if support.engine() then
+        t:truthy(rec.source == "live" or rec.source == "shipped",
+            "with an engine either copy may answer, and the record says which: "
+            .. tostring(rec.source) .. " — " .. tostring(rec.why))
+    else
+        t:eq(rec.source, "shipped",
+            "with no engine there is no live table to resolve, so the shipped copy answers")
+    end
+
     local seen, dupes, blank = {}, 0, 0
     for _, n in ipairs(names) do
         if type(n) ~= "string" or #n == 0 then blank = blank + 1 end
@@ -1895,8 +1923,26 @@ s:test("the report ATTRIBUTES a silent key instead of shrugging at it", function
     -- The whole point of the rewrite, asserted. Three armed keys that have never been pressed,
     -- and the reading says something different about each — so the report has to say three
     -- different things rather than one sentence about all of them.
-    local K = native.keys.keys
+    --
+    -- ⚠️ THE KEY TABLE IS SWAPPED, NOT ADDED TO, AND THAT IS THE FIX FOR A REAL FAILURE. This
+    -- case failed in BOTH game states on 2026-08-02 on "NOT ONE of the 3 armed key" — and unlike
+    -- the other three failures that day it is NOT an environment-gating bug and must not be
+    -- gated away. native.keys.report() computes its whole-route verdict over the WHOLE of
+    -- native.keys.keys (native/ui/keys.lua:259-311), and this case used to write its three
+    -- synthetic records INTO the live table. In a real session that table already holds every
+    -- key PalForge armed — the same run reported END, F1..F10, INS and MIDDLE_MOUSE_BUTTON — so
+    -- the count was never 3, and F1 had just been pressed to start the run, so `arrived == 0`
+    -- was false and the verdict line was not emitted at all. The report was right both times;
+    -- the case was measuring the session instead of its own fixture.
+    --
+    -- Swapping the table makes the fixture the whole population, so the verdict is about exactly
+    -- these three in every environment. Nothing is lost by it: a real key's callback closes over
+    -- its RECORD (keys.lua's `fire(r)` is bound at arm time), so a press arriving during the swap
+    -- still counts on the original record and reappears when the table is put back.
     local names = { "PALFORGE_TEST_GAME", "PALFORGE_TEST_FREE", "PALFORGE_TEST_UNMAPPED" }
+    local savedKeys = native.keys.keys
+    local K = {}
+    native.keys.keys = K
     K[names[1]] = { key = names[1], state = "armed", arrivals = 0, routed = 0, blocked = 0 }
     K[names[2]] = { key = names[2], state = "armed", arrivals = 0, routed = 0, blocked = 0 }
     K[names[3]] = { key = names[3], state = "armed", arrivals = 0, routed = 0, blocked = 0 }
@@ -1922,12 +1968,19 @@ s:test("the report ATTRIBUTES a silent key instead of shrugging at it", function
                                1, true),
                 "and an unanswerable key keeps the old, honest 'cannot tell' answer")
             t:truthy(text:find("NOT ONE of the 3 armed key", 1, true),
-                "with the whole-route verdict first, because it outranks every per-key reading")
+                "and the whole-route verdict counts every armed key, this fixture's three: "
+                .. text)
+            -- ORDERING, asserted rather than implied by the sentence above. The verdict outranks
+            -- every per-key reading — if nothing has ever arrived, no per-key answer means
+            -- anything — so it has to come out FIRST of the four trailing lines, and until now
+            -- nothing in this file checked that it did.
+            t:truthy(text:find("NOT ONE of the", 1, true) < text:find(names[1] .. " never", 1, true),
+                "with the whole-route verdict BEFORE the per-key ones, because it outranks them")
         end)
     end)
 
     keymap.FKEY[names[1]], keymap.FKEY[names[2]] = savedMap[1], savedMap[2]
-    for _, n in ipairs(names) do K[n] = nil end
+    native.keys.keys = savedKeys
     if not ok then error(err, 0) end
 end)
 
@@ -1987,7 +2040,19 @@ function(t)
 end)
 
 s:test("keymap.refresh with no game reads nothing and blanks nothing", function(t)
-    -- A refresh attempted at the title screen must not destroy a reading taken inside a world:
+    -- ⚠️ NEEDS NO ENGINE. This was the fourth of the four checks that failed identically in BOTH
+    -- game states on 2026-08-02 ("nothing is readable with no game", 16:39:05 and 16:40:17), and
+    -- the name was already telling the truth — "with no game" means with no ENGINE. In game the
+    -- refresh SUCCEEDS: the same run reported 107 bindings read, so `n` is 107 rather than 0, the
+    -- real index is swapped in over the stub this case installed, and the surviving-reading half
+    -- has nothing left to assert. It is not a title-screen check either; a title-screen refresh
+    -- still reaches UPalOptionSubsystem through the engine.
+    --
+    -- Gating it also stops the suite paying for a full key-config re-read in the middle of a run.
+    support.needNoEngine(t, "the refresh really reads the game's key config — the same run "
+        .. "measured 107 bindings — so nothing about a FAILED refresh can be observed")
+
+    -- A refresh attempted with nothing to read must not destroy a reading taken inside a world:
     -- the index is built into a fresh table and only swapped in if something landed.
     withKeymap({ insert = { key = "Insert", actions = { { action = "Keep", via = "config/main" } } } },
     function()

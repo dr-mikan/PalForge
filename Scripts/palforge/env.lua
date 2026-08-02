@@ -48,8 +48,18 @@ return {
     -- "PalForge is broken" from "the game moved" — this tree has already been bitten once
     -- by exactly that gap (AddItem declared five parameters where dumps/cxx/Pal.hpp had
     -- four, because the header dump predated the installed build by a single patch).
-    -- `gameBuildLive` is filled in at startup with what the running game actually reports,
-    -- so a mismatch is visible in the log rather than inferred from a broken call.
+    --
+    -- `gameBuild` IS DECLARED BY HAND AND NOTHING VERIFIES IT. `gameBuildLive` is not a check
+    -- on it — it is CONTEXT for the reader of a log. Scripts/main.lua fills it in from the
+    -- running game and prints it beside the declared string; whether the two can be compared
+    -- at all depends on which route answered, and main.lua's ② block says which and why.
+    -- MEASURED 2026-08-02 16:39:33 (hook `game-build-live`): UKismetSystemLibrary answers
+    -- "++UE5+Release-5.1-CL-0" / "5.1.1-0+++UE5+Release-5.1" / "Pal" — Unreal's branch, Unreal's
+    -- version and the project name. NONE of them carries Palworld's patch number, so none is
+    -- compared with this string, and `gameBuildLive` reads `unknown (engine ...)` when they are
+    -- all that answered. Palworld's own version is UPalGameInstance::DisplayVersion (the string
+    -- on the title screen); main.lua reads it, and until one run prints it, the value below is
+    -- checked by a human comparing it with that corner of the title screen and by nothing else.
     gameBuild     = "v1.0.2.101103",
     gameBuildLive = nil,
 

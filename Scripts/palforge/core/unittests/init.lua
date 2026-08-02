@@ -28,28 +28,53 @@
 --
 --   t:skipNeedsWorld(why)          -- load a save and press the key again
 --   t:skipNeedsNoWorld(why)        -- quit to the title screen and press the key again
+--   t:skipNeedsNoEngine(why)       -- no UE4SS at all: only a headless lua5.4 run measures it
 --   t:skipNeedsHook(id, why)       -- only test/hooks/<id> can measure it; `pf_hook_<id>` runs it
 --   t:skipOptIn(why)               -- deliberately off: it writes to a real save
 --   t:skipNeedsSetup(why)          -- a world IS loaded, but not in the state this needs
 --   t:skipUnanswerable(why)        -- this session could not answer — that IS the finding
 --   t:skip(why)                    -- unclassified; still counted, and reported as unstated
 --
--- and M.run() prints the breakdown plus the sentence saying two runs are needed. The bare
+-- and M.run() prints the breakdown plus the sentence saying how many runs are needed. The bare
 -- one-argument t:skip(why) still works exactly as it did — case files convert at their own
 -- pace, and everything unconverted is reported as "did not say" rather than disappearing.
+--
+-- ⚠️ THERE ARE THREE ENVIRONMENTS, NOT TWO, and modelling only two is what the first real
+-- in-game run (2026-08-02 16:39:05 title, 16:40:18 in a save) reported as four FAILURES:
+--
+--   headless          lua5.4, no UE4SS globals at all
+--   engine, no world  the game is running and sitting on the title screen
+--   engine and world  a save is loaded and there is a player pawn
+--
+-- A check whose claim is "with no engine under it, this refuses" is green in the first and RED
+-- in the other two, because UE4SS being present is enough to make it false — no save required.
+-- Both game states reported the same four failures for exactly that reason, and none of the
+-- four was a defect in the code under test. NEEDS.NOENGINE is that third direction, and the
+-- predicate behind it asks whether UE4SS's own globals exist, never whether a pawn does
+-- (test/support.lua: M.engine / M.needNoEngine).
+--
+-- THE WORLD PAIR IS ONE PREDICATE, ASKED TWICE. skipNeedsNoWorld is the exact negation of
+-- skipNeedsWorld — both sides go through test/support.lua's M.worldLoaded() — so a gated PAIR
+-- always has exactly one half running. The same title-screen run proved what happens when they
+-- disagree: the world half asked for a player pawn (absent at the title, correctly) while the
+-- inverse half asked whether an OWNER existed, and a PalPlayerController and a GameInstance are
+-- both up at the title screen, so BOTH directions closed at once and 6 checks that should have
+-- been the whole point of that run reported "6 need no world" instead of running. An owner is
+-- not a world; it is an ENGINE, and those six are NEEDS.NOENGINE now.
 local log = require("palforge.utils.log").scope("unittests")
 
 local M = {}
 M._suites = {}   -- every suite created via M.suite(); M.run() runs all of these
 
 -- ---- skip directions ----
--- The seven values a skip can carry: six states it is waiting on, plus the bucket for a bare
+-- The eight values a skip can carry: seven states it is waiting on, plus the bucket for a bare
 -- t:skip(reason) that named none. The value is what the summary prints, so it is a short
 -- human string rather than an enum number; NEEDS_PHRASE below turns it into the clause the
 -- summary line reads with.
 M.NEEDS = {
     WORLD    = "world",       -- needs a loaded save
-    NOWORLD  = "no-world",    -- needs the title screen (no world loaded)
+    NOWORLD  = "no-world",    -- needs the title screen (engine up, no world loaded)
+    NOENGINE = "no-engine",   -- needs NO UE4SS at all: only a headless lua5.4 run measures it
     HOOK     = "hook",        -- needs a declared test/hooks/<id> run, C7
     OPTIN    = "opt-in",      -- deliberately off; it would write to the tester's save
     SETUP    = "setup",       -- a world is loaded but is not in the state the check needs
@@ -58,12 +83,13 @@ M.NEEDS = {
 }
 
 -- Report order, so the breakdown reads the same way every run.
-local NEEDS_ORDER = { M.NEEDS.WORLD, M.NEEDS.NOWORLD, M.NEEDS.HOOK, M.NEEDS.OPTIN,
-                      M.NEEDS.SETUP, M.NEEDS.SESSION, M.NEEDS.UNSTATED }
+local NEEDS_ORDER = { M.NEEDS.WORLD, M.NEEDS.NOWORLD, M.NEEDS.NOENGINE, M.NEEDS.HOOK,
+                      M.NEEDS.OPTIN, M.NEEDS.SETUP, M.NEEDS.SESSION, M.NEEDS.UNSTATED }
 
 local NEEDS_PHRASE = {
     [M.NEEDS.WORLD]    = "need a world",
     [M.NEEDS.NOWORLD]  = "need no world",
+    [M.NEEDS.NOENGINE] = "need no engine",
     [M.NEEDS.HOOK]     = "need a declared test/hooks run",
     [M.NEEDS.OPTIN]    = "are opt-in",
     [M.NEEDS.SETUP]    = "need the world set up differently",
@@ -73,6 +99,35 @@ local NEEDS_PHRASE = {
 
 local NEEDS_VALID = {}
 for _, n in ipairs(NEEDS_ORDER) do NEEDS_VALID[n] = true end
+
+-- ---- the three ENVIRONMENTS ----
+-- Three of the eight directions are not "this session lacked something" but "this check belongs
+-- to a different environment", and they are mutually exclusive: a run is headless, or on the
+-- title screen, or in a save, and never two of those. Everything the summary says about how
+-- many runs a full measurement takes is derived from THIS table and nowhere else, so adding a
+-- fourth environment later means adding one row rather than editing four sentences.
+local ENVIRONMENT_ORDER = { M.NEEDS.WORLD, M.NEEDS.NOWORLD, M.NEEDS.NOENGINE }
+
+local ENVIRONMENT = {
+    [M.NEEDS.WORLD] = {
+        where  = "inside a loaded save",
+        why    = "there is no world loaded",
+        action = "load a save and press the key again",
+    },
+    [M.NEEDS.NOWORLD] = {
+        where  = "at the title screen",
+        why    = "a world IS loaded",
+        action = "quit to the title screen and press the key again",
+    },
+    [M.NEEDS.NOENGINE] = {
+        where  = "with no engine under them (a headless lua5.4 run)",
+        why    = "UE4SS is under this run, and these assert what PalForge does with NO engine",
+        action = "no key press in any session state reaches them, so run the suite headless: "
+              .. "`cd Scripts && lua5.4 -e 'package.path=\"./?.lua;./?/init.lua;\"..package.path; "
+              .. "local e=require(\"palforge.env\") e.dev=true e.debug=true "
+              .. "require(\"palforge.test\").run()'`",
+    },
+}
 
 -- A zeroed counter table, so the breakdown can always be indexed without a nil check.
 local function newNeeds()
@@ -101,14 +156,64 @@ function M.needsPhrase(needs)
     return table.concat(parts, ", ")
 end
 
----Is this run half a measurement? True when the world-gated and the inverse-gated checks are
----both waiting, which is the state in which NO SINGLE PRESS has measured everything.
+---Which ENVIRONMENTS this run left unmeasured, in report order. Empty when the run covered
+---every environment its checks name.
+---@param needs table   # M.NEEDS value -> count
+---@return string[]     # a subset of { NEEDS.WORLD, NEEDS.NOWORLD, NEEDS.NOENGINE }
+function M.environmentsPending(needs)
+    local out = {}
+    if type(needs) ~= "table" then return out end
+    for _, n in ipairs(ENVIRONMENT_ORDER) do
+        if (needs[n] or 0) > 0 then out[#out + 1] = n end
+    end
+    return out
+end
+
+---Is this run part of a measurement rather than the whole of one? True when checks from more
+---than one environment are waiting, which is the state in which NO SINGLE RUN has measured
+---everything.
+---
+---⚠️ THE NAME IS KEPT AND THE MEANING IS WIDENED, deliberately. It used to be "the world half
+---and the no-world half are both waiting" and there were only two environments to be waiting
+---in; there are three now (see the ENVIRONMENT table above), so the honest question is "is more
+---than one environment waiting". test/init.lua calls this to decide whether to put the sentence
+---on the player's SCREEN, and every case that used to answer true still answers true — it just
+---also answers true when the headless-only checks are the ones that did not run. A second
+---function with a second name would have left that screen line silently narrower than the log.
 ---@param needs table
 ---@return boolean
 function M.needsTwoRuns(needs)
-    return type(needs) == "table"
-        and (needs[M.NEEDS.WORLD] or 0) > 0
-        and (needs[M.NEEDS.NOWORLD] or 0) > 0
+    return #M.environmentsPending(needs) > 1
+end
+
+---The sentence that says which environments this run did not measure and what would. nil when
+---it measured every environment its checks name.
+---
+---Exported for the same reason needsPhrase is: the run summary is written in TWO places (this
+---file to UE4SS.log, test/init.lua to the player's screen) and the wording of the environment
+---sentence is the thing a tester acts on, so it is formatted once here rather than spelled a
+---second time there.
+---@param needs table
+---@return string?
+function M.needsRunsSentence(needs)
+    local pending = M.environmentsPending(needs)
+    if #pending == 0 then return nil end
+
+    -- One environment waiting: name it, say why it did not run, and say what would run it.
+    if #pending == 1 then
+        local e = ENVIRONMENT[pending[1]]
+        return string.format("tests: %d check(s) were not measured because %s — %s.",
+            needs[pending[1]], e.why, e.action)
+    end
+
+    -- More than one: the run is a fraction of a measurement and the count of runs is the point.
+    local parts = {}
+    for _, n in ipairs(pending) do
+        parts[#parts + 1] = string.format("%d check(s) only run %s", needs[n], ENVIRONMENT[n].where)
+    end
+    local last = table.remove(parts)
+    return string.format("tests: NO SINGLE RUN MEASURES EVERYTHING — %s and %s. Run it once in "
+        .. "each; a green run is %d runs.", table.concat(parts, ", "), last, #pending)
 end
 
 -- ---- assertion context (the `t` handed to each test body) ----
@@ -125,19 +230,19 @@ Assert.__index = Assert
 -- loaded, no player pawn, a native route this session does not have).
 --
 -- `needs` is one of M.NEEDS and says what WOULD have run it; omitting it is still legal and
--- lands in the "unstated" bucket. A direction that is not one of the seven is a FAILURE, not
+-- lands in the "unstated" bucket. A direction that is not one of the eight is a FAILURE, not
 -- a skip — a typo'd direction would otherwise silently make the check invisible again, which
 -- is the exact defect this API exists to remove.
 function Assert:skip(reason, needs)
     if needs ~= nil and not NEEDS_VALID[needs] then
         self:fail("unittests: unknown skip direction '" .. tostring(needs)
-            .. "'; use one of T.NEEDS.WORLD / NOWORLD / HOOK / OPTIN / SETUP / SESSION")
+            .. "'; use one of T.NEEDS.WORLD / NOWORLD / NOENGINE / HOOK / OPTIN / SETUP / SESSION")
     end
     error({ __unittest_skip = true, msg = reason or "precondition not met",
             needs = needs or M.NEEDS.UNSTATED }, 0)
 end
 
--- The six directions, spelled as their own calls so a case file reads as a statement about
+-- The seven directions, spelled as their own calls so a case file reads as a statement about
 -- what is missing rather than a string the summary has to guess at.
 
 ---This check only runs inside a loaded save.
@@ -145,10 +250,30 @@ function Assert:skipNeedsWorld(reason)
     self:skip(reason or "no world loaded", M.NEEDS.WORLD)
 end
 
----This check only runs with NO world — the title screen. The inverse gate: it is verifying a
----refusal path that a loaded world would turn into a real action.
+---This check only runs with NO world — the title screen, with the engine still up. The inverse
+---gate: it is verifying a refusal path that a loaded world would turn into a real action.
+---
+---⚠️ IT IS THE ENGINE-IS-UP HALF. If what the check actually needs is that there be no engine
+---AT ALL — no PlayerController, no GameInstance, no LoadAsset — this is the wrong direction and
+---skipNeedsNoEngine is the right one, because a PalPlayerController and a GameInstance are both
+---already up on the title screen (measured 2026-08-02, 16:39:05: six ui checks gated on
+---widget.owner() skipped at the title screen, which is the one state they were written for).
 function Assert:skipNeedsNoWorld(reason)
     self:skip(reason or "a world is loaded; this asserts the no-world path", M.NEEDS.NOWORLD)
+end
+
+---This check only runs with NO ENGINE AT ALL — a headless lua5.4 process. It asserts what a
+---call does when the UE4SS globals it needs are simply not there, and UE4SS being loaded is
+---enough to falsify it: no save has to be loaded, so BOTH game states are the wrong one.
+---
+---⚠️ NOT skipNeedsNoWorld, and the difference is the whole of finding 1 from the 2026-08-02 run.
+---Four checks whose failure messages read "nothing resolves without a game", "headless there is
+---no live table" and "nothing is readable with no game" were green under lua5.4 and red at the
+---title screen AND in a save, identically, because "a game" in those sentences means the ENGINE
+---and the suite only had a gate for the WORLD. A check gated this way is honest about the fact
+---that no key press in any session state can reach it.
+function Assert:skipNeedsNoEngine(reason)
+    self:skip(reason or "UE4SS is loaded; this asserts the no-engine path", M.NEEDS.NOENGINE)
 end
 
 ---This check can only be measured with the game doing something a test cannot make it do, so
@@ -380,22 +505,13 @@ function M.run(suites)
         log.info(string.format("tests: %d skipped (%s)", skipped,
             M.needsPhrase(needs) or "no direction recorded"))
 
-        -- The two-run sentence, and it is a statement of fact about this suite rather than
-        -- advice: the world-gated and the inverse-gated checks cannot both run in one press,
-        -- so no single press has ever measured everything.
-        if M.needsTwoRuns(needs) then
-            log.info(string.format("tests: NO SINGLE RUN MEASURES EVERYTHING — %d check(s) only "
-                .. "run inside a loaded save and %d only at the title screen. Press the key "
-                .. "once in each state; a green run is two runs.",
-                needs[M.NEEDS.WORLD], needs[M.NEEDS.NOWORLD]))
-        elseif needs[M.NEEDS.WORLD] > 0 then
-            log.info(string.format("tests: %d check(s) were not measured because there is no "
-                .. "world — load a save and press the key again.", needs[M.NEEDS.WORLD]))
-        elseif needs[M.NEEDS.NOWORLD] > 0 then
-            log.info(string.format("tests: %d check(s) were not measured because a world IS "
-                .. "loaded — quit to the title screen and press the key again.",
-                needs[M.NEEDS.NOWORLD]))
-        end
+        -- The environment sentence, and it is a statement of fact about this suite rather than
+        -- advice: checks written for different environments cannot both run in one press, so no
+        -- single press has ever measured everything. THREE environments now (headless / title
+        -- screen / loaded save), and the wording is built from the ENVIRONMENT table at the top
+        -- of this file so the third one is named exactly the way the first two are.
+        local sentence = M.needsRunsSentence(needs)
+        if sentence then log.info(sentence) end
         if needs[M.NEEDS.HOOK] > 0 then
             log.info(string.format("tests: %d check(s) can only be measured by a declared hook "
                 .. "— `pf_hooks` lists them with the reason each one would skip, and each SKIP "

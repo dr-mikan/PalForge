@@ -10,8 +10,10 @@ that takes the measurement**. There are eight.
 **Foundations**, immediately after *Before publish*, is the layer underneath: how an id identifies
 a thing, and how an asset is found and kept. The fourteen findings recorded there (F-1..F-8,
 A-1..A-6) were audited on 2026-08-01 and implemented on 2026-08-02. The measurements are kept
-because they are why the fixes are shaped the way they are, and because two of them can only be
-*confirmed* with the game running.
+because they are why the fixes are shaped the way they are, and because two of them could only be
+*confirmed* with the game running. **The first in-game run happened on 2026-08-02 16:39, and A-1 —
+the most consequential finding in the audit — is now confirmed rather than inferred.** What that
+run settled is written into each item below, with the timestamp that settled it.
 
 **Owed work**, at the end, is the opposite kind: nothing there is waiting on a measurement. It is
 work that is simply not finished.
@@ -71,9 +73,48 @@ Palworld build everything was measured against — **v1.0.2.101103** — is in `
 this tree was bitten by: `AddItem` declared five parameters where `dumps/cxx/Pal.hpp` had four,
 because the header dump predated the installed build by a single patch (see
 `item-additem-signature`). `main.lua` also reads the build back at runtime into `env.gameBuildLive`
-and warns once on a mismatch — but **that read has never been run**, so which of
-`GetBuildVersion` / `GetEngineVersion` / `GetGameName` carries the string is unknown. That is the
-`game-build-live` hook, and it is the cheapest one in the directory.
+and warned once on a mismatch. **That read has now been run, and it settles NEGATIVELY.**
+
+`pf_hook game-build-live`, 2026-08-02 16:39:33, in a loaded save. All three
+`UKismetSystemLibrary` candidates answered, each arriving as userdata unwrapped by `:ToString()`:
+
+```text
+GetBuildVersion   "++UE5+Release-5.1-CL-0"       FApp's branch/CL     (Engine.hpp:14991)
+GetEngineVersion  "5.1.1-0+++UE5+Release-5.1"    the UNREAL version   (Engine.hpp:14977)
+GetGameName       "Pal"                          the project name     (Engine.hpp:14974)
+```
+
+**Not one of them carries Palworld's patch number.** So `main.lua`'s `comparable = true` flag on
+`GetBuildVersion` was wrong, and the cost of it is in the same log: at 16:38:19 the startup line
+raised `game build MISMATCH: ... measured against v1.0.2.101103 and the running game reports
+++UE5+Release-5.1-CL-0`, whose digits reduce to 5.5.1.0 — a **warn on every single start**, for a
+comparison that can never succeed, and the hook repeated it as its one FAIL. The reading was right
+and the verdict was wrong. Fixed after the run and NOT yet seen in a game: the flag has moved off
+all three Kismet reads, the always-fires warn is one info line that says what Unreal answered and
+why each Palworld route did not, the banner never prints an engine string under a word that means
+"the game's build", and `env.gameBuildLive` reads `unknown (engine 5.1.1-0+++UE5+Release-5.1)`
+rather than handing a banner an engine string to print as "live".
+
+**`FApp::GetProjectVersion` does not exist on this build** — zero hits across all 1579 headers in
+`dumps/cxx/` (re-measured 2026-08-02). That candidate is closed; do not re-probe it.
+
+**Two routes to Palworld's own version are wired and NOT YET MEASURED.**
+`UPalGameInstance::DisplayVersion` (`dumps/cxx/Pal.hpp:18842`, and live under
+`/Script/Pal.PalGameInstance` at `dumps/reflection/02_reflection.txt:80`) is the string the title
+screen prints in its corner; `UPalUtility::GetDisplayVersion(WorldContextObject)` (`Pal.hpp:32372`,
+live under `/Script/Pal.PalUtility` at `02_reflection.txt:2201`) is the Blueprint accessor for the
+same field, called through `core/signature` with `{"ObjectProperty"}` because it takes an argument
+and a wrong type faults where `pcall` cannot see it. Both need a live `UPalGameInstance`, which does
+not exist when UE4SS starts a Lua mod, so `main.lua` reads them again at the first `world.ready` and
+`pf_hook game-build-live` prints both raw. **The next run in a loaded save closes this either way:**
+a string, and `env.gameBuild` is verifiable against the running game for the first time; nothing,
+and Palworld's patch version is not reachable from Lua on this build — a settled negative, which the
+hook now scores as a PASS rather than a failure.
+
+**Until then, `env.gameBuild` is declared by hand and nothing verifies it.** The only check on
+`v1.0.2.101103` is a human comparing it with the version in the corner of the title screen; that is
+written into `env.lua` beside the field, and `env.gameBuildLive` is context for a log reader, never
+a check.
 
 **§3 — `dev` no longer defaults to on.** `env.lua` ships `dev = false`, `debug = false`,
 `debugHooks = {}`. A dev session turns them on through an optional `Scripts/palforge_dev.lua`
@@ -117,11 +158,13 @@ file.
 
 **§6 — the three foundation defects landed.** A-1 (per-actor tables keyed on a UE4SS handle),
 F-1 (silent id overwrite) and F-8 (reading a native catalog started persisting world state) are
-all implemented; see **Foundations** for what each one now does. Two of the three are verified by
-reading plus the headless suite, and A-1's in-game confirmation is a declared hook,
-`mesh-actor-identity`. That distinction is deliberate and is kept everywhere in this file:
-"verified by reading + the headless suite" is honest, and it is a different claim from "observed
-live".
+all implemented; see **Foundations** for what each one now does. That distinction is deliberate and
+is kept everywhere in this file: "verified by reading + the headless suite" is honest, and it is a
+different claim from "observed live". **Two of the three are now observed live**, on 2026-08-02:
+A-1 by `pf_hook mesh-actor-identity` at 16:39:52 and 16:39:58, and F-8 by the startup line itself —
+`initialized (dev=true, debug=true, 17 class(es) registered)` with **building = 0**, and no
+persistence file written for the save that was loaded. F-1 remains verified by reading plus the
+suite, which is all it needs; nothing about a silent overwrite requires a world.
 
 ---
 
@@ -357,8 +400,27 @@ being true the moment `object_manager` entered `KEEP`. Had that comment stayed t
 would have quarantined every pack's records ~30 s after any F9. If `object_manager` is ever dropped
 from `KEEP` again, `ORPHAN_GRACE_SCANS` is all that stands between a reload and a mass quarantine.
 
-**Still owed.** The round trip has never been run against a real save file. **The hook is now
-declared** — `pf_hook building-record-orphans` (`test/hooks/building_record_orphans.lua`). ⚠️ The
+**Still owed, and the first in-game run halved it.** `pf_hook building-record-orphans` ran at
+2026-08-02 16:39:58, 30 s after `world.ready`, in a real save. It settled the file identity and
+found nothing to round-trip:
+
+```text
+VALUE spatial.saveId()   = w_1DF0E44B4FDDD6196E30819A899C9009
+VALUE persistence key    = entities_w_1DF0E44B4FDDD6196E30819A899C9009.json
+PASS  the save id resolved to a per-save name, so this file belongs to this save alone
+NOTE  THERE IS NO SUCH FILE YET
+```
+
+So the `"world"` fallback bucket is not what a real save uses — the ⚠️ softening below applies to
+the working tree's old file and not to a game — and the ambiguity it describes ("a record
+no definition claims" may be "a record from a different save") does not arise here. **The round trip
+itself is still unmeasured, and the reason is F-8 working**: a record is written only when the scan
+finds an actor whose build id a REGISTERED definition claims, and the same session registered
+**zero** buildings, so there is nothing on disk to load, orphan or restore. Re-measured on
+2026-08-02 after the run: `state/` in this working tree is empty, and there is no `entities_*.json`
+anywhere under the deployed `<Mods>/PalForge/` either. To close it, publish a definition first — see
+the ⚠️ under A-1, because that call is a save write. **The hook stays declared** —
+`pf_hook building-record-orphans` (`test/hooks/building_record_orphans.lua`). ⚠️ The
 delay is part of the measurement: the one orphan pass per world runs only after
 `ORPHAN_GRACE_SCANS = 60` (~30 s), so load the save, wait ~35 s, then run it; running it earlier
 prints `gate.pruned = false` and how many scans are left, and running it twice prints the delta
@@ -371,8 +433,10 @@ reads.
 ⚠️ **One unstated fact makes the working-tree evidence weaker than the paragraph below implies, and
 the hook prints it whenever it applies.** `state/entities_world.json` is the **fallback bucket**:
 `spatial.saveId()` answers `"world"` when the `PalGameInstance` read fails, so that one file is
-shared by *every* such session. A real save has a `w_<directory>` file of its own and nothing has
-ever looked at one. In the fallback file, "a record no definition claims" may equally be "a record
+shared by *every* such session. A real save has a `w_<directory>` file of its own and nothing had
+ever looked at one until 2026-08-02 16:39:58, when the hook asked and the answer was
+`w_1DF0E44B4FDDD6196E30819A899C9009`, with no file behind it. In the fallback file, "a record no
+definition claims" may equally be "a record
 from a different save", so the round trip is only really settled against a named save id. A second
 softening, for pre-F-7 records specifically: "logged … with the packs it belonged to" is optimistic,
 because the log names `rec.pack or rec.def or "unattributed"` and a v1 record carries neither —
@@ -386,7 +450,10 @@ quarantined, by a headless run rather than a game** — the attest pass's `test.
 printed `world records: 0 restored, 1 quarantined (unattributed), 0 unreadable dropped, 0 live`,
 and the record now sits under `orphans` with an `orphanedAt` and its dead `altKeys` still on it,
 because quarantine copies a record rather than rewriting it. That is the policy working, not a bug
-report, and it is invisible to a clone: `state/` is gitignored and git has never tracked it.
+report, and it is invisible to a clone: `state/` is gitignored and git has never tracked it. ⚠️ That
+file was then DELETED — `state/` was emptied before the first in-game run so the run would be a
+clean baseline, and it is empty here and in the deployed tree as of 2026-08-02. The paragraph is
+kept because it is the only time the quarantine has ever been observed doing anything.
 
 **Correction to the old text:** that file was described here as "the checked-in
 `state/entities_world.json`". It is not checked in — `state/` is gitignored (`.gitignore:2`) and
@@ -415,7 +482,14 @@ the six leaves `om.isRegistered` false; and `publish` is idempotent and returns 
 "reading a name registers NOTHING", and `test/cases/registry.lua` gained the matching
 "the curated BUILDINGS are declared but not registered until published".
 
-**Still owed.** Nothing. Note the old text used `buildings.Foundation` twice as the example id;
+**Still owed.** Nothing, and **the gate is now observed holding in a game.** The startup line of the
+first in-game run, 2026-08-02 16:38:19, reads `initialized (dev=true, debug=true, 17 class(es)
+registered)`; re-measured headlessly the same day, that 17 is `pal 2, item 3, skill 1, effect 3,
+audio 6` — the six catalogs' 15 — plus the two native UI classes, with **building = 0 and mesh = 0**.
+A save was then loaded (world ready 16:39:27) and PalForge ran in it for the 58 s the log covers,
+scanning a base with 8 `PalBuildObject` actors in it, and wrote no persistence file at all
+(F-7 above). A read of a native catalog no longer starts persisting a base; that is the whole item,
+seen from the outside. Note the old text used `buildings.Foundation` twice as the example id;
 there is no plain `Foundation` row in `DT_BuildObjectDataTable_Common` — the real ones are
 `Wooden_foundation`, `Stone_Foundation`, `Metal_Foundation`, `Glass_foundation`.
 
@@ -513,15 +587,46 @@ Weak keys came out with the handles, deliberately: a string key is not collectab
 would have made those tables immortal. `apps` is bounded by a `target_gone` expiry plus `prune()`;
 `lastFire` by a `COOLDOWN_KEEP_SEC = 600` sweep run at most once a minute.
 
-**Still owed — and this is the one in-game line that confirms the whole finding.**
-`pf_hook mesh-actor-identity` takes three `FindAllOf("PalBuildObject")` sweeps six seconds apart,
-re-finding the target **by `GetFullName`** each time so a miss is attributable, and reports HIT/MISS
-under the old handle key and under `uo.key`, `rawequal` vs `uo.same`, and the shipped path
-`event.instanceOfActor(fresh)`. A miss under the old key is the bug as diagnosed; a hit means UE4SS
-interns handles somewhere this audit did not find. Only `renderer.lua`'s MID store has a
+**CONFIRMED IN GAME, 2026-08-02 16:39:52 and 16:39:58** — deployed build 2026-08-02 16:37:13, game
+v1.0.2.101103, a loaded save with a base in it. `pf_hook mesh-actor-identity` takes three
+`FindAllOf("PalBuildObject")` sweeps six seconds apart, re-finding the target **by `GetFullName`**
+each time so a miss is attributable. Sweep 1 listed 8 actors and recorded all 8 under both keys;
+the target was `BP_BuildObject_WorkBench_C_2147468373`. Sweeps 2 and 3 each printed:
+
+```text
+byActor[handle]    -> MISS   (the OLD key)
+byKey[GetFullName] -> HIT    (the NEW key, contract C1)
+rawequal(sweep1 handle, sweepN handle) = false
+uo.same(sweep1 handle, sweepN handle)  = true
+```
+
+That is the whole finding in four lines, twice, six seconds apart, on an actor that certainly still
+existed. **UE4SS does not intern handles on this runtime**, so the per-actor re-key onto `uo.key`
+is necessary rather than tidy, every silent consequence listed above follows from it, and A-2's
+diagnosis below stands as written. The hit under the name key also shows the fix working on the
+same actor in the same breath, which is why the hook re-finds by name rather than trusting the
+sweep's ordering.
+
+**Still owed: the SHIPPED per-actor lookup, and it is a gate rather than a defect.** Both blocks
+also printed `event.instanceOfActor(fresh handle) -> MISS`, and the hook of the day read that as
+"the shipped scan does not find its own record". That reading was wrong and has been corrected in
+the hook: `core/event.M.instanceOfActor` (`core/event.lua:2767`) is `local k = uo.key(actor);
+return k and instancesByActor[k] or nil` — already on the new key — and it answered nil because
+`instancesByActor` was EMPTY. The scan records an actor only when a REGISTERED definition claims its
+build id, and F-8 leaves building = 0 registered. The hook now distinguishes HIT (pass),
+MISS-with-a-record-found-another-way (a named FAIL in shipped code, citing `bindActor`/`unbindActor`
+at `core/event.lua:570,578` and `scanOnce` at `:867`), and no-record (NOT APPLICABLE, naming which
+of the three reasons applied). **To close it**: in a base with a workbench run
+`require('palforge.native.buildings').publish('WorkBench')` — the hook prints that exact id, resolved
+by `resolveBuildId`'s own tier-1 pattern off the live target — wait one 500 ms scan, and re-run
+`pf_hook mesh-actor-identity`. ⚠️ **That call is a SAVE WRITE**: a registered definition makes every
+matching actor in the world a tracked instance *and* a line in this save's entities file, and
+un-publishing later does not undo the writing. Use a save you do not mind.
+
+Still unobserved for the same engine reason as before: only `renderer.lua`'s MID store has a
 two-handles regression test that can run headlessly — `dressedBy`, `static.byActor`,
 `procedural.byActor` and `skeletal.originalOf` need `AddComponentByClass` and cannot be driven
-without the engine. That is what the hook is for.
+without the engine. The hook confirms the PREMISE they all rest on; it does not exercise them.
 
 #### A-2 — a declared `Building{ mesh = ... }` probably never attached itself
 
@@ -547,8 +652,12 @@ possible. And `spatial.indexUpdate(bound)` **was already written** in the fast p
 code, because of A-1. The real damage was that `bound.pos = p` never ran (a tracked instance's
 position was frozen at discovery), `indexUpdate` never ran, and `_meshPending` was never consumed.
 
-**Still owed.** The same hook as A-1: `mesh-actor-identity`. Nobody has ever watched a building
-mesh appear.
+**Still owed.** The premise is no longer owed — A-1 was confirmed in game on 2026-08-02 16:39:52 and
+16:39:58 on a `BP_BuildObject_WorkBench_C`, i.e. on exactly the class this item is about, so "that
+lookup missed on every scan after the one that created the instance" is now a measurement rather
+than a deduction. What is still owed is the CONSEQUENCE: nobody has ever watched a building mesh
+appear. That needs a registered Building definition carrying a mesh, which is the same save write
+A-1 names above.
 
 #### A-3 — the sound loader was the un-hardened twin of the mesh loader
 
@@ -739,7 +848,10 @@ instructions.
    probes, so a block lifts out of `UE4SS.log` straight into this file. A hook that keeps watching
    after its body returns prints further blocks of its own, `-1`, `-2`, …
 4. **Implement, then re-check.** **F1** re-runs the 481-check API suite; **F9** reloads every
-   palforge module without restarting. ⚠️ While a hook's watcher is alive **F9 is refused by name**
+   palforge module without restarting. ⚠️ A green F1 is not a green suite — a check belongs to one
+   of THREE environments (headless, title screen, loaded save) and one press measures one of them.
+   The full pass is a headless `lua5.4` run plus one F1 in a save; see Owed work §3.
+   ⚠️ While a hook's watcher is alive **F9 is refused by name**
    — every poller brackets itself with `core/reload`'s async guard. That is the guard working. It
    clears when the watcher retires, at its own 180 s cap, or from the Lua console with
    `require('palforge.core.reload').asyncReset()`. Deploy, then run the hook; not the reverse.
@@ -758,12 +870,12 @@ one whose gate is open, read-only ones first.
 
 | hook | writes | what it owns |
 | --- | --- | --- |
-| `game-build-live` | | Before publish §2 — which function carries the build string |
-| `keymap-key-coverage` | | Owed work §3 — the only hook here with **no `needs` at all** |
-| `mesh-actor-identity` | | Foundations / A-1 and A-2 — the whole keying finding, in one run |
+| `game-build-live` | | Before publish §2 — which call carries PALWORLD's build string (**run**; the three Kismet ones do not) |
+| `keymap-key-coverage` | | Owed work §3 — the only hook here with **no `needs` at all** (**run**: 4 pass, 0 fail) |
+| `mesh-actor-identity` | | Foundations / A-1 and A-2 — the whole keying finding, in one run (**run**: A-1 confirmed) |
 | `item-datatable-row-read` | | Open / Item (with `item-recipe-of` folded in) |
 | `audio-custom-file-loader` | | Open / Audio |
-| `building-record-orphans` | | Foundations / F-7 — the quarantine round trip, ~35 s after load |
+| `building-record-orphans` | | Foundations / F-7 — the quarantine round trip, ~35 s after load (**run**: no file to round-trip yet) |
 | `ui-update-event` | | Open / UI |
 | `pal-spawned-fresh` | | Open / Events |
 | `skill-hit-source` | | Open / Skill — confirms the negative |
@@ -777,6 +889,16 @@ one whose gate is open, read-only ones first.
 | `audio-setvolume-audible` | | Owed work §2 — deliberately not `writes`: it makes noise, not a save edit |
 | `building-unlock` | ✔ | Owed work §2 |
 | `pal-skills-equip` | ✔ | Before publish §1 / Open / Pal — **the publish blocker** |
+
+**Four of the nineteen have been run, all on 2026-08-02, all from `autorun.txt` rather than a key
+or the console** — the queue was `pf_hooks`, then `game-build-live` at +5 s, `keymap-key-coverage`
+at +10 s, `mesh-actor-identity` at +18 s, `building-record-orphans` at +30 s, `pf_tests` at +45 s,
+and every one of them arrived. That is the third input route working end to end after a key and a
+console had each failed a session. What each returned is under its item: A-1 confirmed
+(16:39:52 / 16:39:58), 165-vs-165 name coverage with two empty drift lists (16:39:38), the build
+string settled negatively for Unreal's three functions with two Palworld routes still unmeasured
+(16:39:33), and a per-save persistence id with no file behind it yet (16:39:58). The fifteen that
+remain are the fifteen this file still calls owed.
 
 Five declare `writes = true` (the ✔ column) and so need an `env.debugHooks` entry on top of
 `env.debug`. Three of the unticked ones change something anyway and say so in their own headers,
@@ -807,7 +929,7 @@ All nine are bound only in a dev session (`env.dev`), from `test/init.lua` (F1 a
 
 | Key | What it does | What you need on screen |
 | --- | --- | --- |
-| F1 | The API test suite — 481 checks, 14 suites | Anything. World-gated checks skip |
+| F1 | The API test suite — 481 checks, 14 suites | Anything. 28 checks skip with no world, 8 skip in EITHER game state (see Owed work §3) |
 | F2 | Title-screen widgets | The title screen |
 | F3 | The title-menu button's inner slot, read from a world | A loaded save |
 | F4 | Unlock all technologies (`utils.items.unlockAllTech`) | A loaded save |
@@ -828,6 +950,16 @@ has taken is named in the log rather than looking like a probe that found nothin
 a promise the press arrives: the game's key config is not the only thing that can take a key
 (the Steam overlay, the OS, UE's own console keys are all outside it), and F7 may well read `free`
 there. The report says so in its own words.
+
+**Measured 2026-08-02, the first in-game run.** The keymap read Palworld's own config in 0.009 s and
+answered **107 mapping(s) over 77 key(s)**, so the lookup this section rests on is live rather than
+hoped for; all nine startup binds printed `free`; and `pf_hook keymap-key-coverage` confirmed that
+every name involved — the twelve PalForge holds, END through MIDDLE_MOUSE_BUTTON — is a real UE4SS
+key with a `keymap.FKEY` row (Owed work §3). What is still unmeasured for eight of the nine is the
+third question: whether a bound press ARRIVES. **F1 is the only key that was pressed** — the
+16:39:05 title-screen suite run has no `autorun` line before it and started 46 s after `ready`,
+which is a human hitting the key — and everything else that ran in that session came through
+`autorun.txt`. F2..F6, F8, F9 and F10 bound `free` and were never touched.
 
 ### The console
 
@@ -891,7 +1023,7 @@ UFunction's real signature, which is the only source in this tree that answers a
 without the game running. The rest were observed live.
 
 - **`audio-akevent-play-signature`** — Audio.Handle:play. The recorded session caught the GAME ITSELF calling PalSoundUtility:PlayAkEventSoundByActor six times with exactly (AActor, UObject) in that order, which is the call PalForge already makes. Arity, order and callee are settled.
-- **`spatial-saveid`** — core.spatial.saveId. PalGameInstance's full 111-property listing contains no WorldGuid, WorldSaveName or SaveName — all three probed names were wrong, which is why every save shared one persistence file. The real accessors are GetSelectedWorldSaveDirectoryName and GetSelectedWorldName, and core/spatial now reads them.
+- **`spatial-saveid`** — core.spatial.saveId. PalGameInstance's full 111-property listing contains no WorldGuid, WorldSaveName or SaveName — all three probed names were wrong, which is why every save shared one persistence file. The real accessors are GetSelectedWorldSaveDirectoryName and GetSelectedWorldName, and core/spatial now reads them. **Re-confirmed from a hook, 2026-08-02 16:39:58**: in a loaded save `spatial.saveId()` answered `w_1DF0E44B4FDDD6196E30819A899C9009` and the persistence key it builds is `entities_w_1DF0E44B4FDDD6196E30819A899C9009.json` — a per-save name, so the one-file-for-every-save defect is measured gone rather than argued gone.
 - **`building-leftclick`** — Building onLeftClick. PalBuildObject's complete 22-function list has no click, hit or attack entry. The standing candidate, OnDamage, turned out to be the deterioration timer: 196 firings on a strict 12-13 s cadence per structure, starting half a second after placement, with no player involved. Wiring the hook to it would have run every pack's handler every 12 seconds on every structure in the base.
 - **`building-break`** — Building onBreak. None of PalBuildObject, PalMapObjectModel, PalMapObjectConcreteModelBase or PalNetworkPlayerComponent carries a destroy, dismantle or break function. Destruction exists only as delegate FIELDS, which RegisterHook cannot address by path. Disappearance keeps surfacing as onRemove with reason "missing".
 - **`building-break-source`** — the building.break and building.leftclick channels. Same evidence, applied to the source side: neither channel is worth adding, and core/event now records why rather than carrying a hopeful TODO.
@@ -905,7 +1037,7 @@ without the game running. The rest were observed live.
 - **`mesh-skeletal-animclass`** — Mesh.Spec.animClass. All three assumptions confirmed: `SetAnimClass(UClass*)`, `SetAnimationMode(TEnumAsByte<EAnimationMode::Type>)`, and `EAnimationMode::AnimationBlueprint = 0`. The calls were already right, and the log line claiming "SetAnimClass is not on this component" was simply wrong. The real weak link turned out to be elsewhere and is recorded in its place: `SetAnimClass` wants an AnimBlueprintGeneratedClass, and the one live asset sweep on disk found zero loaded while the classes plainly exist — so what is unproven is the LoadAsset resolve, not the call.
 - **`mesh-texture-import`** — Mesh.Spec.texture. `Engine.hpp:14694` declares `UTexture2D* ImportFileAsTexture2D(UObject* WorldContextObject, FString Filename)` on UKismetRenderingLibrary. Both halves of the unknown are answered: the world context is a plain `UObject*`, so the actor already being passed qualifies, and the path is an FString — an ordinary Lua string, and NOT the FName shape that kills the process.
 - **`effect-native-status`** — Effect.Spec.nativeStatus. **Observed working in a loaded save**, 2026-07-26: `status.add AttackUp (EPalStatusID 26) [declared]`, the game reading the ailment back as present, then `status.remove` and the game reading it back as gone. The route is `PalCharacter.StatusComponent` -> `UPalStatusComponent::AddStatus(EPalStatusID)`, and the vocabulary that previously had no source anywhere on disk is `EPalStatusID`'s 38 names. One thing had to change to get there and it generalises: those parameters are declared **EnumProperty**, not ByteProperty — an `enum class`, not a legacy `enum` — and `core/signature.lua` refused three correct calls over the spelling until it learned the two marshal identically. Every `EPal*` argument in this tree is an enum class.
-- **`pal-spawnmonster-signature`** — Pal.Handle:spawn. **Observed working**, 2026-07-26. The call was never broken: `cm:SpawnMonster(FName("ChickenPal"), lv)` was issued with `[evidence declared]`, meaning `core/signature.lua` walked the real UFunction on the installed binary and matched it. What was broken was the VERDICT around it — a spawn that arrives after ~5.9 seconds was measured synchronously with a stopwatch stopped at 1.2 s, and the miss was reported as a property of the build. Three hypotheses died with it, including the server-authority one, which had been invented to explain an observation that never happened. `:spawn` now returns whether the call was ISSUED, because arrival is seconds away and no caller can block; the arrival line follows in the log, with elapsed seconds.
+- **`pal-spawnmonster-signature`** — Pal.Handle:spawn. **Observed working**, 2026-07-26. The call was never broken: `cm:SpawnMonster(FName("ChickenPal"), lv)` was issued with `[evidence declared]`, meaning `core/signature.lua` walked the real UFunction on the installed binary and matched it. What was broken was the VERDICT around it — a spawn that arrives after ~5.9 seconds was measured synchronously with a stopwatch stopped at 1.2 s, and the miss was reported as a property of the build. Three hypotheses died with it, including the server-authority one, which had been invented to explain an observation that never happened. `:spawn` now returns whether the call was ISSUED, because arrival is seconds away and no caller can block; the arrival line follows in the log, with elapsed seconds. ⚠️ **UNEXPLAINED, 2026-08-02 16:40:25 — the same call arrived at NOTHING three times in one press.** The in-save suite issued `spawn.pal(world) ChickenPal (lv 1)` with `[evidence declared]` at 16:40:13 and 12 s later logged `the call ran but NO new PalCharacter appeared in 12.1 s (26 looks)`, twice more from `spawn.palAt` with `nothing in the world was absent from the pre-spawn snapshot`. The 12 s window is not the reason (the arrival that closed this item took ~5.9 s), and the signature still matched, so what this does NOT overturn is the parameter list. What it means is open: the item was closed on ONE observed arrival, in a different session, and a call that issues and delivers nothing looks identical from Lua to a CharacterID the game does not have. It belongs to whoever next runs a spawn, and it is a reason to re-run rather than a reopening.
 - **`pal-spawn-placement`** — core.spawn.palAt. **Observed end to end, twice, in the same press**: `placed new pal at (-345296,263050,4153); it reads back (-345296,263050,4153), off by 0`. Every half that had never been seen is now seen — the pal appears, the nearest-to-player anchor picks the right one, `K2_TeleportTo` accepts it, and the read-back is exact rather than approximate.
 - **`icons-row-read`** — core.icons.resolve, and every domain's `:iconOf()`. **Observed working**, 2026-07-26, on every icon table at once: 674/674 pal, 1183/1207 item, 567/571 building, 311/311 partner skill. (The item table's 24 blanks are rows that genuinely carry no icon.) Three wrong turns, each worth remembering: the row accessors are not UFunctions and not on `UDataTable` — UE4SS binds them itself; the value in an icon column is a `TSoftObjectPtr` userdata that answers none of the nineteen member names a soft pointer could plausibly expose, so the struct cannot be opened from Lua; and the string column that replaces it delivers its elements wrapped in **RemoteUnrealParam**, with the real value behind `:get()` — which is what made the array read the right LENGTH with nothing in it.
 - **`item-additem-signature`** — Item.Handle:give. **Observed working**, 2026-07-26: `give Wood x3: 140 -> 143`, with the game's own pickup event firing beside it (`Wood onObtain: count=3`) — two independent witnesses in a real save. The whole project was blocked on ONE argument. The live declaration is `(FName StaticItemId, int32 Count, bool IsAssignPassive, float LogDelay, bool bNotifyLog) -> EPalItemOperationResult` — five arguments and a return, where `dumps/cxx/Pal.hpp` has four and no `bNotifyLog` at all, because the dump predates the installed binary by one game patch. UE4SS counts the return as a slot, which is where "expected 6 parameters, received 4" came from. It also ANSWERS, with a named `EPalItemOperationResult`, so a refusal now explains itself instead of being inferred from a count that did not move.
@@ -926,10 +1058,14 @@ without the game running. The rest were observed live.
 ### Settled without the game, 2026-08-02 (14)
 
 These are the Foundations findings. Each is **verified by reading plus the headless suite** —
-`luac5.4 -p` clean on all 147 files under `Scripts/` and `tools/` (145 + 2), `450 passed / 0 failed /
-31 skipped (481 total)`, the 8-check startup bundle green, and in several cases a purpose-built
-headless harness. None was observed live, and where a live confirmation is owed it is named. The
-measurement that shaped each fix is in **Foundations** above; this list is the index.
+`luac5.4 -p` clean on all 145 `.lua` files under `Scripts/` and `tools/` (143 + 2; re-counted
+2026-08-02 after the first in-game run — the 147 this line used to claim counted two gitignored
+dev-only files that a clone does not have), `450 passed / 0 failed / 31 skipped (481 total)`, the
+8-check startup bundle green, and in several cases a purpose-built headless harness. **Two have
+since been observed live** and say so in place: `A-1` (2026-08-02 16:39:52 and 16:39:58) and `F-8`
+(the startup line, plus a save that stayed unwritten). Everywhere else, where a live confirmation is
+owed it is named. The measurement that shaped each fix is in **Foundations** above; this list is
+the index.
 
 - **`F-1` — silent id overwrite.** Closed by the entry record + three logging cases in
   `core/object_manager.lua`, and by `isRegistered`/`owner`/`entry` as the public answer to "is this
@@ -955,21 +1091,29 @@ measurement that shaped each fix is in **Foundations** above; this list is the i
   open:** `checkImport` still has no producer — see Owed work §1.
 - **`F-7` — records carried no owner and orphans accumulated forever.** Closed by `v`/`def`/`pack`
   per record, a deterministic `refreshDefs`, and quarantine-not-delete with a 30 s grace and a 4096
-  cap. Verified by reading and by the events suite. **Live confirmation owed** —
-  `pf_hook building-record-orphans`, ~35 s after a save loads. The working-tree run was against the
-  `"world"` FALLBACK bucket, not a named save; see F-7.
+  cap. Verified by reading and by the events suite. **Half-confirmed live, 2026-08-02 16:39:58** —
+  `pf_hook building-record-orphans` in a real save answered the file-identity half
+  (`saveId = w_1DF0E44B4FDDD6196E30819A899C9009`, a per-save name, so the `"world"` FALLBACK bucket
+  the working-tree run used is not what a game uses). **The round trip itself is still owed**, and
+  cannot be taken until something is persisted: F-8 leaves building = 0 registered, so that save has
+  no records file at all. See F-7.
 - **`F-8` — reading a native catalog started persisting world state.** Closed by
   `X(spec, { register = false })` in all eight domains and the publish gate in all six catalogs.
   Verified by measurement: six catalogs load, 15 classes register, **zero buildings**, a read
-  changes the count by 0.
+  changes the count by 0. **Observed live, 2026-08-02**: the startup line reads `17 class(es)
+  registered` — those 15 plus the two native UI classes — and ninety seconds of play wrote no
+  persistence file for the loaded save.
 - **`A-1` — per-object tables keyed on a UE4SS handle.** Closed by `uo.key` at nine sites, two of
   which (`api/effect.lua`'s `apps`, `api/skill.lua`'s `lastFire`) were live bugs the audit had not
   found — effect stacking was broken and skill `cooldown` did nothing at all for an engine owner.
-  Verified by two new two-handles regression tests plus the mesh suite. **Live confirmation owed** —
-  `pf_hook mesh-actor-identity`, which is the whole finding in one run.
+  Verified by two new two-handles regression tests plus the mesh suite. **CONFIRMED IN GAME,
+  2026-08-02 16:39:52 and 16:39:58** — `pf_hook mesh-actor-identity`, sweeps 2 and 3 on a live
+  `BP_BuildObject_WorkBench_C`: handle key MISS, `GetFullName` key HIT, `rawequal` false,
+  `uo.same` true. The premise the whole re-key rests on is a measurement now; see A-1.
 - **`A-2` — a declared `Building{ mesh = ... }` never attached itself.** Closed by the re-keyed fast
   path; `_meshPending` is now consumed, and `bound.pos` and `spatial.indexUpdate` run again.
-  Verified headlessly end to end. Same hook.
+  Verified headlessly end to end. Its premise is A-1's, and A-1 was confirmed in game on the class
+  this item is about; watching a building mesh appear still needs a registered definition.
 - **`A-3` — the sound loader was the un-hardened twin of the mesh loader.** Closed by `normalize` +
   an `AkAudioEvent` class check + `core/signature` on the play call. Verified by reading and by a
   world-gated test that hands it a wrong-typed asset (a crash there means the check is gone).
@@ -1489,7 +1633,11 @@ boot). §6 and §7 are done except for what is listed below.
 - **`state/entities_world.json`'s top-level `"version": 1` is never bumped** while its records are
   upgraded to `v = 2` in place. Nothing reads the file-level field, so it is cosmetic; a file that
   says 1 and contains v2 records will mislead the next reader. Confirmed on disk on 2026-08-02:
-  `version: 1`, `entities: 0`, `orphans: 1`, against a live `REC_VERSION = 2`.
+  `version: 1`, `entities: 0`, `orphans: 1`, against a live `REC_VERSION = 2`. ⚠️ **That file no
+  longer exists**: `state/` was emptied before the first in-game run so the run would be a clean
+  baseline, and re-measured after it, `state/` here and the deployed `<Mods>/PalForge/state/` are
+  both empty — so the defect is now unwitnessed as well as unfixed, and the next file written will
+  carry it again.
   `pf_hook building-record-orphans` prints both numbers side by side, so the lie is visible in the
   same block that reports the round trip.
 - **11 bare `TODO:` survive in `Scripts/palforge/tmp/building_runtime_ref.lua`.** That directory is
@@ -1540,30 +1688,109 @@ run.** A hook that exists is an instrument, not a measurement.
 
 ### 3. Test blind spots that remain
 
-- **No single F1 press can run every check, and the summary now says so** — but the split is not yet
-  fully attributable. 28 checks are world-gated and skip at the title screen; **10 are inverse-gated
-  and skip when a world IS loaded**, and all ten now route through `t:skipNeedsNoWorld`. Headlessly
-  the run is `450 passed, 0 failed, 31 skipped (481 total)` — 28 need a world, 1 needs a declared
-  hook, 2 could not be answered by the session at all (the events ready gate needs `LoopAsync`; the
-  UI keymap coverage needs UE4SS's own `Key` table). In a save the totals move, which is why the
-  docs treat prose counts as warnings rather than errors.
-- **`test/cases/ui.lua`'s keymap-coverage case still has an in-game-only half.** The headless half is
-  no longer vacuous — it asserts the table is populated, has no blank or duplicate rows, that
-  `translate()` agrees with every row, and that the 17 names this tree binds *or refuses by name*
-  (F1–F10, ESCAPE, INS, DEL, END and the three mouse buttons) each have a row — but
-  the COVERAGE assertion against UE4SS's live `Key` table can only run in a game. That table has
-  **165** names, not the 156 two comments in `keymap.lua` claimed; `M.FKEY` matches it exactly in
-  both directions (165 rows, re-counted 2026-08-02). **The hook is now declared** —
-  `pf_hook keymap-key-coverage`, the only hook in the directory with **no `needs` at all**, because
-  `Key` is a UE4SS process global rather than a world subsystem: it answers at the title screen and
-  during a load, which also makes it the cheapest thing to put in `autorun.txt`. It crosses the two
-  tables one row per name in both directions and names every drift; today's expected result is two
-  empty lists, and the day either is not empty is the day it was worth declaring. It measures NAME
-  COVERAGE and nothing else — whether Palworld has an action on a key is `pf_keys`, and whether a
-  bound key's press ever reaches Lua is the third question F7 cost a session on.
-- **A ninth gating axis exists that "run F1 twice" does not cover.** `test/cases/ui.lua`'s
-  `ownStack` gates on *stack emptiness*, not on a world: it skips in any session where something is
-  already mounted, and `pf_uiz` leaves three panels up.
+- **A check has THREE environments and the suite modelled two. Found by running, not by reading.**
+  The first in-game run pressed the suite twice — 16:39:05 at the title screen (442 passed, 4 failed,
+  35 skipped) and 16:40:18 in a loaded save (464 passed, 4 failed, 13 skipped) — and **the same four
+  checks failed in both**, while `lua5.4` headless was green on all four the same day. Four
+  identical failures in two opposite session states is not four defects; it is one classification
+  error. The four:
+
+  ```text
+  [mesh] a texture reference dispatches on its SHAPE, so only one route can ever apply
+  [ui]   keymap.refresh with no game reads nothing and blanks nothing
+  [ui]   the candidate action names are Palworld's own, and every one of them is usable
+  [ui]   the report ATTRIBUTES a silent key instead of shrugging at it
+  ```
+
+  The first two assert what PalForge does when there is **no engine under it** — a thing no key
+  press in any session state can produce, because UE4SS is what delivers the press. `core/unittests`
+  gained a third direction for them, `NEEDS.NOENGINE` / `t:skipNeedsNoEngine`, decided by
+  `test/support.M.engine()`, which looks for the first of UE4SS's nine injected globals
+  (`FindFirstOf`, `FindAllOf`, `StaticFindObject`, `FindObject`, `RegisterHook`, `RegisterKeyBind`,
+  `LoopAsync`, `ExecuteInGameThread`, `StaticConstructObject`) and returns its NAME, so the skip line
+  is evidence rather than a boolean. **Eight checks route through it** — re-counted 2026-08-02 off
+  the call sites and off a run: `[mesh]` ×1 and `[ui]` ×7.
+
+  **The second half was a gate that closed both directions at once.** `support.needWorld` asked for
+  a player pawn; the six inverse-gated `[ui]` cases asked for an OWNER
+  (`widget.owner()` / `findFirst("PalPlayerController")`) — and a `PalPlayerController` is up on the
+  title screen. The title-screen press proves it: it reported "6 need no world" while standing in
+  the exact state the words "no world" name. There is now **one** definition,
+  `support.worldLoaded()` (the pawn), with `needNoWorld` as its exact negation, so exactly one of a
+  gated pair always runs. The six owner-gated cases were never no-world checks and are `NOENGINE`
+  now. The genuine no-world set is **four** — `cases/player.lua`, `cases/building.lua`,
+  `cases/events.lua`, `cases/audio.lua`, all already on `support.player()` — and all four RAN at the
+  title screen on that same press.
+
+  **Measured after the change, on 2026-08-02.** Headless is unchanged at `450 passed, 0 failed,
+  31 skipped (481 total)` — 28 need a world, 1 needs a declared hook, 2 could not be answered by the
+  session at all (the events ready gate needs `LoopAsync`; the UI keymap coverage needs UE4SS's own
+  `Key` table) — so nothing that used to assert stopped asserting. Driven with a stubbed
+  `FindFirstOf` to simulate each game state, the two inverse buckets come out complementary and with
+  nothing in both: title screen `28 world + 8 no-engine`, loaded save `4 no-world + 8 no-engine`.
+  **The next in-game run is expected to read `444 passed / 0 failed / 37 skipped` at the title
+  screen and `466 / 0 / 15` in a save**, out of 481 either way; anything else is a new finding.
+
+  **The minimum full measurement is TWO runs, and neither of them is the pair the summary suggests.**
+  A headless `lua5.4` run covers the no-engine eight and the no-world four (there is no world in a
+  bare Lua process either); one F1 in a loaded save covers the world-gated 28 and the two the
+  session could not answer. The title-screen press remains useful — it is the only one that
+  exercises the game's no-world path with a real engine under it — but it measures nothing the
+  headless run does not.
+
+  **FOLLOW-UP, one edit, not taken here because this file does not own it:**
+  `test/init.lua:1214-1217` still hard-codes the ON-SCREEN copy "press the key once in a loaded save
+  and once at the title screen; a green run is two runs". `core/unittests` now exports
+  `T.needsRunsSentence(results.needs)` for exactly that line, derived from the same `ENVIRONMENT`
+  table the log summary uses; until it is used, the screen says something narrower than the log.
+- **Two of those four were not gating at all, and one was a real defect in the CASE.**
+  `[ui] the report ATTRIBUTES a silent key` wrote its three synthetic key records **into the live
+  `native.keys.keys`**, and `report()` computes its whole-route verdict over the whole of that table
+  — so in a session already holding the twelve keys PalForge armed, one of which (F1) had just been
+  pressed to start the run, "NOT ONE of the 3 armed key(s)" could never appear and `arrived == 0`
+  was false. The report was right both times; the case was measuring the session instead of its own
+  fixture. It now SWAPS the table and restores it (safe: `fire(r)` closes over the record at arm
+  time, so a press arriving mid-window still counts on the original), runs in all three
+  environments, and finally asserts the ORDERING its failure message had always claimed and never
+  checked. `[ui] the candidate action names are Palworld's own` was left ungated on purpose: only
+  its `rec.source == "shipped"` line was environment-dependent, so it asks per environment now
+  (`live or shipped` with an engine, `shipped` without) and the uniqueness / blank / real-action
+  assertions keep running in game **against the live list**, which is the more valuable direction.
+- **`test/cases/ui.lua`'s keymap-coverage case has an in-game-only half, and it has now run in one.**
+  The headless half is not vacuous — it asserts the table is populated, has no blank or duplicate
+  rows, that `translate()` agrees with every row, and that the 17 names this tree binds *or refuses
+  by name* (F1–F10, ESCAPE, INS, DEL, END and the three mouse buttons) each have a row — but the
+  COVERAGE assertion against UE4SS's live `Key` table can only run in a game. **`pf_hook
+  keymap-key-coverage`, 2026-08-02 16:39:38: 4 pass, 0 fail.** The numbers, because they are what a
+  future drift is measured against:
+
+  ```text
+  UE4SS Key names this session   = 165      keymap.FKEY rows              = 165
+    of which explicit `false`    =  67      (Unreal has no FKey for it)
+    of which a US-LAYOUT guess   =  11
+  rows printed (the union)       = 165      drift: 0 UE4SS-only, 0 FKEY-only
+  keys PalForge holds            = END, F1, F10, F2, F3, F4, F5, F6, F8, F9, INS, MIDDLE_MOUSE_BUTTON
+  ```
+
+  The union being 165 is the whole result: the two sets are identical in **both** directions, so
+  there is no name UE4SS will bind that `keymap` cannot speak about, and no `FKEY` row naming a key
+  this UE4SS does not have. 165 also stands as measured — the 156 that two comments in `keymap.lua`
+  used to claim was wrong in the game as well as on paper. Every one of the twelve names PalForge
+  holds has a row and is a real key, so each bind addressed a key rather than being accepted and
+  dropped. The hook stays declared and stays the cheapest thing in `autorun.txt`: it has **no
+  `needs` at all**, because `Key` is a UE4SS process global rather than a world subsystem. It
+  measures NAME COVERAGE and nothing else — whether Palworld has an action on a key is the keymap's
+  own read of the game's config, which ran twice in that session and answered **107 mapping(s) over
+  77 key(s)** in 0.009 s and 0.025 s (`pf_keys` prints the same table per key, and was left
+  commented out in `autorun.txt` for that run) — and whether a bound key's press ever reaches Lua is
+  the third question F7 cost a session on. Each of the nine keys bound at startup logged
+  `bound <KEY> [keymap: free — no action in Palworld's key config uses it, which is NOT the same as
+  "the press will arrive"]` on its own bind line, which is that verdict working as designed.
+- **One gating axis is outside the environment model entirely, so no number of runs covers it.**
+  `core/unittests` now declares eight `NEEDS` directions (world, no-world, no-engine, hook, opt-in,
+  setup, session, unstated), of which three are ENVIRONMENTS. `test/cases/ui.lua`'s `ownStack` is
+  none of them: it gates on *stack emptiness*, so it skips in any session where something is already
+  mounted, and `pf_uiz` leaves three panels up.
 - `test/probes/reflect.lua` emits `#### BEGIN pal-spawn-at-location` blocks for an id this file has
   never carried. Resolved as **keep + declare**: the two existing spawn ids are both Closed and
   neither asks that question, so renaming onto either would emit a block for a settled item and

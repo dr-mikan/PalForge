@@ -517,6 +517,18 @@ s:test("load says WHICH of the situations it can tell apart it is in", function(
 end)
 
 s:test("a texture reference dispatches on its SHAPE, so only one route can ever apply", function(t)
+    -- ⚠️ NEEDS NO ENGINE, and this is one of the four checks the first real in-game run
+    -- (2026-08-02) reported as a FAILURE in BOTH game states — at the title screen 16:39:05 and
+    -- in a loaded save 16:40:15, with the identical message "nothing resolves without a game".
+    -- It was never a defect in resolveTexture: both refusals asserted below are refusals the
+    -- ENGINE removes, not ones a save removes. With UE4SS present LoadAsset exists, so the asset
+    -- route can really resolve a texture (and would really load a package from a test), and
+    -- KismetRenderingLibrary exists, so the disk route fails for a different reason and stops
+    -- naming the dependency this asserts it names. No world is involved in either, which is why
+    -- the world gate could never have caught it — see test/support.lua's three-environment note.
+    support.needNoEngine(t, "LoadAsset resolves the asset route for real and "
+        .. "KismetRenderingLibrary is present, so neither refusal below can happen")
+
     -- The missing half of "reusable by pointing at an asset": a mesh could point at a game
     -- asset while its textures could only come off the author's disk. resolveTexture takes
     -- either, and which one is decided by the string, not by trying both.

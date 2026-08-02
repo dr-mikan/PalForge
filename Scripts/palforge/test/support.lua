@@ -8,16 +8,30 @@
 --     player pawn — so the same suite is green at the title screen and meaningful in a
 --     save. Nothing here throws on a missing engine global.
 --   * Some cases are the INVERSE: they verify a refusal path that a loaded world would turn
---     into a real action (a widget that would really draw, an offset from a pawn that would
---     really exist), so they need NO world. There are TEN of them across the suite and they
---     reach the gate two ways: support.needNoWorld(t) here (cases/player.lua), and a direct
---     t:skipNeedsNoWorld where the case wants to say something specific about what a loaded
---     world would have DONE (cases/ui.lua's skipNeedsNoGame covers six; building, events and
---     audio one each). Either spelling lands in the same summary bucket — what does not is the
---     bare t:skip, which is what those nine used to call, and which is why a run inside a save
---     once reported "1 need no world, 9 did not say which" for ten checks of one kind. The two
---     sets cannot both run in one press, which is why every skip carries a direction and the
---     summary says so (core/unittests: t:skipNeedsWorld / t:skipNeedsNoWorld).
+--     into a real action (an offset from a pawn that would really exist, a cheat-manager write
+--     into the player's own technology state), so they need NO world. There are FOUR of them
+--     across the suite — cases/player.lua, cases/building.lua, cases/events.lua and
+--     cases/audio.lua — and they all ask the SAME question support.needWorld asks, so a gated
+--     pair always has exactly one half running. Either spelling lands in the same summary
+--     bucket; what does not is the bare t:skip, which is why a run inside a save once reported
+--     "1 need no world, 9 did not say which" for what were then ten checks of one kind.
+--   * And some cases need NO ENGINE AT ALL, which is a THIRD environment and not a stronger
+--     form of the second. They assert what a call does when the UE4SS globals are simply not
+--     there, and UE4SS being loaded is enough to falsify them — no save required. That is
+--     support.needNoEngine(t, what), and it is the gate the first real in-game run
+--     (2026-08-02) proved was missing: nine such checks were split between "no gate at all"
+--     (four FAILED identically at the title screen and in a save) and "gated on an OWNER"
+--     (six SKIPPED at the title screen, which was the one state they were written for,
+--     because a PalPlayerController and a GameInstance are both up there).
+--
+--     THE THREE ENVIRONMENTS, and the one predicate that decides each:
+--       headless           M.engine() == nil                    -> needNoEngine runs
+--       engine, no world   M.engine() and not M.worldLoaded()   -> needNoWorld runs
+--       engine and world   M.worldLoaded()                      -> needWorld runs
+--
+--     No two of them are ever true at once, which is why every skip carries a direction and
+--     the summary says so (core/unittests: t:skipNeedsWorld / t:skipNeedsNoWorld /
+--     t:skipNeedsNoEngine).
 --   * A run must not leave content behind. Ids come from support.id(), which mixes in a
 --     per-run counter, so running the suite ten times never collides with itself, and
 --     support.sweepAfter(s) hands the suite back its own teardown so the throwaway
@@ -46,6 +60,54 @@ end
 function M.log(msg) log.info(msg) end
 
 --=============================================================================
+-- the three environments
+--=============================================================================
+
+-- ⚠️ IS THERE AN ENGINE UNDER THIS RUN? Asked of UE4SS's OWN GLOBALS, never of a pawn, an
+-- owner, a controller or a UI root — that distinction is the whole of this block.
+--
+-- A game object is evidence about the WORLD; a global that only UE4SS injects is evidence about
+-- the ENGINE, and the two are different axes. Measured 2026-08-02 at the title screen (16:39:05):
+-- FindFirstOf("PalPlayerController") answers, widget.owner() answers with a GameInstance, and
+-- there is no player pawn — so anything gated on an owner is gated on the engine while reading
+-- as though it were gated on the world.
+--
+-- Every name below is injected by UE4SS into the Lua state and none of them exists in a plain
+-- lua5.4 process. Any ONE of them is enough: a session that has FindFirstOf but somehow lacks
+-- LoopAsync is still emphatically not headless, and requiring all of them would misreport such
+-- a session as having no engine, which is the failure mode this predicate exists to prevent.
+M.ENGINE_GLOBALS = { "FindFirstOf", "FindAllOf", "StaticFindObject", "FindObject",
+                     "RegisterHook", "RegisterKeyBind", "LoopAsync", "ExecuteInGameThread",
+                     "StaticConstructObject" }
+
+---The name of the first UE4SS global found, or nil when this really is a bare Lua process.
+---Returning the NAME rather than a boolean is deliberate: it is the evidence, and a skip that
+---says "FindFirstOf is defined" is auditable in a way that "engine = true" is not.
+---@return string?
+function M.engine()
+    for _, name in ipairs(M.ENGINE_GLOBALS) do
+        if type(_G[name]) == "function" then return name end
+    end
+    return nil
+end
+
+-- THE ONE DEFINITION OF "A WORLD", and there is deliberately only one. Both halves of a gated
+-- pair go through this call, so t:skipNeedsNoWorld is the exact negation of t:skipNeedsWorld and
+-- exactly one of the two always runs.
+--
+-- It is the PLAYER PAWN. Not worldReady() — core/event's gate fails OPEN when LoopAsync is
+-- absent (core/event.lua:1188-1196, "fail OPEN but loudly"), and measured 2026-08-02 in a plain
+-- lua5.4 process event.start() reports isWorldReady() == true with no pawn anywhere. Not an
+-- owner, a controller or a UI root either: all three are up on the title screen, so a gate built
+-- on one of them closes BOTH directions at once — which is exactly what the 16:39:05 title-screen
+-- run did, reporting "6 need no world" for the six checks that title screen existed to measure.
+--
+-- Returns the pawn (truthy) or nil, so a caller can use it as both the question and the answer.
+function M.worldLoaded()
+    return M.player()
+end
+
+--=============================================================================
 -- world access
 --=============================================================================
 
@@ -69,27 +131,53 @@ end
 -- write `local pawn = support.needWorld(t)`. The skip is directed (NEEDS.WORLD), so the
 -- summary can say how many checks are waiting on a save rather than just "N skipped".
 function M.needWorld(t)
-    local pawn = M.player()
+    local pawn = M.worldLoaded()
     if not pawn then t:skipNeedsWorld("no world loaded") end
     return pawn
 end
 
 -- The inverse gate: skip when a world IS loaded. A case calls this when what it verifies is
--- a REFUSAL — the path taken because there is no pawn, no controller, no owner — and a loaded
--- world would replace that refusal with a real action against the player's session. These are
--- the checks that never run in the state a tester is usually in, which is exactly why they
--- have to be counted separately.
+-- a REFUSAL that only a MISSING PAWN produces — an offset from a player who is not there, a
+-- cheat-manager write with no character to write to — and a loaded world would replace that
+-- refusal with a real action against the player's session.
 --
--- It asks M.player(), the same question needWorld asks, so a gated PAIR is exactly
--- complementary: one of the two halves always runs and it is never both. Deliberately NOT
--- worldReady(): core/event's gate fails OPEN when LoopAsync is absent (core/event.lua:1188-
--- 1196 — "fail OPEN but loudly"), and a session with no engine at all is precisely the one
--- where the no-world half is the only half that can run. Measured 2026-08-02 in a plain lua5.4
--- process: event.start() reports isWorldReady() == true with no pawn anywhere, so a worldReady
--- gate would have skipped both halves and measured nothing.
-function M.needNoWorld(t)
-    if M.player() then
-        t:skipNeedsNoWorld("a world is loaded; this asserts the no-world path")
+-- It asks M.worldLoaded(), the same call needWorld asks, so a gated PAIR is exactly
+-- complementary: one of the two halves always runs and it is never both. `why` is optional and
+-- is what the summary prints; giving it lets a case say what a loaded world would have DONE
+-- without spelling the direction a second time, which is what four call sites outside this file
+-- currently open-code as `if support.player() then t:skipNeedsNoWorld(...) end`.
+--
+-- ⚠️ IF THE REFUSAL IS ABOUT A MISSING ENGINE RATHER THAN A MISSING PAWN, this is the wrong
+-- gate — use M.needNoEngine. "There is no owner", "there is no PlayerController", "there is no
+-- LoadAsset" are all still true of a loaded world AND of the title screen, so a check that
+-- asserts one of them can only run headless and gating it here makes it invisible in every
+-- session instead of one.
+function M.needNoWorld(t, why)
+    if M.worldLoaded() then
+        t:skipNeedsNoWorld(why or "a world is loaded; this asserts the no-world path")
+    end
+end
+
+-- The THIRD gate: skip when there is an ENGINE at all. A case calls this when what it verifies
+-- is the refusal PalForge produces with no UE4SS under it — resolveTexture with no LoadAsset,
+-- keymap.refresh with no world subsystem to read, _widget.screen with no owner to construct
+-- under — and where the presence of the engine, with or without a save, is enough to make the
+-- claim false.
+--
+-- The skip names the environment rather than the missing thing, because that is the actionable
+-- half: no key press in any session state runs these, only a headless lua5.4 run does.
+--
+--   support.needNoEngine(t, "LoadAsset exists, so the asset route would really resolve a texture")
+--
+---@param t table    # the assertion context
+---@param what string?  # what the engine would DO instead of refusing
+function M.needNoEngine(t, what)
+    local global = M.engine()
+    if global then
+        t:skipNeedsNoEngine(string.format("UE4SS is loaded (%s is defined)%s. This check asserts "
+            .. "the NO-ENGINE refusal path, so neither game state runs it — a loaded save and "
+            .. "the title screen are equally wrong. Run the suite headless under lua5.4 to "
+            .. "measure it.", global, what and (", so " .. what) or ""))
     end
 end
 

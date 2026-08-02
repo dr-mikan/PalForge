@@ -8,7 +8,7 @@
 --      env.dev / env.debug on for a dev session, and that no released copy contains,
 --   3. asks the RUNNING game what build it is and records the answer in env.gameBuildLive,
 --   4. prints the startup banner — the one thing every user sees — carrying the version, the
---      declared and live game build, the dev/debug state and the single-player statement,
+--      declared and the running game build, the dev/debug state and the single-player statement,
 --   5. initializes the kernel (api + native catalogs + event system + dev tools),
 --   6. publishes the downstream API on _G.PalForge for companion mods to reuse.
 --
@@ -86,32 +86,43 @@ end
 -- declared five parameters where dumps/cxx/Pal.hpp had four, because the header dump predated
 -- the installed binary by a single patch (Closed: item-additem-signature).
 --
--- NOTHING HERE IS MEASURED YET. No run has ever printed these strings, so what each function
--- returns on this build is unknown and the code says so rather than guessing:
---   * UKismetSystemLibrary::GetBuildVersion  (dumps/cxx/Engine.hpp:14991) is FApp's branch/CL
---     string and is the only one of the three that could plausibly carry Palworld's own build,
---     so it is the only one compared against env.gameBuild.
---   * GetEngineVersion (:14977) is the UNREAL version and GetGameName (:14974) is the project
---     name — both are worth logging and neither is comparable to "v1.0.2.101103", so they are
---     recorded with `comparable = false` and never raise a mismatch.
--- All three take no parameters, which is why they are called directly rather than through
--- core/signature: there is no argument list to get wrong, and a wrong-typed argument is the
--- only failure shape pcall cannot see.
+-- WHAT THE FIRST LIVE RUN SETTLED — measured 2026-08-02 16:39:33, hook `game-build-live`, in a
+-- loaded save. All three UKismetSystemLibrary reads answered, every one of them as a userdata
+-- unwrapped by :ToString(), and NONE of the three carries Palworld's own patch version:
 --
--- The hook that turns this from "wired" into "measured" is `game-build-live` under
--- Scripts/palforge/test/hooks/ (contract C7) — one run in a loaded save prints all three raw
--- strings and settles which function answers what.
-local BUILD_READS = {
-    { fn = "GetBuildVersion",  comparable = true  },
-    { fn = "GetEngineVersion", comparable = false },
-    { fn = "GetGameName",      comparable = false },
-}
+--   GetBuildVersion   (dumps/cxx/Engine.hpp:14991)  "++UE5+Release-5.1-CL-0"     FApp's branch/CL
+--   GetEngineVersion  (Engine.hpp:14977)            "5.1.1-0+++UE5+Release-5.1"  the UNREAL version
+--   GetGameName       (Engine.hpp:14974)            "Pal"                        the project name
+--
+-- GetBuildVersion carried `comparable = true` here on the guess that FApp's branch string would
+-- be Palworld's. It is Unreal's: its digits reduce to 5.5.1.0 against the declared 1.0.2.101103,
+-- so this file raised a MISMATCH **warn on every single start** for a comparison that can never
+-- succeed. A warning that always fires teaches its reader to ignore warnings, which is worse than
+-- not having one. All three are now `comparable = false`. They are still read and still logged,
+-- as CONTEXT — the engine is UE 5.1.1 and the project is "Pal" — and are compared with nothing.
+--
+-- WHERE PALWORLD'S OWN VERSION LIVES. Two routes exist and both are wired ABOVE the Kismet three,
+-- each one confirmed present in the LIVE game's own reflection dump, not only in the header dump:
+--   * UPalGameInstance::DisplayVersion — dumps/cxx/Pal.hpp:18842, an FString property, listed
+--     live under /Script/Pal.PalGameInstance (dumps/reflection/02_reflection.txt:80). This is the
+--     string the title screen prints in its corner. No argument, so no argument to get wrong.
+--   * UPalUtility::GetDisplayVersion(WorldContextObject) — Pal.hpp:32372, the Blueprint accessor
+--     for the same field, also listed live (02_reflection.txt:2201). Tried second, and through
+--     core/signature rather than directly, because it TAKES an argument: a wrong-typed argument
+--     faults inside UE4SS's marshalling where pcall cannot see it, and signature is the module
+--     that refuses that call instead of making it.
+-- NEITHER HAS ANSWERED IN A RUN YET. Both need a live UPalGameInstance, which does not exist at
+-- the moment UE4SS starts a Lua mod, and the 2026-08-02 run measured only the Kismet three. The
+-- world.ready retry at the end of this section is what gives them their chance, and the hook
+-- prints both raw. If they turn out to answer nothing either, then Palworld's patch version is
+-- not reachable from Lua on this build at all — a settled negative, and the log says so in words.
 
 -- UE4SS hands a string back in more than one shape. A plain Lua string is the common case; an
 -- array element or an out-parameter arrives wrapped in RemoteUnrealParam with the real value
 -- behind :get() — the wrapper that made the icon column read the right LENGTH with nothing in
--- it (Closed: icons-row-read). Both are unwrapped here, and anything else is reported as no
--- answer rather than tostring()'d into a fake one.
+-- it (Closed: icons-row-read). An FString RETURN is a third shape and is the one measured on
+-- 2026-08-02: userdata with :ToString() and no :get(). All three are unwrapped here, and
+-- anything else is reported as no answer rather than tostring()'d into a fake one.
 local function asString(v)
     if type(v) == "string" then return (v ~= "" and v) or nil end
     if type(v) == "userdata" then
@@ -123,39 +134,156 @@ local function asString(v)
     return nil
 end
 
----Ask the running game for its build string.
----@return string? value      -- nil when nothing answered
----@return string source      -- the function that answered, or the reason there is no value
----@return boolean comparable -- may this value be compared with env.gameBuild at all?
+-- One live object of a class, or nil. FindFirstOf matches SUBCLASSES, which is what makes this
+-- find the game's own BP_PalGameInstance_C and not only an exact UPalGameInstance.
+local function liveObject(className)
+    if type(FindFirstOf) ~= "function" then return nil end
+    local o
+    pcall(function() o = FindFirstOf(className) end)
+    if o and o.IsValid ~= nil and o:IsValid() then return o end
+    return nil
+end
+
+-- Route 1: the FString property the title screen prints.
+local function readGameInstanceVersion()
+    local gi = liveObject("PalGameInstance")
+    if not gi then return nil, "no live PalGameInstance yet" end
+    local ok, raw = pcall(function() return gi.DisplayVersion end)
+    if not ok then return nil, "DisplayVersion raised: " .. tostring(raw) end
+    local s = asString(raw)
+    if s then return s end
+    if raw == nil then return nil, "PalGameInstance declares no DisplayVersion on this build" end
+    return nil, "DisplayVersion answered an unreadable " .. type(raw)
+end
+
+-- Route 2: the Blueprint accessor for that same field. Only attempted when there is a live
+-- UObject to hand it as WorldContextObject — without one there is nothing to pass, and a call
+-- is not worth inventing an argument for.
+local function readUtilityVersion()
+    local u
+    pcall(function() u = StaticFindObject("/Script/Pal.Default__PalUtility") end)
+    if not (u and u.IsValid ~= nil and u:IsValid()) then
+        return nil, "PalUtility CDO did not resolve"
+    end
+    local ctx = liveObject("PalGameInstance") or liveObject("PalPlayerCharacter")
+    if not ctx then return nil, "no live UObject to pass as WorldContextObject" end
+    local ok, raw = require("palforge.core.signature")
+        .call(u, "GetDisplayVersion", { "ObjectProperty" }, ctx)
+    if not ok then return nil, "GetDisplayVersion was refused or raised (core/signature said so)" end
+    local s = asString(raw)
+    return s, (s == nil) and "GetDisplayVersion answered nothing" or nil
+end
+
+-- Route 3: the three UKismetSystemLibrary strings, each taking no parameters. The CDO is looked
+-- up once and only memoised on success, so a lookup that failed this early still gets retried.
+local kismetLib
+local function readKismet(fn)
+    return function()
+        if not kismetLib then
+            pcall(function()
+                kismetLib = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+            end)
+            if not (kismetLib and kismetLib.IsValid ~= nil and kismetLib:IsValid()) then
+                kismetLib = nil
+                return nil, "UKismetSystemLibrary CDO did not resolve"
+            end
+        end
+        local ok, raw = pcall(function() return kismetLib[fn] and kismetLib[fn](kismetLib) end)
+        if not ok then return nil, fn .. " raised: " .. tostring(raw) end
+        local s = asString(raw)
+        return s, (s == nil) and (fn .. " answered nothing") or nil
+    end
+end
+
+-- The candidate routes in the order they are tried. `comparable` means ONE thing: may this
+-- string be compared with env.gameBuild — a Palworld patch number — at all? Only Palworld's own
+-- version may. The three engine reads are context and nothing else. test/hooks/game_build_live.lua
+-- restates this list; the two must stay in step.
+local BUILD_READS = {
+    { name = "PalGameInstance.DisplayVersion", comparable = true,  read = readGameInstanceVersion },
+    { name = "PalUtility.GetDisplayVersion",   comparable = true,  read = readUtilityVersion      },
+    { name = "GetBuildVersion",                comparable = false, read = readKismet("GetBuildVersion")  },
+    { name = "GetEngineVersion",               comparable = false, read = readKismet("GetEngineVersion") },
+    { name = "GetGameName",                    comparable = false, read = readKismet("GetGameName")      },
+}
+
+---Every route, tried in order. NOTHING short-circuits: the engine strings are worth logging even
+---when Palworld's own version answered, and the reason a route did not answer is worth as much
+---as the answer.
+---@return table[] results  # { { name =, value =, comparable =, why = }, ... } in BUILD_READS order
 local function readLiveBuild()
-    local lib
-    pcall(function() lib = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary") end)
-    if not (lib and lib.IsValid ~= nil and lib:IsValid()) then
-        return nil, "UKismetSystemLibrary CDO did not resolve", false
+    local out = {}
+    for i, r in ipairs(BUILD_READS) do
+        local v, why = r.read()
+        out[i] = { name = r.name, value = v, comparable = r.comparable, why = why }
     end
-    local tried = {}
-    for _, r in ipairs(BUILD_READS) do
-        local ok, raw = pcall(function() return lib[r.fn] and lib[r.fn](lib) end)
-        local s = ok and asString(raw) or nil
-        if s then return s, r.fn, r.comparable end
-        tried[#tried + 1] = r.fn
+    return out
+end
+
+local function answered(results, name)
+    for _, r in ipairs(results) do if r.name == name then return r.value end end
+    return nil
+end
+
+---Palworld's own version, and the route that carried it — or nil. An engine string is NEVER
+---promoted into this slot: that promotion is exactly what made this file cry wolf.
+local function palVersion(results)
+    for _, r in ipairs(results) do
+        if r.comparable and r.value then return r.value, r.name end
     end
-    return nil, "none of " .. table.concat(tried, "/") .. " answered", false
+    return nil
+end
+
+---What Unreal said about itself, as one clause — or nil when even that did not answer, which is
+---what a session with no engine under it looks like.
+local function engineIdentity(results)
+    local bits = {}
+    local eng, br, proj = answered(results, "GetEngineVersion"),
+                          answered(results, "GetBuildVersion"), answered(results, "GetGameName")
+    if eng  then bits[#bits + 1] = "engine " .. eng end
+    if br   then bits[#bits + 1] = "branch " .. br end
+    if proj then bits[#bits + 1] = string.format("project %q", proj) end
+    return (#bits > 0) and table.concat(bits, ", ") or nil
+end
+
+---Route by route, why Palworld's own version did not answer. This is the sentence that keeps the
+---negative honest: "did not answer" with no reason is indistinguishable from "was never asked".
+local function palRouteTrail(results)
+    local bits = {}
+    for _, r in ipairs(results) do
+        if r.comparable then
+            bits[#bits + 1] = r.name .. ": " .. tostring(r.value or r.why or "no answer")
+        end
+    end
+    return table.concat(bits, "; ")
+end
+
+---What env.gameBuildLive carries. Palworld's own version when a route answered; otherwise the
+---word `unknown` IN THE VALUE, with the engine string in brackets. Three banners print this
+---field verbatim (here, test/init.lua, test/hooks/init.lua) and none of them compares it, so
+---handing one an engine string to print under the word "live" would restate the same false
+---claim in three more places.
+local function liveField(results)
+    local v = palVersion(results)
+    if v then return v end
+    local eng = answered(results, "GetEngineVersion") or answered(results, "GetBuildVersion")
+    return eng and ("unknown (engine " .. eng .. ")") or nil
 end
 
 -- Both strings reduced to their digit runs, so a formatting difference is not reported as a
--- version difference: "v1.0.2.101103" and a branch string of the shape "++Pal+Release-1.0.2-
--- CL-101103" both reduce to "1.0.2.101103". The exact live shape is UNOBSERVED (see above), so
--- this is deliberately the loose comparison — a false "they match" is a quiet no-op, where a
--- false mismatch would train every user to ignore the one line that matters.
+-- version difference: "v1.0.2.101103" and "Ver. 1.0.2 (101103)" both reduce to "1.0.2.101103".
+-- The shape DisplayVersion answers in has not been observed yet, so the loose comparison stays:
+-- a false "they match" is a quiet no-op, where a false mismatch is the thing this section was
+-- rewritten to stop.
 local function digitSignature(s)
     local parts = {}
     for run in tostring(s):gmatch("%d+") do parts[#parts + 1] = run end
     return table.concat(parts, ".")
 end
 
-local liveBuild, buildSource, buildComparable = readLiveBuild()
-env.gameBuildLive = liveBuild
+local results = readLiveBuild()
+local liveBuild, liveSource = palVersion(results)
+env.gameBuildLive = liveField(results)
 
 --=============================================================================
 -- ③ the startup banner
@@ -175,29 +303,56 @@ local SINGLE_PLAYER =
     .. "do nothing for anyone else."
 
 log.info(string.format(
-    "PalForge v%s starting | game build: declared %s, live %s | dev=%s debug=%s | dev overlay: %s",
+    "PalForge v%s starting | game build: declared %s, running %s | dev=%s debug=%s | dev overlay: %s",
     tostring(env.version),
     tostring(env.gameBuild),
-    liveBuild and (liveBuild .. " (" .. buildSource .. ")") or ("unknown (" .. buildSource .. ")"),
+    liveBuild and (liveBuild .. " (" .. liveSource .. ")") or "not read (see the next line)",
     tostring(env.dev), tostring(env.debug), devOverlay))
 log.info(SINGLE_PLAYER)
 
--- The disagreement line, logged ONCE and only when the two values are comparable at all.
-if liveBuild and buildComparable then
-    if digitSignature(liveBuild) ~= digitSignature(env.gameBuild) then
-        log.warn(string.format(
-            "game build MISMATCH: this build of PalForge was measured against %s and the running "
-            .. "game reports %s (%s). Everything in the framework may still work — nothing here "
-            .. "is a version check — but if a call into the game starts failing, THIS LINE is the "
-            .. "first thing to quote, because it is the difference between PalForge being broken "
-            .. "and the game having moved.",
-            tostring(env.gameBuild), liveBuild, buildSource))
+---THE ONE LINE ABOUT THE BUILD, and it is `warn` only when two PALWORLD version strings actually
+---disagree. Until 2026-08-02 the warn fired on every start, because the string being compared was
+---Unreal's branch and could never match a Palworld patch number; the run that proved that is in
+---the block comment above. Silence is now the normal case: when the running version answers and
+---matches, the banner above has already said so and there is nothing to add.
+---@param res table[]     # a readLiveBuild() result list
+---@param when string     # "at startup" | "at the first world.ready"
+---@return boolean        # did Palworld's own version answer?
+local function reportBuild(res, when)
+    local v, src = palVersion(res)
+    if v then
+        if digitSignature(v) ~= digitSignature(env.gameBuild) then
+            log.warn(string.format(
+                "game build MISMATCH: this build of PalForge was measured against %s and the "
+                .. "running game reports %s (%s, read %s). Nothing in the framework is a version "
+                .. "check and most of it will still work — but if a call into the game starts "
+                .. "failing, THIS is the line to quote, because it is the difference between "
+                .. "PalForge being broken and the game having moved.",
+                tostring(env.gameBuild), v, src, when))
+        elseif when ~= "at startup" then
+            log.info(string.format("game build: the running game reports %s (%s, read %s), which "
+                .. "is the build this copy of PalForge was measured against",
+                v, src, when))
+        end
+        return true
     end
-elseif liveBuild then
-    log.info(string.format("live build string %s came from %s, which reports the engine/project "
-        .. "rather than the Palworld build, so it is recorded but NOT compared with the declared "
-        .. "%s", liveBuild, buildSource, tostring(env.gameBuild)))
+    local engine = engineIdentity(res)
+    log.info(string.format(
+        "game build: this copy of PalForge was measured against %s, and the running game's own "
+        .. "patch version is NOT reachable from Lua %s (%s). %s%s",
+        tostring(env.gameBuild), when, palRouteTrail(res),
+        engine and ("What Unreal answers is its own identity — " .. engine .. " — which names the "
+                    .. "engine and the project, never Palworld's patch. ")
+               or "Unreal's own identity did not answer either, so nothing at all was readable. ",
+        when == "at startup"
+            and "It is asked once more at the first world.ready, when a PalGameInstance exists."
+            or "So there is nothing to compare against automatically: if a call into the game "
+             .. "starts failing, check that declared build by hand against the version the title "
+             .. "screen prints in its corner."))
+    return false
 end
+
+reportBuild(results, "at startup")
 
 --=============================================================================
 -- ④ the kernel
@@ -210,30 +365,22 @@ else
     log.info("ready")
 end
 
--- ONE retry for the build read, from the first loaded world. UE4SS runs a Lua mod early and
--- the CDO lookup above can legitimately answer nothing at that point; by world.ready the
--- object map is certainly populated. One-shot, and silent when the startup read already
--- answered — this is a diagnostic, not a heartbeat.
-if not env.gameBuildLive then
+-- ONE retry for the build read, from the first loaded world. UE4SS starts a Lua mod early — long
+-- before a UPalGameInstance exists — so the two routes that carry Palworld's OWN version cannot
+-- answer at startup, while the three engine strings can and did (measured 2026-08-02 16:38:19,
+-- the banner printed them). This is the read that gives those two routes a live game to answer
+-- from. Armed only when the startup read carried no Palworld version, one-shot, and it speaks
+-- exactly once — this is a diagnostic, not a heartbeat.
+if not liveBuild then
     pcall(function()
         local event = require("palforge.core.event")
         local done = false
         event.on("world.ready", function()
             if done then return end
             done = true
-            local v, src, cmp = readLiveBuild()
-            env.gameBuildLive = v
-            if v then
-                log.info(string.format("game build (read at world.ready): %s (%s); declared %s",
-                    v, src, tostring(env.gameBuild)))
-                if cmp and digitSignature(v) ~= digitSignature(env.gameBuild) then
-                    log.warn(string.format("game build MISMATCH: measured against %s, running "
-                        .. "game reports %s (%s)", tostring(env.gameBuild), v, src))
-                end
-            else
-                log.info("game build: unknown at world.ready too (" .. src .. "); every "
-                    .. "capability in this build was measured against " .. tostring(env.gameBuild))
-            end
+            local later = readLiveBuild()
+            env.gameBuildLive = liveField(later) or env.gameBuildLive
+            reportBuild(later, "at the first world.ready")
         end)
     end)
 end

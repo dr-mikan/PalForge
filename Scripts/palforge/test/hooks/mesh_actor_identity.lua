@@ -34,8 +34,40 @@
 -- cannot find the name again says so and the hook stops, because a missing actor would make a
 -- miss unattributable — which is exactly the ambiguity the audit is trying to remove.
 --
+-- MEASURED 2026-08-02 16:39:46/16:39:52/16:39:58, in a loaded save, build 2026-08-02 16:37:13,
+-- game v1.0.2.101103: FindAllOf('PalBuildObject') listed 8 actors on all three sweeps, the
+-- target was BP_BuildObject_WorkBench_C_2147468373, and sweeps 2 AND 3 both printed
+-- byActor[handle] -> MISS, byKey[GetFullName] -> HIT, rawequal = false, uo.same = true.
+-- A-1 IS CONFIRMED IN GAME. The re-key is necessary, not tidy, and the second branch above
+-- (UE4SS interning handles) is not what this runtime does.
+--
+-- THE SECOND MEASUREMENT IN EACH SWEEP — the shipped path — and why it now checks whether it
+-- APPLIES before it says anything. The same two blocks printed
+-- `event.instanceOfActor(fresh handle) -> MISS — the shipped scan does NOT find the record it
+-- made for this actor`, and that reading was WRONG: it reported a defect against correct code.
+-- M.instanceOfActor (core/event.lua:2767) is `local k = uo.key(actor); return k and
+-- instancesByActor[k] or nil` — already keyed on GetFullName, and bindActor fills the same
+-- table under the same key (core/event.lua:570). It answered nil because the table was
+-- EMPTY: core/event's scan only ever makes a record for an actor whose build id a REGISTERED
+-- definition claims (resolveBuildId, core/event.lua:702, returns nil unless Registry.byBuildId
+-- holds the id, and refreshDefs builds that index out of object_manager.all("building") and
+-- nothing else), and that session had building = 0 registered — the startup line said
+-- `17 class(es) registered` and F-8 had made the native catalogs declare with
+-- `{ register = false }`. building-record-orphans measured the same emptiness from the other
+-- side at 16:39:58: no persistence file for this save at all. There was no record to miss.
+-- So the probe now separates the three answers, and only one of them is a defect:
+--
+--   HIT                       -> the shipped lookup resolves a handle it has never seen to the
+--                                instance the scan bound under an older one. C1 in production.
+--   MISS, and a record exists -> A REAL DEFECT, named: Registry.instances and instancesByActor
+--                                disagree about the same actor.
+--   MISS, and no record       -> NOT APPLICABLE. Nothing is measured, and the hook says which
+--                                reason it is and what would arm it — including that arming it
+--                                WRITES to the player's save.
+--
 -- Read-only. Three FindAllOf sweeps and some table lookups; it touches no component, attaches
--- nothing and writes nothing.
+-- nothing and writes nothing. The "what would arm it" sentence names a call that DOES write,
+-- and says so before it names it — the hook never makes that call itself.
 local hooks = require("palforge.test.hooks")
 
 local CLASS   = "PalBuildObject"   -- what core/event's building scan itself enumerates
@@ -98,12 +130,120 @@ hooks.declare{
         end
 
         -- The same-object comparison, on the spot: two lookups of one actor inside ONE sweep.
+        -- FindAllOf lists each actor once, so this is normally the empty case — and it is NOT a
+        -- dead end, because sweeps 2 and 3 answer exactly this question with a handle from a
+        -- LATER FindAllOf, which is the comparison that matters anyway. (MEASURED 2026-08-02
+        -- 16:39:46: one entry, deferred; 16:39:52 and 16:39:58 answered rawequal = false.) This
+        -- line used to say "not testable", which read as a question nothing would ever answer.
         local again
         for _, actor in ipairs(first) do
             if uo.fullName(actor) == targetName and not rawequal(actor, target) then again = actor end
         end
         h:value("two handles for one actor compare == ", again and tostring(rawequal(again, target))
-            or "not testable: the sweep listed this actor once")
+            or "deferred to sweep 2: FindAllOf listed this actor once, so the second handle "
+            .. "comes from the next sweep")
+
+        -- Tier 1 of core/event's own build-id resolution, run here on the target: the class name
+        -- pattern BP_BuildObject_<Id>_C (resolveBuildId, core/event.lua:702). It is printed so
+        -- the NOT APPLICABLE branch below can name the exact id an operator would have to
+        -- register, rather than gesture at "a building". MEASURED 2026-08-02 16:39:46: the
+        -- target's class was BP_BuildObject_WorkBench_C, so this answers "WorkBench".
+        local candidateId = (uo.className(target) or ""):match("BP_BuildObject_([%w_]+)_C")
+        h:value("build id core/event would resolve for it",
+            candidateId or "none — this class is not named BP_BuildObject_<Id>_C, so only "
+            .. "resolveBuildId's tier 2/3 could claim it")
+
+        -- ---- the shipped path: applicability first, verdict second ----
+        -- The header has the account. In short: instanceOfActor is already keyed on
+        -- uo.key(actor), so a MISS says nothing about the key until it is known that the scan
+        -- ever made a record for this actor — and with no Building registered it never does.
+        -- A hook that calls that MISS a defect costs more than a hook that says nothing.
+        local function shippedLookup(fresh)
+            local inst
+            pcall(function() inst = event.instanceOfActor(fresh) end)
+            if inst ~= nil then
+                h:log("VALUE   event.instanceOfActor(fresh handle) -> HIT (record %s)",
+                    tostring(inst.key))
+                h:log("PASS the SHIPPED per-actor lookup is correct in game: core/event."
+                    .. "instanceOfActor keys on uo.key(actor), so a wrapper it has never seen "
+                    .. "before — this sweep's — still resolves to the instance the scan bound "
+                    .. "under an older one. That is contract C1 working in production, on the "
+                    .. "same handle the two lines above show is a different userdata.")
+                return
+            end
+
+            -- A MISS. Ask, WITHOUT the index under test, whether core/event tracks this actor
+            -- at all: event.instances() walks Registry.instances, a different table from
+            -- instancesByActor, so the two disagreeing IS the defect and nothing else here is.
+            local tracked, record = {}, nil
+            pcall(function() tracked = event.instances() or {} end)
+            for _, i in ipairs(tracked) do
+                if i.actor and uo.fullName(i.actor) == targetName then record = i; break end
+            end
+            if record then
+                h:log("VALUE   event.instanceOfActor(fresh handle) -> MISS")
+                h:log("FAIL A REAL DEFECT IN SHIPPED CODE: core/event tracks an instance for "
+                    .. "this actor (record %s, bound under actorKey %s) and its own per-actor "
+                    .. "index does not answer for it. Registry.instances and instancesByActor "
+                    .. "disagree about one structure — read bindActor/unbindActor "
+                    .. "(core/event.lua:570 and 578) and the scan's fast path (scanOnce, "
+                    .. "core/event.lua:867), which refreshes bound.actor on a hit and does NOT "
+                    .. "re-bind the key, so an actor that was renamed keeps a stale one.",
+                    tostring(record.key), tostring(record.actorKey))
+                return
+            end
+
+            -- No record: NOT APPLICABLE. Which reason, and what would arm it.
+            local nDefs, names = 0, {}
+            pcall(function()
+                for id in pairs(require("palforge.core.object_manager").all("building")) do
+                    nDefs = nDefs + 1
+                    if #names < 6 then names[#names + 1] = tostring(id) end
+                end
+            end)
+            local ready = false
+            pcall(function() ready = event.isWorldReady() end)
+
+            -- native.buildings.publish(id) returns nil for an id its catalog does not hold, so
+            -- the fallback is named here rather than left for the operator to discover.
+            local arm = candidateId
+                and ("require('palforge.native.buildings').publish('" .. candidateId
+                     .. "') from the Lua console — or, if that catalog has no such id and it "
+                     .. "returns nil, declare Building{ id = '" .. candidateId .. "' } in a pack")
+                or  "declare a Building{ buildIds = { ... } } that claims this actor's build id"
+            local cost = " ⚠️ THAT IS A SAVE WRITE, and it is why the hook does not do it: a "
+                .. "REGISTERED definition makes every matching actor in this world a tracked "
+                .. "instance AND a line in this save's entities file, and un-publishing later "
+                .. "does not undo the writing (native/buildings.lua header). Do it on a save you "
+                .. "do not mind, then run this hook again — the line above becomes HIT or a "
+                .. "named FAIL."
+
+            h:log("VALUE   event.instanceOfActor(fresh handle) -> NOT APPLICABLE (%d registered "
+                .. "building definition(s), %d live instance(s))", nDefs, #tracked)
+            if nDefs == 0 then
+                h:log("NOTE not one Building definition is REGISTERED in this session, so "
+                    .. "core/event's scan resolves no actor, makes no record and its per-actor "
+                    .. "index is empty. instanceOfActor answering nil here is CORRECT and this "
+                    .. "probe measured nothing — it is neither a pass nor a defect. F-8 is the "
+                    .. "reason: the native catalogs declare with `{ register = false }` "
+                    .. "(contract C2), so a stock install registers no building at all. The "
+                    .. "first in-game run, 2026-08-02 16:39, was in exactly this state — the "
+                    .. "startup line read `17 class(es) registered` with building = 0 — and this "
+                    .. "hook called it a defect in shipped code, which it was not.")
+                h:log("NOTE TO MAKE IT APPLICABLE: %s. Then wait one 500 ms scan.%s", arm, cost)
+            elseif not ready then
+                h:log("NOTE %d building definition(s) are registered (%s) but core/event's world "
+                    .. "gate is still CLOSED, so scanOnce has not run and nothing is tracked "
+                    .. "yet. Not applicable — nothing has had the chance to make a record. Wait "
+                    .. "for world.ready and run this hook again.", nDefs, table.concat(names, ", "))
+            else
+                h:log("NOTE %d building definition(s) are registered (%s) and the scan is "
+                    .. "running, but none of them claims THIS actor's build id (%s), so "
+                    .. "resolveBuildId answered nil and no record was ever made for it. Not "
+                    .. "applicable to this actor. TO MAKE IT APPLICABLE: %s.%s",
+                    nDefs, table.concat(names, ", "), candidateId or "unresolved", arm, cost)
+            end
+        end
 
         h:note("sweeps 2 and 3 follow at +%d s and +%d s; this hook prints "
             .. "#### BEGIN mesh-actor-identity-sweep-N for each.", GAP_S, GAP_S * 2)
@@ -142,14 +282,6 @@ hooks.declare{
             h:log("VALUE   uo.same(sweep1 handle, sweep%d handle)  = %s", done,
                 tostring(uo.same(target, fresh)))
 
-            -- AND THE PRODUCTION PATH, which is the line the refactor is actually judged on:
-            -- core/event's own per-actor instance lookup, asked with a handle from THIS sweep.
-            local inst
-            pcall(function() inst = event.instanceOfActor(fresh) end)
-            h:log("VALUE   event.instanceOfActor(fresh handle) -> %s",
-                inst ~= nil and "HIT — the shipped building scan finds its own record"
-                or "MISS — the shipped scan does NOT find the record it made for this actor")
-
             if not handleHit and keyHit then
                 h:log("PASS A-1 CONFIRMED IN GAME. A table keyed on the handle misses for an "
                     .. "actor that certainly still exists, and the same table keyed on "
@@ -164,6 +296,13 @@ hooks.declare{
                 h:log("FAIL BOTH keys missed, which means the target's own name changed between "
                     .. "sweeps. Neither key is being measured; read the two names above.")
             end
+
+            -- AND THE PRODUCTION PATH, asked with a handle from THIS sweep. It runs AFTER the
+            -- A-1 verdict deliberately: the two-key measurement above stands on its own and is
+            -- what the re-key rests on, while this one may not apply at all, and a block that
+            -- led with an inapplicable probe read as though the headline were in doubt.
+            shippedLookup(fresh)
+
             h:endBlock("sweep-" .. done)
             return done >= SWEEPS
         end)

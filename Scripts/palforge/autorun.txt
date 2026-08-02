@@ -133,6 +133,65 @@
 #15 pf_uiroute
 #130 pf_uiz
 
+# ---- QUEUED 2026-08-02: the first real hook run. Six lines, none of them writes. ----
+#
+# Every hook below is read-only: no save is touched, nothing is spent, no character is
+# written to. The five hooks that DO write (pal-skills-equip, item-satiety-write,
+# skill-projectile-spawn, mesh-color-change, building-unlock) are not here and could not run
+# from here anyway — each additionally needs env.debugHooks[id] = true, which the deployed
+# palforge_dev.lua leaves commented out.
+#
+# The order is deliberate and the delays are for LEGIBILITY, not for correctness:
+#
+#   0 s   pf_hooks                        the gate listing — what would run, and what would not
+#   5 s   game-build-live                 which call carries the build string. The startup line
+#                                         currently warns MISMATCH because GetBuildVersion
+#                                         answered "++UE5+Release-5.1-CL-0", which is Unreal's
+#                                         version and not Palworld's. This picks the right one.
+#  10 s   keymap-key-coverage             FKEY against UE4SS's live Key table, both directions.
+#                                         Needs nothing on screen.
+#  18 s   mesh-actor-identity             THE A-1 confirmation. Reads whether a per-actor lookup
+#                                         hits on the second and third building sweep under the
+#                                         old handle key and under the new GetFullName key. Stand
+#                                         near a base with structures in it.
+#  30 s   building-record-orphans         the F-7 quarantine round trip. The state directory was
+#                                         emptied on 2026-08-02, so this run is the clean
+#                                         baseline every later one is compared against.
+#  45 s   pf_tests                        the 481-check API suite, in a world. Run it once more
+#                                         at the TITLE SCREEN afterwards: 28 checks need a world
+#                                         and 10 need there to be none, and no single press can
+#                                         cover both.
+#
+# Comment these out again before the next run, or the next world load repeats all six.
+# ---- RUN 1 IS DONE. What it settled, so nobody re-runs it for nothing: ----
+#   keymap-key-coverage        4 pass / 0 fail. UE4SS Key = 165 names, keymap.FKEY = 165 rows,
+#                              identical in BOTH directions. Owed work §3's bullet is measured.
+#   mesh-actor-identity        A-1 CONFIRMED IN GAME on sweeps 2 and 3: the handle key MISSED for
+#                              an actor that certainly still existed, GetFullName HIT,
+#                              rawequal false, uo.same true.
+#   building-record-orphans    saveId = w_1DF0E44B..., a per-save name, and NO persistence file
+#                              exists — F-8 observed holding, with building = 0 registered.
+#   game-build-live            all three KismetSystemLibrary calls answer Unreal's identity, not
+#                              Palworld's patch. main.lua now reads PalGameInstance.DisplayVersion
+#                              instead, which is the string on the title screen.
+#
+# ---- RUN 2: confirm the three fixes that run made necessary. Still nothing that writes. ----
+#
+#   0 s   game-build-live      does DisplayVersion answer, and does it match v1.0.2.101103
+#  10 s   mesh-actor-identity  the verdict wording — run 1 reported instanceOfActor as a MISS as
+#                              though the scan had lost a record, when building = 0 means there
+#                              was no record to find. Expect "not applicable", not a defect.
+#  20 s   pf_tests             expect 0 failed. Run 1 failed four checks in BOTH game states that
+#                              are green headlessly: they assert the absence of the ENGINE, not of
+#                              a world, and the suite modelled two environments where there are
+#                              three. Also press F1 at the TITLE SCREEN once — a simulated title
+#                              run is 442/0/39 now, and the real one should match.
+#
+# Comment these out again before the next run.
+pf_hook_game_build_live
+10 pf_hook_mesh_actor_identity
+20 pf_tests
+
 # =====================================================================================
 # ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Nineteen measurements that CANNOT be taken
 # with the game switched off, each one a declared hook naming the plan/TODO.md item it

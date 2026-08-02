@@ -1211,9 +1211,15 @@ function M.run(which)
     local breakdown = T.needsPhrase and T.needsPhrase(results.needs)
     if breakdown then line = line .. " (" .. breakdown .. ")" end
     support.announce(line)
+    -- The sentence itself comes from core/unittests, which owns the environment table. Spelling
+    -- it here a second time is what made this line say "two runs" for a fortnight after the
+    -- suite grew a THIRD environment: the 2026-08-02 in-game run found four checks that assert
+    -- the absence of the ENGINE, not of a world, and they can only be measured under a headless
+    -- lua5.4. The log line and the on-screen line now come from one function and cannot drift.
     if T.needsTwoRuns and T.needsTwoRuns(results.needs) then
-        support.announce("tests: NO SINGLE RUN MEASURES EVERYTHING — press the key once in a "
-            .. "loaded save and once at the title screen; a green run is two runs")
+        local sentence = T.needsRunsSentence and T.needsRunsSentence(results.needs)
+        support.announce("tests: " .. (sentence or "NO SINGLE RUN MEASURES EVERYTHING — run the "
+            .. "suite in each environment it names above; a green run is more than one run"))
     end
 
     -- Repeat each failure on screen; a summary that says "3 failed" and nothing else
