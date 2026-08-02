@@ -49,7 +49,8 @@ rather than checking it.
 
 ## The list
 
-Thirty-one actions, in four groups.
+Thirty-seven actions, in four groups: eighteen of them always, plus one per declared hook once
+`env.debug` is on.
 
 | Command | What it does |
 | --- | --- |
@@ -64,7 +65,7 @@ Thirty-one actions, in four groups.
 | `pf_uiz` | three panels at once: z-order, key routing, the mouse half and the layer route |
 | `pf_reflect` `pf_pal` `pf_watch` `pf_title` `pf_uislot` `pf_uievents` | the six discovery probes, one per key |
 | `pf_hooks` `pf_hook <id>` `pf_hooks_all` | the game-required test hooks (see below) |
-| `pf_hook_<id>` | one generated name per declared hook, thirteen of them |
+| `pf_hook_<id>` | one generated name per declared hook, nineteen of them |
 
 Output that is meant to be pasted somewhere is bracketed, so it can be lifted straight out of the
 log:
@@ -109,7 +110,7 @@ names the poller it is waiting for. That is the async guard doing its job; see
 
 ## The game-required hooks
 
-Thirteen measurements cannot be taken with the game switched off. Each is a declared hook under
+Nineteen measurements cannot be taken with the game switched off. Each is a declared hook under
 `test/hooks/`, naming what it needs on screen, whether it writes into a save, and which open item
 it closes. They load only when `env.debug` is true.
 
@@ -177,7 +178,7 @@ own second gate on top.
 ## Summary
 
 - Every measurement is an entry in `palforge.test`'s `ACTIONS`; the startup log line is the authoritative list.
-- Nothing exists without `env.dev`, and the thirteen game-required hooks also need `env.debug`.
+- Nothing exists without `env.dev`, and the nineteen game-required hooks also need `env.debug`.
 - UE4SS's console is off by default — three settings and a restart.
 - Each command says what it needs on screen and stops rather than half-running.
 - `pf_hooks` before any hook: it prints every gate and the sentence that opens a shut one.

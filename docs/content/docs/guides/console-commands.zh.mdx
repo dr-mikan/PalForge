@@ -46,7 +46,7 @@ GuiConsoleVisible = 1
 
 ## 清单
 
-三十一个动作，分四组。
+三十七个动作，分四组：始终存在的十八个，外加 `env.debug` 打开之后、每个声明式钩子各生成一个。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -61,7 +61,7 @@ GuiConsoleVisible = 1
 | `pf_uiz` | 同时三个面板：z 序、按键路由、鼠标那一半，以及图层路线 |
 | `pf_reflect` `pf_pal` `pf_watch` `pf_title` `pf_uislot` `pf_uievents` | 六个探查探针，各占一个按键 |
 | `pf_hooks` `pf_hook <id>` `pf_hooks_all` | 需要游戏在跑的测试钩子（见下文） |
-| `pf_hook_<id>` | 每个声明式钩子生成一个名字，共十三个 |
+| `pf_hook_<id>` | 每个声明式钩子生成一个名字，共十九个 |
 
 准备贴到别处的输出会用标记括起来，可以直接从日志里整段拿走：
 
@@ -102,7 +102,7 @@ GuiConsoleVisible = 1
 
 ## 需要游戏在跑的钩子
 
-有十三项测量在游戏关着的时候取不到。每一项都是 `test/hooks/` 下的声明式钩子，自己写明屏幕上需要
+有十九项测量在游戏关着的时候取不到。每一项都是 `test/hooks/` 下的声明式钩子，自己写明屏幕上需要
 什么、是否会写入存档、以及它关闭的是哪个未决项。它们只在 `env.debug` 为 true 时加载。
 
 ```lua title="Scripts/palforge_dev.lua"
@@ -166,7 +166,7 @@ if not run then log.warn(name .. ": no action of that name") end
 ## 小结
 
 - 每一项测量都是 `palforge.test` 的 `ACTIONS` 里的一项；启动日志那一行才是权威清单。
-- 没有 `env.dev` 就什么都不存在；十三个需要游戏的钩子还额外需要 `env.debug`。
+- 没有 `env.dev` 就什么都不存在；十九个需要游戏的钩子还额外需要 `env.debug`。
 - UE4SS 的控制台默认关闭——改三项设置并重启。
 - 每条命令都会说明屏幕上需要什么，然后停下，而不是跑一半。
 - 跑任何钩子之前先 `pf_hooks`：它打印每道闸门，以及打开关着那道所需的一句话。

@@ -395,28 +395,36 @@ pf_hook_pal_skills_equip
    フックごとの 2 つめの同意が要ります。`debug` はセッション全体のスイッチであり、書き込みは
    使い捨てのセーブで下す実験ごとの判断だからです。
 
-宣言済みの 13 個のフックを、`pf_hooks_all` が実行する順（読み取り専用が先。途中で落ちても、書き込みに
+宣言済みの 19 個のフックを、`pf_hooks_all` が実行する順（読み取り専用が先。途中で落ちても、書き込みに
 至る前に出せるものはすべて出ているように）で並べます。
 
 | フック | 必要なもの | 何を決着させるか |
 | --- | --- | --- |
 | `game-build-live` | world | `GetBuildVersion` / `GetEngineVersion` / `GetGameName` の生の文字列。宣言したビルドと動いているビルドを実際に比較するため |
+| `keymap-key-coverage` | *なし* | `keymap.FKEY` が UE4SS のライブな 165 名の `Key` テーブルを双方向で覆えているか、ずれをすべて名指しする —— `test/cases/ui.lua` のガードのうち、ヘッドレスでは skip されるゲーム内側の半分。ここで唯一 `needs` を宣言しないフックなので、タイトル画面でも答えが出る |
 | `mesh-actor-identity` | world | UE4SS のアクターハンドルをキーにしたテーブルが、後のスイープでも当たるのか —— アクター単位の再キー化全体が乗っている計測 |
 | `item-datatable-row-read` | world | `dt:FindRow(id)` が返す構造体からスカラや FName の列を直接引けるのか、それともレシピは列ごとに組み立てるしかないのか |
 | `audio-custom-file-loader` | world | 製品ビルドに、ディスク上の `.wav` を再生可能なものへ変える手段が 1 つでもあるのか |
+| `building-record-orphans` | world | 実セーブに対する orphan 隔離の往復。レコードがいくつ読み込まれ、いくつが登録された所有者を持たず、いくつが隔離されたか —— そして肝心の主張として、今回のセッションで単にロードされていないだけのパックが**破棄されていない**こと |
 | `ui-update-event` | world | 4 つの UI クラスの Open/Show/Construct/Refresh/Update/Setup 関数をすべて仕掛け、どれがどの順で発火するかを報告する |
 | `pal-spawned-fresh` | world | `pal.spawned` の発火をすべて `world.ready` からの時刻で記録し、新規スポーンをロード直後の嵐と区別する |
 | `skill-hit-source` | world | ダメージ経路に技 id を運ぶものが無いことを確認し、発動とダメージの相関付けがなぜ誤りかを数値で示す |
 | `ui-host-layer` | world | Palworld 自身の CommonUI レイヤーにパネルを積み、ゲームが受け入れたかどうかを報告する |
 | `ui-backhandler` | world | CommonUI の back アクションを主張するパネルをマウントし、そのとき Esc が何をするかを確かめる |
+| `building-runtime-reload` | world | 建築ランタイムが F9 を生き延びるのか。押すのは**このフックの 2 回の実行のあいだ**です。スキャンとディスパッチは 1 つの `_G.__PalForgeBuildingRegistry` を共有するようになり、`object_manager` はリロードの KEEP リストに入りました —— そのあとも建築フックは発火するのか |
+| `mesh-texture-import-live` | world, player | `ImportFileAsTexture2D` を史上初めて呼び、続けて同じパスでもう一度呼んで、新しいキャッシュが再インポートの代わりに答えたかどうかを述べる |
 | `mesh-color-change` | world, player, **書き込み** | 色を付けたメッシュをプレイヤーの前に置き、色を 2 回変える |
 | `audio-setvolume-audible` | world, player | 1 つの音を 4 段階の出力バス音量で鳴らし、`setVolume` に聴こえる効果があるかを人が判断できるようにする |
 | `building-unlock` | world, player, **書き込み** | `Building.Handle:unlock` について確認できる事実をすべて記録し、確認できない半分は操作者に渡す |
+| `item-satiety-write` | world, player, **書き込み** | 動いているビルドが `SetFullStomach` にどんな引数リストを宣言しているのか、そして満腹度 / HP の書き込みがそもそも Lua から届くのか |
+| `skill-projectile-spawn` | world, pal, **書き込み** | 弾／スポーン系のあらゆる経路について宣言された引数リストを出力し、引数を取らないものだけを実際に撃ち、構造体を取るものは名指しで拒否する |
 | `pal-skills-equip` | world, pal, **書き込み** | アクティブ技の書き込みが実際のパルに載るのか、そしてゲームが生き延びるのか |
 
-13 個のうち 3 個が `writes = true` を宣言します。`audio-setvolume-audible` は意図的に宣言しません。
+19 個のうち 5 個が `writes = true` を宣言します。`audio-setvolume-audible` は意図的に宣言しません。
 音は鳴りますが、変えたものはセッションを越えず、ファイルにも届きません。`writes` は「何かが起きる」
-ではなく「セーブが書き換わる」という意味だからです。
+ではなく「セーブが書き換わる」という意味だからです。`mesh-texture-import-live` も同じ理由で宣言
+しません。`UTexture2D` を確保し、小さな PNG を自分の隣に書き出しますが、それが変えるのは動いている
+プロセスとディレクトリであって、プレイヤーのセーブではありません。
 
 出力は探索プローブとまったく同じ形で囲まれるので、`UE4SS.log` からブロックを切り出して報告に
 そのまま貼れます。
@@ -439,7 +447,7 @@ NOTE item-datatable-row-read finished: 4 pass, 0 fail
 
 <Callout type="info">
 F1 スイートの「これはゲームが必要」というスキップは、すべて計測を行うフックの名前を挙げます。
-つまりスキップは常に、実際に実行できる何かへ辿れます。`pf_hooks` は 13 個すべてを、いま
+つまりスキップは常に、実際に実行できる何かへ辿れます。`pf_hooks` は 19 個すべてを、いま
 スキップされる理由付きで一覧にします。
 </Callout>
 

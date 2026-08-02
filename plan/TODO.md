@@ -269,9 +269,38 @@ pal registries were the same kind of state and were not.
 `core/reload.lua`'s header now names all four survivors and what is still stale after F9.
 
 **Still owed.** This is proven headlessly (two harnesses, 26 + 8 assertions) and by reading. It has
-never been done in a game. The EVENT agent proposed `building-runtime-reload` (place a structure,
-F9, confirm `Building.Handle:instances()` is non-empty and `onTick` still fires) as the hook that
-would settle it; it is not declared.
+never been done in a game. **The hook is now declared** — `pf_hook building-runtime-reload`
+(`test/hooks/building_runtime_reload.lua`), run once BEFORE the press and once after:
+
+```text
+pf_hook building-runtime-reload      -- records the baseline and re-arms
+press F9
+pf_hook building-runtime-reload      -- compares against the record
+```
+
+It measures the three parts separately, so a partial failure is attributable: the `object_manager`
+module table is the same object across the wipe and still holds the same building ids (KEEP); the
+table the SCAN closes over and the table the DISPATCH resolves against are one table, read out of
+the live closures with `debug.getupvalue` (this is the `_G` claim, and it is the half already
+confirmed headlessly — both upvalues are `_G.__PalForgeBuildingRegistry`); and `pump()` re-entry,
+via a transparent witness wrapper on this module's `__scanPump` whose call count the NEXT run reads.
+It arms **no poller**, deliberately: every `core/poll` poller brackets itself with the async guard,
+so a hook with a watcher would refuse the very F9 it is asking for. If no F9 happened in between it
+says so by name rather than reporting a healthy-looking pass for a reload that never occurred.
+
+⚠️ **Two halves of the originally proposed procedure cannot be run as written, and the hook refuses
+them by name rather than faking them.** "Confirm `Building.Handle:instances()` is non-empty" is not
+measurable in a stock session: instances exist only for **registered** Building definitions
+(`refreshDefs` reads `object_manager` and nothing else) and F-8 made both curated native buildings
+`{ register = false }`, so a stock session has zero registered buildings and zero instances before
+*and* after the press — the defect and the fix look identical. The precondition is
+`require("palforge.native.buildings").publish("WorkBench")`, which is itself a save write; that is
+what F-8 is about, so it is the operator's decision and not the hook's. And "`onTick` still fires"
+is unreachable even after publishing: `Registry.tickList` holds only instances whose class
+*overrides* `onTick`, and neither curated building declares one — it needs a pack definition, not a
+catalog. Fix #3 is likewise not observable from any export (`gate.scans` climbs identically whether
+the pre- or post-reload closure ran, because both write the same `_G` tables), which is why the
+hook installs the wrapper instead of reading a counter.
 
 #### F-6 — the ownership model was written, tested, and wired to nothing
 
@@ -328,8 +357,28 @@ being true the moment `object_manager` entered `KEEP`. Had that comment stayed t
 would have quarantined every pack's records ~30 s after any F9. If `object_manager` is ever dropped
 from `KEEP` again, `ORPHAN_GRACE_SCANS` is all that stands between a reload and a mass quarantine.
 
-**Still owed.** The round trip has never been run against a real save file. The proposed hook is
-`building-record-orphans`; it is not declared. Two smaller things: the file's top-level
+**Still owed.** The round trip has never been run against a real save file. **The hook is now
+declared** — `pf_hook building-record-orphans` (`test/hooks/building_record_orphans.lua`). ⚠️ The
+delay is part of the measurement: the one orphan pass per world runs only after
+`ORPHAN_GRACE_SCANS = 60` (~30 s), so load the save, wait ~35 s, then run it; running it earlier
+prints `gate.pruned = false` and how many scans are left, and running it twice prints the delta
+across the pass, which is the round trip itself. The assertion that matters is a **negative**: a
+record whose pack is merely not loaded this session must still be in the file when the pass has
+finished. It is read-only in the strong sense — `utils.file.get` hands back the backend's cached
+table, which is the very table `core/event` holds as `store.cache`, so it assigns into nothing it
+reads.
+
+⚠️ **One unstated fact makes the working-tree evidence weaker than the paragraph below implies, and
+the hook prints it whenever it applies.** `state/entities_world.json` is the **fallback bucket**:
+`spatial.saveId()` answers `"world"` when the `PalGameInstance` read fails, so that one file is
+shared by *every* such session. A real save has a `w_<directory>` file of its own and nothing has
+ever looked at one. In the fallback file, "a record no definition claims" may equally be "a record
+from a different save", so the round trip is only really settled against a named save id. A second
+softening, for pre-F-7 records specifically: "logged … with the packs it belonged to" is optimistic,
+because the log names `rec.pack or rec.def or "unattributed"` and a v1 record carries neither —
+which is exactly the `(unattributed)` the attest pass printed.
+
+Two smaller things: the file's top-level
 `"version": 1` is never bumped while its records are upgraded to `v = 2` in place (nothing reads
 the field, so it is cosmetic and misleading), and the on-disk `state/entities_world.json` in this
 working tree holds one v1 record, `TestBench@1,2,0`, that no definition claims. **It has now been
@@ -582,7 +631,22 @@ the exact absolute path string. The `kismetRendering` latch went with it: it use
 failure permanently, and now retries.
 
 **Still owed.** `ImportFileAsTexture2D` has still never been called, so the new cache is unobserved
-along with the capability it caches.
+along with the capability it caches. **The hook is now declared** — `pf_hook
+mesh-texture-import-live` (`test/hooks/mesh_texture_import.lua`), which needs a world and a player
+and nothing else. It writes an 82-byte 8×8 PNG next to itself first, so "the import failed" can
+never mean "there was no file"; imports once and prints the returned object's class chain and full
+name; imports the same path again and decides the cache with `rawequal` on the two returned Lua
+values; and attempts the import once BEFORE the file exists, so positives-only-with-retry is stated
+as an observation rather than as a code reading. ⚠️ A successful run allocates **one UTexture2D that
+nothing in this process can destroy** — there is no `AddToRoot`, no `FGCObject` and no destroy in
+UE4SS's Lua layer, and a weak-*valued* cache does not shorten a texture's life. One 8×8 is nothing;
+a loop doing this is exactly the leak this item is about.
+
+One thing the paragraphs above leave to be re-derived, and the hook does not: the cache lives
+**inside `importTexture`**, while the per-attach call site is **`resolveTexture`** (`writeMaterial`
+calls it once for `def.texture` and once per `params.texture` entry). A cache the real call site did
+not reach would be a cache in name only, so the hook's last call goes through
+`Renderer.resolveTexture` and `rawequal`s *that* return against the first import.
 
 #### A-6 — there was no "validate my declared assets" pass, and attach threw the diagnosis away
 
@@ -688,16 +752,18 @@ instructions.
 
 ### The hooks
 
-15 declared under `Scripts/palforge/test/hooks/`, loaded only when `env.debug` is true, never run
+19 declared under `Scripts/palforge/test/hooks/`, loaded only when `env.debug` is true, never run
 unless asked for by name. `pf_hooks` lists them, `pf_hook <id>` runs one, `pf_hooks_all` runs every
 one whose gate is open, read-only ones first.
 
 | hook | writes | what it owns |
 | --- | --- | --- |
 | `game-build-live` | | Before publish §2 — which function carries the build string |
+| `keymap-key-coverage` | | Owed work §3 — the only hook here with **no `needs` at all** |
 | `mesh-actor-identity` | | Foundations / A-1 and A-2 — the whole keying finding, in one run |
 | `item-datatable-row-read` | | Open / Item (with `item-recipe-of` folded in) |
 | `audio-custom-file-loader` | | Open / Audio |
+| `building-record-orphans` | | Foundations / F-7 — the quarantine round trip, ~35 s after load |
 | `ui-update-event` | | Open / UI |
 | `pal-spawned-fresh` | | Open / Events |
 | `skill-hit-source` | | Open / Skill — confirms the negative |
@@ -705,10 +771,19 @@ one whose gate is open, read-only ones first.
 | `skill-projectile-spawn` | ✔ | Open / Skill — the second one |
 | `ui-host-layer` | | Owed work §2 |
 | `ui-backhandler` | | Owed work §2 |
+| `building-runtime-reload` | | Foundations / F-5 — the one hook whose measurement spans an F9 |
+| `mesh-texture-import-live` | | Foundations / A-5 — the call that has never once been made |
 | `mesh-color-change` | ✔ | Owed work §2 — the colour nobody has watched change |
 | `audio-setvolume-audible` | | Owed work §2 — deliberately not `writes`: it makes noise, not a save edit |
 | `building-unlock` | ✔ | Owed work §2 |
 | `pal-skills-equip` | ✔ | Before publish §1 / Open / Pal — **the publish blocker** |
+
+Five declare `writes = true` (the ✔ column) and so need an `env.debugHooks` entry on top of
+`env.debug`. Three of the unticked ones change something anyway and say so in their own headers,
+because `writes` means "a save is mutated" and nothing weaker: `audio-setvolume-audible` makes the
+game loud and then quiet again, `mesh-texture-import-live` allocates a UTexture2D nothing can
+destroy and writes an 82-byte PNG next to itself, and `building-runtime-reload` leaves five channel
+subscriptions and a `__scanPump` wrapper behind until its next run takes them back.
 
 A silent skip is the failure mode this tree has been bitten by three times — a probe on Palworld's
 own volume key that bound successfully and never fired, a console command registered into a window
@@ -758,8 +833,9 @@ there. The report says so in its own words.
 
 **Every probe also has a console command**, because a key the game has claimed binds successfully
 and then never fires — which from the log is indistinguishable from a probe that ran and found
-nothing. `test/init.lua` registers **18** actions with `env.debug` off and **33** with it on (one
-generated `pf_hook_<id>` per declared hook). The fifteen that are not hook plumbing:
+nothing. `test/init.lua` registers **18** actions with `env.debug` off and **37** with it on (one
+generated `pf_hook_<id>` per declared hook, so that number moves with the table above). The fifteen
+that are not hook plumbing:
 
 ```text
 pf_tests   pf_keys    pf_spawn    pf_mesh     pf_teach
@@ -850,7 +926,7 @@ without the game running. The rest were observed live.
 ### Settled without the game, 2026-08-02 (14)
 
 These are the Foundations findings. Each is **verified by reading plus the headless suite** —
-`luac5.4 -p` clean on all 143 files under `Scripts/` and `tools/`, `450 passed / 0 failed /
+`luac5.4 -p` clean on all 147 files under `Scripts/` and `tools/` (145 + 2), `450 passed / 0 failed /
 31 skipped (481 total)`, the 8-check startup bundle green, and in several cases a purpose-built
 headless harness. None was observed live, and where a live confirmation is owed it is named. The
 measurement that shaped each fix is in **Foundations** above; this list is the index.
@@ -870,15 +946,18 @@ measurement that shaped each fix is in **Foundations** above; this list is the i
   running each domain's refusal through `lua5.4` and diffing the message.
 - **`F-5` — F9 split the building runtime from its registry.** Closed by `object_manager` in `KEEP`,
   the runtime on `_G`, and the five drivers re-entering the current module. Verified by two headless
-  harnesses (26 + 8 assertions). **Live confirmation owed** — the proposed hook is
-  `building-runtime-reload`.
+  harnesses (26 + 8 assertions), and the `_G` half re-confirmed headlessly on 2026-08-02 with
+  `debug.getupvalue`: the scan's `Registry` and the dispatch's `Registry` are one table, and it is
+  `_G.__PalForgeBuildingRegistry`. **Live confirmation owed** — `pf_hook building-runtime-reload`,
+  run either side of an F9.
 - **`F-6` — the ownership model was wired to nothing.** Closed for identity: `PalForge.pack(...)`,
   `withPack`/`currentPack`, owner recorded at register, `checkOwnership` consulted. **Partially
   open:** `checkImport` still has no producer — see Owed work §1.
 - **`F-7` — records carried no owner and orphans accumulated forever.** Closed by `v`/`def`/`pack`
   per record, a deterministic `refreshDefs`, and quarantine-not-delete with a 30 s grace and a 4096
   cap. Verified by reading and by the events suite. **Live confirmation owed** —
-  `building-record-orphans`.
+  `pf_hook building-record-orphans`, ~35 s after a save loads. The working-tree run was against the
+  `"world"` FALLBACK bucket, not a named save; see F-7.
 - **`F-8` — reading a native catalog started persisting world state.** Closed by
   `X(spec, { register = false })` in all eight domains and the publish gate in all six catalogs.
   Verified by measurement: six catalogs load, 15 classes register, **zero buildings**, a read
@@ -899,6 +978,8 @@ measurement that shaped each fix is in **Foundations** above; this list is the i
   reason, all documented — see A-4 above.
 - **`A-5` — imported textures were re-imported per attach.** Closed by a positives-only path cache.
   Verified by reading; **unobserved**, because `ImportFileAsTexture2D` has still never been called.
+  **Live confirmation owed** — `pf_hook mesh-texture-import-live`, which decides the cache with a
+  `rawequal` on the `resolveTexture` return, i.e. at the seam `writeMaterial` actually uses.
 - **`A-6` — no "validate my declared assets" pass, and attach threw the diagnosis away.** Closed by
   `Mesh.validateDeclared()` at world.ready plus `false, reason` on every mesh action. Verified by
   test and by tracing the call site.
@@ -1407,7 +1488,10 @@ boot). §6 and §7 are done except for what is listed below.
   as the delta across two consecutive `run()`s: 8, then 8 again. Corrected in both places.)
 - **`state/entities_world.json`'s top-level `"version": 1` is never bumped** while its records are
   upgraded to `v = 2` in place. Nothing reads the file-level field, so it is cosmetic; a file that
-  says 1 and contains v2 records will mislead the next reader.
+  says 1 and contains v2 records will mislead the next reader. Confirmed on disk on 2026-08-02:
+  `version: 1`, `entities: 0`, `orphans: 1`, against a live `REC_VERSION = 2`.
+  `pf_hook building-record-orphans` prints both numbers side by side, so the lie is visible in the
+  same block that reports the round trip.
 - **11 bare `TODO:` survive in `Scripts/palforge/tmp/building_runtime_ref.lua`.** That directory is
   gitignored, required by nothing, and deleted from any deployed tree by `deploy.sh` — so they are
   inert, and they will keep showing up in every future `grep 'TODO'`. It also still contains the old
@@ -1429,8 +1513,12 @@ run.** A hook that exists is an instrument, not a measurement.
   `backHandler` (and `input = "clicks"/"exclusive"`) was refused at define time. `host = "layer"`
   passed define with any root and failed at *mount*, despite `api/ui.lua`'s own doc and
   `native/ui/tree.host`'s comment both claiming it "says so rather than half-working". The claim is
-  now true, and `UI{ host = "layer", root = VBox{...} }` is a hard error. `input = "clicks"` and
-  `"exclusive"` remain unobserved with no hook.
+  now true, and `UI{ host = "layer", root = VBox{...} }` is a hard error. **Correction, 2026-08-02:**
+  `input = "clicks"` is no longer hookless — both of those hooks declare it on the panel they mount
+  (`ui_host_layer.lua:69`, `ui_backhandler.lua:59`) and print the applied input grab as a `VALUE`
+  line, so running either one measures it on the way past. `input = "exclusive"` is **the one
+  declared surface in this file with no hook at all**; nothing in `test/hooks/` mounts it, and
+  closing it means declaring one, not running one.
 - **A colour has never been watched changing** — `pf_hook mesh-color-change` (writes). The names are
   measured (`mesh-material-params`); `api/pal.lua`'s `renderOn` is explicit that a `true` means the
   write ran.
@@ -1465,7 +1553,14 @@ run.** A hook that exists is an instrument, not a measurement.
   (F1–F10, ESCAPE, INS, DEL, END and the three mouse buttons) each have a row — but
   the COVERAGE assertion against UE4SS's live `Key` table can only run in a game. That table has
   **165** names, not the 156 two comments in `keymap.lua` claimed; `M.FKEY` matches it exactly in
-  both directions.
+  both directions (165 rows, re-counted 2026-08-02). **The hook is now declared** —
+  `pf_hook keymap-key-coverage`, the only hook in the directory with **no `needs` at all**, because
+  `Key` is a UE4SS process global rather than a world subsystem: it answers at the title screen and
+  during a load, which also makes it the cheapest thing to put in `autorun.txt`. It crosses the two
+  tables one row per name in both directions and names every drift; today's expected result is two
+  empty lists, and the day either is not empty is the day it was worth declaring. It measures NAME
+  COVERAGE and nothing else — whether Palworld has an action on a key is `pf_keys`, and whether a
+  bound key's press ever reaches Lua is the third question F7 cost a session on.
 - **A ninth gating axis exists that "run F1 twice" does not cover.** `test/cases/ui.lua`'s
   `ownStack` gates on *stack emptiness*, not on a world: it skips in any session where something is
   already mounted, and `pf_uiz` leaves three panels up.

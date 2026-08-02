@@ -398,28 +398,36 @@ There are three gates, and a closed one is always printed rather than passed ove
    `env.debugHooks["<id>"] = true`. `debug` is a session-wide switch; a write is a
    per-experiment decision taken on a throwaway save.
 
-The thirteen declared hooks, in the order `pf_hooks_all` runs them — read-only first, so a run
+The nineteen declared hooks, in the order `pf_hooks_all` runs them — read-only first, so a run
 that ends badly has printed everything it could before it got to a write:
 
 | hook | needs | what it settles |
 | --- | --- | --- |
 | `game-build-live` | world | the raw `GetBuildVersion` / `GetEngineVersion` / `GetGameName` strings, so the declared build can be compared with the running one |
+| `keymap-key-coverage` | *nothing* | whether `keymap.FKEY` covers UE4SS's live 165-name `Key` table, in both directions, naming every drift — the in-game half of the guard in `test/cases/ui.lua`, which skips headlessly. The only hook here that declares no `needs`, so it answers at the title screen too |
 | `mesh-actor-identity` | world | whether a table keyed on a UE4SS actor handle still hits on a later sweep — the measurement the whole per-actor re-key rests on |
 | `item-datatable-row-read` | world | whether a scalar or FName column can be indexed off the struct `dt:FindRow(id)` returns, or a recipe must be assembled column by column |
 | `audio-custom-file-loader` | world | whether the shipping build exposes any way at all to turn a `.wav` on disk into something playable |
+| `building-record-orphans` | world | the orphan quarantine round trip against a real save: how many records loaded, how many had no registered owner, how many were quarantined — and, the assertion that matters, that a pack merely not loaded this session was **not** destroyed |
 | `ui-update-event` | world | arms every Open/Show/Construct/Refresh/Update/Setup function on the four UI classes and reports which fire, and in what order |
 | `pal-spawned-fresh` | world | timestamps every `pal.spawned` firing against `world.ready`, so a fresh spawn can be told from the load storm |
 | `skill-hit-source` | world | confirms that nothing in the damage path carries a waza id, and quantifies why correlating activation with damage would be wrong |
 | `ui-host-layer` | world | pushes a panel onto one of Palworld's own CommonUI layers and reports whether the game accepted it |
 | `ui-backhandler` | world | mounts a panel that claims the CommonUI back action, and finds out what Esc then does |
+| `building-runtime-reload` | world | whether the building runtime survives F9, pressed **between two runs of this hook**: the scan and the dispatch now share one `_G.__PalForgeBuildingRegistry`, and `object_manager` is on the reload KEEP list — does a building hook still fire afterwards |
+| `mesh-texture-import-live` | world, player | calls `ImportFileAsTexture2D` for the first time ever, then calls it again for the same path and says whether the new cache answered instead of re-importing |
 | `mesh-color-change` | world, player, **writes** | puts a tinted mesh in front of the player and changes its colour twice |
 | `audio-setvolume-audible` | world, player | plays one sound at four output-bus volumes so a person can say whether `setVolume` does anything audible |
 | `building-unlock` | world, player, **writes** | records every establishable fact about `Building.Handle:unlock`, then hands the unverifiable half to the operator |
+| `item-satiety-write` | world, player, **writes** | what parameter list the live build declares for `SetFullStomach`, and whether the satiety / HP write is reachable from Lua at all |
+| `skill-projectile-spawn` | world, pal, **writes** | prints the declared parameter list of every projectile / spawn route, fires the one that takes no arguments, and refuses the struct ones by name |
 | `pal-skills-equip` | world, pal, **writes** | whether an active-move write lands on a real pal, and whether the game survives it |
 
-Three of the thirteen declare `writes = true`. `audio-setvolume-audible` deliberately does not:
+Five of the nineteen declare `writes = true`. `audio-setvolume-audible` deliberately does not:
 it is audible, but nothing it changes survives the session or reaches a file, and `writes`
-means "a save is mutated" rather than "something happens".
+means "a save is mutated" rather than "something happens". Nor does `mesh-texture-import-live`,
+for the same reason: it allocates a `UTexture2D` and drops a small PNG beside itself, which
+changes the running process and a directory, not the player's save.
 
 Output is bracketed exactly like the discovery probes, so a block can be lifted out of
 `UE4SS.log` and pasted straight into a report:
@@ -442,7 +450,7 @@ before. Deploy, then run the hook; not the reverse.
 
 <Callout type="info">
 Every "this needs the game" skip in the F1 suite names the hook that measures it, so a skip is
-always traceable to something you can actually run. `pf_hooks` lists all thirteen with the
+always traceable to something you can actually run. `pf_hooks` lists all nineteen with the
 reason each one would skip right now.
 </Callout>
 

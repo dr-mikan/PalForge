@@ -104,31 +104,45 @@ local M = {}
 M.FILES = {
     -- read-only, no operator action
     "game_build_live",
+    -- keymap_coverage is second because it is the ONLY hook here that declares no `needs` at
+    -- all: UE4SS's `Key` table is a process global, so it answers at the title screen, during a
+    -- load, and in a session where nothing else in this directory can run.
+    "keymap_coverage",
     "mesh_actor_identity",
     "item_datatable_row_read",
     "audio_custom_file_loader",
+    "building_record_orphans",
     -- read-only, but they arm hooks and want the operator to do something in game
     "ui_update_event",
     "pal_spawned_fresh",
     "skill_hit_source",
     "ui_host_layer",
     "ui_backhandler",
-    -- LAST, because each one CHANGES SOMETHING while it runs. FIVE of these six declare
+    -- building_runtime_reload is in THIS group and not the one above because the thing it wants
+    -- the operator to do is press F9 BETWEEN two runs of it. It is the one hook whose
+    -- measurement spans a reload, which is also why it arms no poller: a live poller refuses the
+    -- very press it is asking for (core/poll.lua:123,134).
+    "building_runtime_reload",
+    -- LAST, because each one CHANGES SOMETHING while it runs. FIVE of these seven declare
     -- `writes = true` and so need their own env.debugHooks entry on top of env.debug:
     -- mesh_color_change, building_unlock, item_satiety_write, skill_projectile_spawn,
-    -- pal_skills_equip. audio_setvolume_audible sits here for ordering only — it makes the game
-    -- loud and then quiet again, and it deliberately does NOT declare writes, because `writes`
-    -- means "a save is mutated", not "something is audible" (see its own header at
-    -- audio_setvolume_audible.lua:26-27). This comment used to read "writes = true, each behind
-    -- its own env.debugHooks entry" over all four, which promised a gate one of them does not
-    -- have; it then said "only THREE of these four", which two new entries have since made
-    -- wrong in the other direction. The count is worth keeping correct because it is the only
-    -- place that says at a glance how many opt-ins a full write run needs.
+    -- pal_skills_equip. TWO sit here for ordering only and deliberately do NOT declare writes,
+    -- because `writes` means "a save is mutated" and neither mutates one:
+    -- audio_setvolume_audible makes the game loud and then quiet again (its own header,
+    -- audio_setvolume_audible.lua:26-27), and mesh_texture_import allocates a UTexture2D that
+    -- nothing in this process can destroy and writes an 82-byte PNG next to itself, which is a
+    -- change to the running process and to a directory rather than to the player's save.
+    -- This comment used to read "writes = true, each behind its own env.debugHooks entry" over
+    -- all four, which promised a gate one of them does not have; it then said "only THREE of
+    -- these four", which new entries have twice since made wrong in the other direction. The
+    -- count is worth keeping correct because it is the only place that says at a glance how many
+    -- opt-ins a full write run needs.
     --
     -- item_satiety_write and skill_projectile_spawn write LESS than the three around them —
     -- one puts back the exact value it read, the other fires a single bullet — but both push an
     -- argument at a UFunction whose declaration is the thing being measured, so they run after
     -- everything that only reads.
+    "mesh_texture_import",
     "mesh_color_change",
     "audio_setvolume_audible",
     "building_unlock",
@@ -471,8 +485,8 @@ function M.report()
         -- test/init.lua — so a session where palforge.test itself failed to load reaches this
         -- line having never ATTEMPTED a hook file, and reporting that as "they all failed"
         -- would send a reader looking for a fault in every file in FILES, none of which was
-        -- ever opened. (That sentence used to say "twelve files"; FILES has grown twice since,
-        -- and a count written into prose beside a list that changes is a count that lies.)
+        -- ever opened. (That sentence used to say "twelve files"; FILES has grown three times
+        -- since, and a count written into prose beside a list that changes is a count that lies.)
         add("hooks: env.debug is on and nothing declared itself. Either M.load() has not run at "
             .. "all — it is called from test/init.lua, so check for a [test] or [registry] error "
             .. "above — or every file in test/hooks/init.lua's FILES list failed to load, in "

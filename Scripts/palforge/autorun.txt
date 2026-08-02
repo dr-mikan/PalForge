@@ -129,7 +129,7 @@
 130 pf_uiz
 
 # =====================================================================================
-# ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Fifteen measurements that CANNOT be taken
+# ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Nineteen measurements that CANNOT be taken
 # with the game switched off, each one a declared hook naming the plan/TODO.md item it
 # closes. Every line below is commented out; uncomment the ONE you are running.
 #
@@ -152,6 +152,16 @@
 # this engine and the startup line's `unknown` is final rather than a wiring fault.
 #5 pf_hook_game_build_live
 #
+# keymap-key-coverage — THE CHEAPEST HOOK HERE AND THE ONLY ONE THAT NEEDS NOTHING. It
+# declares no `needs` at all, because UE4SS's `Key` table is a process global rather than a
+# world subsystem, so it answers at the title screen and during a load. It crosses that
+# table against core/keyboard/base/keymap.lua's M.FKEY — one row per name, both directions
+# — and names every drift. This is the half test/cases/ui.lua:1506 has to skip headlessly
+# (there is no Key table outside the game), i.e. the ONLY guard against a name UE4SS will
+# happily bind that PalForge can say nothing about. Expected result today: two empty drift
+# lists over 165 names. Run it with delay 0; it reads two Lua tables and touches nothing.
+#pf_hook_keymap_key_coverage
+#
 # mesh-actor-identity — A-1, the most consequential finding in the audit. Three sweeps of
 # the building actors, six seconds apart, asking a table keyed on the ACTOR HANDLE and a
 # table keyed on GetFullName whether each still hits for a structure that certainly still
@@ -169,6 +179,26 @@
 # file loader exists on this build. A run of nils CLOSES the item permanently, so the nils
 # are printed rather than skipped.
 #20 pf_hook_audio_custom_file_loader
+#
+# building-record-orphans — F-7's quarantine round trip, against a REAL save file for the
+# first time (it has only ever been run headlessly, against the "world" fallback bucket).
+# How many records loaded, how many had no registered owner, how many are in quarantine and
+# for which packs, and — the assertion that matters — that a record belonging to a pack
+# which is merely NOT LOADED TODAY was kept rather than destroyed. ⚠️ THE DELAY IS PART OF
+# THE MEASUREMENT: the one orphan pass per world runs after ORPHAN_GRACE_SCANS = 60 scans
+# (~30 s), so 35 s is the earliest a run says anything about THIS session. Run it twice and
+# it prints the delta across the pass, which is the round trip itself.
+#35 pf_hook_building_record_orphans
+#
+# mesh-texture-import-live — A-5. ImportFileAsTexture2D is wired with the right declared
+# signature and HAS NEVER ONCE BEEN CALLED. This calls it on a real 8x8 PNG (which it
+# writes next to itself, so "the import failed" can never mean "there was no file"), prints
+# what came back and its class chain, then calls it AGAIN for the same path and says
+# whether the new positives-only cache answered instead of re-importing — that second half
+# is the whole point, and it is what decides whether Pal{ mesh = { texture = ... } } still
+# leaks a UTexture2D per spawned pal. No opt-in: it writes nothing to your save. ⚠️ It does
+# allocate ONE UTexture2D that nothing in this process can destroy.
+#20 pf_hook_mesh_texture_import_live
 #
 # ---- read-only, but they need you to DO something -----------------------------------
 #
@@ -196,6 +226,22 @@
 # PRESS ESC and report which of three things happened. Run ui-host-layer first: if that one
 # cannot mount, this one cannot either and its silence would mean nothing.
 #20 pf_hook_ui_backhandler
+#
+# building-runtime-reload — F-5, and the ONE thing you have to do is PRESS F9. The claim is
+# that the building runtime survives a reload now, because the registry lives on _G and
+# object_manager is on core/reload's KEEP list; nobody has ever pressed the key and looked.
+# Each half runs on its own and this line is only the BEFORE half:
+#     30 pf_hook_building_runtime_reload   (this line — records the baseline and re-arms)
+#     press F9, then use a tracked structure
+#     pf_hook building-runtime-reload      (the AFTER half, from the UE4SS console)
+# It prints the identity of the registry table the SCAN closes over against the one the
+# DISPATCH resolves against, the instance count on both sides of the press, and whether a
+# building hook fired afterwards. ⚠️ It needs a REGISTERED Building definition to have
+# anything to count — F-8 made the native catalogs declare without registering — so run
+# require('palforge.native.buildings').publish('WorkBench') from the Lua console first, in a
+# base with a workbench, and note that publishing is what starts persisting a record.
+# It arms NO poller, on purpose: a live poller would refuse the very F9 it is asking for.
+#30 pf_hook_building_runtime_reload
 #
 # ---- these WRITE, and each needs its own opt-in in palforge_dev.lua ------------------
 #

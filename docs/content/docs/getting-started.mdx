@@ -328,7 +328,7 @@ logs happily, and never once arrives. Every action also has a console command (`
 from `palforge/autorun.txt` on world load — three separate ways in, because three input routes
 have failed in turn on this project.
 
-`env.debug` is the second, narrower switch: it loads `palforge/test/hooks/`, the 13 measurements
+`env.debug` is the second, narrower switch: it loads `palforge/test/hooks/`, the 19 measurements
 that cannot run without a running game. They are declared rather than run — ask for one by name
 with `pf_hook <id>`, and `pf_hooks` lists every hook with the reason each would skip. The ones
 that write into a save need `env.debugHooks[id] = true` on top of that.

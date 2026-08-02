@@ -20,7 +20,7 @@ gitignore，所以不可能顺着仓库传给别人。
 ```lua title="Scripts/palforge_dev.lua"
 local env = require("palforge.env")
 env.dev   = true    -- dev 按键（含 F4：解锁全部科技）、F1、F9、各个探针
-env.debug = true    -- 另外加载 test/hooks 下那十三个需要游戏在跑的测试钩子
+env.debug = true    -- 另外加载 test/hooks 下那十九个需要游戏在跑的测试钩子
 ```
 
 `env.dev` 关闭时，启动日志会明确这么说，并点名所有没有加载的东西。这一点很重要：从外面看，一个从

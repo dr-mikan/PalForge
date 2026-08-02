@@ -310,7 +310,7 @@ F7 被刻意排除在外：那是 Palworld 自己的音量键，绑定会成功�
 而 `core/autorun.lua` 会在世界加载时运行 `palforge/autorun.txt` 里具名的动作 —— 三条不同的入口，
 因为这个项目已经接连有三条输入通路失效过。
 
-`env.debug` 是第二个、也更窄的开关：它加载 `palforge/test/hooks/`，也就是那 13 项没有游戏在跑就
+`env.debug` 是第二个、也更窄的开关：它加载 `palforge/test/hooks/`，也就是那 19 项没有游戏在跑就
 测不了的测量。它们是被声明而不是被运行的 —— 用 `pf_hook <id>` 按名字调用，`pf_hooks` 会列出每个
 钩子以及它会跳过的原因。会写进存档的那些，还需要额外的 `env.debugHooks[id] = true`。
 
