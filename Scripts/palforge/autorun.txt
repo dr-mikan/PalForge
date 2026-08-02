@@ -123,10 +123,15 @@
 # The hooks stay armed across that (UE4SS has no unregister), so the second load's storm is
 # counted in full and the verdict prints itself. Leave the mod running; do not restart.
 #pf_uievents
-5 pf_native
-8 pf_keys
-15 pf_uiroute
-130 pf_uiz
+# PARKED, 2026-08-02. These four ran on every world load and were the reason a first log was
+# never clean: pf_native, pf_keys and pf_uiroute all print several hundred lines between five
+# and fifteen seconds after world.ready, and pf_uiz puts panels on screen at 130 s. None of
+# them writes to a save — they are parked for legibility, not safety. Uncomment the one you
+# want; running them one at a time is the point of this file.
+#5 pf_native
+#8 pf_keys
+#15 pf_uiroute
+#130 pf_uiz
 
 # =====================================================================================
 # ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Nineteen measurements that CANNOT be taken
