@@ -13,13 +13,13 @@ local om = require("palforge.core.object_manager")
 local s = T.suite("object_manager")
 
 -- om.unregister(otype, id) is the explicit removal; before it existed the only spelling was
--- a registration of nil, which does delete the entry but reads as a definition call. Prefer
--- the explicit one and keep the old spelling as the fallback, so this file works either way.
+-- a registration of nil, which does delete the entry but reads as a definition call. The
+-- explicit one is what this file uses; the old spelling was kept beside it behind a
+-- `type(om.unregister) == "function"` probe until 2026-08-02, when it became clear the probe
+-- was constant-true — object_manager ships unregister in this tree — and a second way to
+-- forget an id is a second thing to keep working.
 local function drop(otype, id)
-    pcall(function()
-        if type(om.unregister) == "function" then om.unregister(otype, id)
-        else om.register(otype, id, nil) end
-    end)
+    pcall(om.unregister, otype, id)
 end
 
 s:after(function()

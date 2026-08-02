@@ -24,6 +24,9 @@
 --                                                         DEFINE time by the api constructors
 --   withPack(pack, fn, ...)  / currentPack()           -- who is defining right now, so a
 --                                                         registration can carry an owner
+--   packs()                  -> string[]               -- every pack id seen this session,
+--                                                         sorted. core/state puts one state
+--                                                         file under state/<save>/ per id.
 --
 -- WHY THE SELF-CONTAINMENT RULE WAS RELAXED. This module used to state "self-contained
 -- generic primitive (no PalForge deps)" and that was true while registration was a bare
@@ -230,6 +233,29 @@ local currentPack = nil
 
 function M.currentPack() return currentPack end
 
+-- EVERY PACK ID THIS SESSION HAS SEEN, as a set. Written by withPack (a pack that OPENED a
+-- scoped surface, even if its definitions all failed) and by register (a pack that
+-- ATTRIBUTED something, including one that passed opts.pack without going through
+-- api.pack). Nothing is ever removed: unregistering a pack's last definition does not make
+-- the pack stop having existed this session, and the one consumer — the persistence store,
+-- which puts one file under state/<save>/ per mod id — must be able to name a pack whose
+-- content was replaced or swept.
+local seenPacks = {}
+
+local function sawPack(packId)
+    if type(packId) == "string" and #packId > 0 then seenPacks[packId] = true end
+end
+
+-- The sorted list of those ids. A COPY, like all() and entry(), so a caller cannot edit the
+-- set the store enumerates from.
+---@return string[]
+function M.packs()
+    local out = {}
+    for p in pairs(seenPacks) do out[#out + 1] = p end
+    table.sort(out)
+    return out
+end
+
 -- Run fn(...) with currentPack() == packId, then restore the previous value — including
 -- when fn raises, in which case the error is re-raised unchanged (level 0, so a message
 -- that already carries its own position is not decorated twice, and a table error — the
@@ -237,6 +263,7 @@ function M.currentPack() return currentPack end
 function M.withPack(packId, fn, ...)
     local prev = currentPack
     currentPack = (type(packId) == "string" and #packId > 0) and packId or nil
+    sawPack(currentPack)
     local res = table.pack(pcall(fn, ...))
     currentPack = prev
     if not res[1] then error(res[2], 0) end
@@ -327,6 +354,7 @@ function M.register(otype, id, cls, opts)
 
     local pack = (opts and opts.pack) or currentPack
     if type(pack) ~= "string" or #pack == 0 then pack = nil end
+    sawPack(pack)
 
     -- Ownership: a pack keying an id inside SOMEONE ELSE'S namespace. Warned, not refused
     -- — see the module header for why, and for the one-word change that makes it a refusal.

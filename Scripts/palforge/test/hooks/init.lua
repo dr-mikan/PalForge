@@ -112,7 +112,22 @@ M.FILES = {
     "item_datatable_row_read",
     "audio_custom_file_loader",
     "building_record_orphans",
+    -- store_base_load_cost is the only READ-ONLY member of the format-3 store's set, and it is
+    -- here rather than beside its three siblings for that reason alone: it opens no file it did
+    -- not find, writes nothing anywhere, and answers the efficiency half of the store pass —
+    -- what a real base costs to load — which is a number every other store block is quoted
+    -- against. It pairs with building_record_orphans above the way that one pairs with
+    -- building_actor_streaming below: orphans says what the store is HOLDING, this one says
+    -- what holding it COST, and streaming says what the game did to the actors underneath.
+    "store_base_load_cost",
     -- read-only, but they arm hooks and want the operator to do something in game
+    -- building_actor_streaming LEADS this group because it is the highest-priority measurement
+    -- of the store pass and the one thing the operator does for it — walk away from a base —
+    -- can be done while every hook below is still printing. It decides whether R-1 (a miss
+    -- QUARANTINES a record instead of deleting it) fixed a live data-loss bug or a latent one,
+    -- and it pairs with building_record_orphans above: that one reads the records, this one
+    -- reads the actors the records are about.
+    "building_actor_streaming",
     "ui_update_event",
     "pal_spawned_fresh",
     "skill_hit_source",
@@ -123,11 +138,12 @@ M.FILES = {
     -- measurement spans a reload, which is also why it arms no poller: a live poller refuses the
     -- very press it is asking for (core/poll.lua:123,134).
     "building_runtime_reload",
-    -- LAST, because each one CHANGES SOMETHING while it runs. FIVE of these seven declare
+    -- LAST, because each one CHANGES SOMETHING while it runs. NINE of these eleven declare
     -- `writes = true` and so need their own env.debugHooks entry on top of env.debug:
     -- mesh_color_change, building_unlock, item_satiety_write, skill_projectile_spawn,
-    -- pal_skills_equip. TWO sit here for ordering only and deliberately do NOT declare writes,
-    -- because `writes` means "a save is mutated" and neither mutates one:
+    -- pal_spawn_persisted, pal_skills_equip, and the three store writers below. TWO sit here for ordering only and
+    -- deliberately do NOT declare writes, because `writes` means "a save is mutated" and
+    -- neither mutates one:
     -- audio_setvolume_audible makes the game loud and then quiet again (its own header,
     -- audio_setvolume_audible.lua:26-27), and mesh_texture_import allocates a UTexture2D that
     -- nothing in this process can destroy and writes an 82-byte PNG next to itself, which is a
@@ -148,6 +164,29 @@ M.FILES = {
     "building_unlock",
     "item_satiety_write",
     "skill_projectile_spawn",
+    -- THE THREE STORE WRITERS, and they stretch the definition of `writes` on purpose. None of
+    -- them touches Palworld's save: they create, corrupt and rewrite files under
+    -- <Mods>/PalForge/state/, which by the strict reading is the same class of change as
+    -- mesh_texture_import's 82-byte PNG two entries up. They declare it anyway, because after
+    -- the format-3 pass the claim being defended is that PalForge is careful with the files
+    -- under its own directory, and a hook that made files in a player's state/ because somebody
+    -- left env.debug on in a dev overlay would be the first counter-example. `writes` is the
+    -- only per-experiment gate the framework has, so it is the one used — and each file's
+    -- header says this in its own words rather than leaving it to be inferred from the flag.
+    --
+    -- save_survives_pack_removal is last of the three because it is the only one that asks the
+    -- OPERATOR to do something destructive (uninstall a pack, then reload a save that holds
+    -- that pack's ids), and it is the one that answers the question the whole store pass was
+    -- started for.
+    "store_save_roundtrip",
+    "store_crash_recovery",
+    "save_survives_pack_removal",
+    -- pal_spawn_persisted puts a pal in the world and CANNOT take it back — core/state.lua's
+    -- RECLAIM records `pal` as can = false because the cheat manager's deletions are
+    -- world-scale. It sits here rather than with the two "less invasive" writers above for that
+    -- reason: what it leaves behind is permanent, and it exists because core/ledger.lua declares
+    -- a `pal` kind that nothing writes and pointed at a hook that did not exist.
+    "pal_spawn_persisted",
     "pal_skills_equip",
 }
 

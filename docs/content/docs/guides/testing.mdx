@@ -18,8 +18,8 @@ description: Press F1 in game to find out whether PalForge and your own content 
 Press **F1** while the game is running. A moment later two lines appear on your screen:
 
 ```text
-[PalForge] tests: running 14 suite(s)
-[PalForge] tests: 450 passed, 0 failed, 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge] tests: running 19 suite(s)
+[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 ```
 
 `0 failed` is the answer to "is my setup working". It means PalForge loaded, the api you write
@@ -27,20 +27,20 @@ against behaves the way the api pages describe it, and the game accepted the cal
 Any other number names the broken piece, on screen and in the log.
 
 **No single press runs every check, and the summary says so in words.** 28 checks need a loaded
-save and skip at the title screen. Ten more are the inverse: they prove a *refusal* path — the
+save and skip at the title screen. Eleven more are the inverse: they prove a *refusal* path — the
 shut ready gate, a widget with no owner to draw under, `Player.coordinate()` with no pawn — so
 they can only run where there is nothing to succeed with, and they skip once a world is up. The
 two sets cannot both run in one press. Press the key once at the title screen and once inside a
 save; a green run is two runs.
 
 The numbers above are a real run of the whole suite, measured on 2026-08-02 in a plain `lua5.4`
-process with no engine at all. In the game the world-gated 28 run instead, and the two
-`could not be answered by this session` skips go away as well — both exist only because a bare
+process with no engine at all. In the game the world-gated 28 run instead, and two of the three
+`could not be answered by this session` skips go away as well — they exist only because a bare
 Lua process has no `LoopAsync` and no UE4SS `Key` table to check against.
 
 ```mermaid
 flowchart TD
-  A["require palforge.test"] --> B["load 14 case files"]
+  A["require palforge.test"] --> B["load 19 case files"]
   B --> C["bind F1"]
   C --> D["F1 pressed"]
   D --> E["test.run picks the suites"]
@@ -56,8 +56,10 @@ flowchart TD
 Loading the checks and putting them on F1 happens once, when the game starts. Everything
 from `F1 pressed` down happens again on every press.
 
-Startup only **loads** the checks. It never runs them. They spawn pals and hand out items,
-so a run only ever happens when you ask for one.
+Startup only **loads** these checks. It never runs them. They spawn pals and hand out items,
+so a run only ever happens when you ask for one. The headless `units/` bundle is the one thing
+that does run at boot, and that is why it is a separate directory: it touches nothing but Lua
+tables.
 
 The key is installed through `core/keyboard/base/registory`, which wraps your callback in
 `ExecuteInGameThread` and a `pcall`. A check that blows up cannot take your keyboard input
@@ -87,9 +89,47 @@ this session, it logs `could not bind F1 (keybinds unavailable this session)` an
 `false`. There is no key to press then — call `test.run()` from your own code instead.
 </Callout>
 
+## The test tree
+
+Everything on this page lives under `Scripts/palforge/test/`, and it is one tree with five
+corners. `test/init.lua` is the only name production code knows: `core/registry.lua` requires it
+under the dev gate and calls `install()`, and that one call runs the boot bundle, loads the case
+files, binds F1 and the probe keys, registers every `pf_*` console command including
+`ps_catalog`, and hands `core/autorun` its action table.
+
+```text
+Scripts/palforge/test/
+├── init.lua      the one entry point; install() wires everything below
+├── units/        headless suites, run at STARTUP - two files, 8 checks
+├── cases/        the in-game API suite, on F1 - 19 files
+├── hooks/        measurements that need Palworld running - 25 declared, never auto-run
+├── probes/       discovery dumps - not tests; they pass and fail nothing
+├── tools/        dev instruments - catalog.lua, the body of ps_catalog
+├── support.lua   the world reads, the namespaced ids and the sweep
+└── probe.lua     the BEGIN/END bracketing a probe or hook writes its output with
+```
+
+| directory | what belongs in it | when it runs |
+| --- | --- | --- |
+| `units/` | a suite that touches nothing but Lua tables | at startup, every dev session |
+| `cases/` | a suite that needs a world, a pawn, a UObject or a UE4SS global, and skips with a direction when its environment is absent | on F1, never by itself |
+| `hooks/` | a measurement that cannot be taken with the game switched off, usually with a person watching the screen | only when asked for by name |
+| `probes/` | a dump of what the engine actually looks like, so an open question can be closed | on its own key, or as `pf_<name>` |
+| `tools/` | an instrument that is not a test at all | when its command is typed |
+
+The rule for `units/` is the narrow one, and it is what keeps startup safe: the whole bundle runs
+before the first world exists, in a game that is still loading, so a suite there that blocks or
+raises delays every start. If a check needs a world, a pawn, a UObject or a UE4SS global, it is a
+`cases/` suite or a `hooks/` measurement instead.
+
+**A release deploy has none of this.** `tools/deploy.sh --release` deletes `palforge/test/` from
+the staged copy, all 58 files of it, so the kernel's single `require("palforge.test")` answers
+`absent` — the correct state for a player's install rather than an incomplete one. Nothing on this
+page reaches a player: no suite, no probe key, no hook, no `pf_*` command and no `ps_catalog`.
+
 ## What gets checked
 
-There are **481 checks**, grouped into **14 suites** — a suite is one group of checks,
+There are **580 checks**, grouped into **19 suites** — a suite is one group of checks,
 covering one area of the api. Each suite is one file under
 `Scripts/palforge/test/cases/`. They run against the real game, in your session.
 
@@ -98,6 +138,11 @@ covering one area of the api. Each suite is one file under
 | `schema` | 28 | 0 | 0 |
 | `registry` | 42 | 0 | 0 |
 | `definitions` | 23 | 0 | 0 |
+| `store_codec` | 19 | 0 | 0 |
+| `store_state` | 36 | 0 | 0 |
+| `store_api` | 12 | 0 | 1 |
+| `store_runtime` | 5 | 0 | 0 |
+| `store_disk` | 27 | 0 | 0 |
 | `native` | 26 | 0 | 0 |
 | `pal` | 34 | 5 | 0 |
 | `item` | 23 | 3 | 0 |
@@ -119,16 +164,26 @@ One check in `pal` is in neither column: `teachAll`'s write half needs a live pa
 a real save, so it is measured by a declared hook rather than by F1, and its skip line names
 the hook that measures it.
 
+The five in `store_runtime` are in neither column either, and for a sharper reason: they drive
+the building scan against a fake actor list, and doing that with UE4SS loaded would hand the
+real 500 ms sweep a world with none of the player's structures in it — every one of them would
+miss and be quarantined. So they run headless under `lua5.4` and skip in the game, in both
+states, saying so. The other four store suites are pure Lua and run everywhere. None of the
+five writes into `state/`: three substitute the store's I/O entirely, and `store_disk` — the one
+that has to meet a real filesystem — works in a throwaway directory under the OS temp directory.
+A suite for the module a player's saved state lives in must not be able to write into a player's
+saved state.
+
 ## Reading the output
 
 Results go to two places. `UE4SS.log` gets everything, under the scopes
 `[PalForge.test]` (the runner) and `[PalForge.unittests]` (the framework):
 
 ```text
-[PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 14 suite(s): schema, registry, definitions, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
+[PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 19 suite(s): schema, registry, definitions, store_codec, store_state, store_api, store_runtime, store_disk, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
 [PalForge.unittests][info] SKIP [player] coordinate returns the local player's position as numeric x, y, z (world): no world loaded
-[PalForge.unittests][info] tests: 450 passed, 0 failed, 31 skipped (481 total)
-[PalForge.unittests][info] tests: 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge.unittests][info] tests: 548 passed, 0 failed, 32 skipped (580 total)
+[PalForge.unittests][info] tests: 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 [PalForge.unittests][info] tests: 28 check(s) were not measured because there is no world - load a save and press the key again.
 [PalForge.unittests][info] tests: 1 check(s) can only be measured by a declared hook - `pf_hooks` lists them with the reason each one would skip, and each SKIP line above names the action that runs its own.
 [PalForge.test][info] swept 123 test definition(s)
@@ -154,8 +209,8 @@ The summary is put on screen with `SendSystemAnnounce`, prefixed `[PalForge]`, w
 breakdown clause, so you do not have to alt-tab to find out what was actually measured:
 
 ```text
-[PalForge] tests: running 14 suite(s)
-[PalForge] tests: 450 passed, 0 failed, 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge] tests: running 19 suite(s)
+[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 [PalForge] FAIL [item] give really adds to the live inventory, measured both ways: the Wood count must RISE across a give (135 -> 135)
 ```
 
@@ -165,7 +220,7 @@ nothing else means going back to the log anyway.
 <Callout type="info">
 A bare `N skipped` cannot tell a run that measured almost everything from one that measured
 almost nothing, which is why every skip carries a direction now. `28 need a world` is a
-sentence you can act on; `31 skipped` is not.
+sentence you can act on; `32 skipped` is not.
 </Callout>
 
 ## Running one suite
@@ -194,9 +249,10 @@ for _, suite in ipairs(results.suites) do
 end
 ```
 
-`test.run()` with no argument runs those fourteen suites and nothing more. PalForge also
-runs a small set of pure-Lua checks at startup (`palforge.tests`); they register into the
-same list, but F1 leaves them alone. To reach every registered suite, go one level down:
+`test.run()` with no argument runs those nineteen suites and nothing more. The startup bundle is
+a separate set of pure-Lua checks — `palforge.test.units`, run by `test/init.lua`'s `install()`
+rather than by the kernel. They register into the same list, and F1 still deliberately leaves
+them alone. To reach every registered suite, go one level down:
 
 ```lua
 local T = require("palforge.core.unittests")
@@ -243,7 +299,7 @@ routes reach it.
 sorted at every startup, generated from the table it describes:
 
 ```text
-[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  pf_hook_audio_setvolume_audible  pf_hook_building_unlock  pf_hook_game_build_live  pf_hook_item_datatable_row_read  pf_hook_mesh_actor_identity  pf_hook_mesh_color_change  pf_hook_pal_skills_equip  pf_hook_pal_spawned_fresh  pf_hook_skill_hit_source  pf_hook_ui_backhandler  pf_hook_ui_host_layer  pf_hook_ui_update_event  pf_hooks  pf_hooks_all  pf_keys  pf_mesh  pf_native  pf_pal  pf_reflect  pf_spawn  pf_teach  pf_tests  pf_title  pf_uidecl  pf_uievents  pf_uiroute  pf_uislot  pf_uiz  pf_watch
+[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  pf_hook_audio_setvolume_audible  pf_hook_building_actor_streaming  pf_hook_building_record_orphans  pf_hook_building_runtime_reload  pf_hook_building_unlock  pf_hook_game_build_live  pf_hook_item_datatable_row_read  pf_hook_item_satiety_write  pf_hook_keymap_key_coverage  pf_hook_mesh_actor_identity  pf_hook_mesh_color_change  pf_hook_mesh_texture_import_live  pf_hook_pal_skills_equip  pf_hook_pal_spawned_fresh  pf_hook_save_survives_pack_removal  pf_hook_skill_hit_source  pf_hook_skill_projectile_spawn  pf_hook_store_base_load_cost  pf_hook_store_crash_recovery  pf_hook_store_save_roundtrip  pf_hook_ui_backhandler  pf_hook_ui_host_layer  pf_hook_ui_update_event  pf_hooks  pf_hooks_all  pf_keys  pf_mesh  pf_native  pf_pal  pf_reflect  pf_spawn  pf_teach  pf_tests  pf_title  pf_uidecl  pf_uievents  pf_uiroute  pf_uislot  pf_uiz  pf_watch
 ```
 
 **Registering a command is not the same as being able to type one.** UE4SS ships with its
@@ -398,7 +454,7 @@ There are three gates, and a closed one is always printed rather than passed ove
    `env.debugHooks["<id>"] = true`. `debug` is a session-wide switch; a write is a
    per-experiment decision taken on a throwaway save.
 
-The nineteen declared hooks, in the order `pf_hooks_all` runs them — read-only first, so a run
+The twenty-five declared hooks, in the order `pf_hooks_all` runs them — read-only first, so a run
 that ends badly has printed everything it could before it got to a write:
 
 | hook | needs | what it settles |
@@ -409,6 +465,8 @@ that ends badly has printed everything it could before it got to a write:
 | `item-datatable-row-read` | world | whether a scalar or FName column can be indexed off the struct `dt:FindRow(id)` returns, or a recipe must be assembled column by column |
 | `audio-custom-file-loader` | world | whether the shipping build exposes any way at all to turn a `.wav` on disk into something playable |
 | `building-record-orphans` | world | the orphan quarantine round trip against a real save: how many records loaded, how many had no registered owner, how many were quarantined — and, the assertion that matters, that a pack merely not loaded this session was **not** destroyed |
+| `store-base-load-cost` | world | what a real base costs the store to load: the files, their bytes, the decode timed on those bytes, and what the same records would have cost as one file |
+| `building-actor-streaming` | world, player | whether `FindAllOf("PalBuildObject")` stops returning a base the player has walked away from, and at what distance |
 | `ui-update-event` | world | arms every Open/Show/Construct/Refresh/Update/Setup function on the four UI classes and reports which fire, and in what order |
 | `pal-spawned-fresh` | world | timestamps every `pal.spawned` firing against `world.ready`, so a fresh spawn can be told from the load storm |
 | `skill-hit-source` | world | confirms that nothing in the damage path carries a waza id, and quantifies why correlating activation with damage would be wrong |
@@ -421,9 +479,12 @@ that ends badly has printed everything it could before it got to a write:
 | `building-unlock` | world, player, **writes** | records every establishable fact about `Building.Handle:unlock`, then hands the unverifiable half to the operator |
 | `item-satiety-write` | world, player, **writes** | what parameter list the live build declares for `SetFullStomach`, and whether the satiety / HP write is reachable from Lua at all |
 | `skill-projectile-spawn` | world, pal, **writes** | prints the declared parameter list of every projectile / spawn route, fires the one that takes no arguments, and refuses the struct ones by name |
+| `store-save-roundtrip` | world, **writes** | writes a pack's state through the public surface into a real save's store, reads it back off the real path, and — run again after a reload — across a world load |
+| `store-crash-recovery` | world, **writes** | plants a torn write and an unreadable file in a real save's store and reports which copy the loader recovers from |
+| `save-survives-pack-removal` | world, player, **writes** | names every id PalForge made this save record, then — after the pack is uninstalled and the save reloaded — says what became of each |
 | `pal-skills-equip` | world, pal, **writes** | whether an active-move write lands on a real pal, and whether the game survives it |
 
-Five of the nineteen declare `writes = true`. `audio-setvolume-audible` deliberately does not:
+Nine of the twenty-five declare `writes = true`. `audio-setvolume-audible` deliberately does not:
 it is audible, but nothing it changes survives the session or reaches a file, and `writes`
 means "a save is mutated" rather than "something happens". Nor does `mesh-texture-import-live`,
 for the same reason: it allocates a `UTexture2D` and drops a small PNG beside itself, which
@@ -450,7 +511,7 @@ before. Deploy, then run the hook; not the reverse.
 
 <Callout type="info">
 Every "this needs the game" skip in the F1 suite names the hook that measures it, so a skip is
-always traceable to something you can actually run. `pf_hooks` lists all nineteen with the
+always traceable to something you can actually run. `pf_hooks` lists all twenty-five with the
 reason each one would skip right now.
 </Callout>
 
@@ -668,7 +729,7 @@ M.CASES = {
 
 `M.load()` requires each name under `palforge.test.cases.` and records the result in
 `test.loaded`. A file that fails to load does not stop the run: it is logged at `err` and
-left out of `test.suites()`, so the other thirteen still go.
+left out of `test.suites()`, so the other eighteen still go.
 
 ```text
 [PalForge.test][err] case 'beacon' failed to load: ...cases/beacon.lua:12: attempt to index a nil value
@@ -823,7 +884,9 @@ them reach further, or later, than the name suggests, and the suites pin that do
   after `pf_keys` has told you the key is free.
 - The measurements that need Palworld running are declared hooks under `test/hooks/`: loaded
   only under `env.debug`, run by name with `pf_hooks` / `pf_hook <id>` / `pf_hooks_all`, and
-  the three that write into a save need `env.debugHooks[id] = true` on top.
+  the eight that write into a save need `env.debugHooks[id] = true` on top.
+- One tree, five corners — `units/`, `cases/`, `hooks/`, `probes/`, `tools/` — and
+  `--release` deletes the lot, so none of it reaches a player.
 - Every command is reachable three ways: the UE4SS console (which ships switched off), a key,
   or a line in `Scripts/palforge/autorun.txt` that runs on `world.ready`.
 - Checks that need a world start with `support.needWorld(t)`, so they skip instead of failing.

@@ -265,27 +265,30 @@ local function asName(v)
     return s
 end
 
-local function tryProbe()
+-- Read ONE measured (getter, property) pair off the live PalGameInstance. Getter first,
+-- backing property second — 02_reflection lists names without signatures, so every call is
+-- no-arg and pcall'd, and a raise falls through to the property rather than out of here.
+local function readPair(getter, property)
     if type(FindFirstOf) ~= "function" then return nil end
-    local ok, id = pcall(function()
+    local ok, s = pcall(function()
         local gi = FindFirstOf("PalGameInstance")
         if not (gi and gi:IsValid()) then return nil end
-        -- Getter first, backing property second, for each of the two measured names.
-        for _, pair in ipairs({
-            { "GetSelectedWorldSaveDirectoryName", "SelectedWorldSaveDirectoryName" },
-            { "GetSelectedWorldName", "SelectedWorldName" },
-        }) do
-            local okF, v = pcall(function() return gi[pair[1]] and gi[pair[1]](gi) end)
-            local s = okF and asName(v) or nil
-            if not s then
-                local okP, pv = pcall(function() return gi[pair[2]] end)
-                s = okP and asName(pv) or nil
-            end
-            if s then return s end
+        local okF, v = pcall(function() return gi[getter] and gi[getter](gi) end)
+        local out = okF and asName(v) or nil
+        if not out then
+            local okP, pv = pcall(function() return gi[property] end)
+            out = okP and asName(pv) or nil
         end
-        return nil
+        return out
     end)
-    return ok and id or nil
+    return ok and s or nil
+end
+
+local function tryProbe()
+    -- The DIRECTORY name is the identity; the display name is the second chance, and only
+    -- because a save with no directory name is worse identified by nothing than by a label.
+    return readPair("GetSelectedWorldSaveDirectoryName", "SelectedWorldSaveDirectoryName")
+        or readPair("GetSelectedWorldName", "SelectedWorldName")
 end
 
 function M.saveId()
@@ -293,6 +296,20 @@ function M.saveId()
     local probed = tryProbe()
     cachedSaveId = probed and ("w_" .. probed:gsub("[^%w_]", "_")) or "world"
     return cachedSaveId
+end
+
+---The world's DISPLAY name — the label the player typed — or nil when nothing answers.
+---
+---NOT an identity and never used as one: two saves may carry the same one, which is exactly
+---why saveId() prefers the directory name. This exists so a human reading
+---`<Mods>/PalForge/state/` can tell w_1DF0E44B… from w_9C3A11F2…; core/state writes it into
+---the manifest's `name` and nothing dispatches on it.
+---
+---Not cached, unlike saveId: it is read once per manifest write, a player can rename a world
+---between two of those, and a stale label is worse than a slightly more expensive one.
+---@return string?
+function M.saveName()
+    return readPair("GetSelectedWorldName", "SelectedWorldName")
 end
 
 function M.resetSaveId() cachedSaveId = nil end

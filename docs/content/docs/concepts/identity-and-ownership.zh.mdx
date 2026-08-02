@@ -92,13 +92,19 @@ local Item = api.Item
 Item{ id = "mypack:Potion", name = "Potion" }   -- 以 pack = "mypack" 注册
 ```
 
-它返回同样的九个成员。八个构造函数被包了一层，使定义在 `object_manager.withPack` 内部执行；域以具名
+它返回同样的九个 api 成员，外加第十个——`.store`，也就是这个包自己保存的状态，它没法指到别的包的
+文件上。八个构造函数被包了一层，使定义在 `object_manager.withPack` 内部执行；域以具名
 函数形式追加的定义入口也一样——`Audio.bgm` 和 `Audio.se` 同样会注册，而它们经由 `__index` 而不是
 `__call` 到达，所以是按名字单独包装的。其余成员（`X.get`、`X.get_all`、`Player`）原样透传；这个包装
 是只读视图，往里赋值会抛错，以免和其他调用方看到的模块悄悄分叉。
 
 每个包 id 只有一张作用域表，所以 `PalForge.pack("x").Item == PalForge.pack("x").Item`。用不用是自愿
 的：没有归属的定义以 `pack = nil` 注册。
+
+包 id 现在同时也是**文件名**——保存的状态住在 `state/<save>/<packId>.json`——所以有三个 id 会在你写下
+它的地方被拒绝：`_save`、`_unowned` 和 `_quarantine`，它们是 PalForge 在那个目录里已经占着的名字。
+`opts.version` 可以和 `depends`、`recommends` 一起传，它描述的是你的包，而不是框架。那个文件里装着
+什么、删掉它会怎样，都在[保存的状态](/docs/concepts/saved-state)里。
 
 `depends` 和 `recommends` 会登记到注册表，于是 `checkImport` 能回答「这个包可不可以提到那个 id」，而
 不必每个调用点都把集合传来传去。目前还没有哪个域会把定义*提到*的 id 传进来，所以这是一个已经接好的
@@ -186,6 +192,7 @@ om.unregister("item", "mypack:Potion")   -- 确实删掉了返回 true，本来�
 - `PalForge.pack("mypack")` 给它下面的每次定义打上归属，这正是冲突能被点名的原因。
 - 后者胜出，但不再沉默：跨包重定义和共用解析形各有自己的警告。
 - 询问用 `isRegistered` / `owner` / `entry` / `byResolved`，收回用 `unregister`。
+- 包 id 同时也是它保存状态所在的文件名，所以 `_save`、`_unowned`、`_quarantine` 会被拒绝。
 
 <Cards>
   <Card title="定义与句柄" href="/docs/concepts/definitions">定义是什么，你会拿回什么</Card>

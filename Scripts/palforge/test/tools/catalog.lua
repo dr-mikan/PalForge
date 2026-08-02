@@ -24,7 +24,7 @@ local FRIENDLY = {
 -- ---- self-contained file helpers (ported from deprecated.core; Windows shell) ----
 local function catalogDir()
     local here = debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ""
-    -- here = .../Scripts/palforge/tests/  ->  .../Scripts/catalog/
+    -- here = .../Scripts/palforge/test/tools/  ->  .../Scripts/catalog/
     return here .. "..\\..\\catalog\\"
 end
 

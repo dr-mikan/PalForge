@@ -305,7 +305,7 @@ end
 --
 -- M.dataTable IS THE FALLBACK, NOT THE FRONT DOOR, and that is a measurement rather than a
 -- preference. It walks M.allOf("DataTable") once per call, and that sweep is the crash-prone
--- one: tests/catalog.lua:6-10 records FindAllOf("DataTable") touching a stale pointer as an
+-- one: test/tools/catalog.lua:6-10 records FindAllOf("DataTable") touching a stale pointer as an
 -- EXCEPTION_ACCESS_VIOLATION that Lua pcall cannot catch. So nothing calls it in a loop —
 -- test/probes/reflect.lua wants a table by name in nine sections and wrote its own CACHED
 -- dataTableByName (reflect.lua:247-260) that sweeps once for the whole run, and

@@ -46,25 +46,30 @@ ue4ss/
                 ├── api/         <- パックが書く相手になる公開サーフェス
                 ├── core/        <- エンジン本体。カーネル、イベント系、Palworld ブリッジ
                 ├── native/      <- Palworld 自身のコンテンツをデータカタログにしたもの
-                ├── test/        <- ゲーム内 API スイート（単数形。下を参照）
-                ├── tests/       <- ヘッドレスのユニットバンドル。dev では起動時に走る
+                ├── test/        <- dev 用テストツリー全体（--release のコピーには存在しない）
+                │   ├── units/   <- ヘッドレスのスイート。起動時に走る
+                │   ├── cases/   <- ゲーム内 API スイート。F1 で走る
+                │   ├── hooks/   <- ゲームが動いていないと取れない計測
+                │   ├── probes/  <- 調査用ダンプ。合否は一切出さない
+                │   └── tools/   <- dev 用の道具（ps_catalog の中身のダンパー）
                 └── utils/       <- log, json, file, items
 ```
 
 これは `tools/deploy.sh` がコピーする一覧そのものです。`Scripts/main.lua` と
 `Scripts/palforge/` 全体から、参照専用で実行時には不要な `deprecated/` と `tmp/` を除いたものに
-なります。
+なります。`--release` はさらに、ステージしたコピーから `palforge/test/` を 58 ファイルまるごと
+削除します。つまりプレイヤーの手元にテストディレクトリは残りません。
 
-抜けやすいエントリが 2 つあり、どちらも別の症状に化けます。
+dev のコピーで抜けやすいエントリが 2 つあり、どちらも別の症状に化けます。
 
-- **`palforge/test/`（単数形）**。`core/registry.lua` は `palforge.test` を require しており、
-  **F1** を割り当てているのはこのモジュールです。このディレクトリが無いインストールでは、dev
-  モードでもテストスイートも F1 キーも存在せず、その理由を説明する行はログのどこにも出ません。
-  （`palforge/tests/`（*複数形*）は別物で、dev では起動時にカーネルが走らせるヘッドレスの
-  ユニットバンドルであり、`ps_catalog` コンソールコマンドの中身でもあります。こちらも同梱
-  されます。`core/registry.lua` が起動時に require していることが分かった時点で、これを隠して
-  いた `.gitignore` の行は削除されたので、クローンにも入っています。それでも無い場合は、
-  カーネルが「dev tooling NOT loaded」の行に名前付きで挙げます。）
+- **`palforge/test/`**。`core/registry.lua` は `palforge.test` を require し、その `install()`
+  を呼びます。この 1 回の呼び出しが **F1** を割り当て、ヘッドレスバンドルを走らせ、各調査プローブ
+  にキーを与え、`ps_catalog` を含むすべての `pf_*` コンソールコマンドを登録し、`core/autorun`
+  にアクションテーブルを渡します。このディレクトリが無い dev インストールにはそのどれも無く、
+  カーネルは「dev tooling NOT loaded」の行にツリーごと名前を挙げます。以前はこの隣にもう 1 つ、
+  1 文字違いの `palforge/tests/`（*複数形*）があり、ヘッドレスバンドルと `ps_catalog` のダンパー
+  を持っていて、製品コードが両方に手を伸ばしていました。いまツリーは 1 つで、バンドルは
+  `test/units/`、ダンパーは `test/tools/catalog.lua` です。
 - **`palforge/autorun.txt`**。`core/autorun.lua` が `palforge/` の隣からこれを読み、ワールド
   ロード時に名前付きのアクションを実行します。キーもコンソールも効かないマシンで何かを走らせる
   唯一の方法です。このプロジェクトでは入力経路が 3 つ続けて死んでいます。
@@ -219,22 +224,29 @@ dev デプロイではツール類の行が加わります。各バインドは�
 [PalForge.main][info] PalForge v0.3.0 starting | game build: ... | dev=true debug=true | dev overlay: loaded
 [PalForge.keyboard][info] bound F4 [keymap: unknown — the game's key config has not been read yet (the config source needs a loaded world), so nothing is claimed either way; run pf_keys inside a save]
 [PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
-[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
 [PalForge.keyboard][info] bound F9 [keymap: ...]
+[PalForge.hooks][info] 25 game-required hook(s) declared; `pf_hooks` prints each one's gate state and what would open it
 [PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
 [PalForge.keyboard][info] bound F1 [keymap: ...]
+[PalForge.test][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
+[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  ...  pf_uiz  pf_watch
 [PalForge.test][info] keyboard: F1                   unknown  tests: all suites                        game: the game's key config has not been read
-[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, ps_catalog console command, F9 reload, headless unit bundle (palforge.tests), in-game API suite on F1 (palforge.test), game-required test hooks (palforge.test.hooks)
+[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, F9 reload, headless unit bundle (test/units), in-game API suite on F1 + probe keys, ps_catalog console command (test/tools), autorun action table, game-required test hooks (palforge.test.hooks)
 [PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-`tests: 8 passed ...` はヘッドレスのユニットバンドル `palforge/tests/`（複数形）です。リポジトリ
-に入っているので、これが通常の行です。このディレクトリを落としたインストールでは、代わりに
-カーネルが `dev tooling NOT loaded` の行に名前付きで挙げます。この行は両方のモードで出力され、
-ロードされなかったものとその理由をすべて
-名前で列挙します。バインドされなかったキーと、バインドされたのに届かなかったキーは外から見ると
-同じに見えるので、両者を区別できるのはこの行だけです。
+`tests: 8 passed ...` はヘッドレスのユニットバンドル `palforge/test/units/` です。純 Lua の
+スイート 2 本・チェック 8 件で、`test/init.lua` の `install()` が起動時、ゲームに触れる前に
+走らせます。
+その下の `dev tooling loaded:` の行は、同じ `install()` が各パーツをカーネル経由で報告したもの
+です。`core/registry.lua` が知っている名前は `palforge.test` の 1 つだけで、呼び出しも 1 回だけ
+です。このディレクトリを落とした dev インストールでは、代わりにカーネルが
+`dev tooling NOT loaded` の行にツリーごと名前で挙げます。`--release` のコピーはそもそも持って
+いないので、そこでの `absent` は壊れたインストールではなく正しい状態です。この行は両方のモードで
+出力され、ロードされなかったものとその理由をすべて名前で列挙します。バインドされなかったキーと、
+バインドされたのに届かなかったキーは外から見ると同じに見えるので、両者を区別できるのはこの行だけ
+です。
 
 もう 2 行はワールドのゲートに対応します。PalForge はセーブデータのロードが終わるまでワールド内の
 オブジェクトに触れません。1 行目はセーブの準備ができたとき、2 行目はそのワールドを離れたときに出ます。
@@ -300,14 +312,15 @@ tools/deploy.sh --release              # オーバーレイ無し。古いコピ
 
 ### `dev` が有効にするもの: 9 個のキー
 
-`registry.initialize()` は `core/keyboard/` 以下のキーバインドファイル、F9 のリロード、
-`ps_catalog` DataTable ダンパー、ヘッドレスのユニットバンドル、そして `palforge.test` を読み込み
-ます。F1 を割り当て、各 discovery プローブにキーを 1 つずつ与えているのは最後のモジュールです。
-合計 9 個です。
+`registry.initialize()` は `core/keyboard/` 以下のキーバインドファイルと F9 のリロードを読み込み、
+そのあと `palforge.test` を require して `install()` を呼びます。名前 1 つ、呼び出し 1 回です。
+その呼び出しがヘッドレスのユニットバンドルを走らせ、F1 を割り当て、各 discovery プローブにキーを
+1 つずつ与え、`ps_catalog` DataTable ダンパーとその他すべての `pf_*` コンソールコマンドを登録し、
+`core/autorun` にアクションテーブルを渡します。キーは合計 9 個です。
 
 | キー | 何をするか | 画面に何が必要か |
 | --- | --- | --- |
-| **F1** | ゲーム内 API スイートの実行。14 スイート、481 チェック | どこでも動くが、セーブをロードしていないと 28 チェックが skip |
+| **F1** | ゲーム内 API スイートの実行。19 スイート、580 チェック | どこでも動くが、セーブをロードしていないと 28 チェックが skip |
 | **F2** | プローブ `title` — ゲーム自身のタイトルメニューボタン | タイトル画面 |
 | **F3** | プローブ `uislot` — そのボタンの内側スロットをワールドから読む | ロード済みのセーブ |
 | **F4** | **ロード中のセーブのテクノロジーをすべて解放する** | ロード済みのセーブ |
@@ -331,7 +344,7 @@ F7 が入っていないのは意図的です。Palworld 自身の音量キー�
 `core/autorun.lua` は `palforge/autorun.txt` に書かれた名前付きアクションをワールドロード時に
 実行します。入口が 3 通りあるのは、このプロジェクトで入力経路が 3 つ続けて死んだからです。
 
-`env.debug` は 2 つ目の、より狭いスイッチです。ゲームが動いていないと計測できない 19 件の測定を
+`env.debug` は 2 つ目の、より狭いスイッチです。ゲームが動いていないと計測できない 25 件の測定を
 まとめた `palforge/test/hooks/` を読み込みます。これらは実行されるのではなく宣言されるだけで、
 `pf_hook <id>` で名前を指定して呼び出します。`pf_hooks` は宣言済みのフックと、それぞれが skip
 する理由を一覧します。セーブに書き込むものは、さらに `env.debugHooks[id] = true` が必要です。
@@ -552,7 +565,7 @@ end
 
 `object_manager.owner(type, id)` は、その登録がどのパックのものかを答えます。`entry` と
 `byResolved` は同じ問いに別の方向から答えます。dev デプロイなら、いちばん手早い動作確認は **F1**
-です。14 スイートすべてを実行し、答えを出せなかったチェックが何件で、どちら方向なのかをサマリが
+です。19 スイートすべてを実行し、答えを出せなかったチェックが何件で、どちら方向なのかをサマリが
 書きます。
 
 ## API へのアクセス方法
@@ -840,8 +853,9 @@ events = {
 ## まとめ
 
 - PalForge は `ue4ss/Mods/PalForge/Scripts/` に置き、`palforge/` を `main.lua` の隣に置きます。
-  配置が違うと動きません。`palforge/test/` と `palforge/autorun.txt` も一緒にコピーしてください。
-  前者が無いと F1 が存在せず、後者が無いとキー無しで入る手段が無くなります。
+  配置が違うと動きません。dev のコピーには `palforge/test/` と `palforge/autorun.txt` も一緒に
+  必要です。前者が無いと F1 も `pf_*` コマンドも存在せず、後者が無いとキー無しで入る手段が
+  無くなります。`--release` は `palforge/test/` を丸ごと落とし、それがプレイヤーの手元のコピーです。
 - dev ツールはすべてオフで出荷されます。9 個のキーを有効にするのは `Scripts/palforge_dev.lua` で、
   これは `tools/deploy.sh` が書き出し、gitignore されており、プレイヤーの手元のコピーには決して
   入りません。F4 はロード中のセーブの全テクノロジーを解放します。

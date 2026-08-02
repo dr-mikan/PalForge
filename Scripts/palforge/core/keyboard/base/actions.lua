@@ -159,7 +159,7 @@ M.KEY_NAMES = {
 -- into Lua, which sidesteps the TSoftObjectPtr wall core/icons.lua:316-341 ran into and makes
 -- this the cheapest possible read of the table.
 --
--- ⚠️ NO FindAllOf SWEEP. tests/catalog.lua:6-10 records the FindAllOf("DataTable") sweep as
+-- ⚠️ NO FindAllOf SWEEP. test/tools/catalog.lua:6-10 records the FindAllOf("DataTable") sweep as
 -- crash-prone — it touches every loaded table and a stale pointer there raises an access
 -- violation Lua's pcall cannot catch — and core/icons.lua:186-195 keeps it out of ordinary
 -- helpers for exactly that reason. This is an ordinary helper. Targeted lookup or nothing.

@@ -503,41 +503,39 @@ index, so a base full of unregistered vanilla ids answers empty.
 
 ### Saving state
 
-State lives in one JSON file per world, written by `utils/file` into the mod's `state`
-directory:
+Records live in one JSON file per **mod**, inside one directory per save:
 
 ```text
-<UE4SS Mods>/PalForge/state/entities_<saveId>.json
+<UE4SS Mods>/PalForge/state/w_1DF0E44B4FDDD6196E30819A899C9009/mypack.json
 ```
 
-`saveId` comes from `core/spatial`, which reads the selected save off the live
+The directory name comes from `core/spatial`, which reads the selected save off the live
 `PalGameInstance`. It tries `GetSelectedWorldSaveDirectoryName` first and falls back to
 `GetSelectedWorldName`, each with its backing property (`SelectedWorldSaveDirectoryName`,
 `SelectedWorldName`) as a second chance; the answer becomes `w_` plus that name with anything
 that is not a letter, digit or underscore replaced by `_`, and plain `world` when nothing can be
-read.
+read. The file name is the pack id you passed to `PalForge.pack`, so a structure of yours is
+never in a file another mod also writes.
 
 <Callout type="info">
 `WorldGuid`, `WorldSaveName` and `SaveName` are not on that class. `PalGameInstance`'s full
 111-property listing carries neither, so a probe built on those three names could only ever land
-on the `world` fallback — which is why every save shared one persistence file, and why the one
-artifact a real session left behind is called `entities_world.json`. The directory name is
-preferred over the display name because two saves cannot share a save folder, while two saves may
-well carry the same label the player typed.
+on the `world` fallback — which is why the one artifact an early session left behind is called
+`entities_world.json`. The directory name is preferred over the display name because two saves
+cannot share a save folder, while two saves may well carry the same label the player typed.
 </Callout>
 
 The file holds one record per structure key, plus a quarantine section:
 
 ```json
 {
-  "version": 2,
-  "entities": {
+  "palforge": { "format": 3, "mod": "mypack", "save": "w_1DF0E44B4FDDD6196E30819A899C9009",
+                "forge": "0.3.0", "wrote": 1785646408, "buildings": 1 },
+  "buildings": {
     "WorkBench@1234,-56,78": {
-      "v": 2,
       "buildId": "WorkBench",
       "def": "mypack:Bench",
-      "pack": "mypack",
-      "pos": { "x": 123400.0, "y": -5600.0, "z": 7800.0 },
+      "pos": [123400, -5600, 7800],
       "state": { "uses": 3 }
     }
   },
@@ -545,49 +543,55 @@ The file holds one record per structure key, plus a quarantine section:
 }
 ```
 
-The key is the resolved **build** id and a cell, so it names no owner at all. The owner therefore
-rides inside the record: `v` is the record shape, `def` the definition id that claimed it and
-`pack` the owning pack when the registry can attribute one. An older record is upgraded in place
-the first time a scan binds it, which is the only migration path a single file shared by every
-pack can have.
+The key is the resolved **build** id and a cell, so it names no owner at all. The owner is the
+file name and the record shape is the header's `format`, so neither is repeated per record.
+`def` is the definition id that claimed it, and it is what lets one narrow rename case migrate
+itself. Positions are integer centimetres. [Saved state](/docs/concepts/saved-state) covers the
+layout, the store your pack gets on top of it, and what happens to all of this when the mod is
+uninstalled.
 
 A record's `state` is the same table as `inst.state`, so changing it in place is enough to
 change what will be written. Nothing writes on its own:
 
-- `self:setDirty()` marks the world cache dirty. Cheap.
-- `self:save()` marks it dirty and writes the file straight away.
-- Leaving the world writes once, then drops the live structures and keeps every record.
+- `self:setDirty()` marks this structure's mod dirty. Cheap.
+- `self:save()` marks it dirty and writes that one mod's file straight away, returning
+  `true`, or `false` and a reason.
+- Leaving the world writes everything still dirty, then drops the live structures and keeps
+  every record.
 
 Call `save()` when the change matters and `setDirty()` in a hot loop, otherwise a `save()` on
-every tick writes the file on every heartbeat.
+every tick writes the file on every heartbeat. A write only ever covers the mod that changed:
+another mod's file is not rewritten because yours was.
 
-Records are deleted only on real removal. A structure the scan fails to see for six scans in a
-row — about three seconds at the 500 ms cadence — emits `building.remove` and is dropped along
-with its record.
+**No record is deleted for being absent.** A structure the scan fails to see for six scans in a
+row — about three seconds at the 500 ms cadence — emits `building.remove` with
+`reason = "missing"` and its record is **quarantined**, not dropped: it moves into `orphans` with
+`why = "missing"`, and the next scan that sees that actor again takes it back out with its
+`state` intact. That scan enumerates in-memory objects only, and the shipping binary's own
+declarations say Palworld spawns and disposes map objects by proximity, so "absent from this
+scan" cannot be read as "gone".
 
-A record whose build id **no definition claims this session** is not deleted. It is quarantined:
-moved into the file's `orphans` section with its bytes intact, logged with a count and with the
-packs it belonged to, and moved back the moment a definition claims that build id again. The
-pass waits about 30 seconds after a world opens before it runs, so a pack that defines its
-buildings at `world.ready` or lazily has time to get there. Quarantine is deliberately
-conservative: a pack a player disabled for one evening must not cost them their structures'
-state. The only thing in the runtime that ever destroys a record is the quarantine cap of 4096,
-past which the oldest quarantined records are dropped oldest-first, and the log says how many and
-why.
+A record whose build id **no definition claims this session** is quarantined the same way, with
+`why = "unclaimed"`: moved into `orphans` with its bytes intact, logged with a count and with the
+packs it belonged to, and moved back the moment a definition claims that build id again. That
+pass waits about 30 seconds after a world opens, so a pack that defines its buildings at
+`world.ready` or lazily has time to get there. The only thing in the runtime that ever destroys a
+record is the quarantine cap of 4096 **per mod file**, past which that mod's oldest quarantined
+records are dropped oldest-first, and the log says how many, for which mod, and why.
 
 ```mermaid
 stateDiagram-v2
   [*] --> Tracked
   Tracked --> Missing: not seen by a scan
   Missing --> Tracked: seen again
-  Missing --> Removed: 6 consecutive misses
+  Missing --> Quarantined: 6 consecutive misses
+  Quarantined --> Tracked: seen again
   Tracked --> Dropped: world.left
-  Removed --> [*]
   Dropped --> [*]
 ```
 
-`Removed` deletes the saved record. `Dropped` keeps it, so the structure comes back with its
-data on the next load.
+`Quarantined` and `Dropped` both keep the saved record, so the structure comes back with its data
+when it or its definition returns. Nothing in that diagram deletes one.
 
 ### Reaching the instances
 
@@ -606,9 +610,9 @@ polls for a valid `PalPlayerCharacter` once a second and only opens the gate aft
 successful polls in a row.
 
 All of it survives a hot reload. The building runtime holds its definition index, its live
-instances, its actor index and its persistence cache in one table on `_G`, and `core/reload`
-keeps `object_manager` across the wipe, so pressing F9 leaves `:instances()` answering and the
-building hooks firing on the definitions you already had. The two halves have to stay together:
+instances and its actor index in one table on `_G`, the store keeps the merged record view in
+another, and `core/reload` keeps `object_manager` across the wipe, so pressing F9 leaves
+`:instances()` answering and the building hooks firing on the definitions you already had. The two halves have to stay together:
 a reload that dropped the registry would look to the orphan pass like every pack unloading at
 once, about thirty seconds after the press.
 
@@ -1086,7 +1090,8 @@ call, it does not swallow it.
 - `onPlace`, `onLoad`, `onRightClick`, `onRemove`, `onTick`, `onBuild`, `onWorldReady` and
   `onWorldLeft` all run. `onLeftClick` and `onBreak` never do, and that is measured, not pending.
 - A structure is found again by its rounded world position, so `gridCm` decides how close two
-  of them can stand. The record that key names carries the definition and pack that own it.
+  of them can stand. The record that key names carries the definition that owns it, and the file
+  it is written into is the owning mod.
 - Registering a building is a write: only a registered definition is tracked, and only a tracked
   structure is persisted. `native/buildings.lua` registers nothing until you `publish` it.
 - `Building.get(id):instances()` gives you every structure of that definition standing in the

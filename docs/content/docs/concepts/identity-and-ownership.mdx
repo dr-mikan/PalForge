@@ -98,7 +98,8 @@ local Item = api.Item
 Item{ id = "mypack:Potion", name = "Potion" }   -- registered with pack = "mypack"
 ```
 
-It returns the same nine members. The eight constructors are wrapped so the define runs inside
+It returns the same nine api members, plus a tenth — `.store`, this pack's own saved state, which
+cannot name another pack's file. The eight constructors are wrapped so the define runs inside
 `object_manager.withPack`, and so are the extra define routes a domain adds as named functions —
 `Audio.bgm` and `Audio.se` register too, and they are reached through `__index` rather than
 `__call`, so they are wrapped by name. Everything else (`X.get`, `X.get_all`, `Player`) passes
@@ -107,6 +108,12 @@ silently diverging from the module every other caller sees.
 
 One scoped table exists per pack id, so `PalForge.pack("x").Item == PalForge.pack("x").Item`.
 Using it is optional: an unattributed definition registers with `pack = nil`.
+
+A pack id is also a **file name** now — saved state lives at `state/<save>/<packId>.json` — so
+three ids are refused where you typed them: `_save`, `_unowned` and `_quarantine`, which are names
+PalForge already owns in that directory. `opts.version` is accepted alongside `depends` and
+`recommends`, and it describes your pack rather than the framework.
+[Saved state](/docs/concepts/saved-state) covers what that file holds and what deleting it does.
 
 `depends` and `recommends` are recorded with the registry, which is what lets `checkImport` answer
 "may this pack mention that id?" without every call site threading the set through. No domain
@@ -201,6 +208,7 @@ registry that the building scan walks on every pass.
 - `PalForge.pack("mypack")` attributes every define underneath it, which is what makes a collision nameable.
 - Last-wins, but loud: a cross-pack redefinition and a shared resolved form each get their own warning.
 - `isRegistered` / `owner` / `entry` / `byResolved` ask, and `unregister` takes one back.
+- A pack id is also the file name its saved state lives under, so `_save`, `_unowned` and `_quarantine` are refused.
 
 <Cards>
   <Card title="Definitions and handles" href="/docs/concepts/definitions">What a definition is, and what you get back</Card>

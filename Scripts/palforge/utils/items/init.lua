@@ -483,6 +483,20 @@ function M.give(itemId, count)
     end
     log.info(string.format("give %s x%d: %d -> %d [evidence %s]",
         resolved, count, before, after, level))
+    -- THE LEDGER IS HOOKED HERE, AT THE ENGINE BOUNDARY, and not on Item.Handle:give — which is
+    -- where it started and which covered one of this function's callers. This is the line that
+    -- puts a row FName into ItemContainerSaveData, i.e. into PALWORLD'S OWN SAVE, and main.lua
+    -- publishes `PalForge.utils.items` as a toolbox a pack calls directly. A ledger that only
+    -- hears about the api route makes an uninstall report that is quietly incomplete for every
+    -- other route — an effect, a UI action, a native helper, a pack using the toolbox — and an
+    -- incomplete removal report is worse than none, because it is believed.
+    -- core/character.addSkill records the passive half the same way and for the same reason.
+    --
+    -- Behind the success test, not behind the call: `true` here is the count read back twice, so
+    -- a row is written only for an add the inventory was SEEN to take. The SOURCE id goes in,
+    -- not `resolved` — ledger.record resolves it itself, and om.owner is keyed on the source.
+    -- The require is lazy for load order only; core.ledger has no dependency back on this file.
+    pcall(function() require("palforge.core.ledger").record("item", itemId, count) end)
     return true
 end
 
@@ -729,7 +743,7 @@ end
 --
 -- The table is fetched with UE4SS's TARGETED FindObject("DataTable", name) (lua-api
 -- global, overload #1: class short name + object short name). Deliberately not the
--- FindAllOf("DataTable") sweep the catalog dumper uses: tests/catalog.lua:6-10 documents
+-- FindAllOf("DataTable") sweep the catalog dumper uses: test/tools/catalog.lua:6-10 documents
 -- that sweep as crash-prone (it touches every loaded table, and a stale pointer there
 -- raises an access violation Lua pcall cannot catch), which is not acceptable inside an
 -- ordinary helper. Row names then come from the extraction the dumper DID prove in game
@@ -904,6 +918,13 @@ function M.unlockTech(name)
         return false
     end
     log.info("unlockTech " .. tostring(resolved) .. " (technology row confirmed)")
+    -- Recorded HERE rather than on Building.Handle:unlock, for the reason spelled out at the end
+    -- of M.give: this is the call that changes the player's technology state, and this module is
+    -- a documented public toolbox. `true` already means "the row exists and the cheat ran", which
+    -- is the strongest claim this build allows — there is no is-unlocked accessor, so the ledger
+    -- records an INTENT that landed, never a verified state. `name` and not `resolved`, same as
+    -- give: ledger.record resolves it and om.owner is keyed on the source id.
+    pcall(function() require("palforge.core.ledger").record("tech", name) end)
     return true
 end
 

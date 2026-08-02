@@ -1,5 +1,5 @@
 -- PalForge utils.unittests: a tiny, self-contained unit-test framework. No external
--- deps (only palforge.utils.log for the summary). This is the BASE that palforge.tests
+-- deps (only palforge.utils.log for the summary). This is the BASE that palforge.test.units
 -- extends — content mods author suites the same way.
 --
 --   local T = require("palforge.core.unittests")

@@ -45,22 +45,27 @@ ue4ss/
                 ├── api/         <- 内容包要面对的公开接口
                 ├── core/        <- 引擎本体：内核、事件系统、Palworld 桥接
                 ├── native/      <- 把 Palworld 自己的内容做成的数据目录
-                ├── test/        <- 游戏内 API 测试套件（单数形式，见下）
-                ├── tests/       <- 无界面的单元测试包，dev 下启动时就会跑
+                ├── test/        <- 整棵 dev 测试树（--release 的副本里一个都没有）
+                │   ├── units/   <- 无界面套件，启动时就跑
+                │   ├── cases/   <- 游戏内 API 测试套件，挂在 F1 上
+                │   ├── hooks/   <- 游戏不跑就取不到的测量
+                │   ├── probes/  <- 调查用的转储；不判定通过或失败
+                │   └── tools/   <- dev 工具（ps_catalog 背后的那个导出器）
                 └── utils/       <- log, json, file, items
 ```
 
 这和 `tools/deploy.sh` 复制的清单是同一份：`Scripts/main.lua` 加上整个 `Scripts/palforge/`，减去
-`deprecated/` 和 `tmp/` —— 这两个只作参考，运行时用不到。
+`deprecated/` 和 `tmp/` —— 这两个只作参考，运行时用不到。在这之上，`--release` 还会从暂存的副本里
+把 `palforge/test/` 连同它的 58 个文件一起删掉：玩家手上的树里没有任何测试目录。
 
-有两项很容易漏掉，而且漏掉之后都会表现成别的毛病：
+在 dev 副本里有两项很容易漏掉，而且漏掉之后都会表现成别的毛病：
 
-- **`palforge/test/`，单数。** `core/registry.lua` 会 require `palforge.test`，绑定 **F1** 的正是
-  这个模块。少了这个目录的安装，在 dev 模式下既没有测试套件也没有 F1 键，而日志里没有任何别的行
-  能解释这件事。（`palforge/tests/`，*复数*，是另一样东西：dev 下内核在启动时跑的无界面单元测试
-  包，也是 `ps_catalog` 控制台命令的本体。它同样随仓库发布 —— 发现 `core/registry.lua` 启动时就
-  require 它之后，那条把它藏起来的 `.gitignore` 行已经删掉了，所以克隆里也有。真要是缺了，内核
-  会在 “dev tooling NOT loaded” 那一行里把它点名。）
+- **`palforge/test/`。** `core/registry.lua` 会 require `palforge.test` 并调用它的 `install()`。
+  就这一次调用绑定了 **F1**、跑了无界面测试包、给每个探针分了一个键、注册了包括 `ps_catalog` 在内
+  的全部 `pf_*` 控制台命令，并把动作表交给 `core/autorun`。少了这个目录的 dev 安装一样都没有，内核
+  会在 “dev tooling NOT loaded” 那一行里把整棵树点名。以前它旁边还有第二个目录 ——
+  `palforge/tests/`，*复数*，只差一个字母 —— 装着无界面测试包和 `ps_catalog` 的导出器，而产品代码
+  两边都伸手去够。现在只有一棵树：测试包是 `test/units/`，导出器是 `test/tools/catalog.lua`。
 - **`palforge/autorun.txt`。** `core/autorun.lua` 从 `palforge/` 旁边读它，并在世界加载时运行其中
   具名的动作。在按键和控制台都失效的机器上，它是唯一能跑起东西的路子 —— 这个项目已经接连有三条
   输入通路失效过。
@@ -207,21 +212,25 @@ dev 部署会多出工具相关的行。每次绑定都会在同一行里报告�
 [PalForge.main][info] PalForge v0.3.0 starting | game build: ... | dev=true debug=true | dev overlay: loaded
 [PalForge.keyboard][info] bound F4 [keymap: unknown — the game's key config has not been read yet (the config source needs a loaded world), so nothing is claimed either way; run pf_keys inside a save]
 [PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
-[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
 [PalForge.keyboard][info] bound F9 [keymap: ...]
+[PalForge.hooks][info] 25 game-required hook(s) declared; `pf_hooks` prints each one's gate state and what would open it
 [PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
 [PalForge.keyboard][info] bound F1 [keymap: ...]
+[PalForge.test][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
+[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  ...  pf_uiz  pf_watch
 [PalForge.test][info] keyboard: F1                   unknown  tests: all suites                        game: the game's key config has not been read
-[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, ps_catalog console command, F9 reload, headless unit bundle (palforge.tests), in-game API suite on F1 (palforge.test), game-required test hooks (palforge.test.hooks)
+[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, F9 reload, headless unit bundle (test/units), in-game API suite on F1 + probe keys, ps_catalog console command (test/tools), autorun action table, game-required test hooks (palforge.test.hooks)
 [PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-`tests: 8 passed ...` 来自无界面的单元测试包 `palforge/tests/`（复数）。它在仓库里，所以这是正常
-的一行。要是哪份安装把这个目录漏掉了，内核就会把它点名写进 `dev tooling NOT loaded` 那一行。
-这一行两种模式下都会打印，逐项列出
-没有加载的东西和原因：一个从未被绑定的键，和一个绑定了却从来收不到按键的键，从外面看是一样的，
-能区分它们的只有这一行。
+`tests: 8 passed ...` 来自无界面的单元测试包 `palforge/test/units/` —— 两个纯 Lua 套件、八项检查，
+由 `test/init.lua` 的 `install()` 在启动时、在碰到游戏之前跑完。它下面那行 `dev tooling loaded:`
+就是同一个 `install()` 把每一块经内核报告回来的结果：`core/registry.lua` 只知道 `palforge.test`
+这一个名字，也只调用一次。要是哪份 dev 安装把这个目录漏掉了，内核会把整棵树点名写进
+`dev tooling NOT loaded` 那一行；而 `--release` 的副本本来就不带它，所以那里的 `absent` 是正确的
+状态，不是装坏了。这一行两种模式下都会打印，逐项列出没有加载的东西和原因：一个从未被绑定的键，
+和一个绑定了却从来收不到按键的键，从外面看是一样的，能区分它们的只有这一行。
 
 另外两行属于世界闸门。PalForge 会等存档加载完成，才去碰世界里的东西；第一行在存档准备好时出现，
 第二行在你离开那个世界时出现：
@@ -282,13 +291,14 @@ F1**。Lua 是在模组加载时读的，所以部署过去的文件在重新加
 
 ### `dev` 会武装什么：九个键
 
-`registry.initialize()` 会加载 `core/keyboard/` 下的按键绑定文件、F9 重新加载、`ps_catalog`
-DataTable 导出工具、无界面单元测试包，以及 `palforge.test` —— 绑定 F1、并给每个探针各分一个键的，
-正是最后这个模块。一共九个键：
+`registry.initialize()` 会加载 `core/keyboard/` 下的按键绑定文件和 F9 重新加载，然后 require
+`palforge.test` 并调用它的 `install()` —— 一个名字，一次调用。这次调用跑了无界面单元测试包、绑定
+F1、给每个探针各分一个键、注册 `ps_catalog` DataTable 导出工具和其余所有 `pf_*` 控制台命令，并把
+动作表交给 `core/autorun`。一共九个键：
 
 | 键 | 做什么 | 屏幕上需要什么 |
 | --- | --- | --- |
-| **F1** | 运行游戏内 API 测试套件：14 个套件，481 项检查 | 哪里都能跑，但没有加载存档时会跳过 28 项 |
+| **F1** | 运行游戏内 API 测试套件：19 个套件，580 项检查 | 哪里都能跑，但没有加载存档时会跳过 28 项 |
 | **F2** | 探针 `title` —— 游戏自己的标题菜单按钮 | 标题界面 |
 | **F3** | 探针 `uislot` —— 那个按钮的内层 slot，从世界里读 | 一个加载好的存档 |
 | **F4** | **解锁当前存档里的全部科技** | 一个加载好的存档 |
@@ -310,7 +320,7 @@ F7 被刻意排除在外：那是 Palworld 自己的音量键，绑定会成功�
 而 `core/autorun.lua` 会在世界加载时运行 `palforge/autorun.txt` 里具名的动作 —— 三条不同的入口，
 因为这个项目已经接连有三条输入通路失效过。
 
-`env.debug` 是第二个、也更窄的开关：它加载 `palforge/test/hooks/`，也就是那 19 项没有游戏在跑就
+`env.debug` 是第二个、也更窄的开关：它加载 `palforge/test/hooks/`，也就是那 25 项没有游戏在跑就
 测不了的测量。它们是被声明而不是被运行的 —— 用 `pf_hook <id>` 按名字调用，`pf_hooks` 会列出每个
 钩子以及它会跳过的原因。会写进存档的那些，还需要额外的 `env.debugHooks[id] = true`。
 
@@ -523,7 +533,7 @@ end
 </Steps>
 
 `object_manager.owner(type, id)` 会说出某个注册属于哪个内容包，`entry` 和 `byResolved` 从另外两个
-方向回答同一个问题。做了 dev 部署的话，最快的冒烟测试就是 **F1**：它会跑完 14 个套件，而摘要会写
+方向回答同一个问题。做了 dev 部署的话，最快的冒烟测试就是 **F1**：它会跑完 19 个套件，而摘要会写
 明有多少项检查没能被回答、以及是哪个方向没能回答。
 
 ## 访问 API
@@ -801,8 +811,9 @@ events = {
 ## 小结
 
 - PalForge 放在 `ue4ss/Mods/PalForge/Scripts/`，`palforge/` 和 `main.lua` 并排。换成别的布局就
-  不能用。`palforge/test/` 和 `palforge/autorun.txt` 也要一起复制：少了前者就没有 F1，少了后者就
-  没有不靠按键的入口。
+  不能用。dev 副本还要一起复制 `palforge/test/` 和 `palforge/autorun.txt`：少了前者就没有 F1、也
+  没有任何 `pf_*` 命令，少了后者就没有不靠按键的入口。`--release` 会整个丢掉 `palforge/test/`，
+  那才是玩家手上的副本。
 - 所有 dev 工具都以关闭状态出厂。武装那九个键的是 `Scripts/palforge_dev.lua` —— 由
   `tools/deploy.sh` 写出、被 gitignore、绝不会出现在玩家的副本里 —— 而 F4 会解锁当前存档的全部
   科技。

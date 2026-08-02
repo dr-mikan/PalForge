@@ -75,16 +75,30 @@ mkdir -p "$STAGE"
 # have failed in turn on this machine (a key the game claimed, a second key, and a console UE4SS
 # ships switched off). Edit it in the source tree, deploy, load a save.
 #
-# Everything the mod needs at runtime. Both test directories stay, and neither is optional:
-# palforge/test/ is what binds F1, and palforge/tests/ is the headless bundle core/registry runs
-# at startup under dev plus the body of the ps_catalog console command. This comment used to say
-# tests/ was gitignored and therefore "exists only in a working tree" — it WAS listed in
-# .gitignore, and that was the defect: the kernel required a directory a clone did not carry.
-# The line is gone and both ship. Only deprecated/ and tmp/ are dropped below, and they are
-# reference trees nothing requires.
+# Everything the mod needs at runtime. ONE test tree now: palforge/test/ holds the in-game F1
+# suite (cases/), the headless boot bundle (units/), the game-required measurements (hooks/), the
+# discovery dumps (probes/) and the dev instruments (tools/). There used to be two — palforge/test
+# and palforge/tests, one character apart, with production code reaching into both — and this
+# comment used to explain which was which. It does not have to any more.
+#
+# Only deprecated/ and tmp/ are dropped unconditionally below; they are reference trees nothing
+# requires. palforge/test/ is dropped for --release only, a few lines further down.
 cp -r "$SRC/Scripts/main.lua" "$STAGE/main.lua"
 cp -r "$SRC/Scripts/palforge" "$STAGE/palforge"
 rm -rf "$STAGE/palforge/deprecated" "$STAGE/palforge/tmp"
+
+# THE TEST TREE IS NOT PART OF A RELEASE. palforge/test/ is ~50 files of suites, probes, hooks
+# and dev instruments; a player runs none of them and env.dev = false means none of them is even
+# required. Dropping it under --release makes that structural instead of conditional: there is no
+# F1 suite to arm because the files are not there, and core/registry's single
+# requireState("palforge.test") answers "absent", which its own comment names as the CORRECT
+# state for a release rather than an incomplete install.
+#
+# It stays in a DEV deploy, where it is the whole point. Note the asymmetry with deprecated/ and
+# tmp/ above: those are dropped from BOTH modes because nothing requires them in either.
+if [ "$MODE" = "release" ]; then
+    rm -rf "$STAGE/palforge/test"
+fi
 
 # A BUILD STAMP, so a stale run is obvious in the log instead of being diagnosed for an hour.
 # Lua that is already loaded stays loaded: copying files here changes nothing in a running game

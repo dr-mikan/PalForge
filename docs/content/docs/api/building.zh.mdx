@@ -393,30 +393,29 @@ end,
 
 ### 保存状态
 
-状态存在每个世界一个的 JSON 文件里，由 `utils/file` 写进模组的 `state` 目录：
+记录存在每个**模组**一个的 JSON 文件里，而这些文件放在每个存档一个的目录中：
 
 ```text
-<UE4SS Mods>/PalForge/state/entities_<saveId>.json
+<UE4SS Mods>/PalForge/state/w_1DF0E44B4FDDD6196E30819A899C9009/mypack.json
 ```
 
-`saveId` 由 `core/spatial` 决定：它从活着的 `PalGameInstance` 上读当前选中的存档，先试 `GetSelectedWorldSaveDirectoryName`，不行再试 `GetSelectedWorldName`，两者各自还有对应的支撑属性（`SelectedWorldSaveDirectoryName`、`SelectedWorldName`）作为第二次机会；拿到的名字里不是字母、数字、下划线的字符换成 `_`，前面再加上 `w_`，什么都读不到时就是 `world`。
+目录名由 `core/spatial` 决定：它从活着的 `PalGameInstance` 上读当前选中的存档，先试 `GetSelectedWorldSaveDirectoryName`，不行再试 `GetSelectedWorldName`，两者各自还有对应的支撑属性（`SelectedWorldSaveDirectoryName`、`SelectedWorldName`）作为第二次机会；拿到的名字里不是字母、数字、下划线的字符换成 `_`，前面再加上 `w_`，什么都读不到时就是 `world`。文件名就是你传给 `PalForge.pack` 的那个包 id，所以你的建筑物永远不会待在别的模组也会写的文件里。
 
 <Callout type="info">
-`WorldGuid`、`WorldSaveName` 和 `SaveName` 并不在那个类上。`PalGameInstance` 完整的 111 条属性清单里一个都没有，所以基于这三个名字的探测只可能落到 `world` 这个兜底值——这就是为什么每个存档共用同一个持久化文件，也是为什么真实会话留下来的唯一产物叫 `entities_world.json`。这里优先用存档目录名而不是显示名，是因为两个存档不可能共用同一个存档文件夹，而玩家自己敲的标签完全可能重名。
+`WorldGuid`、`WorldSaveName` 和 `SaveName` 并不在那个类上。`PalGameInstance` 完整的 111 条属性清单里一个都没有，所以基于这三个名字的探测只可能落到 `world` 这个兜底值——早期会话留下来的唯一产物之所以叫 `entities_world.json`，就是这个缘故。这里优先用存档目录名而不是显示名，是因为两个存档不可能共用同一个存档文件夹，而玩家自己敲的标签完全可能重名。
 </Callout>
 
 文件里每个建筑物的键对应一条记录，另外还有一个隔离区：
 
 ```json
 {
-  "version": 2,
-  "entities": {
+  "palforge": { "format": 3, "mod": "mypack", "save": "w_1DF0E44B4FDDD6196E30819A899C9009",
+                "forge": "0.3.0", "wrote": 1785646408, "buildings": 1 },
+  "buildings": {
     "WorkBench@1234,-56,78": {
-      "v": 2,
       "buildId": "WorkBench",
       "def": "mypack:Bench",
-      "pack": "mypack",
-      "pos": { "x": 123400.0, "y": -5600.0, "z": 7800.0 },
+      "pos": [123400, -5600, 7800],
       "state": { "uses": 3 }
     }
   },
@@ -424,32 +423,32 @@ end,
 }
 ```
 
-这个键是解析后的 **build** id 加一个单元格，所以它完全不指明所有者。于是所有者写在记录里面：`v` 是记录的形状，`def` 是认领它的定义 id，`pack` 是注册表能归因时的所属内容包 id。旧记录会在扫描第一次把它绑上时就地升级——这是一个所有内容包共用的单文件所能有的唯一迁移路径。
+这个键是解析后的 **build** id 加一个单元格，所以它完全不指明所有者。所有者就是文件名，记录的形状就是头部的 `format`，两者都不必逐条重复。`def` 是认领它的定义 id，也正是它让一种很窄的改名情形能自己迁移。位置是整数厘米。布局、包在它之上拿到的 store，以及卸载模组时这一切会怎样，都在[保存的状态](/docs/concepts/saved-state)里。
 
 记录里的 `state` 和 `inst.state` 是同一张表，所以就地改它，就足以改变将要写出的内容。但没有东西会自己去写：
 
-- `self:setDirty()` 只把世界缓存标脏。开销很小。
-- `self:save()` 标脏之后马上写文件。
-- 离开世界时会写一次，然后丢掉运行中的建筑物，保留全部记录。
+- `self:setDirty()` 只把这个建筑物所属的模组标脏。开销很小。
+- `self:save()` 标脏之后马上写那一个模组的文件，并返回 `true`，或者 `false` 加一个原因。
+- 离开世界时会把还脏着的全部写掉，然后丢掉运行中的建筑物，保留全部记录。
 
-重要的改动用 `save()`，高频循环里用 `setDirty()`；不然每个 tick 都 `save()`，就会每次心跳都写一遍文件。
+重要的改动用 `save()`，高频循环里用 `setDirty()`；不然每个 tick 都 `save()`，就会每次心跳都写一遍文件。一次写只覆盖发生了改动的那个模组：不会因为你改了东西，就把别人的文件重写一遍。
 
-记录只在真的被拆除时才删。扫描连续六次没看到的建筑物 —— 按 500 ms 的节奏大约三秒 —— 会发出 `building.remove`，并连同它的记录一起被丢掉。
+**没有记录会因为「不在」而被删掉。** 扫描连续六次没看到的建筑物 —— 按 500 ms 的节奏大约三秒 —— 会以 `reason = "missing"` 发出 `building.remove`，但它的记录不是被丢掉，而是被**隔离**：带着 `why = "missing"` 挪进 `orphans`，而下一次再看到那个 Actor 的扫描会把它连同 `state` 一起取回来。那次扫描只枚举内存里的对象，而出货二进制自己的声明表明 Palworld 是按距离生成和销毁地图对象的，所以「这一遍扫描里没有」不能读成「已经没了」。
 
-而**本次会话里没有任何定义认领**其 build id 的记录不会被删掉，而是被隔离：原样搬进文件的 `orphans` 区，带着条数和它们所属的内容包写进日志，一旦有定义重新认领那个 build id，就立刻搬回来。这一趟检查会在世界打开后等大约 30 秒才跑，好让那些在 `world.ready` 时、或者懒加载时才定义建筑物的内容包来得及。隔离刻意保守：玩家只是把某个内容包关了一晚上，不该因此丢掉建筑物的状态。运行时里唯一会真的销毁记录的，是 4096 条的隔离上限，超过之后从最旧的开始丢，并在日志里写明丢了多少条、为什么。
+**本次会话里没有任何定义认领**其 build id 的记录也按同样的方式隔离，理由是 `why = "unclaimed"`：原样搬进 `orphans`，带着条数和它们所属的内容包写进日志，一旦有定义重新认领那个 build id，就立刻搬回来。这一趟检查会在世界打开后等大约 30 秒才跑，好让那些在 `world.ready` 时、或者懒加载时才定义建筑物的内容包来得及。运行时里唯一会真的销毁记录的，是 4096 条的隔离上限，而且是**按模组文件**算的；超过之后从那个模组最旧的开始丢，并在日志里写明丢了多少条、属于哪个模组、为什么。
 
 ```mermaid
 stateDiagram-v2
   [*] --> Tracked
   Tracked --> Missing: not seen by a scan
   Missing --> Tracked: seen again
-  Missing --> Removed: 6 consecutive misses
+  Missing --> Quarantined: 6 consecutive misses
+  Quarantined --> Tracked: seen again
   Tracked --> Dropped: world.left
-  Removed --> [*]
   Dropped --> [*]
 ```
 
-`Removed` 会删掉保存记录。`Dropped` 会留着，所以下次加载时，建筑物会连数据一起回来。
+`Quarantined` 和 `Dropped` 都会留着保存记录，所以当建筑物或它的定义回来时，它会连数据一起回来。这张图里没有任何一条转移会删记录。
 
 ### 拿到这些实例
 
@@ -465,7 +464,7 @@ event.isWorldReady()                       -- has the world finished loading
 
 扫描跑起来之前 `:instances()` 都是空的，而扫描需要一个加载完的世界：一个监视每秒查一次有没有有效的 `PalPlayerCharacter`，连续成功五次之后才放行。
 
-这些东西都能挺过一次热重载。建筑物运行时把定义索引、运行中的实例、actor 索引和持久化缓存都放在 `_G` 上的一张表里，而 `core/reload` 在清空模块时会保留 `object_manager`，所以按下 F9 之后 `:instances()` 照样有答案，建筑物的钩子也照样在你已有的定义上触发。这两半必须一起在：一次把注册表丢掉的重载，在隔离检查看来就等于所有内容包同时被卸载——大约在按下之后 30 秒。
+这些东西都能挺过一次热重载。建筑物运行时把定义索引、运行中的实例和 actor 索引放在 `_G` 上的一张表里，store 把合并后的记录视图放在另一张表里，而 `core/reload` 在清空模块时会保留 `object_manager`，所以按下 F9 之后 `:instances()` 照样有答案，建筑物的钩子也照样在你已有的定义上触发。这两半必须一起在：一次把注册表丢掉的重载，在隔离检查看来就等于所有内容包同时被卸载——大约在按下之后 30 秒。
 
 ## 生命周期事件
 
@@ -846,7 +845,7 @@ return Building{
 - 想被记住的数据放进 `state`，就地改，然后调 `self:save()`。
 - 处理函数写在 `events` 里，第一个参数是放好的建筑物，所以 `self.state`、`self.pos` 和 `self.actor` 直接就能用。
 - `onPlace`、`onLoad`、`onRightClick`、`onRemove`、`onTick`、`onBuild`、`onWorldReady` 和 `onWorldLeft` 都会运行。`onLeftClick` 和 `onBreak` 永远不会，而这是测出来的，不是还没做。
-- 建筑物是靠取整后的世界坐标重新找到的，所以 `gridCm` 决定了两个建筑物能挨多近。那个键指向的记录里写着拥有它的定义和内容包。
+- 建筑物是靠取整后的世界坐标重新找到的，所以 `gridCm` 决定了两个建筑物能挨多近。那个键指向的记录里写着拥有它的定义，而它被写进的那个文件本身就是所属模组。
 - 注册一个建筑物就是一次写入：只有注册过的定义会被追踪，只有被追踪的建筑物会被持久化。`native/buildings.lua` 在你 `publish` 之前不注册任何东西。
 - `Building.get(id):instances()` 会给你这个定义此刻立在世界里的全部建筑物，而 `self:neighbors(cm)` 会给某一个建筑物它周围的那些。
 

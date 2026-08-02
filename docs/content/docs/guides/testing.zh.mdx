@@ -18,26 +18,26 @@ description: 在游戏里按 F1，确认 PalForge 和你自己的内容是否正
 游戏运行时按 **F1**。过一会儿，屏幕上会出现两行：
 
 ```text
-[PalForge] tests: running 14 suite(s)
-[PalForge] tests: 450 passed, 0 failed, 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge] tests: running 19 suite(s)
+[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 ```
 
 `0 failed` 就是"我的环境能不能用"的答案：PalForge 已经加载，你写的 api 的行为和 api 页面描述的
 一致，游戏也接受了它发出的调用。出现别的数字时，坏掉的那一块会在屏幕上和日志里被点名。
 
 **没有哪一次按键能跑完所有检查，而汇总会用文字把这件事说出来。** 28 项检查需要已加载的存档，
-在标题画面会跳过。另有 10 项正相反：它们验证的是*拒绝*路径 —— 关着的 ready 闸门、没有归属者可
+在标题画面会跳过。另有 11 项正相反：它们验证的是*拒绝*路径 —— 关着的 ready 闸门、没有归属者可
 挂载的控件、没有 pawn 时的 `Player.coordinate()` —— 所以只能在没有任何东西可以成功的地方运行，
 一旦世界起来了它们就跳过。这两组不可能在一次按键里都跑到。请在标题画面按一次，进存档再按一次；
 一次全绿的运行，其实是两次运行。
 
 上面的数字是 2026-08-02 在一个没有任何引擎的纯 `lua5.4` 进程里跑完整套件的实测结果。在游戏里，
-那 28 项受世界限制的检查会改为运行，`could not be answered by this session` 的两项也会消失 ——
-它们只是因为纯 Lua 进程既没有 `LoopAsync` 也没有 UE4SS 的 `Key` 表才出现的。
+那 28 项受世界限制的检查会改为运行，`could not be answered by this session` 的三项里也会消失两项
+—— 那两项只是因为纯 Lua 进程既没有 `LoopAsync` 也没有 UE4SS 的 `Key` 表才出现的。
 
 ```mermaid
 flowchart TD
-  A["require palforge.test"] --> B["load 14 case files"]
+  A["require palforge.test"] --> B["load 19 case files"]
   B --> C["bind F1"]
   C --> D["F1 pressed"]
   D --> E["test.run picks the suites"]
@@ -53,8 +53,9 @@ flowchart TD
 加载这些检查、把它们放到 F1 上，只在游戏启动时发生一次。从 `F1 pressed` 往下的部分，每按一次
 就重新发生一次。
 
-启动时只**加载**检查，从不运行它们。它们会生成帕鲁、发放道具，所以只有你主动要求时才会真的
-跑一次。
+启动时对这些检查只**加载**，从不运行。它们会生成帕鲁、发放道具，所以只有你主动要求时才会真的
+跑一次。启动时真会跑的只有无界面的 `units/` 测试包，这也正是它单独成一个目录的原因：它除了 Lua
+表以外什么都不碰。
 
 按键是通过 `core/keyboard/base/registory` 安装的，它把你的回调包进 `ExecuteInGameThread` 和一个
 `pcall` 里。某个检查炸了，也不会把你的键盘输入一起拖下水。
@@ -82,9 +83,45 @@ env.debug   = true
 请改为从你自己的代码里调用 `test.run()`。
 </Callout>
 
+## 测试树
+
+这一页上的所有东西都在 `Scripts/palforge/test/` 底下，是一棵树，分成五个角落。产品代码知道的名字
+只有 `test/init.lua`：`core/registry.lua` 在 dev 开关内侧 require 它并调用 `install()`，就这一次
+调用跑了启动测试包、加载了 case 文件、绑定了 F1 和探针的键、注册了包括 `ps_catalog` 在内的全部
+`pf_*` 控制台命令，并把动作表交给 `core/autorun`。
+
+```text
+Scripts/palforge/test/
+├── init.lua      唯一的入口；install() 把下面这些全部接好
+├── units/        无界面套件，启动时就跑 - 2 个套件、8 项检查
+├── cases/        游戏内 API 测试套件，挂在 F1 上 - 19 个文件
+├── hooks/        需要 Palworld 在跑才能取的测量 - 声明了 25 个，从不自动运行
+├── probes/       调查用的转储 - 不是测试；不判定通过或失败
+├── tools/        dev 工具 - catalog.lua，也就是 ps_catalog 的本体
+├── support.lua   世界读取、带命名空间的 id，以及清扫
+└── probe.lua     探针和钩子给输出加的 BEGIN/END 括号
+```
+
+| 目录 | 什么该放这里 | 什么时候跑 |
+| --- | --- | --- |
+| `units/` | 除了 Lua 表以外什么都不碰的套件 | 启动时，每次 dev 会话 |
+| `cases/` | 需要世界、pawn、UObject 或 UE4SS 全局的套件；环境不在时带方向地跳过 | 按 F1 时，绝不自己跑 |
+| `hooks/` | 游戏关着就取不到的测量，通常还要有人盯着屏幕 | 只有被点名时 |
+| `probes/` | 引擎实际长什么样的转储，用来关掉一个悬而未决的问题 | 自己的键，或 `pf_<name>` |
+| `tools/` | 根本不是测试的工具 | 敲它的命令时 |
+
+`units/` 的规矩最窄，而这正是启动安全的原因：整个测试包在第一个世界存在之前、在还在加载的游戏里
+跑完，所以放在那里的套件一旦阻塞或抛出，每次启动都会被拖慢。需要世界、pawn、UObject 或 UE4SS
+全局的检查，属于 `cases/` 的套件或 `hooks/` 的测量。
+
+**发布部署里一个都没有。** `tools/deploy.sh --release` 会把 `palforge/test/` 连同它的 58 个文件
+一起从暂存副本里删掉，于是内核那唯一一次 `require("palforge.test")` 答 `absent` —— 对玩家的安装
+来说这是正确状态，而不是装了一半。这一页上的东西没有一样会到玩家手里：套件、探针键、钩子、
+`pf_*` 命令、`ps_catalog`，一个也没有。
+
 ## 检查了哪些东西
 
-一共有 **481 项检查**，分成 **14 个**套件。一个套件就是一组检查，覆盖 api 的一个领域。每个套件
+一共有 **580 项检查**，分成 **19 个**套件。一个套件就是一组检查，覆盖 api 的一个领域。每个套件
 是 `Scripts/palforge/test/cases/` 下的一个文件。它们针对你这次会话里真实的游戏运行。
 
 | 套件 | 检查数 | 只在存档里跑 | 只在标题画面跑 |
@@ -92,6 +129,11 @@ env.debug   = true
 | `schema` | 28 | 0 | 0 |
 | `registry` | 42 | 0 | 0 |
 | `definitions` | 23 | 0 | 0 |
+| `store_codec` | 19 | 0 | 0 |
+| `store_state` | 36 | 0 | 0 |
+| `store_api` | 12 | 0 | 1 |
+| `store_runtime` | 5 | 0 | 0 |
+| `store_disk` | 27 | 0 | 0 |
 | `native` | 26 | 0 | 0 |
 | `pal` | 34 | 5 | 0 |
 | `item` | 23 | 3 | 0 |
@@ -111,16 +153,23 @@ env.debug   = true
 `pal` 里有一项两列都不属于：`teachAll` 的写入那一半需要一只活着的帕鲁，并且会改动真实存档，
 所以由一个声明过的钩子来测量，而不是 F1；它那行跳过会点出负责测量的钩子名字。
 
+`store_runtime` 里那五项同样两列都不属于，理由更尖锐一点：它们拿一份假的 Actor 列表去驱动建筑
+扫描，而在 UE4SS 已加载的情况下这么做，等于把一个不含玩家任何结构的世界交给真正的 500 ms 扫描
+——那些结构会全部漏掉并被隔离。所以它们只在 `lua5.4` 的无头环境里跑，在游戏里的两种状态下都跳过，
+并且会说明原因。另外四个 store 套件是纯 Lua，在哪里都能跑。这五个套件都不会写进 `state/`：三个把 store 的 I/O
+整个换掉，而必须面对真实文件系统的 `store_disk` 在操作系统临时目录下的一个用完即弃的目录里工作。
+因为一个测试"玩家保存状态所在模块"的套件，绝不能有能力去写玩家保存的状态。
+
 ## 读懂输出
 
 结果会去两个地方。`UE4SS.log` 里什么都有，作用域是 `[PalForge.test]`（运行器）和
 `[PalForge.unittests]`（框架）：
 
 ```text
-[PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 14 suite(s): schema, registry, definitions, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
+[PalForge.test][info] build 2026-08-02 12:41:30 | dev=true debug=true | game v1.0.2.101103 (live v1.0.2.101103) | running 19 suite(s): schema, registry, definitions, store_codec, store_state, store_api, store_runtime, store_disk, native, pal, item, building, skill, effect, audio, mesh, ui, player, events
 [PalForge.unittests][info] SKIP [player] coordinate returns the local player's position as numeric x, y, z (world): no world loaded
-[PalForge.unittests][info] tests: 450 passed, 0 failed, 31 skipped (481 total)
-[PalForge.unittests][info] tests: 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge.unittests][info] tests: 548 passed, 0 failed, 32 skipped (580 total)
+[PalForge.unittests][info] tests: 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 [PalForge.unittests][info] tests: 28 check(s) were not measured because there is no world - load a save and press the key again.
 [PalForge.unittests][info] tests: 1 check(s) can only be measured by a declared hook - `pf_hooks` lists them with the reason each one would skip, and each SKIP line above names the action that runs its own.
 [PalForge.test][info] swept 123 test definition(s)
@@ -143,8 +192,8 @@ env.debug   = true
 切出游戏就能知道到底测到了什么：
 
 ```text
-[PalForge] tests: running 14 suite(s)
-[PalForge] tests: 450 passed, 0 failed, 31 skipped (28 need a world, 1 need a declared test/hooks run, 2 could not be answered by this session)
+[PalForge] tests: running 19 suite(s)
+[PalForge] tests: 548 passed, 0 failed, 32 skipped (28 need a world, 1 need a declared test/hooks run, 3 could not be answered by this session)
 [PalForge] FAIL [item] give really adds to the live inventory, measured both ways: the Wood count must RISE across a give (135 -> 135)
 ```
 
@@ -153,7 +202,7 @@ env.debug   = true
 
 <Callout type="info">
 光一个 `N skipped`，分不出"几乎全都测到了"和"几乎什么都没测到"这两种运行，所以现在每个跳过都带
-方向。`28 need a world` 是一句你能照着做的话，`31 skipped` 不是。
+方向。`28 need a world` 是一句你能照着做的话，`32 skipped` 不是。
 </Callout>
 
 ## 只跑一个套件
@@ -182,9 +231,9 @@ for _, suite in ipairs(results.suites) do
 end
 ```
 
-不带参数的 `test.run()` 只跑那十四个套件，不会更多。PalForge 在启动时还会跑一小组纯 Lua 的检查
-（`palforge.tests`）；它们注册进同一个列表，但 F1 不碰它们。要够到每一个注册过的套件，就往下
-走一层：
+不带参数的 `test.run()` 只跑那十九个套件，不会更多。启动测试包是另一回事：那是一组纯 Lua 的检查
+`palforge.test.units`，由 `test/init.lua` 的 `install()` 来跑，而不是内核。它们注册进同一个列表，
+而 F1 仍然刻意不碰它们。要够到每一个注册过的套件，就往下走一层：
 
 ```lua
 local T = require("palforge.core.unittests")
@@ -227,7 +276,7 @@ keyboard: F5                   unknown  probe reflect (reflection dump: classes,
 那张表生成，因此不会走样：
 
 ```text
-[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  pf_hook_audio_setvolume_audible  pf_hook_building_unlock  pf_hook_game_build_live  pf_hook_item_datatable_row_read  pf_hook_mesh_actor_identity  pf_hook_mesh_color_change  pf_hook_pal_skills_equip  pf_hook_pal_spawned_fresh  pf_hook_skill_hit_source  pf_hook_ui_backhandler  pf_hook_ui_host_layer  pf_hook_ui_update_event  pf_hooks  pf_hooks_all  pf_keys  pf_mesh  pf_native  pf_pal  pf_reflect  pf_spawn  pf_teach  pf_tests  pf_title  pf_uidecl  pf_uievents  pf_uiroute  pf_uislot  pf_uiz  pf_watch
+[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  pf_hook_audio_setvolume_audible  pf_hook_building_actor_streaming  pf_hook_building_record_orphans  pf_hook_building_runtime_reload  pf_hook_building_unlock  pf_hook_game_build_live  pf_hook_item_datatable_row_read  pf_hook_item_satiety_write  pf_hook_keymap_key_coverage  pf_hook_mesh_actor_identity  pf_hook_mesh_color_change  pf_hook_mesh_texture_import_live  pf_hook_pal_skills_equip  pf_hook_pal_spawned_fresh  pf_hook_save_survives_pack_removal  pf_hook_skill_hit_source  pf_hook_skill_projectile_spawn  pf_hook_store_base_load_cost  pf_hook_store_crash_recovery  pf_hook_store_save_roundtrip  pf_hook_ui_backhandler  pf_hook_ui_host_layer  pf_hook_ui_update_event  pf_hooks  pf_hooks_all  pf_keys  pf_mesh  pf_native  pf_pal  pf_reflect  pf_spawn  pf_teach  pf_tests  pf_title  pf_uidecl  pf_uievents  pf_uiroute  pf_uislot  pf_uiz  pf_watch
 ```
 
 **能注册命令，不等于你能敲命令。** UE4SS 发布时控制台是关着的，处理函数会一丝不苟地注册进一个
@@ -363,7 +412,7 @@ pf_hook_pal_skills_equip
 3. `writes = true` —— 会改动存档的钩子还需要一个逐钩子的同意：`env.debugHooks["<id>"] = true`。
    `debug` 是整个会话范围的开关，而写入是在一个可以丢掉的存档上、针对单次实验做出的决定。
 
-十九个声明过的钩子，按 `pf_hooks_all` 的运行顺序排列 —— 只读的在前，这样即使中途出事，凡是能打印
+二十四个声明过的钩子，按 `pf_hooks_all` 的运行顺序排列 —— 只读的在前，这样即使中途出事，凡是能打印
 的东西都已经在写入发生之前打印完了：
 
 | 钩子 | 需要 | 它把什么问题定下来 |
@@ -374,6 +423,8 @@ pf_hook_pal_skills_equip
 | `item-datatable-row-read` | world | `dt:FindRow(id)` 返回的结构体上能不能直接索引标量或 FName 列，还是配方只能一列一列拼出来 |
 | `audio-custom-file-loader` | world | 正式版里到底有没有任何办法，把磁盘上的 `.wav` 变成能播放的东西 |
 | `building-record-orphans` | world | 针对真实存档的孤儿隔离往返：读进来多少条记录、多少条没有已注册的归属、多少条被隔离 —— 以及最要紧的那条断言：仅仅是本次会话没有加载的包，**没有**被销毁 |
+| `store-base-load-cost` | world | 一个真实基地让 store 加载起来要付多少：文件数、字节数、按那些字节计时的解码，以及同样这些记录若合成一个文件会是多少 |
+| `building-actor-streaming` | world, player | `FindAllOf("PalBuildObject")` 会不会不再返回玩家已经走远的基地，以及在多远处开始 |
 | `ui-update-event` | world | 给四个 UI 类上的每个 Open/Show/Construct/Refresh/Update/Setup 函数挂钩，报告哪些真的触发、按什么顺序 |
 | `pal-spawned-fresh` | world | 把每次 `pal.spawned` 的触发相对 `world.ready` 打上时间戳，好把新生成和加载风暴区分开 |
 | `skill-hit-source` | world | 确认伤害路径上没有任何东西携带技能 id，并量化为什么把发动和伤害相关联是错的 |
@@ -386,9 +437,12 @@ pf_hook_pal_skills_equip
 | `building-unlock` | world, player, **写入** | 把关于 `Building.Handle:unlock` 能确认的事实全部记下来，剩下确认不了的那一半交给操作者 |
 | `item-satiety-write` | world, player, **写入** | 运行中的版本给 `SetFullStomach` 声明的是什么参数表，以及饱食度 / HP 的写入从 Lua 到底够不够得着 |
 | `skill-projectile-spawn` | world, pal, **写入** | 打印每一条弹道 / 生成路径声明的参数表，只发射那条不吃参数的，并把吃结构体的那些点名拒绝 |
+| `store-save-roundtrip` | world, **写入** | 通过公开接口把一个包的状态写进真实存档的 store，再从真实路径读回来，并在重载之后再跑一次，看它能不能跨过一次世界加载 |
+| `store-crash-recovery` | world, **写入** | 在真实存档的 store 里种下一个写到一半的文件和一个读不了的文件，报告加载器是从哪一份副本恢复的 |
+| `save-survives-pack-removal` | world, player, **写入** | 把 PalForge 让这个存档记下的每一个 id 都点名，然后在卸载内容包并重新加载之后，说清楚它们各自变成了什么 |
 | `pal-skills-equip` | world, pal, **写入** | 主动技的写入会不会落到一只真帕鲁身上，以及游戏能不能撑住 |
 
-十九个里有五个声明了 `writes = true`。`audio-setvolume-audible` 刻意不声明：它确实出声，但它改的
+二十四个里有八个声明了 `writes = true`。`audio-setvolume-audible` 刻意不声明：它确实出声，但它改的
 东西既不跨会话存在也不写到文件里，而 `writes` 的意思是"存档被改动"，不是"发生了点什么"。
 `mesh-texture-import-live` 同样出于这个理由不声明：它分配一个 `UTexture2D`，并在自己旁边写下一个
 很小的 PNG，改的是运行中的进程和一个目录，不是玩家的存档。
@@ -412,7 +466,7 @@ NOTE item-datatable-row-read finished: 4 pass, 0 fail
 
 <Callout type="info">
 F1 套件里每一条"这需要游戏"的跳过，都会点出负责测量它的钩子，所以任何一次跳过都能追到一件你真的
-可以去跑的事情上。`pf_hooks` 会把十九个全列出来，并附上它们此刻会跳过的理由。
+可以去跑的事情上。`pf_hooks` 会把二十四个全列出来，并附上它们此刻会跳过的理由。
 </Callout>
 
 ## 世界闸门
@@ -616,7 +670,7 @@ M.CASES = {
 ### 按键
 
 `M.load()` 会在 `palforge.test.cases.` 下 require 每个名字，并把结果记进 `test.loaded`。某个
-文件加载失败不会让这次运行停下：它会记在 `err` 级别，并从 `test.suites()` 里被排除，其余十三个
+文件加载失败不会让这次运行停下：它会记在 `err` 级别，并从 `test.suites()` 里被排除，其余十八个
 照跑。
 
 ```text
@@ -757,8 +811,10 @@ support.GAME = {
 - `test.run("pal")` 只跑一个套件，`test.bind("F11", fn)` 能把你想要的任何处理放到一个键上 ——
   前提是 `pf_keys` 告诉过你这个键是空的。
 - 需要 Palworld 在跑才能做的测量，是 `test/hooks/` 下声明过的钩子：只在 `env.debug` 下加载，用
-  `pf_hooks` / `pf_hook <id>` / `pf_hooks_all` 按名字运行，其中会写入存档的三个还需要
+  `pf_hooks` / `pf_hook <id>` / `pf_hooks_all` 按名字运行，其中会写入存档的八个还需要
   `env.debugHooks[id] = true`。
+- 一棵树，五个角落 —— `units/`、`cases/`、`hooks/`、`probes/`、`tools/` —— 而 `--release` 会把它
+  整个删掉，所以玩家一个都拿不到。
 - 每条命令都有三个入口：UE4SS 控制台（默认是关着的）、一个键，或者
   `Scripts/palforge/autorun.txt` 里在 `world.ready` 时运行的一行。
 - 需要世界的检查以 `support.needWorld(t)` 开头，所以它们会跳过，而不是失败。

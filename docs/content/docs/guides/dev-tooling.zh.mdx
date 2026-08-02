@@ -20,7 +20,7 @@ gitignore，所以不可能顺着仓库传给别人。
 ```lua title="Scripts/palforge_dev.lua"
 local env = require("palforge.env")
 env.dev   = true    -- dev 按键（含 F4：解锁全部科技）、F1、F9、各个探针
-env.debug = true    -- 另外加载 test/hooks 下那十九个需要游戏在跑的测试钩子
+env.debug = true    -- 另外加载 test/hooks 下那二十四个需要游戏在跑的测试钩子
 ```
 
 `env.dev` 关闭时，启动日志会明确这么说，并点名所有没有加载的东西。这一点很重要：从外面看，一个从
@@ -170,14 +170,16 @@ pf_native            # 世界就绪后立刻执行
 延迟同样搭那条心跳，这个文件不建自己的定时器。一行是 `[delay] name`，不携带参数，这也是钩子运行器
 为每个钩子生成一个动作名、而不是让这个解析器学会传词的原因。
 
-文件里装的是**一串名字，不是代码**。每一个都在 `require("palforge.test").ACTIONS` 里查，查不到的会
-被报告并跳过：
+文件里装的是**一串名字，不是代码**。`core/autorun.lua` 不写任何 `test/` 底下的名字：`test/init.lua`
+的 `install()` 用 `autorun.setActions(M.ACTIONS)` 把表交给它，每一行只在这张交来的表里查一次，查不到
+的会被报告并跳过：
 
 ```text
 [PalForge.autorun][warn] autorun.txt: no action named "pf_typo" - the names are the pf_* commands
 ```
 
-于是测试面里任何地方注册的命令，从它存在的那一刻起就能从这里跑，不需要改 `core/autorun.lua`；而一个
+于是测试面里任何地方注册的命令，从它存在的那一刻起就能从这里跑，不需要改 `core/autorun.lua`；而在
+`--release` 部署出来的那种没有测试树的副本里，这张表根本不存在，队列就是一个零成本的空操作。一个
 乱入的文件也不可能执行这个 mod 按键做不到的事。会写入存档的钩子在此之上还有自己的第二道闸门
 （`env.debugHooks[id]`），这条路径既不知道它，也绕不过它。
 
@@ -191,7 +193,7 @@ pf_native            # 世界就绪后立刻执行
 - 原生钩子、那唯一一条 `LoopAsync` 和已绑定按键每个会话只挂一次；事件源内部的改动需要重启。
 - 只要还有重复工作未完成，F9 就拒绝并点名，180 秒后自动过期，也可以从控制台清掉。
 - 重复工作用 `poll.every(name, fn)` 写：按经过秒数判断，返回 `true` 退场，同时最多 16 个。
-- `autorun.txt` 每行一个 `[delay] name`，对照 `palforge.test` 的 `ACTIONS` 解析，每次载入世界跑一遍。
+- `autorun.txt` 每行一个 `[delay] name`，对照 `test/init.lua` 交给 `core/autorun` 的 `ACTIONS` 解析，每次载入世界跑一遍。
 
 <Cards>
   <Card title="控制台命令" href="/docs/guides/console-commands">全部 pf_* 名称，以及它们在屏幕上需要什么</Card>

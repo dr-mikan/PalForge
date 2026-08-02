@@ -175,25 +175,49 @@
 #                              Palworld's patch. main.lua now reads PalGameInstance.DisplayVersion
 #                              instead, which is the string on the title screen.
 #
-# ---- RUN 2: confirm the three fixes that run made necessary. Still nothing that writes. ----
+# ---- RUN 2 IS DONE. All three questions it was queued for came back answered: ----
+#   game-build-live        3 pass / 0 fail. PalGameInstance.DisplayVersion and
+#                          PalUtility.GetDisplayVersion BOTH answer "v1.0.2.101103", and both
+#                          match env.gameBuild. Palworld's own patch version is readable from
+#                          Lua after all — the negative that run 1 established was only about
+#                          the three UKismetSystemLibrary calls, and env.gameBuildLive is a
+#                          real check now instead of context for a log reader.
+#   mesh-actor-identity    A-1 confirmed a SECOND time, on BP_BuildObject_ItemChest_C this
+#                          time rather than the workbench — handle key MISS, GetFullName key
+#                          HIT, on a different actor class in a different session.
+#   pf_tests               444 / 0 / 37 at the title screen and 466 / 0 / 15 in a save, which
+#                          is EXACTLY what the three-environment model predicted. The four
+#                          failures of run 1 are gone and none came back.
 #
-#   0 s   game-build-live      does DisplayVersion answer, and does it match v1.0.2.101103
-#  10 s   mesh-actor-identity  the verdict wording — run 1 reported instanceOfActor as a MISS as
-#                              though the scan had lost a record, when building = 0 means there
-#                              was no record to find. Expect "not applicable", not a defect.
-#  20 s   pf_tests             expect 0 failed. Run 1 failed four checks in BOTH game states that
-#                              are green headlessly: they assert the absence of the ENGINE, not of
-#                              a world, and the suite modelled two environments where there are
-#                              three. Also press F1 at the TITLE SCREEN once — a simulated title
-#                              run is 442/0/39 now, and the real one should match.
+# ---- RUN 3: THE STORE. The format-3 store has never opened a file in a real save. ----
+#
+# The first two lines are read-only and answer the two questions the store pass left open;
+# the third is the suite, which now carries 553 checks rather than 481.
+#
+#   0 s   pf_hooks                 the gate listing. FOUR NEW HOOKS since run 2, three of them
+#                                  behind their own env.debugHooks opt-in — this line says
+#                                  which are open before anything tries to run.
+#   5 s   store-base-load-cost     WHAT A REAL BASE COSTS TO LOAD. Every number in the design's
+#                                  cost table was taken on WSL2/ext4 against synthetic records;
+#                                  the largest set this tree has ever produced is 18. Expect
+#                                  "zero bytes, zero milliseconds" in a stock session — F-8
+#                                  leaves building = 0 registered — and that IS the result.
+#  15 s   building-actor-streaming THE HIGHEST-PRIORITY MEASUREMENT OF THE PASS, and the one
+#                                  thing you have to do is WALK AWAY FROM THE BASE. It decides
+#                                  whether R-1 (a miss QUARANTINES a record instead of deleting
+#                                  it) fixed a live data-loss bug or a latent one. It prints one
+#                                  line a second for 180 s; keep walking or fast-travel.
+#  25 s   pf_tests                 expect 521 / 0 / 32 headless-equivalent; in a save the world
+#                                  gated checks come in on top.
 #
 # Comment these out again before the next run.
-pf_hook_game_build_live
-10 pf_hook_mesh_actor_identity
-20 pf_tests
+pf_hooks
+5 pf_hook_store_base_load_cost
+15 pf_hook_building_actor_streaming
+25 pf_tests
 
 # =====================================================================================
-# ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Nineteen measurements that CANNOT be taken
+# ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Twenty-four measurements that CANNOT be taken
 # with the game switched off, each one a declared hook naming the plan/TODO.md item it
 # closes. Every line below is commented out; uncomment the ONE you are running.
 #
@@ -254,6 +278,18 @@ pf_hook_game_build_live
 # it prints the delta across the pass, which is the round trip itself.
 #35 pf_hook_building_record_orphans
 #
+# store-base-load-cost — WHAT A REAL BASE COSTS THE STORE TO LOAD, and the cheapest of the
+# four store hooks: it opens no file it did not already find and writes nothing anywhere. It
+# prints the actors standing here, the registered building definitions, every pack file with
+# its bytes, the json.decode of those exact bytes timed on THIS machine, and — by merging the
+# real documents back into one — what the same records would have cost in the old format-2
+# single-file shape. That last ratio is the "5.8x" the design claimed from a synthetic
+# 500-record set; this is the first time it has been put next to a real base. ⚠️ In a stock
+# session the honest answer is ZERO BYTES AND ZERO MILLISECONDS, because F-8 leaves building = 0
+# registered and a pack that registers nothing has no file. That is the result, not a failed
+# run. To measure a base that costs something, publish a definition first (see A-1's ⚠️).
+#5 pf_hook_store_base_load_cost
+#
 # mesh-texture-import-live — A-5. ImportFileAsTexture2D is wired with the right declared
 # signature and HAS NEVER ONCE BEEN CALLED. This calls it on a real 8x8 PNG (which it
 # writes next to itself, so "the import failed" can never mean "there was no file"), prints
@@ -265,6 +301,20 @@ pf_hook_game_build_live
 #20 pf_hook_mesh_texture_import_live
 #
 # ---- read-only, but they need you to DO something -----------------------------------
+#
+# building-actor-streaming — ⚠️ THE HIGHEST-PRIORITY MEASUREMENT OF THE STORE PASS, and the one
+# thing it asks of you is to WALK. Palworld separates a persistent Model from a transient
+# ConcreteModel (FPalMapObjectSaveData, Pal.hpp:4639) and carries OnAvailable /
+# OnNotAvailableConcreteModel delegate pairs on about ten classes — every sign of proximity
+# streaming, and NOT ONE OF THEM HAS BEEN MEASURED. If base actors really do leave memory, then
+# before R-1 PalForge DELETED every structure's pack state about three seconds after the player
+# walked away from the base. Stand in the middle of a base, run this, then walk off in a
+# straight line or fast-travel and keep going for two minutes. One line a second: how many
+# PalBuildObject actors FindAllOf still returns, how many of the originals survive, and how far
+# you have got. THE ANSWER IS THE DISTANCE AT WHICH THE COUNT FIRST DROPS. Standing still for
+# two minutes is also a result — it is the control. R-1 is correct either way; this decides
+# whether the release note says "fixed" or "hardened".
+#15 pf_hook_building_actor_streaming
 #
 # ui-update-event — arms every Open/Show/Construct/Refresh/Update/Setup UFunction on the
 # four UI classes, then wants: inventory open and closed, build menu opened, and a return
@@ -308,6 +358,51 @@ pf_hook_game_build_live
 #30 pf_hook_building_runtime_reload
 #
 # ---- these WRITE, and each needs its own opt-in in palforge_dev.lua ------------------
+#
+# ⚠️ THE THREE STORE WRITERS BELOW STRETCH WHAT `writes` MEANS, ON PURPOSE. None of them
+# touches Palworld's save. They create, corrupt and rewrite files under <Mods>/PalForge/state/
+# — by the strict reading, the same class of change as mesh-texture-import's 82-byte PNG, which
+# deliberately does NOT declare writes. They declare it anyway, because after the format-3 pass
+# the claim being defended is that PalForge is careful with the files under its own directory,
+# and a hook that made files in a player's state/ because somebody left env.debug on would be
+# the first counter-example. Every one of them ends by printing the absolute path of what it
+# left and the single call that removes it. Between them they use two pack ids and no more:
+# `pf_probe` and `pf_crash`. No real pack may be called either.
+#
+#     env.debugHooks["store-save-roundtrip"] = true
+# store-save-roundtrip — DOES A REAL SAVE'S STORE SURVIVE A REAL WORLD LOAD. The format-3 store
+# has 553 headless checks behind it and has never once opened a file for a save Palworld
+# actually loaded. Run it, and the short round trip completes inside the run: write through
+# PalForge.pack(id).store, flush, drop the cache, read the bytes back off the real NTFS path,
+# compare field by field, and check that <f>.json and <f>.json.bak both parse and differ.
+# ⚠️ THEN QUIT TO THE TITLE SCREEN, LOAD THE SAME SAVE, AND RUN IT AGAIN — run 2 reads what run
+# 1 wrote across a world teardown and a fresh load, and THAT is the trip a pack's onLoad makes.
+# It deliberately does not clean up after itself, for exactly that reason.
+#20 pf_hook_store_save_roundtrip
+#
+#     env.debugHooks["store-crash-recovery"] = true
+# store-crash-recovery — WHICH COPY DOES THE LOADER READ WHEN A WRITE WAS INTERRUPTED. §7.3 of
+# the design is a four-row table reasoned entirely from os.rename's semantics; the headless case
+# file pins it on WSL2/ext4, and NTFS refuses an existing rename destination where POSIX
+# replaces it. This plants a partial .tmp beside a good .json, a complete .tmp with no .json,
+# and a lone .bak, and says which copy answered each time. It also plants an UNPARSEABLE file
+# and checks that the loader refuses it, does not overwrite it, and moves it into _quarantine/
+# byte for byte. ⚠️ THE QUARANTINE HALF NEEDS A FRESH SESSION — core/state reads a pack's file
+# at most once per world, so run this one FIRST after a load or block [2] refuses by name.
+#20 pf_hook_store_crash_recovery
+#
+#     env.debugHooks["save-survives-pack-removal"] = true
+# save-survives-pack-removal — ⚠️ THE QUESTION THE WHOLE STORE PASS WAS STARTED FOR, and the
+# only thing in this tree that can answer it. Removing PalForge is safe by construction (its
+# state is a sidecar; the .sav is untouched). What is NOT settled is the other direction: a
+# pack's `mypack_Potion` sits in the player's inventory in Palworld's own save, and that row
+# exists only because PalSchema injected it. The load path is unreflected C++ (FPalBinaryMemory)
+# — nothing to signature.describe, no UFunction to hook — so this is empirical or it is nothing.
+# TWO LAUNCHES: run it in a THROWAWAY save while the pack is installed (the BEFORE snapshot),
+# then QUIT, DELETE THAT PACK'S MOD FOLDER — both halves, the PalSchema JSON and the PalForge
+# Lua — relaunch, load the same save, and run it again. Whether the save loads at all is the
+# headline, and you will know it before the hook runs.
+#20 pf_hook_save_survives_pack_removal
 #
 #     env.debugHooks["mesh-color-change"] = true
 # mesh-color-change — hangs a chest in front of you and turns it red, green, blue. Nobody

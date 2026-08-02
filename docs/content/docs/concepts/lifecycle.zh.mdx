@@ -690,7 +690,8 @@ actor 的 `GetFullName()` 字符串上，绝不会落在句柄上：UE4SS 每次
 
 `def.cls:new{ ... }` 产出实例，所以你在定义里写的每个方法都能在它上面解析到。状态优先来自已
 保存的记录，没有就来自定义的 `state` 字段，这个字段可以是一张表，也可以是一个工厂函数。新建的
-实例会写进模组文件夹下的 `state/entities_<saveId>.json`。`saveId` 是从 `PalGameInstance` 上读的：
+实例会写进模组文件夹下的 `state/<saveId>/<模组 id>.json`——每个存档一个目录，每个模组一个文件。
+`saveId` 是从 `PalGameInstance` 上读的：
 先取存档**目录**名（`GetSelectedWorldSaveDirectoryName`，或它背后的属性），再取世界的显示名，
 清理掉非法字符后加上 `w_` 前缀。两者都读不到时，退回到共享的 `world`。
 </Step>

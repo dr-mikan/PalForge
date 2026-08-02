@@ -320,10 +320,7 @@ function M.sweep()
     for _, otype in ipairs(om.TYPES) do
         for id in pairs(om.all(otype)) do          -- all() is a snapshot, safe to mutate under
             if M.isTestId(id) then
-                pcall(function()
-                    if type(om.unregister) == "function" then om.unregister(otype, id)
-                    else om.register(otype, id, nil) end
-                end)
+                pcall(om.unregister, otype, id)
                 removed = removed + 1
             end
         end

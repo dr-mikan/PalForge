@@ -104,20 +104,63 @@
 --
 -- ==== WHAT IS PERSISTED, WHO OWNS IT, AND WHAT IS NEVER DELETED (F-7) ==================
 --
--- One JSON file per save (state/entities_<saveId>.json), shared by every pack. A record is
--- keyed `<resolvedBuildId>@<cell>` (core.spatial), which carries no owner, so the owner is
--- written INTO the record: `v` (record version), `def` (the definition id, e.g.
--- "mypack:Bench") and `pack` (the owning pack id from object_manager, nil when the registry
--- cannot attribute it). Old records are stamped on the first scan that binds them.
+-- THIS FILE NO LONGER OWNS A BYTE OF IT. core.state owns the files, the caches, the dirty
+-- sets and every failure decision; core.event owns the RUNTIME. What this file sees is one
+-- MERGED VIEW — `state.world()`, the same `{ entities = {…}, orphans = {…} }` shape it used
+-- to hold itself — so the scan's per-actor lookup is still a single hash hit and never walks
+-- N files. It says which pack a change belongs to (`state.markDirty(pack)`) and core.state
+-- decides which file that is.
 --
--- NOTHING IS EVER SILENTLY DESTROYED. A record whose build id no definition claims this
--- session is QUARANTINED, not deleted: it moves to the file's `orphans` section, is logged
--- with a count and with the packs it belonged to, and moves BACK the moment a definition
--- claims that build id again. That is the conservative half of the prune — a pack that is
--- merely not loaded today (a player disables a mod for one evening, a pack that defines its
--- buildings lazily has not got there yet) must not cost the player their structures' state.
--- The only destructive act in the whole file is the quarantine cap (ORPHAN_MAX): past it the
--- OLDEST quarantined records are dropped, oldest first, and the log says how many and why.
+-- ONE FILE PER MOD ID, PER SAVE (format 3): state/<saveId>/<packId>.json, plus _unowned.json
+-- for records no pack can be attributed to. The mod id is object_manager's pack identity —
+-- the same string `owner("building", defId)` answers and `PalForge.pack("id")` scopes on —
+-- promoted from a FIELD inside the record to the FILENAME. What that buys, and it is the
+-- reason the split was asked for: a pack that is installed but registers nothing costs ZERO
+-- reads, a pack that is UNINSTALLED costs zero reads forever and cannot be evicted by
+-- another pack's growth, and removing one pack's state is deleting one file by name instead
+-- of a prune pass over a file every pack shares. A record is still keyed
+-- `<resolvedBuildId>@<cell>` (core.spatial) — unchanged, deliberately: every key would move
+-- if that changed, no live instance would find its record, and the scan would write a SECOND
+-- record for every structure in the base.
+--
+-- NOTHING IS EVER SILENTLY DESTROYED, and R-1 widened that from one absence to two.
+--
+--   * UNCLAIMED — no registered definition claims the record's build id. QUARANTINED
+--     (`orphans`, `why = "unclaimed"`), logged with a count and with the packs it belonged
+--     to, moved BACK the moment a definition claims that build id again. A pack that is
+--     merely not loaded today (a player disables a mod for one evening, a pack that defines
+--     its buildings lazily has not got there yet) must not cost the player their state.
+--
+--   * MISSING — the actor was not in FindAllOf for MISS_THRESHOLD consecutive scans. This
+--     used to DELETE the record outright, three seconds after the sweep stopped seeing the
+--     actor, and that is the one line in this file that could have cost a player a whole
+--     base. FindAllOf enumerates in-memory UObjects only, and everything readable off the
+--     shipping binary says map objects are spawned and disposed by proximity: Palworld keeps
+--     a persistent `Model` apart from a transient `ConcreteModel`
+--     (FPalMapObjectSaveData{ MapObjectId, Model, ConcreteModel }, dumps/cxx/Pal.hpp:4639),
+--     ~10 classes carry OnAvailableConcreteModel / OnNotAvailableConcreteModel delegate
+--     pairs (:14252-14699), TryGetConcreteModel has a `Failed` out-pin
+--     (Pal_enums.hpp:2853-2857) and UPalMapObjectConcreteModelBase carries :bDisposed. NONE
+--     of that has been measured in game — hook `building-actor-streaming` is the measurement
+--     and it is the highest-priority one in this pass. So a miss QUARANTINES too
+--     (`why = "missing"`), and the scan's bind path takes the record back out of quarantine
+--     ON SIGHT rather than waiting for the once-per-world prune, which by then has already
+--     run. A structure that streams out and back inside one session keeps its state either
+--     way, and the change is correct whether or not streaming turns out to happen: it turns
+--     a possibly-catastrophic silent deletion into a bounded, logged, self-reversing move.
+--
+-- The miss sweep cannot simply STOP, either — it is the only destruction signal that exists
+-- in this build (see the "NO building.break" note at the bottom of the building source: none
+-- of the four candidate classes declares a Destroy / Dismantle / Demolish entry, destruction
+-- appears only as delegate FIELDS RegisterHook cannot address). So it stays, and it moves
+-- instead of deleting. `building.remove` still emits with reason = "missing"; no pack sees a
+-- change.
+--
+-- The only destructive act left is the quarantine cap (ORPHAN_MAX), and it is now applied PER
+-- PACK FILE rather than to the whole save. That is a scope change, not a policy change, and
+-- it matters: one pack's 4096 quarantined records used to evict another pack's. Past the cap
+-- the OLDEST records of THAT pack are dropped, oldest first, and the log says how many, for
+-- which pack, and why.
 --
 -- ONE CASE THAT WAS ON THAT LIST AND NO LONGER IS, because two halves of this sweep met: an
 -- F9 hot reload. core/reload.lua used to wipe palforge.core.object_manager with everything
@@ -155,7 +198,13 @@ local uo  = require("palforge.core.uobject")
 -- Building-runtime deps (self-contained generic primitives; NO deprecated/tmp require).
 local object_manager = require("palforge.core.object_manager")
 local spatial        = require("palforge.core.spatial")
-local file           = require("palforge.utils.file")
+-- core.state owns every persisted byte: the per-save directory, one document per mod id, the
+-- dirty sets, the atomic write, the quarantine of a file that will not parse, and the one-shot
+-- migration off the old single-file format. This file holds no file name, no cache and no
+-- codec any more — it asks for the merged view and names the pack a change belongs to.
+-- (core.state requires utils.file / utils.json / core.spatial / core.object_manager and
+-- nothing from api/, so this is not a cycle.)
+local state          = require("palforge.core.state")
 -- The api.building BASE class (not the module): its inert hook defaults are the baseline
 -- `overrides()` compares a definition against, and `cls:new(spec)` — used by makeInstance
 -- to turn a placed actor into a live instance — resolves through it.
@@ -192,7 +241,8 @@ local SCAN_MS = M.TICK_MS  -- building reconstruction scan cadence (quantized to
 -- only MARK the world dirty; the only thing that ever wrote was inst:save() and the
 -- world-left teardown, so everything placed in a session used to survive a clean exit and
 -- nothing else. 10 s = the deprecated runtime's own batched flush (deprecated/ticker.lua:19
--- FLUSH_EVERY = 20 ticks, :37 "and only when dirty"), which is exactly what flushWorld does.
+-- FLUSH_EVERY = 20 ticks, :37 "and only when dirty"), which is exactly what the flush pump
+-- does: core.state writes the documents that were marked dirty and nothing else.
 local FLUSH_MS = 10000
 
 -- Pal onTick sweep cadence. Deliberately NOT the heartbeat: the sweep is a
@@ -335,14 +385,24 @@ if not RT then
                       scans = 0, pruned = false },
         pal       = { classOf = {}, classOfN = 0, defCount = -1,
                       tickState = setmetatable({}, { __mode = "k" }) },
-        store     = { cache = nil, dirty = false },
+        -- WAS the persistence cache (`cache` + `dirty`); core.state holds both now, keyed per
+        -- save AND per pack, which is the split this table could not express. What is left
+        -- here is the one persistence fact that belongs to the RUNTIME rather than to the
+        -- store: which pack documents THIS world has already asked core.state to load, so the
+        -- scan does not re-ask twice a second and the orphan hook can print what was and was
+        -- not loaded — "not loaded" being the mechanism that protects an absent pack's records.
+        store     = { packsAsked = {} },
     }
     _G.__PalForgeBuildingRegistry = RT
 end
 local Registry         = RT
 local instancesByActor = RT.byActor
 local gate             = RT.world     -- the world-load gate, shared with the old closures
-local store            = RT.store     -- the persistence cache, shared for the same reason
+local store            = RT.store     -- the per-world load memo, shared for the same reason
+-- A session that started before the store split has an RT.store carrying the OLD two fields
+-- and no packsAsked (rule 2: this table is on _G and outlives the module). Fill it in rather
+-- than replacing the table — the pre-reload closures hold the table itself.
+store.packsAsked = store.packsAsked or {}
 
 local MISS_THRESHOLD        = 6    -- consecutive scans an instance may be unseen before removal
 local INTERACT_DEBOUNCE_SEC = 1.0
@@ -354,42 +414,80 @@ local READY_POLLS           = 5    -- consecutive ~1s polls with a valid player 
 -- onWorldReady over an empty registry (which is exactly what it used to do).
 local lastInteract = {}   -- "<actorName>" -> os.clock()
 
--- ---- persistence (per-world file, via utils.file) ----
--- The record schema. Bumped when the SHAPE of a record changes, and written into every
--- record so a later version can tell what it is looking at without guessing:
---   1  { buildId, pos, state, altKeys = {} }   -- the port. altKeys was written by nothing
---                                              -- and read by nothing; it is gone.
---   2  { v, buildId, def, pack, pos, state }   -- carries its owner (F-7)
-local REC_VERSION = 2
+-- ---- persistence (core.state owns the files; this file owns the runtime) ----
+--
+-- WHAT LIVES WHERE, now that the store has moved out. `state.world()` is the MERGED view of
+-- every pack document loaded for this save — one `{ entities, orphans }` pair, the exact
+-- shape this file used to hold as `store.cache`, so every reader below is unchanged. Which
+-- FILE a record belongs to is `rec.pack`, and the one thing this file has to do about it is
+-- say `state.markDirty(rec.pack)` when it changes something. There are seven such sites and
+-- each is marked `-- DIRTY <n>` so they can be counted against the list in the store spec.
+--
+-- THE RECORD'S PACK, NOT THE DEFINITION'S, decides the file. They agree once stampRecord has
+-- run, and before that they deliberately do not: an unattributed record (the whole of a
+-- migrated player's file — `def` and `pack` are stamped only on the first scan that BINDS a
+-- record, so every record written before that is bare) lives in `_unowned` until the bind
+-- moves it. Marking the definition's pack there would dirty a file the record is not in and
+-- leave the file it IS in unwritten.
+--
+-- The record SHAPE is core.state's business now (format 3: `pack` is the filename and `v` is
+-- the document header's `format`), which is why REC_VERSION is gone from here. What this file
+-- still owns is the two fields that describe the record's relationship to the REGISTRY —
+-- `def` and `pack` — because the scan is the only thing that ever knows which definition
+-- claimed a structure. stampRecord writes them; core.state carries them.
 
 -- Quarantine bounds. ORPHAN_GRACE_SCANS delays the one prune pass per world long enough for
 -- a pack that defines its buildings at world.ready (or lazily, on first use) to have done so;
 -- ORPHAN_MAX is the only limit in this file whose enforcement DELETES a player's record, and
--- it says so in the log when it does.
+-- it says so in the log when it does. It is applied PER PACK FILE (see pruneOrphans): the
+-- cap is a bound on one mod's quarantine, and before the split one pack at the cap evicted
+-- another pack's records — a mod the player had not touched in months paying for a mod they
+-- had just uninstalled.
 local ORPHAN_GRACE_SCANS = 60      -- ~30 s at SCAN_MS = 500
 local ORPHAN_MAX         = 4096
 
-local function worldKey()
-    return "entities_" .. spatial.saveId()
+-- The two reasons a record is quarantined rather than deleted, written into the record as
+-- `why` so a hook, a log line and `db.diagnose()` can tell them apart without guessing:
+--   "unclaimed"  no REGISTERED definition claims this record's build id (the pack is not
+--                loaded today). Decided by pruneOrphans, once per world.
+--   "missing"    the ACTOR was not in FindAllOf for MISS_THRESHOLD consecutive scans.
+--                Decided by the scan's miss sweep, and reversed by its bind path.
+local WHY_UNCLAIMED = "unclaimed"
+local WHY_MISSING   = "missing"
+
+-- Move a record into quarantine, keeping every byte of it. The ONLY way a record leaves
+-- `entities` other than tryMigrate's re-key; there is deliberately no other statement in this
+-- file that assigns nil into w.entities[key].
+local function quarantine(w, key, rec, why)
+    rec.orphanedAt = rec.orphanedAt or os.time()
+    rec.why        = why
+    w.orphans[key] = rec
+    w.entities[key] = nil
+    state.markDirty(rec.pack)
+    return rec
 end
 
-local function loadWorld()
-    if store.cache then return store.cache end
-    local data = file.get(worldKey())
-    if type(data) ~= "table" or type(data.entities) ~= "table" then
-        data = { version = REC_VERSION, entities = {}, orphans = {} }
-    end
-    -- A file written before quarantine existed has no orphans section; adding it here rather
-    -- than at every use site keeps the shape of `w` a single fact.
-    if type(data.orphans) ~= "table" then data.orphans = {} end
-    store.cache = data
-    return store.cache
-end
-
-local function flushWorld()
-    if not store.cache or not store.dirty then return end
-    file.setAndFlush(worldKey(), store.cache)
-    store.dirty = false
+-- The other direction, and the half R-1 is really about: take `key` back OUT of quarantine.
+-- Returns the record, or nil when there was nothing quarantined under that key.
+--
+-- Called from the scan's BIND PATH, on sight, not only from the once-per-world prune. That is
+-- the whole point: the prune runs once, at scan 60, and a structure that streams out at scan
+-- 400 and back at scan 460 would otherwise wait for the next world load to get its state
+-- back — by which time the same sweep would have quarantined it again.
+--
+-- Returns the record AND the reason it had been held, because the caller's log line is the
+-- only place that reason is ever read and this clears the field on its way past.
+---@return table|nil rec, string|nil why
+local function unquarantine(w, key)
+    local rec = w.orphans[key]
+    if type(rec) ~= "table" then return nil, nil end
+    local why       = rec.why
+    w.orphans[key]  = nil
+    rec.orphanedAt  = nil
+    rec.why         = nil
+    w.entities[key] = rec
+    state.markDirty(rec.pack)
+    return rec, why
 end
 
 -- ---- class helpers ----
@@ -516,6 +614,16 @@ local buildIdConflictSeen = {}
 -- the log. (2) byBuildId was add-only, so re-defining a building with different buildIds
 -- left the old ids pointing at a def nothing else referenced any more. It is rebuilt from
 -- the live registry each pass and defs whose id is no longer registered are retired with it.
+--
+-- AND IT IS WHAT DRIVES THE LAZY LOAD. Registration is the only event in this framework that
+-- says "this mod has state in this save" — so the pack document is read HERE, on first sight
+-- of a definition that pack owns, and nowhere else. The read path the store split was asked
+-- for falls straight out of that: nothing is opened at game start, nothing is opened at world
+-- load, nothing is opened for a pack that is installed but registers no building, and a pack
+-- that is UNINSTALLED is never opened again, ever, so its records cannot be touched by
+-- anything. F-8 survives it exactly — asking core.state to load a document touches no disk
+-- when there is no file, creates no directory, and with zero registered building definitions
+-- this loop does not run at all.
 local function refreshDefs()
     local live = object_manager.all("building")
 
@@ -530,6 +638,30 @@ local function refreshDefs()
         if not def or def.cls ~= cls then
             def = buildDef(cls, id)
             Registry.defs[id] = def
+        end
+        -- LAZY LOAD, ONCE PER PACK PER WORLD. The memo is on RT (per world, cleared by the
+        -- teardown) rather than trusting state.loadPack's own idempotence to be free: this
+        -- runs for every registered definition, twice a second, for the life of the session.
+        --
+        -- BUT core.state IS THE AUTHORITY, not the memo, and the `and` below is what says so.
+        -- Two tables have to agree here and they are owned by different modules; if this one
+        -- ever said "asked" while core.state's caches had been dropped, the runtime would be
+        -- looking at an EMPTY record set with every structure still standing, would persist a
+        -- fresh empty record for each of them, and the next flush would write that over the
+        -- player's state. Both tables live on _G today (RT here, __PalForgeState there) so a
+        -- hot reload keeps them in step — this line means the invariant does not depend on
+        -- that staying true. state.isLoaded counts an ATTEMPT, so a refused file is not
+        -- retried twice a second either.
+        local packId = def.pack or state.UNOWNED
+        if not (store.packsAsked[packId] and state.isLoaded(packId)) then
+            store.packsAsked[packId] = true
+            local okL, errL = state.loadPack(packId)
+            if okL == false then
+                log.warn(string.format("pack '%s': its saved state for this world could NOT be "
+                    .. "read (%s). Its structures will behave as though they had never been "
+                    .. "placed, and core.state has NOT overwritten the file — read its log line "
+                    .. "for where the unreadable copy was put", packId, tostring(errL)))
+            end
         end
         for _, r in ipairs(def.buildIds) do
             local held = byBuildId[r]
@@ -550,6 +682,15 @@ local function refreshDefs()
             end
         end
     end
+
+    -- THE COMPATIBILITY BUCKET, whenever any building definition exists — this file says WHEN,
+    -- core/state says WHAT and WHY. It used to spell `_unowned` out three times here, which put
+    -- the store's own read policy in a module whose header says it holds no file name and no
+    -- cache; `state.loadCompatBucket()` is the same measurement with the reasoning next to the
+    -- rule that names the bucket. See its doc comment for why it is a named call rather than a
+    -- side effect of loadPack — a loadPack that opened it implicitly broke the store's
+    -- one-mod-one-file read claim, and three checks said so.
+    if #ids > 0 then state.loadCompatBucket() end
 
     -- Retire: replace the index wholesale (a stale build id must stop resolving) and drop
     -- defs for ids the registry no longer holds. Existing INSTANCES keep the def object they
@@ -581,54 +722,90 @@ local function unbindActor(inst)
 end
 
 -- ---- instance object (port of entity.makeInstance + model instance sugar) ----
-local function makeInstance(def, buildId, actor, pos, state, key)
+-- `initialState`, NOT `state`: the module-local `state` is core.state, and a parameter
+-- spelled the same would shadow the store inside every closure built here. Renamed on
+-- contact rather than aliased, because the two things are one letter apart and the shadow
+-- would be silent.
+local function makeInstance(def, buildId, actor, pos, initialState, key)
     -- A placed structure IS a Building class instance: cls:new(spec) sets the class
     -- metatable, so lifecycle dispatch (inst:onPlace/onTick/onRightClick/...) and the
     -- visual methods (inst:mesh/material/render/update) resolve directly.
     local inst = def.cls:new({
         def   = def, key = key, buildId = buildId,
         pos   = pos, cell = spatial.cellOf(pos, def.gridCm),
-        actor = actor, state = state or {},
+        actor = actor, state = initialState or {},
         missingStreak = 0,
     })
+    -- The record this instance's state belongs to, wherever it currently sits. `orphans` is
+    -- in the search because R-1 made quarantine reversible and therefore reachable while the
+    -- instance is still alive: the miss sweep can quarantine a record the same scan the actor
+    -- comes back, and a setDirty in between must still land on the record rather than on
+    -- nothing.
+    local function recordOf(self)
+        local w = state.world()
+        return w.entities[self.key] or w.orphans[self.key], w
+    end
     -- Per-instance persistence closures (INSTANCE FIELDS, like actor/pos — not additions
     -- to the Building class method set). The persisted record's `state` is the SAME table
     -- reference as inst.state, so an in-place mutation is written on the next flush.
-    inst.setDirty = function(self)
-        store.dirty = true
-        local rec = loadWorld().entities[self.key]
+    inst.setDirty = function(self)                                        -- DIRTY 3
+        local rec = recordOf(self)
         if rec then rec.state = self.state end
+        state.markDirty((rec and rec.pack) or (self.def and self.def.pack))
     end
-    inst.save = function(self) self:setDirty(); flushWorld() end
+    -- RETURNS ok, err now, and that is not cosmetic. The old flushWorld discarded its own
+    -- result and cleared `dirty` regardless, so one unencodable state table anywhere in the
+    -- save turned every subsequent write into a silent no-op and a whole session's building
+    -- state disappeared. A pack that wants durability NOW can see whether it got it:
+    --     local ok, err = self:save(); if not ok then print("save failed: " .. err) end
+    inst.save = function(self)                                            -- DIRTY 4
+        self:setDirty()
+        local rec = recordOf(self)
+        return state.flush((rec and rec.pack) or (self.def and self.def.pack))
+    end
     inst.isValid = function(self) return uo.live(self.actor) end
     return inst
 end
 
--- Stamp a record with WHO it belongs to and WHAT SHAPE it is (F-7). A record used to carry
--- buildId / pos / state and an `altKeys` table that nothing ever wrote to and nothing ever
--- read — no owner, no version, no way for a later load to tell an old record from a new one
--- or to say which pack's file this line is. It carries all three now, and an old record is
--- upgraded in place the first time the scan binds it, which is the only migration path a
--- single shared file can have.
+-- Stamp a record with WHO it belongs to (F-7). A record used to carry buildId / pos / state
+-- and an `altKeys` table that nothing ever wrote to and nothing ever read — no owner, no way
+-- for a later load to say which pack's line this is. It carries `def` and `pack` now, and an
+-- old record is upgraded in place the first time the scan binds it, which is the only moment
+-- the runtime knows which definition claimed a structure.
+--
+-- ATTRIBUTION IS A FILE MOVE, which is why this returns the PREVIOUS pack as well as whether
+-- anything changed. Under one shared file a stamp was a field write; under one file per mod
+-- id it takes the record out of `_unowned.json` and puts it in `<pack>.json`, so BOTH
+-- documents are dirty and marking only one leaves a duplicate behind in the other. The
+-- marking is done at the call site rather than here because persist() stamps a record that
+-- has never been on disk — there is no previous file for that one, and dirtying `_unowned`
+-- for it would create a document nothing needs.
+-- `v` IS NOT TOUCHED HERE, and that is a deliberate hand-off rather than an omission. The
+-- per-record version became the document header's `format`: core.state drops `v` on write and
+-- puts the current format back on read, so a record in memory always carries one and no code
+-- outside that module has any business setting it. `altKeys` is dropped on write for the same
+-- reason and is cleared here as well, because it is the one field a HUMAN might still see in
+-- an old file and the orphan hook counts how many records still carry it.
+---@return boolean changed, string|nil previousPack
 local function stampRecord(rec, inst)
-    if type(rec) ~= "table" then return false end
+    if type(rec) ~= "table" then return false, nil end
     local defId = inst.def and inst.def.id or nil
     local pack  = inst.def and inst.def.pack or nil
-    if rec.v == REC_VERSION and rec.def == defId and rec.pack == pack then return false end
-    rec.v       = REC_VERSION
+    local prev  = rec.pack
+    if rec.def == defId and rec.pack == pack and rec.altKeys == nil then return false, prev end
     rec.def     = defId
     rec.pack    = pack
     rec.altKeys = nil          -- the dead field, removed on contact rather than rewritten
-    return true
+    return true, prev
 end
 
 -- write/refresh the persisted record for an instance
-local function persist(inst)
-    local w = loadWorld()
+local function persist(inst)                                              -- DIRTY 1
+    local w = state.world()
     local rec = { buildId = inst.buildId, pos = inst.pos, state = inst.state }
     stampRecord(rec, inst)
     w.entities[inst.key] = rec
-    store.dirty = true
+    state.markDirty(rec.pack)
 end
 
 -- register a live instance: index, deferred mesh, tick set.
@@ -657,10 +834,31 @@ local function removeInstance(key, reason)
         if Registry.tickList[i] == inst then table.remove(Registry.tickList, i); break end
     end
     Registry.instances[key] = nil
-    -- delete persisted record only on genuine removal (not world-left)
+    -- R-1: A MISS QUARANTINES, IT DOES NOT DELETE. This is the line that used to read
+    -- `loadWorld().entities[key] = nil`, and it was the most dangerous statement in the file.
+    --
+    -- The only evidence behind it is "FindAllOf did not return this actor for MISS_THRESHOLD
+    -- consecutive scans" — three seconds at SCAN_MS = 500 — and FindAllOf enumerates
+    -- in-memory UObjects only. That is the same CLASS of statement as "no definition claims
+    -- this build id", which this file already refuses to delete on, in words written a few
+    -- hundred lines below: *"Deleting on that evidence would cost the player every
+    -- structure's state for a reason that reverses itself."* An actor the player has walked
+    -- away from reverses itself the moment they walk back.
+    --
+    -- Whether the game really does dispose base structures by proximity is UNMEASURED — the
+    -- header lists what the binary says and hook `building-actor-streaming` is the
+    -- measurement. This change does not wait for it, because it is right either way: if
+    -- streaming happens, it was silently deleting every structure's pack state about three
+    -- seconds after the player left the base; if it does not, a genuinely demolished
+    -- structure's record sits in quarantine, bounded by ORPHAN_MAX, visible in the log and in
+    -- `db.diagnose()`, and restored on sight if the same structure is ever seen again.
+    --
+    -- world-left is unchanged and still keeps the record where it is: leaving a world is not
+    -- evidence about a structure at all.
     if reason ~= "world_left" then
-        loadWorld().entities[key] = nil
-        store.dirty = true
+        local w   = state.world()
+        local rec = w.entities[key]
+        if type(rec) == "table" then quarantine(w, key, rec, WHY_MISSING) end   -- DIRTY 5
     end
 end
 
@@ -746,11 +944,13 @@ end
 -- WHAT IT COSTS, stated plainly: the file still grows in the one case where growth is
 -- genuinely permanent (a pack uninstalled forever), and only the ORPHAN_MAX cap bounds it.
 -- That cap is the single destructive act in this file and it names itself in the log.
-local function orphanCount(w)
-    local n = 0
-    for _ in pairs(w.orphans) do n = n + 1 end
-    return n
-end
+--
+-- WHAT THE SPLIT CHANGED HERE, and it is one line of behaviour rather than one of structure:
+-- the growth is now confined to the file of the pack that caused it. A pack uninstalled
+-- forever grows ITS document, which nothing loads any more, so it costs the player no read
+-- time at all and is deleted by deleting one file by name. (`orphanCount`, which counted the
+-- whole save's quarantine for a cap that is now per pack, went with it — the cap does its own
+-- counting per document below.)
 
 -- The one migration a record can carry itself through. `def` is registered, the record's
 -- build id is one that def no longer claims, and the def now claims exactly ONE build id:
@@ -769,6 +969,7 @@ local function tryMigrate(w, key, rec)
     rec.buildId = bid
     w.entities[newKey] = rec
     w.entities[key] = nil
+    state.markDirty(rec.pack)                                             -- DIRTY 7
     log.info(string.format("record %s migrated to %s: definition '%s' is still registered and "
         .. "now declares exactly one build id (%q), so the structure's saved state follows the "
         .. "rename instead of being orphaned", key, newKey, rec.def, bid))
@@ -776,19 +977,29 @@ local function tryMigrate(w, key, rec)
 end
 
 local function pruneOrphans()
-    local w = loadWorld()
+    local w = state.world()
     local restored, quarantined, junk = 0, 0, 0
     local packs = {}
 
     -- RESTORE FIRST, so a pack that came back this session gets its records before anything
     -- else looks at them, and so a record cannot be counted as an orphan twice.
+    --
+    -- The CONDITION is unchanged by R-1 and deliberately so: it asks only whether a
+    -- registered definition claims the build id, not why the record was quarantined. A
+    -- `why = "missing"` record whose pack IS loaded therefore comes back here too. That reads
+    -- odd until you name what the alternative would be — leaving a record in quarantine on
+    -- the strength of a sighting that failed once, minutes ago, while the definition that
+    -- owns it is loaded and its structure may be standing in front of the player. The scan's
+    -- bind path is the fast half of the same statement; this is the slow half.
     for key, rec in pairs(w.orphans) do
         if type(rec) ~= "table" then
+            -- Not a record, so it names no pack and nothing can attribute it. `_unowned` is
+            -- the only document it can have come from and the only one that has to be
+            -- rewritten without it — state.markDirty(nil) is that document by definition.
             w.orphans[key] = nil; junk = junk + 1
+            state.markDirty(nil)                                          -- DIRTY 6
         elseif rec.buildId and Registry.byBuildId[rec.buildId] and w.entities[key] == nil then
-            rec.orphanedAt = nil
-            w.entities[key] = rec
-            w.orphans[key] = nil
+            unquarantine(w, key)                                          -- DIRTY 6
             restored = restored + 1
         end
     end
@@ -806,37 +1017,56 @@ local function pruneOrphans()
             -- nothing can read it; quarantining junk would only make the junk permanent.
             w.entities[key] = nil
             junk = junk + 1
+            state.markDirty(nil)                                          -- DIRTY 6
         elseif not (type(rec.buildId) == "string" and Registry.byBuildId[rec.buildId]) then
             if not tryMigrate(w, key, rec) then
-                rec.orphanedAt = rec.orphanedAt or os.time()
-                w.orphans[key] = rec
-                w.entities[key] = nil
+                quarantine(w, key, rec, WHY_UNCLAIMED)                    -- DIRTY 6
                 quarantined = quarantined + 1
                 packs[tostring(rec.pack or rec.def or "unattributed")] = true
             end
         end
     end
 
-    -- The cap. Oldest first, by the time the record was quarantined; a record with no
-    -- orphanedAt (written by a version that had none) sorts as oldest, which is the
+    -- THE CAP, PER PACK FILE. Oldest first, by the time the record was quarantined; a record
+    -- with no orphanedAt (written by a version that had none) sorts as oldest, which is the
     -- conservative direction only if it is genuinely old — it is, because the field has been
     -- written since quarantine existed.
-    local dropped = 0
-    local n = orphanCount(w)
-    if n > ORPHAN_MAX then
-        local keys = {}
-        for k in pairs(w.orphans) do keys[#keys + 1] = k end
-        table.sort(keys, function(a, b)
-            local ta = tonumber(w.orphans[a] and w.orphans[a].orphanedAt) or 0
-            local tb = tonumber(w.orphans[b] and w.orphans[b].orphanedAt) or 0
-            if ta ~= tb then return ta < tb end
-            return a < b                     -- deterministic tie-break
-        end)
-        for i = 1, n - ORPHAN_MAX do w.orphans[keys[i]] = nil; dropped = dropped + 1 end
+    --
+    -- PER PACK is the change format 3 brought, and it is a scope change rather than a policy
+    -- change. Under one shared file the cap counted every pack's quarantine together, so one
+    -- pack that had been uninstalled for a year and had 4096 records in the file could push
+    -- ANOTHER pack's records over the edge and delete them — a mod paying for a neighbour's
+    -- history. Each document now has its own budget, which is also the only reading of the
+    -- cap that survives "one file per mod id" as a sentence.
+    local dropped, droppedPacks = 0, {}
+    local byPack = {}
+    for k, rec in pairs(w.orphans) do
+        -- state.packOf, not a local re-derivation: this counts records against a per-pack cap
+        -- and the flush partitions them into files, so the two have to agree on WHOSE a record
+        -- is. The copy that used to be here omitted the reserved-name check, which meant a
+        -- record carrying `pack = "_save"` was capped against `_save` and written into
+        -- `_unowned.json` — two answers to one question, in the one place that must have one.
+        local p = state.packOf(rec)
+        local g = byPack[p]
+        if not g then g = {}; byPack[p] = g end
+        g[#g + 1] = k
+    end
+    for p, keys in pairs(byPack) do
+        if #keys > ORPHAN_MAX then
+            table.sort(keys, function(a, b)
+                local ta = tonumber(w.orphans[a] and w.orphans[a].orphanedAt) or 0
+                local tb = tonumber(w.orphans[b] and w.orphans[b].orphanedAt) or 0
+                if ta ~= tb then return ta < tb end
+                return a < b                     -- deterministic tie-break
+            end)
+            local over = #keys - ORPHAN_MAX
+            for i = 1, over do w.orphans[keys[i]] = nil; dropped = dropped + 1 end
+            droppedPacks[#droppedPacks + 1] = string.format("%s (%d)", p, over)
+            state.markDirty(p)                                            -- DIRTY 6
+        end
     end
 
     if restored + quarantined + junk + dropped > 0 then
-        store.dirty = true
         local names = {}
         for p in pairs(packs) do names[#names + 1] = p end
         table.sort(names)
@@ -850,10 +1080,12 @@ local function pruneOrphans()
             (#names > 0 and (" (" .. table.concat(names, ", ") .. ")") or ""),
             junk, liveN))
         if dropped > 0 then
-            log.warn(string.format("world records: the quarantine held more than %d entries, so "
-                .. "%d of the OLDEST were DELETED permanently. This is the only place PalForge "
-                .. "destroys a saved record; it means that many structures belonged to packs "
-                .. "that have not been loaded for a long time", ORPHAN_MAX, dropped))
+            table.sort(droppedPacks)
+            log.warn(string.format("world records: %d record(s) were DELETED permanently because "
+                .. "a pack's quarantine held more than %d entries — %s. This is the only place "
+                .. "PalForge destroys a saved record, and the cap is now per pack file, so no "
+                .. "other pack's records were touched by it",
+                dropped, ORPHAN_MAX, table.concat(droppedPacks, ", ")))
         end
     end
 end
@@ -937,12 +1169,16 @@ local function scanOnce()
             if not pos then return end -- not ready; retried next scan
 
             local buildId = resolveBuildId(actor)
-            -- tier 3: position match against a persisted record for any of our builds
+            -- tier 3: position match against a persisted record for any of our builds.
+            -- UNCHANGED except that the record set is fetched ONCE instead of once per
+            -- (definition, build id) pair — `loadWorld()` was a single field test and
+            -- `state.world()` is a call, and this is the innermost loop of the scan.
             if not buildId then
+                local records = state.world().entities
                 for _, def in pairs(Registry.defs) do
                     for _, bid in ipairs(def.buildIds) do
                         local k = spatial.keyOf(bid, spatial.cellOf(pos, def.gridCm))
-                        if loadWorld().entities[k] then buildId = bid; break end
+                        if records[k] then buildId = bid; break end
                     end
                     if buildId then break end
                 end
@@ -976,10 +1212,33 @@ local function scanOnce()
                 return
             end
 
-            local rec = loadWorld().entities[key]
+            local w   = state.world()
+            local rec = w.entities[key]
+            -- R-1, THE RESTORE HALF: a record this session already quarantined comes back out
+            -- ON SIGHT. Both reasons are honoured and both are reversals of an absence — the
+            -- structure is standing here, which is the strongest possible evidence against
+            -- "the actor is gone" (why = "missing", the miss sweep) and against "no
+            -- definition claims this build id" (why = "unclaimed", the prune), since we only
+            -- reach this line because a registered definition claims exactly this build id.
+            --
+            -- IT HAS TO BE HERE and not only in pruneOrphans. That pass runs ONCE per world,
+            -- at scan 60; a structure the player walks away from at scan 400 and back to at
+            -- scan 460 would otherwise be reconstructed with a fresh, empty state table while
+            -- its real state sat in quarantine, and the next flush would write the empty one.
+            if rec == nil then
+                local why
+                rec, why = unquarantine(w, key)
+                if rec then
+                    log.info(string.format("record %s came back out of quarantine: its actor is "
+                        .. "in this scan again (it was held as %q, not deleted, so its state "
+                        .. "table came back with it)", key, tostring(why or "quarantined")))
+                end
+            end
             local pend = popPendingNear(buildId, pos)
-            local state
-            if rec then state = rec.state or {}
+            -- `recState`, not `state`: the module-local `state` is the store, and this used to
+            -- shadow it for the rest of the block.
+            local recState
+            if rec then recState = rec.state or {}
             elseif def.cls.defaultState then
                 -- defaultState may be a factory function or a plain table. Passed the
                 -- class as self so `function Cls:defaultState()` also works.
@@ -988,17 +1247,26 @@ local function scanOnce()
                     if type(ds) == "function" then return ds(def.cls) end
                     return ds
                 end)
-                state = (oks and type(s) == "table") and s or {}
-            else state = {} end
+                recState = (oks and type(s) == "table") and s or {}
+            else recState = {} end
 
-            inst = makeInstance(def, buildId, actor, pos, state, key)
+            inst = makeInstance(def, buildId, actor, pos, recState, key)
             if rec then
-                -- An EXISTING record, being bound for the first time this session: upgrade it
-                -- in place to the current shape and owner (F-7). This is the only moment a
-                -- v1 record — no version, no def, no pack, one dead `altKeys` — can be
-                -- attributed, because it is the only moment the runtime knows which
-                -- definition claimed it.
-                if stampRecord(rec, inst) then store.dirty = true end
+                -- An EXISTING record, being bound for the first time this session: attribute
+                -- it to its definition and its pack (F-7). This is the only moment a bare
+                -- record — no def, no pack, one dead `altKeys` — can be attributed, because
+                -- it is the only moment the runtime knows which definition claimed it.
+                --
+                -- BOTH DOCUMENTS ARE MARKED. Attribution MOVES the record between files: it
+                -- was being written into `_unowned.json` (or into the previous owner's, after
+                -- a pack renamed itself) and belongs in `<pack>.json` from now on. Marking
+                -- only the destination would leave the record duplicated in the source file
+                -- forever, and the copy left behind would be the STALE one.
+                local changed, prevPack = stampRecord(rec, inst)          -- DIRTY 2
+                if changed then
+                    state.markDirty(prevPack)
+                    state.markDirty(rec.pack)
+                end
             else
                 persist(inst)
             end
@@ -1065,7 +1333,6 @@ end
 -- world-left teardown: drop live instances, keep saved records (port of entity.onWorldLeft).
 -- Runs AFTER world.left has been emitted (so onWorldLeft dispatched while still live).
 local function dropAllInstances()
-    flushWorld()
     local keys = {}
     for k in pairs(Registry.instances) do keys[#keys + 1] = k end
     for _, k in ipairs(keys) do removeInstance(k, "world_left") end
@@ -1075,7 +1342,20 @@ local function dropAllInstances()
     -- F-5 split all over again, one field down.
     for k in pairs(instancesByActor) do instancesByActor[k] = nil end
     spatial.indexReset()
-    store.cache = nil  -- re-read on next world (saveId may differ)
+    -- THE STORE'S OWN TEARDOWN, and it is LAST rather than first. It flushes every dirty
+    -- document and then drops the per-save caches, so the instance sweep above — which marks
+    -- nothing, because a world-left removal keeps its record — cannot race it either way.
+    --
+    -- Dropping the caches is not tidiness. The backend's module-level cache was never evicted
+    -- by anything: `store.cache = nil` here dropped THIS file's reference while the backend
+    -- went on holding every record set for every world visited this session, so a long session
+    -- that toured four saves kept four saves' records live. state.unload() releases them.
+    local okU, errU = pcall(state.unload)
+    if not okU then log.warn("world left: the store teardown failed: " .. tostring(errU)) end
+    -- The next world asks core.state for its own documents. Cleared IN PLACE, same reason as
+    -- instancesByActor above.
+    for k in pairs(store.packsAsked) do store.packsAsked[k] = nil end
+    store.migrated = nil   -- the next world is a different save with its own legacy file
     gate.scans  = 0    -- the next world gets its own orphan pass, after its own grace period
     gate.pruned = false
     spatial.resetSaveId()
@@ -1142,7 +1422,18 @@ function M.__scanPump()
     end
 end
 
-function M.__flushPump() return flushWorld() end
+-- The 10 s batched flush. Writes only the DOCUMENTS that were marked dirty, so one structure
+-- changing one number rewrites that pack's file and touches no other pack's — measured at 500
+-- records: 102,332 bytes and 7.48 ms of re-encode became 26,419 bytes and 1.78 ms, with the
+-- other two packs' files not opened at all.
+--
+-- IT RETURNS ok, err AND THAT IS THE POINT. The old flushWorld discarded `setAndFlush`'s
+-- result and cleared `dirty` regardless, so ONE cyclic state table in ONE pack made encode
+-- return nil, logged a single warn line naming a file, and then guaranteed that nothing would
+-- ever be retried — the same shape for a full disk, a read-only folder or antivirus holding
+-- the handle. A whole session's building state disappeared with one warn line. core.state
+-- KEEPS the dirty set on failure, so the next pump tries again.
+function M.__flushPump() return state.flushDirty() end
 
 function M.__placeIntent(buildId, pos, player) return onPlaceRequest(buildId, pos, player) end
 
@@ -1153,6 +1444,41 @@ function M.__placeIntent(buildId, pos, player) return onPlaceRequest(buildId, po
 -- invalid -> emit world.left (then drop live instances). This gate also guards the
 -- building scan/hooks (don't touch objects during the load storm).
 -- =====================================================================================
+-- THE ONE CALLER OF core.state's MIGRATION, and where it sits is the whole of its
+-- correctness.
+--
+-- It has to run at world.ready, because the save id is not knowable before one; and it has to
+-- run BEFORE THE FIRST SCAN THAT BINDS AN ACTOR, which is why it is here at the gate flip and
+-- not in __scanPump's pendingReady block next to the other once-per-world work. The order is
+-- not a preference: migrate() adds what is missing and NEVER replaces what is already there
+-- (core/state.lua, `absorb`), which is exactly right for a re-run over a restored backup and
+-- exactly wrong if the scan has gone first — the scan would have bound each standing structure
+-- to a fresh, EMPTY record, migrate would find those keys occupied, and every one of the
+-- player's saved states would be skipped over in favour of the blank the scan had just made.
+-- The gate flips here and `scanOnce` returns at `if not gate.ready` until it does, so this is
+-- the last moment at which the world view is still empty.
+--
+-- One-shot per world: `migrated` is cleared by the world-left teardown along with the rest of
+-- RT.store. Everything else about it is core/state's — it is a no-op when there is no legacy
+-- file, when the fingerprint says it already ran, and when the file will not parse. It is
+-- pcall'd because a failed migration must not take the world-ready gate down with it; the
+-- records stay in the legacy file, which is never touched either way.
+local function migrateOnce()
+    if store.migrated then return end
+    store.migrated = true
+    local ok, rep = pcall(function() return state.migrate() end)
+    if not ok then
+        log.warn("the one-shot migration of the pre-format-3 state file raised (" ..
+            tostring(rep) .. "). The legacy file is untouched and this world starts from " ..
+            "whatever the per-mod files hold")
+    elseif type(rep) == "table" then
+        log.info(string.format("migrated %d record(s) out of the single pre-format-3 state "
+            .. "file into per-mod files; %d could not be attributed to a mod yet and are in "
+            .. "_unowned.json, which drains as each structure is bound", rep.records or 0,
+            rep.unowned or 0))
+    end
+end
+
 -- One poll of the ready-watch. Public-by-convention (the `__` says "a driver calls this,
 -- you do not") because the LoopAsync below must reach the CURRENT copy of it — see pump().
 function M.__worldPoll()
@@ -1167,6 +1493,7 @@ function M.__worldPoll()
             gate.ready = true
             gate.pendingReady = true
             log.info("world ready - building dispatch enabled")
+            migrateOnce()
         end
     else
         local wasReady = gate.ready
@@ -1195,6 +1522,7 @@ local function installWorldSource()
         gate.ready = true
         gate.pendingReady = true
         log.warn("ready-watch unavailable (" .. tostring(e) .. ") - dispatch always on")
+        migrateOnce()   -- the gate opened, so this is still "before the first bind"
     end
 end
 
@@ -1394,8 +1722,8 @@ local function installBuildingSource()
     -- Batched persistence flush (see FLUSH_MS). Without it the ONLY writes are inst:save()
     -- and the world-left teardown, so a structure discovered by the scan — and any state a
     -- handler mutated in place after inst:setDirty() — reached disk only on a clean exit and
-    -- was lost to an alt-F4 or a crash. flushWorld is a no-op while nothing is dirty, so this
-    -- costs one boolean test every 10 s.
+    -- was lost to an alt-F4 or a crash. The flush is a no-op while no document is dirty, so
+    -- this costs one empty-set test every 10 s.
     M.every(FLUSH_MS, function() pump("__flushPump") end)
 
     -- build COMPLETE -> building.build (api/building's declarable `onBuild`).

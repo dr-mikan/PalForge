@@ -5,13 +5,22 @@
 -- PUBLIC API — the same method names the old core.util.store exposed, so callers
 -- (core.building) only change their `require` (...util.store -> ...util.file) and
 -- their local var name (store -> file):
---   M.get(key)              -> value | nil
+--   M.get(key)              -> value | nil, err, kind
 --   M.set(key, val)         -- stage in memory
 --   M.setAndFlush(key, val) -- stage + persist immediately
 --   M.flush(key)            -- persist (key, or everything staged)
+--   M.forget(key)           -- drop a key's CACHED value (the cache was never evicted)
+--   M.pathFor(key)          -- the absolute file a key lands at
 --   M.packDir(level)        -- the directory of the .lua file that called you
 --   M.resolvePackPath(rel)  -- that directory + a relative path
 --   M.isAbsolute(path)      -- the test the two above dispatch on
+--
+-- ⚠️ A KEY MAY NOW CONTAIN "/" — format 3 puts one directory per Palworld save under state/
+-- and one file per mod id inside it, so a key reads "w_1DF0E44B…/logi". The separator
+-- handling, the refusal of anything that could escape state/, and the .bak rotation are all
+-- in json_file.lua; this facade only forwards. Everything else about the contract is
+-- unchanged, and PalForge.utils.file stays a public surface a pack can use for its own
+-- arbitrary keys.
 --
 -- WHY THE PATH HALF IS HERE AND WHY IT WAS MISSING. The one asset route a pack can
 -- genuinely ship on today is a file off disk (a .obj for the procedural mesh backend, a
@@ -25,7 +34,9 @@ local backend = require("palforge.utils.file.json_file")
 
 local M = {}
 
--- Read a key -> value (decoded), or nil.
+-- Read a key -> value (decoded), or nil. On failure the second return says WHY and the third
+-- is "absent" (nothing on disk — the normal answer for a key never written) or "corrupt" (a
+-- file is there and would not parse, and must not be overwritten).
 function M.get(key) return backend:get(key) end
 
 -- Stage a key in memory (persist later via flush / setAndFlush).
@@ -36,6 +47,26 @@ function M.setAndFlush(key, value) return backend:setAndFlush(key, value) end
 
 -- Persist a key (nil = everything staged).
 function M.flush(key) return backend:flush(key) end
+
+---Drop a key's CACHED value, so the next get() reads the file again.
+---
+---This closes a leak rather than adding a convenience. The backend's cache is module-level
+---and had no eviction at all: core/event's `store.cache = nil` on world-left dropped that
+---module's reference while the backend still held every record set for every world visited
+---this session, so leaving a world freed nothing and re-entering it read a stale table.
+---core/state calls this per loaded key in state.unload().
+---@param key string
+---@return boolean had   # was anything cached
+function M.forget(key) return backend:forget(key) end
+
+---The absolute path a key lands at — <Mods>/PalForge/state/<key>.json — or nil + why the key
+---was refused. Exported because a player who is uninstalling a pack is entitled to be told
+---which file to delete (`db.path()`), and because moving an unparseable file into
+---_quarantine/ VERBATIM needs the path of the bytes to move.
+---@param key string
+---@return string? path
+---@return string? err
+function M.pathFor(key) return backend.pathFor(key) end
 
 --=============================================================================
 -- pack-relative paths

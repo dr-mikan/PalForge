@@ -393,6 +393,29 @@ end
 -- are exposed for advanced use (custom event channels, catalog lookups).
 local api = require("palforge.api")
 
+-- THE STORE, AND WHY IT IS THE ONE CORE MODULE REQUIRED BEHIND A pcall. Every other entry below
+-- is a bare require, and that is right for them: if core/event cannot load, PalForge cannot do
+-- its job and the error should be immediate. The store is different in exactly one way — it is
+-- where a PLAYER'S data lives. A store that fails to load must degrade to "no persistence this
+-- session", named in the log, rather than take the whole framework down and make every pack in
+-- the load order look broken. api/init.lua's `.store` member does the same thing for the same
+-- reason, and answers a refusal that says why instead of a nil.
+local state, ledger
+do
+    local ok, mod = pcall(require, "palforge.core.state")
+    if ok and type(mod) == "table" then
+        state = mod
+    else
+        log.err("core.state did not load: " .. tostring(mod) .. ". PalForge.core.state is absent, "
+            .. "nothing a pack saves will survive this session, and building state will not be "
+            .. "read or written. Everything else is unaffected")
+    end
+    -- The ledger is the list of ids PalForge asked the GAME to write (see core/ledger.lua). It
+    -- is what makes an uninstall answerable, so it is exposed rather than kept private.
+    local okL, modL = pcall(require, "palforge.core.ledger")
+    if okL and type(modL) == "table" then ledger = modL end
+end
+
 _G.PalForge = {
     env = env,
     api = api,
@@ -411,6 +434,17 @@ _G.PalForge = {
         registry       = registry,
         event          = require("palforge.core.event"),
         object_manager = require("palforge.core.object_manager"),
+        -- PERSISTENCE, and the two halves of the removal question it answers.
+        --   state   PalForge's OWN saved state: one JSON file per pack, per save, under
+        --           <Mods>/PalForge/state/. Nothing here is inside Palworld's .sav — delete
+        --           the mod folder and the world still loads. A pack reaches its own slice
+        --           through PalForge.pack("mypack").store, which cannot name another pack's.
+        --   ledger  the names PalForge asked the GAME to write (an item id into an inventory,
+        --           a technology into the player's list, a passive onto a pal). Those DO live
+        --           in the save, and this is the only thing in the tree that can list them.
+        -- Both may be nil this session; see the pcall above, which says so in the log.
+        state          = state,
+        ledger         = ledger,
         spawn          = require("palforge.core.spawn"),
         mesh           = require("palforge.core.mesh"),
         sound          = require("palforge.core.sound"),

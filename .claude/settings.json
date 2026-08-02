@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf state/*)",
+      "Bash(rm -rf state)",
+      "Bash(rm -f state/*)",
+      "Bash(rm -rf ./state/*)",
+      "Bash(rm -rf /mnt/e/steam_hosts/pal/mods/PalSmith/src/PalForge/state/*)",
+      "Bash(rm -rf /tmp/palforge_*)",
+      "Bash(rm -rf /tmp/pfstate_*)",
+      "Bash(rm -f /tmp/palforge_*)",
+      "Bash(rm -f /tmp/pfstate_*)",
+      "Bash(luac5.4 *)",
+      "Bash(lua5.4 *)",
+      "Bash(find Scripts *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git ls-files*)",
+      "Bash(node scripts/lint-content.mjs)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf /*)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf ~/*)",
+      "Bash(rm -rf .git)",
+      "Bash(rm -rf .git/*)",
+      "Bash(rm -rf Scripts)",
+      "Bash(rm -rf Scripts/*)",
+      "Bash(rm -rf docs)",
+      "Bash(rm -rf docs/*)",
+      "Bash(rm -rf plan)",
+      "Bash(rm -rf plan/*)",
+      "Bash(rm -rf dumps)",
+      "Bash(rm -rf dumps/*)",
+      "Bash(rm -rf /mnt/e/SteamLibrary/*)"
+    ]
+  }
+}

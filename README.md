@@ -79,31 +79,58 @@ ue4ss/
                 ├── types.lua    <- editor annotations only; nothing loads it at runtime
                 ├── autorun.txt  <- the keyless dev queue (core/autorun.lua reads it here)
                 ├── api/         <- the public surface a pack writes against
-                ├── core/        <- the engine: kernel, event system, Palworld bridges
+                ├── core/        <- the engine: kernel, event system, Palworld bridges, and
+                │                   the keyboard/, mesh/, sound/, unittests/ subsystems
                 ├── native/      <- Palworld's own content as data catalogs
-                ├── test/        <- the in-game API suite (SINGULAR — see below)
-                ├── tests/       <- the headless unit bundle + ps_catalog (PLURAL — see below)
-                └── utils/       <- log, json, file, items
+                ├── utils/       <- log, json, file, items
+                └── test/        <- DEV ONLY. A release install does not have this directory
+                    ├── init.lua      the one entry point — install() does all of it
+                    ├── units/        the headless bundle, run at boot under dev
+                    ├── cases/        the in-game API suite, the thing F1 runs
+                    ├── hooks/        measurements that need a running game; declared,
+                    │                 never auto-run, each asked for by name
+                    ├── probes/       discovery dumps — not tests; they pass and fail nothing
+                    └── tools/        dev instruments: catalog.lua, the body of `ps_catalog`
 ```
 
-Three entries are easy to leave out and each has a consequence that looks like something else:
+**There is one test directory and it is `test/`, singular.** There used to be two, `test/` and
+`tests/`, one character apart, and production code reached into both — the kernel ran the headless
+bundle out of `palforge.tests`, the `ps_catalog` handler named `palforge.tests.catalog`,
+`core/registry` required `palforge.test` for its side effects, and `core/autorun.lua` pulled
+`require("palforge.test").ACTIONS` on every world load. `palforge/tests/` no longer exists and
+those module paths resolve to nothing. The kernel's whole knowledge of the tests is now one name
+and one call in `core/registry.lua`:
 
-* **`palforge/test/`, singular.** `core/registry.lua` requires `palforge.test`, and that module
-  is what binds **F1**. An install without this directory has no test suite and no F1 key, in
-  dev mode, with nothing else in the log to explain it.
-* **`palforge/tests/`, plural.** A different thing: the headless unit bundle `core/registry`
-  runs at startup under dev, and `palforge.tests.catalog`, which is the body of the `ps_catalog`
-  console command. It ships. This paragraph used to say it was gitignored and absent from the
-  repository — it *was* listed in `.gitignore`, and that was a defect rather than a design: a
-  clone had a boot path and a console command pointing at four files it did not carry. The
-  ignore line is gone. If the kernel names it in its "dev tooling NOT loaded" line, the copy is
-  incomplete.
+```lua
+local testState = requireState("palforge.test")
+if testState == "loaded" then require("palforge.test").install(record) end
+```
+
+`install()` runs the boot bundle, loads the cases, binds F1 and the probe keys, registers the
+console commands including `ps_catalog`, and hands `core/autorun` its action table. `core/autorun.lua`
+names nothing under `test/` any more.
+
+**A release install has no test tree at all**, and that is now a fact about the files rather than
+about a runtime switch. `tools/deploy.sh --release` deletes `palforge/test/` from the staged copy
+before the swap. Deploy both modes into a throwaway target and the script counts them for you: a
+dev deploy lands **127 files**, a release deploy **69**. So `requireState("palforge.test")`
+answering `absent` is the *correct* state for a player's copy, not an incomplete one — there is no
+F1 suite to arm because the files are not there. A dev deploy keeps it, and there it is the whole point.
+
+Two entries are easy to leave out and each has a consequence that looks like something else:
+
+* **`palforge/test/`, in a DEV copy.** `core/registry.lua` calls the line above, and
+  `install()` is what binds **F1**, the probe keys and every `pf_*` console command. A dev install
+  missing this directory has no test suite and no F1 key, with nothing in the log to explain it
+  beyond the kernel naming it in its "dev tooling NOT loaded" line. In a release copy that same
+  line is expected and means nothing is wrong.
 * **`palforge/autorun.txt`.** `core/autorun.lua` reads it from beside `palforge/` and runs named
   actions on world load. It is how anything gets run on a machine where no key and no console
   works — three input routes have failed in turn on this project.
 
-`palforge/deprecated/` and `palforge/tmp/` are reference-only and are not needed at runtime.
-`palforge/build.lua` is generated by `tools/deploy.sh` and is not in the repository.
+`palforge/deprecated/` and `palforge/tmp/` are reference-only, are not needed at runtime, and are
+dropped from **both** deploy modes. `palforge/build.lua` is generated by `tools/deploy.sh` and is
+not in the repository.
 
 Then switch the mod on, with either an empty `enabled.txt` in the mod folder or a line in
 `ue4ss/Mods/mods.txt`:
@@ -131,28 +158,110 @@ mod early, so `unknown` at that moment is ordinary rather than a failure — the
 once at the first world load and the answer logged there. PalForge would rather print `unknown`
 than a guess.
 
+## What PalForge writes, and what removing it does
+
+This is the question a base mod owes its users a straight answer to, and it splits in two. One
+half is settled; the other is real, bounded, and named here rather than left to be discovered.
+
+**PalForge's own saved state is a sidecar, and it is not in your Palworld save.** Everything the
+framework persists is a JSON document under its own mod folder:
+
+```text
+Pal/Binaries/Win64/ue4ss/Mods/PalForge/
+└── state/
+    ├── README.txt                                  the same statement, next to the files
+    └── w_1DF0E44B4FDDD6196E30819A899C9009/         one directory per Palworld save
+        ├── _save.json                              which save this is, which mods it holds
+        ├── _unowned.json                           records no pack can be attributed to yet
+        ├── mypack.json                             ONE FILE PER MOD ID
+        ├── mypack.json.bak                         the previous good copy, never deleted
+        └── _quarantine/                            files that would not parse, moved aside
+```
+
+Nothing in `Scripts/palforge` calls `SaveGame`, `RequestSave` or `WriteSave`, and nothing there
+opens a `.sav` — grep the tree for those four spellings and every hit is a comment asserting the
+negative. Grep instead for a file opened for writing and there are three answers, all inside the
+mod folder: `utils/file/json_file.lua` writing into `state/`, the DataTable dump `ps_catalog`
+writes into `Scripts/catalog/`, and two `test/hooks` that a developer has to arm and name. The last
+two are dev-only twice over — `env.dev` has to be on, and `tools/deploy.sh --release` does not
+copy `palforge/test/` at all, so a player's install does not contain those files. `state/` is
+resolved from the module's own path rather than a configured one, so "everything is inside
+`Mods/PalForge/`" stays structurally true instead of currently true.
+
+So: **delete the PalForge folder and your world still loads.** What is lost is the state mods kept
+for your structures, not the save. Removing one mod is one file — `state/<save>/<mod id>.json` —
+and a mod that is merely absent is never read, so it can cost nothing and be evicted by nothing.
+
+**What does reach Palworld's own save is what PalForge asks the GAME to do.** Three calls make the
+game record a name, and they are the three the ledger records:
+
+| Call | What the game writes into its own save |
+| --- | --- |
+| `Item.get("mypack:Potion"):give(1)` | the row name `mypack_Potion` into an inventory container |
+| `Building.get("mypack:Bench"):unlock()` | that name into the player's unlocked-technology list |
+| `Skill.get("mypack:Legend"):teach(pal)` | that name onto a character's passive-skill list |
+
+Those rows exist only because a pack's PalSchema JSON injected them. Remove the pack and the save
+holds a name with no row behind it. `Item.get("Wood"):give(1)` is not in that category at all — a
+vanilla row cannot stop existing — which is why PalForge records only namespaced ids, and only
+when the call succeeded, in that pack's `ledger` section. That log is per save and per pack, it
+survives the pack's uninstall, and it is the only thing in this tree that can name — id by id —
+what an uninstall would leave dangling:
+
+```lua
+PalForge.pack("mypack").store.reclaim()   -- a report; .text is one English paragraph
+```
+
+The recording happens at the **engine boundary** rather than on the `Handle` — `utils/items.give`,
+`utils/items.unlockTech` and `core/character.addSkill` are the three lines that call it — so a pack
+that goes the direct route, `PalForge.utils.items.give(...)`, is recorded on the same terms. A
+fourth kind, `pal`, is declared in `core/ledger.lua` because the file format carries it and is
+written by nothing today: `Pal.Handle:spawn` does put a character into the world, but whether a
+spawned pal survives into the save has not been measured, and a ledger row asserting it would be a
+guess. Active skills are deliberately never recorded — `EPalWazaID` is a fixed vanilla enum and Lua
+cannot mint a value, so nothing written through it can stop being valid.
+
+An item can be taken back from the local player's own bag; one already in a chest cannot be
+reached. A passive can be removed from a character you can hold. **A technology unlock cannot be
+reversed at all** — `UPalCheatManager` declares four unlock entries and no lock, and no lock,
+remove, reset or forget entry appears anywhere in the header dump — so `unlock()` is one-way and
+the report says so in those words.
+
+**And the part nobody has measured yet.** What Palworld does when it loads a save holding a name
+whose DataTable row is gone has not been watched happen. Everything readable off the binary says
+the shape is a *missing lookup* rather than a broken file: the save stores plain `FName`s, rows
+are resolved through accessors built to fail (`TryGetStaticItemData` returns a bool, as does the
+whole `BP_FindRow(row, bool&)` family), and `EPalSaveError { Success, NotFound, Unknown, Broken,
+OutOfMemory }` has no "unknown content" member. That is well-founded, not proven — the load path
+is unreflected C++, so there is nothing to interrogate and only an experiment can settle it
+(`test/hooks/save-survives-pack-removal`). Until it is run, tell your players that, in those
+words.
+
+Full detail, including the store your pack gets and how the layout is migrated from the older
+single file, is in the docs under **Concepts → Saved state**.
+
 ## What actually works
 
 PalForge is at **v0.3.0**, and the honest summary is that the *routes into the game* are mostly
 settled and a few *capabilities* are not. 32 capability items have been closed — most of them by
 watching the thing happen in a real save, and the rest by reading the installed binary's own
-function declarations. Six are open, and every one of them degrades honestly: it returns nil, or
+function declarations. Eight are open, and every one of them degrades honestly: it returns nil, or
 does not fire, or refuses at define time and says why. Nothing in the list below silently does
 the wrong thing.
 
 | Domain | Works | Does not |
 | --- | --- | --- |
-| **Item** | `:give`, `:take`, `:count` — all three observed in a real save, each verified by reading the inventory back. `onObtain` / `onUse` / `onCraft` / `onDiscard` all fire. `:iconOf` reads the game's own artwork | `:recipeOf` returns nil (`item-datatable-row-read`) |
+| **Item** | `:give`, `:take`, `:count` — all three observed in a real save, each verified by reading the inventory back. `onObtain` / `onUse` / `onCraft` / `onDiscard` all fire. `:iconOf` reads the game's own artwork | `:recipeOf` returns nil (`item-datatable-row-read`). An item a pack declares itself cannot say what it restores — there is no such field, and the bar moves only when the row it named was already a consumable (`item-satiety-write`) |
 | **Pal** | `:spawn` and placement, both observed end to end. `onCaptured` / `onDamaged` / `onDeath` / `onSpawned` fire. Reading a pal's skills works. `:iconOf` reads 674/674 rows | `onSpawned` may over-report at world load (`pal-spawned-fresh`); `:teachAll` shares the skill-write item below |
 | **Building** | the most complete domain: placement, per-structure instances, per-world save/load, `onPlace` / `onLoad` / `onRightClick` / `onRemove` / `onTick` / `onBuild` / `onWorldReady` / `onWorldLeft` | `onLeftClick` and `onBreak` are settled **negatively** — the game exposes no such hook. Disappearance surfaces as `onRemove(reason = "missing")` |
 | **Effect** | `nativeStatus` turns the game's real ailments on and off, observed in a save. The duration / interval / stacking runtime is PalForge's own and works without the game | the ailment runs on the game's rules; PalForge does not control its strength |
-| **Skill** | `onActivate` and `onEquip` / `onUnequip` observed firing in real combat. `:skillsOn` reads a pal's real loadout. Manual `:activate` / `:hit` with the cooldown enforced in Lua | `onHit` never fires (`skill-hit-source`); `:teach` / `:forget` are **unproven and opt-in** (`pal-skills-equip`) |
+| **Skill** | `onActivate` and `onEquip` / `onUnequip` observed firing in real combat. `:skillsOn` reads a pal's real loadout. Manual `:activate` / `:hit` with the cooldown enforced in Lua | `onHit` never fires (`skill-hit-source`); `:teach` / `:forget` are **unproven and opt-in** (`pal-skills-equip`); an active skill's `element` and `power` are framework-side metadata that reach nothing, and a handler has no call available to it that puts an object in the world (`skill-projectile-spawn`) |
 | **Audio** | the vanilla route: a 1957-entry AkAudioEvent catalog, `Audio.get(id):play()`, `:stop`, `:setVolume` | custom sound files. `Audio.Spec.soundFile` is **refused at define time** and names the reason (`audio-custom-file-loader`) — it used to outrank `soundId`, so setting it silenced audio that had been playing |
 | **Mesh** | vanilla `/Game/...` static and skeletal meshes, class-checked before they are handed to the engine; `.obj` geometry from disk; material colour / texture parameter names read off the running game | nobody has yet watched a colour change or a custom texture import in game. See the asset table below |
 | **UI** | building widgets out of Palworld's own UMG kit and mounting them into the game's own UI root — confirmed live | there is no "the UI changed" event to hook, so `:autoRefresh(ms)` polls (`ui-update-event`) |
 | **Player** | `Player.character()`, `Player.coordinate()`, `Player.coordinateOffset(dx, dy, dz)` | — |
 
-The six open items in full, with what each measurement needs, are in `plan/TODO.md`. Every one
+The eight open items in full, with what each measurement needs, are in `plan/TODO.md`. Every one
 of them is also marked in the source at the line an implementer would open, as
 `-- TODO(<item-id>)`.
 
@@ -194,11 +303,16 @@ be the other way round. `env.dev` and `env.debug` both default to `false` in
 `Scripts/palforge/env.lua`, and nothing in the framework turns them on.
 
 What `dev` arms: nine keybinds — including **F4, which unlocks every technology in the loaded
-save** — the F1 API suite (it spawns pals and hands out items), F9 reload-without-restarting, the
-`ps_catalog` DataTable dumper, and the headless unit bundle at boot. What `debug` additionally
-arms: the game-required test hooks under `palforge/test/hooks/`, which are declared rather than
-run — each has to be asked for by name, and the ones that write into a save need
-`env.debugHooks[id] = true` on top of that.
+save** — the F1 API suite (`test/cases/`; it spawns pals and hands out items), F9
+reload-without-restarting, the `ps_catalog` DataTable dumper (`test/tools/catalog.lua`), and the
+headless unit bundle at boot (`test/units/`). All of it comes out of one `install()` call, so
+either every piece is there or none is. What `debug` additionally arms: the game-required test
+hooks under `test/hooks/`, which are declared rather than run — each has to be asked for by name,
+and the ones that write into a save need `env.debugHooks[id] = true` on top of that.
+
+None of that reaches a player's copy twice over. `env.dev` is `false`, *and* a release deploy does
+not contain `palforge/test/` at all — the kernel's one `requireState("palforge.test")` answers
+`absent`, which is the correct answer for a release rather than a broken install.
 
 The switch is one optional file, `Scripts/palforge_dev.lua`, which `main.lua` requires
 immediately before the kernel starts and ignores when it is absent:
@@ -216,12 +330,14 @@ writes it for you:
 ```bash
 tools/deploy.sh                        # dev deploy into the default install; writes the overlay
 tools/deploy.sh "/path/to/Palworld"    # dev deploy somewhere else
-tools/deploy.sh --release              # no overlay, and any stale copy is deleted by name
+tools/deploy.sh --release              # no overlay, no test tree, stale copies deleted by name
 ```
 
 The script replaces the deployed `Scripts/` wholesale (staging first, then two renames, so the
 game never sees a half-populated tree), stamps the copy with a build timestamp so a stale in-game
-run is visible in the log, and prints which mode it ran in. **It never edits `env.lua`**: a
+run is visible in the log, and prints which mode it ran in and how many files it wrote — **127 in
+dev, 69 with `--release`**, the difference being `palforge/test/` and the one-file overlay.
+`deprecated/` and `tmp/` are dropped from both. **It never edits `env.lua`**: a
 release toggle that a tool flips on is a release toggle that eventually ships on, which is how
 `dev = true` came to be the shipped default in the first place.
 

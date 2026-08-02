@@ -7,6 +7,7 @@
     "lifecycle",
     "status-and-icons",
     "spatial-index",
+    "saved-state",
     "editor-setup"
   ]
 }

@@ -21,7 +21,7 @@ dev セッションでは、`tools/deploy.sh` が既定モードで配置先ツ�
 ```lua title="Scripts/palforge_dev.lua"
 local env = require("palforge.env")
 env.dev   = true    -- dev キーバインド（F4 の全テクノロジー解放を含む）、F1、F9、プローブ群
-env.debug = true    -- さらに test/hooks 配下の、ゲームが必要な 19 のテストフック
+env.debug = true    -- さらに test/hooks 配下の、ゲームが必要な 25 のテストフック
 ```
 
 `env.dev` が off のとき、起動ログはその旨と、ロードされなかったものすべてを名指しします。これが
@@ -189,16 +189,19 @@ pf_native            # ワールドが準備でき次第すぐ実行
 `[delay] name` で引数を運ばないので、フックランナー側は、このパーサに語を渡す機能を足す代わりに
 フック 1 つにつきアクション名を 1 つ生成しています。
 
-このファイルが持つのは**名前の一覧であり、コードではありません**。各行は
-`require("palforge.test").ACTIONS` で引かれ、一致しない名前は報告のうえスキップされます。
+このファイルが持つのは**名前の一覧であり、コードではありません**。`core/autorun.lua` は `test/`
+配下の名前を 1 つも書きません。`test/init.lua` の `install()` が
+`autorun.setActions(M.ACTIONS)` でテーブルを渡し、各行は渡されたテーブルを引くだけで、一致しない
+名前は報告のうえスキップされます。
 
 ```text
 [PalForge.autorun][warn] autorun.txt: no action named "pf_typo" - the names are the pf_* commands
 ```
 
 したがって、テスト面のどこかに登録されたコマンドは、存在した瞬間からここで実行可能になります。
-`core/autorun.lua` の変更は不要です。そして迷い込んだファイルが、この MOD がキー操作でできないことを
-実行することもありません。セーブに書き込むフックには、その上でさらに専用ゲート
+`core/autorun.lua` の変更は不要です。そして `--release` が配置するようなテストツリーの無いコピーでは
+テーブル自体が存在しないので、このキューは何のコストもない no-op になります。迷い込んだファイルが、
+この MOD がキー操作でできないことを実行することもありません。セーブに書き込むフックには、その上でさらに専用ゲート
 （`env.debugHooks[id]`）があり、この経路はそれを知りもしなければ迂回もできません。
 
 ファイルの場所は、作業ディレクトリではなくモジュール自身のディスク上の位置
@@ -212,7 +215,7 @@ pf_native            # ワールドが準備でき次第すぐ実行
 - ネイティブフック、唯一の `LoopAsync`、バインド済みキーはセッションに 1 回 arm されます。イベントソース内部の変更には再起動が必要です。
 - 繰り返し処理が未完了のあいだ F9 は拒否し、対象を名指しし、180 秒で自動失効するかコンソールから解除できます。
 - 繰り返し処理は `poll.every(name, fn)` で書きます。判定は経過秒、`true` で終了、同時 16 本まで。
-- `autorun.txt` は 1 行 `[delay] name` で、`palforge.test` の `ACTIONS` に照合され、ワールドのロードごとに 1 回走ります。
+- `autorun.txt` は 1 行 `[delay] name` で、`test/init.lua` が `core/autorun` に渡した `ACTIONS` に照合され、ワールドのロードごとに 1 回走ります。
 
 <Cards>
   <Card title="コンソールコマンド" href="/docs/guides/console-commands">pf_* の全名称と、画面上に必要なもの</Card>

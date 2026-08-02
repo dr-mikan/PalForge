@@ -132,6 +132,23 @@ M.CASES = {
     "schema",
     "registry",
     "definitions",
+    -- The five store suites, and they are PURE — no world, no engine — which is why they sit
+    -- with the structural cases rather than beside the domain ones. They cover the persistence
+    -- split five ways: the codec and the file backend (store_codec), the store module itself
+    -- (store_state), the pack-facing surface (store_api), the building runtime's half of it
+    -- (store_runtime), and the whole thing end to end on a REAL FILESYSTEM against the REAL
+    -- legacy files this tree has produced (store_disk — the other four all substitute their
+    -- I/O, which is right and leaves nobody measuring what a disk does).
+    -- NONE OF THEM MAY WRITE INTO state/ — a suite for the module a player's saved state lives
+    -- in must not be able to touch a player's saved state — so each works against a substituted
+    -- backend or a throwaway directory under the OS temp directory. The check is not a promise
+    -- in this comment: `ls state/` after a headless run is empty, and it was not while these
+    -- suites were being written.
+    "store_codec",
+    "store_state",
+    "store_api",
+    "store_runtime",
+    "store_disk",
     "native",
     "pal",
     "item",
@@ -1167,11 +1184,19 @@ function M.load()
     return n
 end
 
----The suite names THIS module owns, in run order. Deliberately not every suite the
----framework knows about: palforge.tests registers its own headless bundle into the same
----registry, and pressing the key should run the API suite, not everything in the process.
+---The suite names THIS module owns, in run order. Deliberately not every suite the framework
+---knows about: test/units registers its own headless bundle into the same registry, and
+---pressing the key should run the API suite, not everything in the process.
+---
+---LOADS ON DEMAND. The cases used to be required by a top-level `M.load()` at the bottom of
+---this file, so a bare `require("palforge.test")` was enough and `run()` always had something
+---to run. Loading moved into install() when the kernel stopped reaching into this tree — which
+---is right for production, and would have made `require(...).run()` answer "0 suites" for
+---anyone calling it directly, including every headless verification command in this project's
+---own history. One line keeps both true.
 ---@return string[]
 function M.suites()
+    if next(M.loaded) == nil then M.load() end
     local out = {}
     for _, name in ipairs(M.CASES) do
         if M.loaded[name] then out[#out + 1] = name end
@@ -1289,15 +1314,6 @@ end
 ---@return string[]
 function M.bindings() return reg.report() end
 
--- Wire it up on require: load the cases, put the whole run on F1, and give each discovery
--- probe its own key. Re-bind any of them from your own code — M.bind replaces a binding in
--- place, so `test.bind("F5", "pal")` would take F5 back for a suite.
-M.load()
-M.bind("F1")
-for _, p in ipairs(M.PROBES) do
-    M.bind(p.key, function() M.probe(p.name) end,
-        { desc = string.format("probe %s (%s) - needs %s", p.name, p.desc, p.needs) })
-end
 
 -- A CONSOLE COMMAND FOR EVERY ACTION, so a key the game has taken can never block one again.
 -- F7 turned out to be Palworld's own volume control: the bind succeeded, the key never arrived,
@@ -1359,16 +1375,100 @@ local function installCommands()
     log.info("if you cannot type those, UE4SS's console is off: set ConsoleEnabled, "
         .. "GuiConsoleEnabled and GuiConsoleVisible to 1 in ue4ss/UE4SS-settings.ini and restart")
 end
-installCommands()
 
--- Print the bindings once, at load. A key the GAME has already claimed still binds successfully
--- here and simply never fires — that is how `watch` sat unreachable on Palworld's volume key —
--- so the log has to carry which key is on what, or a probe that cannot be pressed looks exactly
--- like a probe that found nothing.
---
--- The `game:` column reads "the game's key config has not been read" HERE and that is correct
--- rather than a defect: this runs at mod load, the config lives on a world subsystem, and there
--- is no world yet. Run `pf_keys` from inside a save for the filled-in version.
-for _, line in ipairs(M.bindings()) do log.info(line) end
+-- ps_catalog — THE DATATABLE DUMPER, opt-in and never auto-run. It walks every loaded
+-- UDataTable, and test/tools/catalog.lua's own header records that sweep touching a stale
+-- pointer as the thing that closed the game during a load storm; that is why it is a command
+-- and not a startup step. Registered by this tree rather than by the kernel: it is our file, so
+-- naming it is our job.
+---@return boolean installed
+---@return string? why
+local function installCatalogCommand()
+    if type(RegisterConsoleCommandHandler) ~= "function" then
+        return false, "RegisterConsoleCommandHandler unavailable in this UE4SS"
+    end
+    local ok, err = pcall(function()
+        RegisterConsoleCommandHandler("ps_catalog", function()
+            local run = function() pcall(function() require("palforge.test.tools.catalog").dump() end) end
+            if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(run) else run() end
+            return true
+        end)
+    end)
+    if not ok then return false, tostring(err) end
+    log.info("dev console command registered: ps_catalog (DataTable dumper, opt-in)")
+    return true
+end
+
+
+---THE ONE ENTRY POINT PRODUCTION USES, and the reason this function exists rather than a pile
+---of top-level statements.
+---
+---`core/registry.lua` used to reach into the test tree in FOUR places: it required
+---`palforge.tests` and called run(), it registered `ps_catalog` by requiring
+---`palforge.tests.catalog` inside the handler, it required `palforge.test` for its side
+---effects, and `core/autorun.lua` separately pulled `require("palforge.test").ACTIONS`. Four
+---names, in two directories one character apart, all reached from production code — so the
+---kernel knew the shape of the test tree, and a release build that dropped the tests would have
+---broken in four places instead of one.
+---
+---It is inverted now. The kernel knows ONE name and calls ONE function; everything below is
+---this tree installing ITSELF — the boot bundle, F1, the probe keys, the console commands, the
+---autorun action table and ps_catalog. `tools/deploy.sh --release` deletes `palforge/test/`
+---outright, and the single `requireState("palforge.test")` in the kernel then answers "absent",
+---which is the CORRECT state for a release rather than a missing file to explain.
+---
+---`report(ok, what, why)` is optional and is how the kernel prints what loaded and what did
+---not. Called with no argument this still installs; it just says nothing about itself.
+---@param report fun(ok: boolean, what: string, why: string?)?
+function M.install(report)
+    report = report or function() end
+
+    -- ① the headless bundle, NOW. Pure Lua, no engine, no world — it is the one part of this
+    -- tree that is safe to run before a world exists, and running it at boot is what makes a
+    -- structural break show up before anything touches the game.
+    local okUnits, unitsErr = pcall(function() require("palforge.test.units").run() end)
+    report(okUnits, "headless unit bundle (test/units)", tostring(unitsErr))
+
+    -- ② the in-game suite and the probe keys. M.load() reads test/cases; F1 runs the lot; each
+    -- discovery probe gets its own key. Re-bind any of them from your own code — M.bind
+    -- replaces a binding in place, so `test.bind("F5", "pal")` would take F5 back for a suite.
+    local okCases, casesErr = pcall(function()
+        M.load()
+        M.bind("F1")
+        for _, p in ipairs(M.PROBES) do
+            M.bind(p.key, function() M.probe(p.name) end,
+                { desc = string.format("probe %s (%s) - needs %s", p.name, p.desc, p.needs) })
+        end
+    end)
+    report(okCases, "in-game API suite on F1 + probe keys", tostring(casesErr))
+
+    -- ③ ps_catalog. The dumper lives at test/tools/catalog.lua and is a DEV INSTRUMENT rather
+    -- than a test: it walks every loaded UDataTable, which its own header records as
+    -- crash-prone on a load storm, so it is opt-in and never auto-run. Registered here because
+    -- it is ours; the kernel used to register it and had to name our file to do so.
+    local okCat, catWhy = installCatalogCommand()
+    report(okCat, "ps_catalog console command (test/tools)", tostring(catWhy))
+
+    -- ④ the console commands, and ⑤ the autorun action table. Both are M.ACTIONS: one lets a
+    -- human type a name, the other lets Scripts/palforge/autorun.txt run one on world.ready
+    -- with no key and no console. core/autorun used to REACH for this table by module name;
+    -- it is handed over now, so that file names nothing under test/.
+    installCommands()
+    local okAuto = pcall(function() require("palforge.core.autorun").setActions(M.ACTIONS) end)
+    report(okAuto, "autorun action table", "core.autorun did not accept it")
+
+    -- ⑥ the bindings, printed once. A key the GAME has already claimed still binds successfully
+    -- and simply never fires — that is how `watch` sat unreachable on Palworld's volume key —
+    -- so the log has to carry which key is on what, or a probe that cannot be pressed looks
+    -- exactly like a probe that found nothing.
+    --
+    -- The `game:` column reads "the game's key config has not been read" here and that is
+    -- correct rather than a defect: this runs at mod load, the config lives on a world
+    -- subsystem, and there is no world yet. Run `pf_keys` from inside a save for the filled-in
+    -- version.
+    for _, line in ipairs(M.bindings()) do log.info(line) end
+    return true
+end
+
 
 return M

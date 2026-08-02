@@ -95,6 +95,12 @@ local mesh    = require("palforge.core.mesh")
 local items   = require("palforge.utils.items")
 local schema  = require("palforge.core.schema")
 local spatial = require("palforge.core.spatial")
+-- WHAT THIS PACK MADE THE GAME WRITE. :unlock is one of the three calls that appends to
+-- PALWORLD'S save rather than to PalForge's own sidecar — and the only one of the three that
+-- can never be undone. The record is written by utils.items.unlockTech, at the engine
+-- boundary, so this file requires no ledger: hooking the api Handle covered one caller of a
+-- toolbox main.lua publishes for packs to call directly. Fail-soft either way — a ledger
+-- append never raises and never changes what :unlock returns.
 -- core.event is NOT required here: it requires THIS module at load (for the base hook
 -- table), so every use of it below is a lazy, pcall'd require inside the function.
 
@@ -507,20 +513,44 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 ---technology row of that resolved name really exists in the live DT_TechnologyRecipeUnlock
 ---(only 115 of the 501 vanilla build ids have one, so that check is what stops the cheat
 ---"succeeding" for a building that has nothing to unlock). What cannot be read is the result:
----UnlockOneTechnology returns nothing and no "is this technology unlocked" accessor exists
----anywhere on this build — not in the CheatManager surface, not in dumps/cxx, not in the C++
----bridge (utils/items/init.lua, the technology row set). And it rides the same cheat-manager
----route that `pal-spawnmonster-signature` measured as accepting a call and silently doing
----nothing, which is the failure mode this cannot distinguish itself from.
+---UnlockOneTechnology returns nothing, and it rides the same cheat-manager route that
+---`pal-spawnmonster-signature` measured as accepting a call and silently doing nothing, which is
+---the failure mode this cannot distinguish itself from.
 ---
----So the only way to settle it is to press it in a save and LOOK at the build menu. That is
----the declared hook `test/hooks/building-unlock` (needs a world and a player, writes = true —
+---⚠️ CORRECTION, 2026-08-02. This docstring said for months that "no 'is this technology
+---unlocked' accessor exists anywhere on this build — not in dumps/cxx". THAT IS FALSE, and it
+---sent at least one reader away from a route that is right there: dumps/cxx/Pal.hpp:29999-30001
+---declares, on UPalTechnologyData (:29966, reached from APalPlayerState.TechnologyData),
+---    bool IsUnlockRecipeTechnology(const FName& technologyName);
+---    bool IsUnlockCraftRecipe(const FName& craftRecipeName);
+---    bool IsUnlockBuildObject(const FName& BuildObjectId);
+---Three read-backs, each taking exactly the FName this call passes. Nothing here calls them yet
+---and this return value is unchanged, because a DUMP is not the running build — that lesson cost
+---this tree a week when AddItem_ServerInternal turned out to declare five parameters where the
+---dump had four. Whether the live build declares them is what `pf_hook building-unlock` walks
+---with core.signature's describe, on a live UPalTechnologyData; if they are there, `issued`
+---becomes a real verdict and core/ledger's technology half gains the one thing it can report on.
+---(This paragraph named `test/hooks/tech-unlock-readback` until 2026-08-02, and no such hook was
+---ever declared — the measurement belongs to `building-unlock`, which is right below and already
+---owns the same question from the other end.)
+---
+---Until then the only way to settle it is to press it in a save and LOOK at the build menu. That
+---is the declared hook `test/hooks/building-unlock` (needs a world and a player, writes = true —
 ---it mutates the player's technology state), not a unit check.
+---
+---⚠️ A SUCCESSFUL UNLOCK REACHES PALWORLD'S OWN SAVE: it appends to the player's unlocked-
+---technology list, which the game writes. So a pack-owned id is recorded in core/ledger, and it
+---is the ONE kind that can never be undone — UPalCheatManager declares four unlocks and no lock
+---(LockTechnology / RemoveTechnology / ResetTechnology / ForgetTechnology are zero hits in
+---dumps/cxx/Pal.hpp). The removal report says so in those words rather than implying a reversal.
 ---@return boolean issued  # the call ran AND a technology row of that name exists; NOT "unlocked"
 function Handle:unlock()
     -- `resolve(x) or x`: a DataTable row FName is the resolved form, and an id that cannot
     -- resolve still asks the game about the literal rather than about nothing. Class:iconOf
     -- spells it the same way; the two used to disagree, with iconOf passing the id raw.
+    -- The ledger row is written by utils.items.unlockTech itself, at the engine boundary, NOT
+    -- here — the same move as Item.Handle:give. That function is published as part of
+    -- `PalForge.utils.items`, so hooking its one api caller left every other route unrecorded.
     return items.unlockTech(om.resolve(self.id) or self.id)
 end
 

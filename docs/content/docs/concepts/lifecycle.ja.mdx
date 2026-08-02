@@ -738,7 +738,8 @@ sequenceDiagram
 インスタンスは `def.cls:new{ ... }` で作られるので、定義に書いたメソッドはすべてその上で解決
 します。state は保存済みレコードがあればそこから、なければ定義の `state` フィールドから取られ
 ます。`state` はテーブルでもファクトリ関数でも構いません。新規インスタンスは Mod フォルダ配下の
-`state/entities_<saveId>.json` に書き込まれます。`saveId` は `PalGameInstance` から読みます。
+`state/<saveId>/<mod id>.json` に書き込まれます。セーブごとに 1 ディレクトリ、mod ごとに 1 ファイル
+です。`saveId` は `PalGameInstance` から読みます。
 まずセーブ **ディレクトリ** 名（`GetSelectedWorldSaveDirectoryName`、またはその実体プロパティ）、
 次にワールドの表示名で、記号を除いたうえで `w_` を前置します。どちらも答えない場合は共有の
 `world` にフォールバックします。

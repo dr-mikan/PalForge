@@ -26,7 +26,9 @@ Three things follow from that:
   authority.** Grep `UE4SS.log` for `console commands:`.
 - A command and a key are two ways into the same function. `pf_reflect` and F5 run the same probe.
 - Nothing here exists unless `env.dev` is true. The whole `palforge.test` module is only required
-  under the dev gate, so a release deploy has no `pf_*` commands, no F1 and no probe keys.
+  under the dev gate, and `tools/deploy.sh --release` deletes `palforge/test/` from the deployed
+  tree outright — so a release copy has no `pf_*` commands, no F1 and no probe keys, and the
+  kernel's one `require` answers `absent`.
 
 The body of a command is queued onto the game thread through `ExecuteInGameThread`, because
 everything it touches is a live UObject, and it is wrapped in a `pcall` — a command that raises
@@ -49,8 +51,8 @@ rather than checking it.
 
 ## The list
 
-Thirty-seven actions, in four groups: eighteen of them always, plus one per declared hook once
-`env.debug` is on.
+Forty-two actions, in four groups: eighteen of them always, plus one per declared hook — another
+twenty-five — once `env.debug` is on.
 
 | Command | What it does |
 | --- | --- |
@@ -65,7 +67,7 @@ Thirty-seven actions, in four groups: eighteen of them always, plus one per decl
 | `pf_uiz` | three panels at once: z-order, key routing, the mouse half and the layer route |
 | `pf_reflect` `pf_pal` `pf_watch` `pf_title` `pf_uislot` `pf_uievents` | the six discovery probes, one per key |
 | `pf_hooks` `pf_hook <id>` `pf_hooks_all` | the game-required test hooks (see below) |
-| `pf_hook_<id>` | one generated name per declared hook, nineteen of them |
+| `pf_hook_<id>` | one generated name per declared hook, twenty-five of them |
 
 Output that is meant to be pasted somewhere is bracketed, so it can be lifted straight out of the
 log:
@@ -110,7 +112,7 @@ names the poller it is waiting for. That is the async guard doing its job; see
 
 ## The game-required hooks
 
-Nineteen measurements cannot be taken with the game switched off. Each is a declared hook under
+Twenty-four measurements cannot be taken with the game switched off. Each is a declared hook under
 `test/hooks/`, naming what it needs on screen, whether it writes into a save, and which open item
 it closes. They load only when `env.debug` is true.
 
@@ -163,14 +165,18 @@ text file on disk can say to the game.
 The delay matters more than it looks. A pal takes four to eight seconds to arrive, so an action
 that needs one nearby cannot run in the same breath as the spawn that makes it.
 
-The file holds **names, never code**. Each one is looked up in `require("palforge.test").ACTIONS`,
-and a name that is not there is reported and skipped:
+The file holds **names, never code**. `core/autorun.lua` names nothing under `test/`: the table is
+HANDED to it by `test/init.lua`'s `install()`, through `autorun.setActions(M.ACTIONS)`. Each line
+is a lookup in that table, and a name that is not there is reported and skipped:
 
 ```lua
--- what autorun does with every line, in one expression
-local run = require("palforge.test").ACTIONS[name]
+-- core/autorun.lua, with the table it was handed
+local run = M._actions[name]        -- set once by test/init.lua's install()
 if not run then log.warn(name .. ": no action of that name") end
 ```
+
+With no test tree — a release build — there is simply no table, and the queue is a no-op that
+costs nothing rather than a failed `require` on every world load.
 
 So a stray file cannot execute anything a keypress could not, and a hook that writes still has its
 own second gate on top.
@@ -178,7 +184,7 @@ own second gate on top.
 ## Summary
 
 - Every measurement is an entry in `palforge.test`'s `ACTIONS`; the startup log line is the authoritative list.
-- Nothing exists without `env.dev`, and the nineteen game-required hooks also need `env.debug`.
+- Nothing exists without `env.dev`, and the twenty-five game-required hooks also need `env.debug`.
 - UE4SS's console is off by default — three settings and a restart.
 - Each command says what it needs on screen and stops rather than half-running.
 - `pf_hooks` before any hook: it prints every gate and the sentence that opens a shut one.

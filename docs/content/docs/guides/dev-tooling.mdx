@@ -20,7 +20,7 @@ mode and deletes under `--release`. It is gitignored, so it cannot travel throug
 ```lua title="Scripts/palforge_dev.lua"
 local env = require("palforge.env")
 env.dev   = true    -- dev keybinds (including F4, unlock all technologies), F1, F9, the probes
-env.debug = true    -- additionally: the nineteen game-required test hooks under test/hooks
+env.debug = true    -- additionally: the twenty-five game-required test hooks under test/hooks
 ```
 
 With `env.dev` off the startup log says so in as many words, and names everything that did not
@@ -192,16 +192,18 @@ The delay rides the same heartbeat; this file creates no timer of its own. A lin
 `[delay] name` and carries no argument, which is why the hook runner generates one action name per
 hook instead of teaching this parser to pass words through.
 
-The file holds **a list of names, never code**. Each is looked up in
-`require("palforge.test").ACTIONS`, and a name with no match is reported and skipped:
+The file holds **a list of names, never code**. `core/autorun.lua` names nothing under `test/`:
+`test/init.lua`'s `install()` hands it the table with `autorun.setActions(M.ACTIONS)`, each line is
+a lookup in what it was handed, and a name with no match is reported and skipped:
 
 ```text
 [PalForge.autorun][warn] autorun.txt: no action named "pf_typo" - the names are the pf_* commands
 ```
 
 So a command registered anywhere in the test surface is runnable from here the moment it exists,
-with no change in `core/autorun.lua` — and a stray file cannot execute anything the mod does not
-already do on a keypress. A hook that writes into a save still carries its own second gate
+with no change in `core/autorun.lua` — and with no test tree at all, which is what `--release`
+deploys, there is simply no table and the queue is a no-op that costs nothing. A stray file cannot
+execute anything the mod does not already do on a keypress. A hook that writes into a save still carries its own second gate
 (`env.debugHooks[id]`), which this route neither knows about nor can bypass.
 
 The file is found from the module's own location on disk (`debug.getinfo(1, "S").source`), not from
@@ -215,7 +217,7 @@ case and says nothing.
 - Native hooks, the one `LoopAsync` and bound keys are armed once per session; a change inside an event source needs a restart.
 - F9 refuses while repeated work is outstanding, names it, and self-clears after 180 s or from the console.
 - `poll.every(name, fn)` is how repeated work is written: bound on elapsed seconds, `true` to retire, 16 at once.
-- `autorun.txt` is `[delay] name` per line, resolved against `palforge.test`'s `ACTIONS`, once per world load.
+- `autorun.txt` is `[delay] name` per line, resolved against the `ACTIONS` table `test/init.lua` hands `core/autorun`, once per world load.
 
 <Cards>
   <Card title="Console commands" href="/docs/guides/console-commands">Every pf_* name and what it needs on screen</Card>

@@ -13,8 +13,8 @@
 --     technologyRows() uses to read the live technology tables, and it asks for the ONE
 --     object we want, touching nothing else; the
 --     FindAllOf("DataTable") + o:GetFName():ToString() sweep that dumped the 390-table
---     catalog (tests/catalog.lua:141-163) is the fallback for when that global is absent or
---     misses. The order is not cosmetic: tests/catalog.lua:6-10 records the sweep as
+--     catalog (test/tools/catalog.lua:141-163) is the fallback for when that global is absent or
+--     misses. The order is not cosmetic: test/tools/catalog.lua:6-10 records the sweep as
 --     crash-prone (it touches EVERY loaded table, and a stale pointer there raises an access
 --     violation Lua's pcall cannot catch), which is why utils/items refuses it "inside an
 --     ordinary helper" — and iconOf() is exactly that.
@@ -185,7 +185,7 @@ end
 
 -- Object name. GetFName():ToString() is reliably bound; GetName() is not (calling an unbound
 -- GetName() throws and silently killed the old dump), so it is tried second. Same shape as
--- the dumper's objName at tests/catalog.lua:125-131.
+-- the dumper's objName at test/tools/catalog.lua:125-131.
 local function objName(o)
     local ok, n = pcall(function() return o:GetFName():ToString() end)
     if ok and type(n) == "string" and #n > 0 then return n end
@@ -212,7 +212,7 @@ end
 -- TARGETED lookup — UE4SS's FindObject("DataTable", "<name>") overload (class short name +
 -- object short name). Same call utils/items/init.lua's technologyRows() makes for the
 -- technology tables, and preferred over the sweep for the reason recorded there: the sweep
--- walks every loaded UDataTable and tests/catalog.lua:6-10 documents that as crash-prone.
+-- walks every loaded UDataTable and test/tools/catalog.lua:6-10 documents that as crash-prone.
 -- One targeted lookup costs nothing, and when it hits, the sweep below never runs at all.
 local function findObjectByName(name)
     if type(FindObject) ~= "function" then return nil end
@@ -239,7 +239,7 @@ end
 -- expensive call in the module — FindAllOf walks the whole UObject array — so it is lazy
 -- (never at load), rate-limited to once per RETRY_COOLDOWN, and fills the cache for ALL of
 -- M.TABLES in one pass so four domains cost one sweep. Deliberately touches each object as
--- little as possible (IsValid + GetFName, no row access): tests/catalog.lua:7-10 warns that
+-- little as possible (IsValid + GetFName, no row access): test/tools/catalog.lua:7-10 warns that
 -- enumerating natives can hit a stale pointer, and that raises an access violation Lua's
 -- pcall cannot catch. That warning is why this never runs on a timer.
 local function sweep(target)

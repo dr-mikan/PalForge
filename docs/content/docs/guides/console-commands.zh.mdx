@@ -25,8 +25,9 @@ console commands: pf_hook  pf_hook_audio_custom_file_loader  pf_hook_audio_setvo
 - 本页列出的名字是写作时表里的内容。**权威是那行日志。**在 `UE4SS.log` 里搜
   `console commands:`。
 - 命令和按键是通往同一个函数的两个入口。`pf_reflect` 和 F5 跑的是同一个探针。
-- `env.dev` 为 false 时这些都不存在。整个 `palforge.test` 模块只在 dev 闸门之下才被 require，所以
-  发布版部署既没有 `pf_*` 命令，也没有 F1 和探针按键。
+- `env.dev` 为 false 时这些都不存在。整个 `palforge.test` 模块只在 dev 闸门之下才被 require，而
+  `tools/deploy.sh --release` 更是把 `palforge/test/` 从部署出去的树里整个删掉 —— 所以发布版的副本
+  既没有 `pf_*` 命令，也没有 F1 和探针按键，内核那唯一一次 `require` 答的是 `absent`。
 
 命令主体通过 `ExecuteInGameThread` 排进游戏线程，因为它触碰的全是活的 UObject；外面还包了一层
 `pcall`——一条会抛异常的命令，否则会把 UE4SS 的整个控制台处理器一起带走。
@@ -46,7 +47,7 @@ GuiConsoleVisible = 1
 
 ## 清单
 
-三十七个动作，分四组：始终存在的十八个，外加 `env.debug` 打开之后、每个声明式钩子各生成一个。
+四十二个动作，分四组：始终存在的十八个，外加 `env.debug` 打开之后、每个声明式钩子各生成一个，共二十四个。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -61,7 +62,7 @@ GuiConsoleVisible = 1
 | `pf_uiz` | 同时三个面板：z 序、按键路由、鼠标那一半，以及图层路线 |
 | `pf_reflect` `pf_pal` `pf_watch` `pf_title` `pf_uislot` `pf_uievents` | 六个探查探针，各占一个按键 |
 | `pf_hooks` `pf_hook <id>` `pf_hooks_all` | 需要游戏在跑的测试钩子（见下文） |
-| `pf_hook_<id>` | 每个声明式钩子生成一个名字，共十九个 |
+| `pf_hook_<id>` | 每个声明式钩子生成一个名字，共二十四个 |
 
 准备贴到别处的输出会用标记括起来，可以直接从日志里整段拿走：
 
@@ -102,7 +103,7 @@ GuiConsoleVisible = 1
 
 ## 需要游戏在跑的钩子
 
-有十九项测量在游戏关着的时候取不到。每一项都是 `test/hooks/` 下的声明式钩子，自己写明屏幕上需要
+有二十四项测量在游戏关着的时候取不到。每一项都是 `test/hooks/` 下的声明式钩子，自己写明屏幕上需要
 什么、是否会写入存档、以及它关闭的是哪个未决项。它们只在 `env.debug` 为 true 时加载。
 
 ```lua title="Scripts/palforge_dev.lua"
@@ -152,21 +153,24 @@ pf_native            # 世界就绪后立刻执行
 延迟比看上去更要紧。一只帕鲁要四到八秒才到位，所以需要身边有帕鲁的动作，不能和生成它的那次 spawn
 挤在同一口气里。
 
-这个文件里装的是**名字，不是代码**。每一行都在 `require("palforge.test").ACTIONS` 里查表，查不到
-的名字会被报告并跳过：
+这个文件里装的是**名字，不是代码**。`core/autorun.lua` 不写任何 `test/` 底下的名字：这张表是
+`test/init.lua` 的 `install()` 通过 `autorun.setActions(M.ACTIONS)` **交**给它的。每一行只是在那
+张表里查一次，查不到的名字会被报告并跳过：
 
 ```lua
--- autorun 对每一行做的事，写成一个表达式
-local run = require("palforge.test").ACTIONS[name]
+-- core/autorun.lua 拿着别人交给它的表所做的事
+local run = M._actions[name]        -- 由 test/init.lua 的 install() 设置一次
 if not run then log.warn(name .. ": no action of that name") end
 ```
 
-所以一个乱入的文件不可能执行按键做不到的事，而会写入的钩子在此之上还有自己的第二道闸门。
+在没有测试树的发布版里根本不存在这张表，于是这个队列就是一个零成本的空操作，而不是每次载入世界都
+去失败一次 require。所以一个乱入的文件不可能执行按键做不到的事，而会写入的钩子在此之上还有自己的
+第二道闸门。
 
 ## 小结
 
 - 每一项测量都是 `palforge.test` 的 `ACTIONS` 里的一项；启动日志那一行才是权威清单。
-- 没有 `env.dev` 就什么都不存在；十九个需要游戏的钩子还额外需要 `env.debug`。
+- 没有 `env.dev` 就什么都不存在；二十四个需要游戏的钩子还额外需要 `env.debug`。
 - UE4SS 的控制台默认关闭——改三项设置并重启。
 - 每条命令都会说明屏幕上需要什么，然后停下，而不是跑一半。
 - 跑任何钩子之前先 `pf_hooks`：它打印每道闸门，以及打开关着那道所需的一句话。

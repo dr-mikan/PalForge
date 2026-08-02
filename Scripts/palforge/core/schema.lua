@@ -472,14 +472,14 @@ function M.validId(v)
     if type(v) ~= "string" or #v == 0 then return false, "must be a non-empty string" end
     local om = manager()
     if not om then return true end   -- no registry loaded: there is no id model to enforce
-    if type(om.validId) == "function" then
-        local ok, why = om.validId(v)
-        if ok then return true end
-        return false, why or "is not an id object_manager can resolve"
-    end
-    local resolved, why = om.resolve(v)
-    if resolved then return true end
-    return false, (why or "cannot be resolved to a DataTable row spelling")
+    -- object_manager.validId is the ONE id rule, and this is a forward to it rather than a
+    -- preferred-if-present branch with a resolve() fallback behind it. The fallback used to be
+    -- here and could never run: object_manager ships in this tree and gained validId in the same
+    -- change, so the probe was constant-true. Two spellings of "is this a usable id" is how a
+    -- define-time refusal starts disagreeing with the resolver it exists to protect.
+    local ok, why = om.validId(v)
+    if ok then return true end
+    return false, why or "is not an id object_manager can resolve"
         .. ". A namespaced id is \"packid:name\", and both halves may hold letters, digits "
         .. "and _ only, because the row PalSchema writes for it is packid_name"
 end

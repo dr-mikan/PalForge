@@ -93,23 +93,6 @@ end
 -- perfectly well into a window that does not exist (core/autorun.lua's header records that as
 -- one of the three input routes that failed in turn). autorun.txt is the route that needs no
 -- console at all.
----@return boolean installed
----@return string? why  -- why not, when installed is false
-local function installDevCatalogCommand()
-    if type(RegisterConsoleCommandHandler) ~= "function" then
-        return false, "RegisterConsoleCommandHandler unavailable in this UE4SS"
-    end
-    local ok, err = pcall(function()
-        RegisterConsoleCommandHandler("ps_catalog", function()
-            local run = function() pcall(function() require("palforge.tests.catalog").dump() end) end
-            if type(ExecuteInGameThread) == "function" then ExecuteInGameThread(run) else run() end
-            return true
-        end)
-    end)
-    if not ok then return false, tostring(err) end
-    log.info("dev console command registered: ps_catalog (DataTable dumper, opt-in)")
-    return true
-end
 
 -- Game-start entry (main.lua calls this once).
 function M.initialize()
@@ -156,9 +139,6 @@ function M.initialize()
         end)
         record(okKeys, "dev keybinds incl. F4 unlock-all-technologies", tostring(keysErr))
 
-        local okCat, catWhy = installDevCatalogCommand()
-        record(okCat, "ps_catalog console command", tostring(catWhy))
-
         -- Editing a file and pressing a key beats restarting the game. F9 drops every
         -- palforge.* module and runs this function again; the engine-facing hooks stay as
         -- they were armed on the first load. See core/reload.lua for what that does and
@@ -166,34 +146,33 @@ function M.initialize()
         local okReload, reloadErr = pcall(function() require("palforge.core.reload").bind("F9") end)
         record(okReload, "F9 reload", tostring(reloadErr))
 
-        -- The headless unit bundle runs NOW (it touches nothing but Lua tables). It lives in
-        -- palforge/tests/, which SHIPS — this comment used to say the directory was gitignored
-        -- and that a clone was expected not to have it, which was true of .gitignore and wrong
-        -- of the code: the require below and the ps_catalog registration above are both boot
-        -- paths into that directory, so a clone without it was an install with two dangling
-        -- references and no way to tell. The .gitignore line was removed; "absent" now means an
-        -- incomplete copy and is reported as such rather than swallowed. The same directory
-        -- holds palforge.tests.catalog, which is what the ps_catalog console command dumps.
-        local unitState = requireState("palforge.tests")
-        if unitState == "loaded" then
-            local ranOk = pcall(function()
-                local tests = require("palforge.tests")
-                if tests and type(tests.run) == "function" then tests.run() end
-            end)
-            record(ranOk, "headless unit bundle (palforge.tests)", "run failed")
-        else
-            record(false, "headless unit bundle (palforge.tests)", unitState)
-        end
-
-        -- The in-game API suite is only LOADED here — requiring it registers every case
-        -- and binds F1. It spawns pals and hands out items, so it runs when you press the
-        -- key, never at startup. See palforge/test/init.lua for how to bind your own.
-        -- palforge/test/ is the module that binds F1: an install that omits
-        -- Scripts/palforge/test/ has no test suite and no F1, with nothing else in the log to
-        -- say why. (This line used to add "unlike palforge/tests/" — both directories are in
-        -- the repository now; see the note on the bundle above.)
+        -- ONE NAME, ONE CALL, AND THAT IS THE WHOLE OF THE KERNEL'S KNOWLEDGE OF THE TESTS.
+        --
+        -- This used to be four reaches into two directories whose names differ by one letter:
+        -- `require("palforge.tests")` + run() for the headless bundle, a `ps_catalog` handler
+        -- that named `palforge.tests.catalog` inside its own body, `require("palforge.test")`
+        -- for its load-time side effects, and -- in another file entirely -- core/autorun
+        -- pulling `require("palforge.test").ACTIONS` on every world load. The kernel knew the
+        -- SHAPE of the test tree, so the tree could not be moved, renamed or dropped without
+        -- editing production code in four places.
+        --
+        -- palforge/test/init.lua's install() now does all of it -- the boot bundle, F1, the
+        -- probe keys, the console commands, ps_catalog and handing core/autorun its action
+        -- table -- and reports each piece through the same `record` this block uses, so the log
+        -- reads as it did. `tools/deploy.sh --release` DELETES palforge/test/, so "absent" here
+        -- is the correct answer for a release build rather than a broken install.
         local testState = requireState("palforge.test")
-        record(testState == "loaded", "in-game API suite on F1 (palforge.test)", testState)
+        if testState == "loaded" then
+            local okInstall, installErr = pcall(function()
+                require("palforge.test").install(record)
+            end)
+            if not okInstall then
+                record(false, "the test tree (palforge.test)", tostring(installErr))
+            end
+        else
+            record(false, "the test tree (palforge.test): F1 suite, boot bundle, ps_catalog, "
+                .. "probe keys, autorun actions", testState)
+        end
 
         -- env.debug is the SECOND switch and it is narrower: the measurements that cannot run
         -- without a running game live in palforge/test/hooks (contract C7), are declared rather

@@ -89,12 +89,30 @@ local function readQueue()
     return out
 end
 
+---The action table this queue may run, HANDED OVER rather than reached for.
+---
+---This file used to do `require("palforge.test").ACTIONS` inside M.run, which put a production
+---module's only knowledge of the test tree in the middle of a loop — and made a release build,
+---where palforge/test/ is not deployed at all, take a pcall miss on every world load to
+---discover something it could have been told once. palforge/test/init.lua's install() calls
+---this; nothing else does, so with no test tree there is simply no table and the queue is a
+---no-op that costs nothing.
+---
+---It stays a NAME LOOKUP, never code: the queue file holds names, this table maps a name to a
+---function someone already wrote, and an unknown name warns. Nothing here can run anything a
+---keypress could not.
+---@param actions table<string, fun(arg: string?)>
+function M.setActions(actions)
+    if type(actions) ~= "table" then return false end
+    M._actions = actions
+    return true
+end
+
 ---Run the queue. Called once per world.ready; safe to call again (each world load re-reads the
 ---file, which is what makes an edit take effect without restarting the game).
 function M.run()
-    local actions
-    local ok = pcall(function() actions = require("palforge.test").ACTIONS end)
-    if not (ok and type(actions) == "table") then return end
+    local actions = M._actions
+    if type(actions) ~= "table" then return end
 
     for _, entry in ipairs(readQueue()) do
         local run = actions[entry.name]

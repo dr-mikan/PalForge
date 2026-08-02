@@ -86,6 +86,12 @@ local om     = require("palforge.core.object_manager")
 local icons  = require("palforge.core.icons")
 local items  = require("palforge.utils.items")
 local schema = require("palforge.core.schema")
+-- WHAT THIS PACK MADE THE GAME WRITE. :give is one of the three calls in the whole framework
+-- that puts a name into PALWORLD'S save rather than into PalForge's own sidecar, so a
+-- successful, pack-owned give is recorded in core/ledger. This file does NOT require that
+-- module: the record is written by utils.items.give, at the engine boundary, so that every
+-- caller of the public toolbox is covered and not only this one. Fail-soft either way — a
+-- ledger append never raises and never changes what :give returns.
 
 --=============================================================================
 -- SPEC — the shape of Item{ ... }, declared as data so it is enforced on every call and
@@ -343,9 +349,25 @@ wrap = function(cls) return setmetatable({ id = cls.id, _cls = cls }, Handle) en
 ---a line naming the item, the count and the evidence level.
 ---Observed in a real save: "give Wood x3: 140 -> 143", with the game's own pickup event firing
 ---alongside it. See utils.items.give.
+---
+---⚠️ THIS IS THE ONE ITEM ACTION THAT REACHES PALWORLD'S OWN SAVE, and it is the only reason
+---removing a pack can matter at all. PalForge's own state is a sidecar it owns; a StaticItemId
+---is not — it lands in FPalWorldSaveData.ItemContainerSaveData, which the game writes. When the
+---id belongs to a PACK, the row behind it exists only because PalSchema injected it, so a
+---successful give is recorded in core/ledger — per save, per pack — and that list is what lets
+---PalForge name, id by id, what an uninstall would leave dangling. A literal game id records
+---nothing: a vanilla row cannot stop existing. See core/ledger.lua's header.
 ---@param count integer?
 ---@return boolean ok  # true only when the inventory count was measured to rise
-function Handle:give(count) return items.give(self.id, count or 1) end
+function Handle:give(count)
+    local n = count or 1
+    -- The ledger row is written by utils.items.give itself, at the engine boundary, NOT here.
+    -- It used to be here, and that covered exactly one of that function's callers: anything
+    -- reaching `PalForge.utils.items.give` — a documented public toolbox — put a pack-owned
+    -- FName into the player's save with the removal report never hearing about it. See the end
+    -- of utils/items.give for the whole reasoning; core/character.addSkill does the same.
+    return items.give(self.id, n)
+end
 
 ---Remove `count` of this item from the local player's inventory (default 1) through the game's own
 ---APalWeaponBase:RequestConsumeItem(const FName& StaticItemId, int32 ConsumeNum), measured the

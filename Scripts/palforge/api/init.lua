@@ -67,6 +67,26 @@
 -- changes for a pack that does not — an unattributed definition registers with pack = nil,
 -- exactly as before.
 --
+-- AND A TENTH MEMBER, `.store` — THE PACK'S OWN SAVED STATE:
+--
+--   local api = PalForge.pack("mypack", { version = "1.0.0" })
+--   local db  = api.store
+--   db.set("tutorialSeen", true)          -- validated NOW, at your call site
+--   db.data().launches = (db.data().launches or 0) + 1
+--   db.save()                             -- durable now, and it tells you if it wasn't
+--   db.building(inst)                     -- that structure's persisted state table
+--
+-- It lands in ONE file that belongs to this pack alone: <Mods>/PalForge/state/<saveId>/mypack.json.
+-- The pack id is baked into the handle, so there is no way to reach another pack's store through
+-- it; an uninstalled pack costs zero reads and cannot be evicted by another pack's growth; and
+-- deleting that one file is a complete uninstall of everything PalForge kept for it. None of it
+-- is inside Palworld's .sav — the game's save is untouched and loads fine without PalForge (the
+-- one thing that DOES reach it is what a pack asks the GAME to write: see core/ledger.lua).
+--
+-- `opts.version` is written into that file's header, so a state file can say which build of the
+-- pack wrote it. Three pack ids are refused because the store owns those file names — see
+-- RESERVED below.
+--
 -- The ---@type annotations make LuaLS auto-complete the bare globals.
 -- (UE4SS gives each Lua mod its own state, so these globals are mod-local — no clash
 --  with the game or other mods.)
@@ -150,9 +170,117 @@ local EXTRA_CONSTRUCTORS = {
 -- of a pack file, rather than turning into an unresolvable id per definition later.
 local PACK_ID = "^[%w_]+$"
 
+-- THREE IDS THE STORE OWNS. A pack id is no longer only an id: it is a FILE NAME. Persisted
+-- state lives at <Mods>/PalForge/state/<saveId>/<packId>.json, one file per pack, and three
+-- names in that directory already belong to PalForge itself —
+--   _save         the per-save manifest (which world this folder is, which packs it holds)
+--   _unowned      records no pack can be attributed to yet
+--   _quarantine   the folder a file that would not parse is moved into, verbatim
+-- All three match ^[%w_]+$, so all three were legal pack ids until this line existed, and a
+-- pack called "_save" would have written its buildings straight over the manifest. Refused HERE,
+-- at the one call that mints a pack id, rather than defended in the store: one validation beats
+-- a "pack.<id>.json" naming convention that would cost legibility in every directory forever.
+--
+-- Neither half of the path can escape state/: spatial.saveId() gsubs [^%w_] to _ and prefixes
+-- "w_", and a pack id is ^[%w_]+$ — so neither can contain /, \, . or :. Written down because
+-- the store's key used to be a leaf name and is now a path.
+-- ASKED OF core/state RATHER THAN RESTATED. The three names were a literal here and a second
+-- literal at core/state's M.RESERVED, so a fourth reserved file name was a two-file edit whose
+-- failure mode is a pack writing over the manifest — the exact thing this guard exists to stop.
+-- The require is pcall'd and lazy for the same reason storeFor's is (see it, twenty lines
+-- down): api/init must load even when core.state does not. When it does not, the shape check
+-- above still runs and state.keyFor refuses the id later, so the degradation is a worse
+-- message, never a hole.
+local function reservedIds()
+    local ok, state = pcall(require, "palforge.core.state")
+    if ok and type(state) == "table" and type(state.RESERVED) == "table" then return state.RESERVED end
+    return {}
+end
+
 -- One scoped table per pack id, so `api.pack("x").Item == api.pack("x").Item` and a pack
 -- that calls it in ten files builds eight wrappers, not eighty.
 local scopedApis = {}
+
+-- The version a pack declared, by pack id. Recorded on the FIRST api.pack call that names one,
+-- because the scoped table is memoized and the store handle is built with it — a later call
+-- declaring a different version is noted and the first one stands, which is the same rule the
+-- memoization has always had for everything else on the scoped table. Declared HERE, above
+-- storeFor, because storeFor closes over it.
+local declaredVersion = {}
+
+-- ---- the store member ----
+
+-- A store that ISN'T. core/state is what owns persistence; if it did not load, a pack must not
+-- get a `store` that quietly accepts writes and drops them — that is the exact failure this whole
+-- store redesign exists to remove.
+--
+-- THE SPLIT IS READS vs WRITES, and it is deliberate. A READ answers nil, exactly as db.get does
+-- when a key was never set: a pack asking "have they seen the tutorial?" gets "no" and carries on,
+-- which is the same answer it would get on a fresh save. A WRITE answers false plus a sentence
+-- naming the pack and the cause, and `db.data()` hands back a table that RAISES on assignment —
+-- because `db.data().launches = 1` has no return value to check, so a refusal it cannot see is a
+-- silent loss. Nothing here silently succeeds, and a pack that never stores anything is unaffected.
+local function deadStore(packId, why)
+    local reason = string.format("PalForge.pack(%q).store is unavailable: %s", packId, why)
+    local function refuse() return false, reason end
+    local sealed = setmetatable({}, {
+        __newindex = function() error(reason, 2) end,
+    })
+    return {
+        get = function() return nil end,
+        set = refuse, delete = refuse, save = refuse,
+        keys = function() return {} end,
+        data = function() return sealed end,
+        building = function() return nil end,
+        buildings = function() return {} end,
+        ledger = function() return nil end,
+        -- Same shape core/state's report has, so a caller that reads it does not have to know
+        -- which of the two it got.
+        reclaim = function() return { pack = packId, applied = false, entries = {},
+                                      unreclaimable = {}, text = reason } end,
+        saveId = function() return nil end,
+        path = function() return nil end,
+        stats = function() return { health = "unavailable", lastError = reason } end,
+        diagnose = function() return reason end,
+    }
+end
+
+-- This pack's store handle. core/state is required LAZILY and behind a pcall for the same reason
+-- object_manager's logger is: the api must stay loadable by tooling outside the game, it must
+-- survive F9 (core/reload wipes modules, and a reference captured at file scope would close over
+-- a wiped one), and a store that failed to load must degrade to a named refusal rather than take
+-- every definition call down with it.
+--
+-- `opts.version` is accepted and validated above, recorded in declaredVersion, and handed to
+-- core/state as the SECOND ARGUMENT OF storeFor, where it becomes `palforge.packVer` in the
+-- pack's own file header.
+--
+-- ⚠️ IT IS A STRING, NOT A TABLE, and that is the whole of a bug this used to have. Two slices
+-- landed either side of this seam and each guessed a different shape: this file passed
+-- `{ version = ... }` and core/state.lua declares `M.storeFor(packId, packVer)` and tests
+-- `type(packVer) == "string"`. A table fails that test silently, so the declared version was
+-- dropped on the floor and every file a pack wrote through api.pack carried no packVer at all
+-- — while `state.storeFor(id, "2.3.0")` called directly worked, which is what made it look
+-- like core/state's gap rather than this line's. Every other call site in the tree passes the
+-- string. Do not "helpfully" wrap it in a table again.
+local function storeFor(packId)
+    local ok, state = pcall(require, "palforge.core.state")
+    if not ok or type(state) ~= "table" or type(state.storeFor) ~= "function" then
+        local why = "palforge.core.state did not load, so nothing this pack saves would survive "
+                 .. "the session"
+        require("palforge.utils.log").scope("api").warn(string.format(
+            "pack '%s': %s. Definitions, events and every other api call are unaffected", packId, why))
+        return deadStore(packId, why)
+    end
+    local built, store = pcall(state.storeFor, packId, declaredVersion[packId])
+    if not built or type(store) ~= "table" then
+        local why = "core.state.storeFor refused: " .. tostring(store)
+        require("palforge.utils.log").scope("api").warn(
+            string.format("pack '%s': %s", packId, why))
+        return deadStore(packId, why)
+    end
+    return store
+end
 
 -- Wrap a domain module: calling it defines INSIDE withPack, so object_manager.register
 -- attributes the entry to this pack; every other member (get, get_all, and whatever a
@@ -189,9 +317,11 @@ end
 
 -- The scoped api. `opts.depends` / `opts.recommends` (arrays of pack ids, or set-like
 -- tables) are recorded with object_manager so checkImport can answer "may this pack
--- mention that id?" without every call site threading the set through.
+-- mention that id?" without every call site threading the set through. `opts.version` is
+-- the pack's own version string; it is carried into the header of that pack's state file
+-- (palforge.packVer) so a state file can say which build of the pack wrote it.
 ---@param packId string
----@param opts? { depends?: string[], recommends?: string[] }
+---@param opts? { depends?: string[], recommends?: string[], version?: string }
 ---@return palforge.api
 function api.pack(packId, opts)
     if type(packId) ~= "string" or not packId:match(PACK_ID) then
@@ -199,10 +329,36 @@ function api.pack(packId, opts)
             .. "(it becomes the \"packid\" half of every \"packid:name\" this pack defines)",
             type(packId) == "string" and string.format("%q", packId) or type(packId)), 0)
     end
+    if reservedIds()[packId] then
+        error(string.format("PalForge: api.pack(%q): %q is RESERVED — a pack id is also the "
+            .. "file name its saved state lives under (state/<save>/%s.json), and PalForge "
+            .. "already owns _save, _unowned and _quarantine in that directory. Pick another id",
+            packId, packId, packId), 0)
+    end
     if opts ~= nil then
         if type(opts) ~= "table" then
             error(string.format("PalForge: api.pack(%q): the second argument must be a table "
-                .. "of { depends = { ... }, recommends = { ... } }", packId), 0)
+                .. "of { depends = { ... }, recommends = { ... }, version = \"1.0.0\" }", packId), 0)
+        end
+        if opts.version ~= nil then
+            if type(opts.version) ~= "string" then
+                error(string.format("PalForge: api.pack(%q): opts.version must be a string "
+                    .. "(got %s) — it is written verbatim into this pack's state file header",
+                    packId, type(opts.version)), 0)
+            end
+            local had = declaredVersion[packId]
+            if had == nil then
+                declaredVersion[packId] = opts.version
+            elseif had ~= opts.version then
+                -- Not an error: two files of one pack disagreeing about their own version is a
+                -- packaging mistake, not a reason to refuse to load. It is said once, because a
+                -- state file stamped with the wrong version is exactly the kind of thing nobody
+                -- notices until they are reading it at 2am.
+                require("palforge.utils.log").scope("api").warn(string.format(
+                    "pack '%s' declared version %q and then %q; the FIRST one is what its state "
+                    .. "file header carries, because the scoped api is built once per pack id",
+                    packId, tostring(had), tostring(opts.version)))
+            end
         end
         -- Iterating the FIELD NAMES, not { opts.depends, opts.recommends }: a pack that
         -- declares only `recommends` would leave a hole at index 1 of that array and ipairs
@@ -227,6 +383,15 @@ function api.pack(packId, opts)
         for _, name in ipairs(CONSTRUCTORS) do
             scoped[name] = scopeModule(api[name], packId, EXTRA_CONSTRUCTORS[name])
         end
+        -- THE TENTH MEMBER: this pack's own saved state, `PalForge.pack("mypack").store`. The
+        -- pack id is baked in, so there is no way to name another pack's store through it — the
+        -- isolation is the surface, not a convention.
+        --
+        -- ⚠️ THIS TOUCHES NO DISK. storeFor is a handle, not a load: no file is opened, no
+        -- directory is created, and a pack that registers no building definition and saves
+        -- nothing still produces no file at all. That is F-8 and it was measured closed in game;
+        -- a store that created its directory on the way past would silently reopen it.
+        scoped.store = storeFor(packId)
         scopedApis[packId] = scoped
     end
     return scoped

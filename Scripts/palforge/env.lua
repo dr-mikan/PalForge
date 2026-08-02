@@ -40,6 +40,18 @@ return {
     debug      = false,       -- game-required test hooks (test/hooks); needs dev too
     debugHooks = {},          -- per-hook opt-in for the hooks that WRITE: { ["pal-skills-equip"] = true }
     name       = "PalForge",
+    -- `version` is not only a log line any more: core/state.lua stamps it into the header of
+    -- every state file it writes (`palforge.forge`), so this string ends up on a player's disk,
+    -- once per mod per save, saying which build of the framework wrote those records. Changing
+    -- it is free — nothing dispatches on it — but it is the first thing anyone reads when a
+    -- record looks wrong after an update, so it should mean what it says.
+    --
+    -- TWO THINGS THAT ARE NOT HERE, deliberately, and where they are instead. WHERE the store
+    -- writes is resolved by utils/file/json_file.lua from its own module path (a debug.getinfo
+    -- walk to <Mods>/PalForge/state/), which is what keeps "delete the mod folder and it is all
+    -- gone" structurally true rather than dependent on a setting someone can point elsewhere.
+    -- The ON-DISK FORMAT VERSION is core/state.lua's M.FORMAT, next to the code that dispatches
+    -- on it. Neither belongs in a table whose whole job is dev/release switches.
     version    = "0.3.0",
 
     -- The Palworld build every capability in plan/TODO.md's Closed list was measured
@@ -49,17 +61,22 @@ return {
     -- by exactly that gap (AddItem declared five parameters where dumps/cxx/Pal.hpp had
     -- four, because the header dump predated the installed build by a single patch).
     --
-    -- `gameBuild` IS DECLARED BY HAND AND NOTHING VERIFIES IT. `gameBuildLive` is not a check
-    -- on it — it is CONTEXT for the reader of a log. Scripts/main.lua fills it in from the
-    -- running game and prints it beside the declared string; whether the two can be compared
-    -- at all depends on which route answered, and main.lua's ② block says which and why.
-    -- MEASURED 2026-08-02 16:39:33 (hook `game-build-live`): UKismetSystemLibrary answers
+    -- `gameBuild` IS DECLARED BY HAND AND IT IS NOW VERIFIABLE — that changed on 2026-08-02 and
+    -- this note used to say the opposite. `gameBuildLive` is what Scripts/main.lua fills in from
+    -- the running game and prints beside the declared string.
+    --
+    -- MEASURED 16:39:33 (hook `game-build-live`, run 1): UKismetSystemLibrary answers
     -- "++UE5+Release-5.1-CL-0" / "5.1.1-0+++UE5+Release-5.1" / "Pal" — Unreal's branch, Unreal's
-    -- version and the project name. NONE of them carries Palworld's patch number, so none is
-    -- compared with this string, and `gameBuildLive` reads `unknown (engine ...)` when they are
-    -- all that answered. Palworld's own version is UPalGameInstance::DisplayVersion (the string
-    -- on the title screen); main.lua reads it, and until one run prints it, the value below is
-    -- checked by a human comparing it with that corner of the title screen and by nothing else.
+    -- version and the project name. NONE of them carries Palworld's patch number, which is why
+    -- the startup banner's MISMATCH warning was a defect in the reader rather than a fact about
+    -- the install, and why `comparable` sits on none of the three.
+    --
+    -- MEASURED 17:37:40 (run 2): UPalGameInstance::DisplayVersion — the string Palworld puts on
+    -- its own title screen — answers "v1.0.2.101103", and UPalUtility::GetDisplayVersion answers
+    -- the same through core/signature with evidence `declared`. Two independent routes, matching
+    -- the value below. It is not readable at STARTUP (there is no PalGameInstance yet), so
+    -- main.lua reads it at the first world.ready and says so in the meantime; a mismatch after
+    -- that line is a real one.
     gameBuild     = "v1.0.2.101103",
     gameBuildLive = nil,
 

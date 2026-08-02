@@ -46,24 +46,31 @@ ue4ss/
                 ├── api/         <- the public surface a pack writes against
                 ├── core/        <- the engine: kernel, event system, Palworld bridges
                 ├── native/      <- Palworld's own content as data catalogs
-                ├── test/        <- the in-game API suite (SINGULAR - see below)
-                ├── tests/       <- the headless unit bundle, run at startup in dev
+                ├── test/        <- the whole dev test tree (a --release copy has none of it)
+                │   ├── units/   <- headless suites, run at startup
+                │   ├── cases/   <- the in-game API suite, on F1
+                │   ├── hooks/   <- the measurements that need the game running
+                │   ├── probes/  <- discovery dumps; they pass and fail nothing
+                │   └── tools/   <- dev instruments (the dumper behind ps_catalog)
                 └── utils/       <- log, json, file, items
 ```
 
 That is the same list `tools/deploy.sh` copies: `Scripts/main.lua` plus all of
 `Scripts/palforge/`, minus `deprecated/` and `tmp/`, which are reference-only and are not needed
-at runtime.
+at runtime. `--release` deletes `palforge/test/` from the staged copy on top of that — all 58
+files of it — so a player's tree has no test directory at all.
 
-Two entries are easy to leave out, and both have consequences that look like something else:
+Two entries are easy to leave out of a dev copy, and both have consequences that look like
+something else:
 
-- **`palforge/test/`, singular.** `core/registry.lua` requires `palforge.test`, and that module
-  is what binds **F1**. An install without this directory has no test suite and no F1 key in dev
-  mode, with nothing else in the log to explain it. (`palforge/tests/`, *plural*, is a different
-  thing — the headless unit bundle the kernel runs at startup in dev, and the module behind the
-  `ps_catalog` console command. It ships too: the `.gitignore` line that used to hide it was
-  removed once it turned out `core/registry.lua` requires it at boot, so a clone carries it. If
-  it is missing anyway, the kernel names it in its "dev tooling NOT loaded" line.)
+- **`palforge/test/`.** `core/registry.lua` requires `palforge.test` and calls its `install()`.
+  That one call binds **F1**, runs the headless bundle, gives each discovery probe its key,
+  registers every `pf_*` console command including `ps_catalog`, and hands `core/autorun` its
+  action table. A dev install without this directory has none of them, and the kernel names the
+  whole tree on its "dev tooling NOT loaded" line. A second directory once sat beside this one —
+  `palforge/tests/`, *plural*, a single character apart — holding the headless bundle and the
+  `ps_catalog` dumper, with production code reaching into both. There is one tree now: the
+  bundle is `test/units/` and the dumper is `test/tools/catalog.lua`.
 - **`palforge/autorun.txt`.** `core/autorun.lua` reads it from beside `palforge/` and runs named
   actions on world load. It is how anything gets run on a machine where no key and no console
   works — three input routes have failed in turn on this project.
@@ -217,22 +224,27 @@ key, on the same line as the bind:
 [PalForge.main][info] PalForge v0.3.0 starting | game build: ... | dev=true debug=true | dev overlay: loaded
 [PalForge.keyboard][info] bound F4 [keymap: unknown — the game's key config has not been read yet (the config source needs a loaded world), so nothing is claimed either way; run pf_keys inside a save]
 [PalForge.keyboard][info] keybinds loaded (1 function file(s): F4)
-[PalForge.registry][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
 [PalForge.keyboard][info] bound F9 [keymap: ...]
+[PalForge.hooks][info] 25 game-required hook(s) declared; `pf_hooks` prints each one's gate state and what would open it
 [PalForge.unittests][info] tests: 8 passed, 0 failed, 0 skipped (8 total)
 [PalForge.keyboard][info] bound F1 [keymap: ...]
+[PalForge.test][info] dev console command registered: ps_catalog (DataTable dumper, opt-in)
+[PalForge.test][info] console commands: pf_hook  pf_hook_audio_custom_file_loader  ...  pf_uiz  pf_watch
 [PalForge.test][info] keyboard: F1                   unknown  tests: all suites                        game: the game's key config has not been read
-[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, ps_catalog console command, F9 reload, headless unit bundle (palforge.tests), in-game API suite on F1 (palforge.test), game-required test hooks (palforge.test.hooks)
+[PalForge.registry][info] dev tooling loaded: dev keybinds incl. F4 unlock-all-technologies, F9 reload, headless unit bundle (test/units), in-game API suite on F1 + probe keys, ps_catalog console command (test/tools), autorun action table, game-required test hooks (palforge.test.hooks)
 [PalForge.registry][info] initialized (dev=true, debug=true, 17 class(es) registered)
 [PalForge.main][info] ready
 ```
 
-`tests: 8 passed ...` is the headless unit bundle, `palforge/tests/` — plural, and part of the
-repository, so this is the normal line. An install that dropped the directory gets it listed by
-name on a `dev tooling NOT loaded` line instead. That line is printed in both modes and names
-every piece that did not load, and why: a
-key that was never bound and a key that was bound and never arrived look identical from outside,
-and it is what tells them apart.
+`tests: 8 passed ...` is the headless unit bundle — `palforge/test/units/`, two suites and eight
+checks of pure Lua, which `test/init.lua`'s `install()` runs at boot before anything touches the
+game. The `dev tooling loaded:` line beneath it is that same `install()` reporting each piece back
+through the kernel: `core/registry.lua` knows one name, `palforge.test`, and makes one call. A dev
+install that dropped the directory gets the whole tree listed by name on a `dev tooling NOT
+loaded` line instead — and a `--release` copy does not carry it at all, so `absent` there is the
+correct state rather than a broken install. That line is printed in both modes and names every
+piece that did not load, and why: a key that was never bound and a key that was bound and never
+arrived look identical from outside, and it is what tells them apart.
 
 Two more lines belong to the world gate. PalForge waits for a save to finish loading before it
 touches anything in the world; the first line appears when the save is ready, the second when you
@@ -298,13 +310,15 @@ instead of diagnosed for an hour.
 
 ### What `dev` arms: nine keys
 
-`registry.initialize()` loads the keybind files under `core/keyboard/`, the F9 reload, the
-`ps_catalog` DataTable dumper, the headless unit bundle, and `palforge.test` — which is what binds
-F1 and gives each discovery probe its own key. Nine keys in total:
+`registry.initialize()` loads the keybind files under `core/keyboard/` and the F9 reload, then
+requires `palforge.test` and calls its `install()` — one name, one call. That call runs the
+headless unit bundle, binds F1, gives each discovery probe its own key, registers the
+`ps_catalog` DataTable dumper and every other `pf_*` console command, and hands `core/autorun`
+its action table. Nine keys in total:
 
 | Key | What it does | What it needs on screen |
 | --- | --- | --- |
-| **F1** | run the in-game API suite: 14 suites, 481 checks | works anywhere, but 28 checks skip without a loaded save |
+| **F1** | run the in-game API suite: 19 suites, 580 checks | works anywhere, but 28 checks skip without a loaded save |
 | **F2** | probe `title` — the game's own title menu button, so yours can match it | the title screen |
 | **F3** | probe `uislot` — that button's inner slot, read from a world | a loaded save |
 | **F4** | **unlock every technology in the loaded save** | a loaded save |
@@ -328,7 +342,7 @@ logs happily, and never once arrives. Every action also has a console command (`
 from `palforge/autorun.txt` on world load — three separate ways in, because three input routes
 have failed in turn on this project.
 
-`env.debug` is the second, narrower switch: it loads `palforge/test/hooks/`, the 19 measurements
+`env.debug` is the second, narrower switch: it loads `palforge/test/hooks/`, the 25 measurements
 that cannot run without a running game. They are declared rather than run — ask for one by name
 with `pf_hook <id>`, and `pf_hooks` lists every hook with the reason each would skip. The ones
 that write into a save need `env.debugHooks[id] = true` on top of that.
@@ -550,7 +564,7 @@ end
 
 `object_manager.owner(type, id)` names the pack a registration belongs to, and `entry` and
 `byResolved` answer the same question from the other two directions. With a dev deploy, **F1** is
-the quickest smoke test there is: it runs all 14 suites, and the summary says how many checks
+the quickest smoke test there is: it runs all 19 suites, and the summary says how many checks
 could not be answered and in which direction.
 
 ## Reaching the API
@@ -843,8 +857,9 @@ wanted.
 ## Summary
 
 - PalForge lives at `ue4ss/Mods/PalForge/Scripts/`, with `palforge/` next to `main.lua`. Any other
-  layout breaks it. Copy `palforge/test/` and `palforge/autorun.txt` with the rest: without the
-  first there is no F1, without the second there is no keyless way in.
+  layout breaks it. A dev copy needs `palforge/test/` and `palforge/autorun.txt` with the rest:
+  without the first there is no F1 and no `pf_*` command, without the second there is no keyless
+  way in. `--release` drops `palforge/test/` outright, and that is what a player's copy is.
 - Every dev tool ships off. `Scripts/palforge_dev.lua` — written by `tools/deploy.sh`, gitignored,
   never in a player's copy — is what arms the nine keys, and F4 unlocks every technology in the
   loaded save.

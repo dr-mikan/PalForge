@@ -97,7 +97,9 @@ local Item = api.Item
 Item{ id = "mypack:Potion", name = "Potion" }   -- pack = "mypack" として登録される
 ```
 
-返るのは同じ 9 メンバーです。8 つのコンストラクタは定義が `object_manager.withPack` の内側で走るよう
+返るのは同じ 9 つの api メンバーと、10 番目の `.store` です。`.store` はこのパック自身の保存された
+状態で、他のパックのファイルを名指しすることはできません。8 つのコンストラクタは定義が
+`object_manager.withPack` の内側で走るよう
 ラップされ、ドメインが名前付き関数として追加している定義経路も同様です。`Audio.bgm` と `Audio.se` も
 登録を行い、これらは `__call` ではなく `__index` 経由で到達するので名前を指定してラップしてあります。
 それ以外（`X.get`、`X.get_all`、`Player`）は素通りで、ラッパーは読み取り専用のビューです。書き込もう
@@ -106,6 +108,13 @@ Item{ id = "mypack:Potion", name = "Potion" }   -- pack = "mypack" として登�
 スコープ付きテーブルはパック id ごとに 1 つなので、
 `PalForge.pack("x").Item == PalForge.pack("x").Item` が成り立ちます。利用は任意で、帰属のない定義は
 `pack = nil` で登録されます。
+
+パック id は今や **ファイル名** でもあります。保存された状態は `state/<save>/<packId>.json` に
+置かれるので、3 つの id は書いた場所で拒否されます。`_save`、`_unowned`、`_quarantine` の 3 つで、
+どれもそのディレクトリで PalForge がすでに使っている名前です。`opts.version` は `depends` や
+`recommends` と並べて渡せます。これはフレームワークではなくあなたのパックのバージョンです。
+そのファイルに何が入り、削除すると何が起きるかは [保存される状態](/docs/concepts/saved-state) に
+あります。
 
 `depends` と `recommends` はレジストリに記録されます。これにより `checkImport` は「このパックがその
 id に言及してよいか」に答えられ、呼び出し側が集合を持ち回る必要がなくなります。定義が*言及する*
@@ -198,6 +207,7 @@ om.unregister("item", "mypack:Potion")   -- 何かを消したら true、空い�
 - `PalForge.pack("mypack")` は配下の定義すべてに帰属を付け、それが衝突を名指し可能にします。
 - 後勝ちですが黙っていません。パック間の再定義と解決形の共有には、それぞれ専用の警告があります。
 - 尋ねるのは `isRegistered` / `owner` / `entry` / `byResolved`、取り消すのは `unregister` です。
+- パック id は保存された状態が置かれるファイル名でもあるので、`_save` / `_unowned` / `_quarantine` は拒否されます。
 
 <Cards>
   <Card title="定義とハンドル" href="/docs/concepts/definitions">定義とは何か、何が返ってくるか</Card>

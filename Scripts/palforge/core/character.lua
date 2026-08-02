@@ -679,6 +679,19 @@ function M.addSkill(actor, id)
     log.info(string.format("addSkill %s (passive%s) [%s] -> %s",
         tostring(id), row ~= tostring(id) and (" as " .. row) or "", level,
         landed and "added" or "not in the read-back"))
+    -- THE PASSIVE BRANCH REACHES PALWORLD'S OWN SAVE, and the active branch above does not.
+    -- That asymmetry is the whole reason the ledger append sits here rather than at the top of
+    -- the function: a passive is an FName ROW id, and a pack's row exists only because PalSchema
+    -- injected it, so removing the pack leaves that name on the pal with nothing behind it. An
+    -- ACTIVE skill is one of 309 EPalWazaID values — a fixed vanilla enum Lua cannot add to — so
+    -- nothing written through AddEquipWaza can ever stop being valid and recording it would be
+    -- noise in the one report that has to be trustworthy.
+    -- Behind the read-back, not behind the call: `landed` is the game's own passive list, so a
+    -- row is written only for a skill that was SEEN on the character afterwards. The require is
+    -- lazy for load order only — core.ledger has no dependency back on this file.
+    if landed then
+        pcall(function() require("palforge.core.ledger").record("passive", id) end)
+    end
     return landed == true
 end
 

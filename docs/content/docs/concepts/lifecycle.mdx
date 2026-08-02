@@ -753,10 +753,10 @@ each scan's `FindAllOf` hands back new ones.
 `def.cls:new{ ... }` produces the instance, so every method you declared on the definition
 resolves on it. State comes from the saved record if there is one, otherwise from the
 definition's `state` field, which may be a table or a factory function. A fresh instance is
-written to `state/entities_<saveId>.json` under the mod folder. `saveId` is read off
-`PalGameInstance`: the save DIRECTORY name first (`GetSelectedWorldSaveDirectoryName`, or
-its backing property), then the world's display name, sanitised and prefixed `w_`. When
-neither answers it falls back to the shared bucket `world`.
+written to `state/<saveId>/<mod id>.json` under the mod folder — one directory per save, one
+file per mod. `saveId` is read off `PalGameInstance`: the save DIRECTORY name first
+(`GetSelectedWorldSaveDirectoryName`, or its backing property), then the world's display name,
+sanitised and prefixed `w_`. When neither answers it falls back to the shared bucket `world`.
 </Step>
 
 <Step>
