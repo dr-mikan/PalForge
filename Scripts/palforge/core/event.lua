@@ -473,8 +473,13 @@ local READY_POLLS           = 5    -- consecutive ~1s polls with a valid player 
 local SCAN_REPORT_FIRST = 20    -- sweeps before the first report (~10 s at SCAN_MS = 500)
 local SCAN_REPORT_EVERY = 120   -- sweeps between cost reports thereafter (~60 s)
 local scanCost = RT.scanCost or { sweeps = 0, ms = 0, peakMs = 0, actors = 0, bound = 0,
-                                  rendered = 0, deferredBind = 0, deferredRender = 0 }
+                                  rendered = 0, deferredBind = 0, deferredRender = 0,
+                                  findMs = 0, loopMs = 0, idle = 0 }
 RT.scanCost = scanCost
+
+-- Handed to the actor loop when the scan declines to enumerate, so the loop needs no second
+-- shape. One table for the life of the module; nothing ever writes to it.
+local EMPTY_ACTORS = {}
 
 -- =====================================================================================
 -- SCAN BUDGET — the fix for the burst half
@@ -1201,8 +1206,33 @@ local function scanOnce()
     end
 
     local t0 = os.clock()
-    local okFind, actors = pcall(FindAllOf, "PalBuildObject")
-    if not okFind or type(actors) ~= "table" then return 0 end
+
+    -- ⚠️ NOTHING TO MATCH MEANS NOTHING TO ENUMERATE. Measured 2026-08-06 in a 623-structure
+    -- base with ZERO building definitions registered: **69.25 ms average, 124 ms peak, every
+    -- 500 ms** — 14% of wall-clock held on the game thread by a Lua callback that bound nothing,
+    -- rendered nothing and could not have, because no definition claimed any build id. Every one
+    -- of those milliseconds went into FindAllOf plus IsValid / GetFullName / K2_GetActorLocation
+    -- over 623 actors, and then a `if not buildId then return end` for every single one.
+    --
+    -- That is the DEFAULT state of the framework: a player with no building pack installed pays
+    -- the entire cost of the building runtime forever, for a feature they are not using. The
+    -- early-out is not an optimisation of the scan, it is the scan declining to run.
+    --
+    -- `Registry.byBuildId` is rebuilt by refreshDefs() above, so this reads the current truth on
+    -- every sweep and costs one `next`. The moment a pack registers a Building, the scan resumes
+    -- on the next sweep with no further signal needed.
+    --
+    -- The removal sweep below is NOT skipped: instances can outlive the definition that made
+    -- them (a pack unregistering, an F9 reload), and those still have to be able to go away.
+    local anyDef = next(Registry.byBuildId) ~= nil
+    local actors = EMPTY_ACTORS
+    local tFind = t0
+    if anyDef then
+        local okFind, found = pcall(FindAllOf, "PalBuildObject")
+        if not okFind or type(found) ~= "table" then return 0 end
+        actors = found
+    end
+    tFind = os.clock()
     local matched = {}
     local changes = 0
 
@@ -1422,9 +1452,16 @@ local function scanOnce()
 
     -- COST, counted rather than argued. os.clock is CPU time for this Lua state, which is the
     -- right measure here: what matters is how long this callback holds the game thread.
-    local dt = os.clock() - t0
+    local tEnd = os.clock()
+    local dt = tEnd - t0
     scanCost.sweeps  = scanCost.sweeps + 1
     scanCost.ms      = scanCost.ms + dt * 1000
+    -- SPLIT, so the next refactor is aimed rather than guessed: FindAllOf walks every UObject in
+    -- the process and the per-actor loop pays three native calls each. Which of the two dominates
+    -- decides whether the answer is "enumerate less often" or "touch each actor less".
+    scanCost.findMs  = scanCost.findMs + (tFind - t0) * 1000
+    scanCost.loopMs  = scanCost.loopMs + (tEnd - tFind) * 1000
+    if not anyDef then scanCost.idle = scanCost.idle + 1 end
     scanCost.actors  = scanCost.actors + #actors
     scanCost.bound   = scanCost.bound + changes
     scanCost.deferredBind   = scanCost.deferredBind + deferredBind
@@ -1435,15 +1472,18 @@ local function scanOnce()
     if scanCost.sweeps >= due then
         scanCost.reports = scanCost.reports + 1
         log.info(string.format(
-            "scan cost over %d sweeps: %.2f ms avg, %.2f ms peak | %d actor(s) enumerated per "
-            .. "sweep | %d bound, %d deferred bind(s), %d deferred render(s) | budgets %d/%d",
-            scanCost.sweeps, scanCost.ms / scanCost.sweeps, scanCost.peakMs,
+            "scan cost over %d sweeps: %.2f ms avg (%.2f find + %.2f loop), %.2f ms peak | %d "
+            .. "actor(s) per sweep | %d bound, %d deferred bind(s), %d deferred render(s) | %d "
+            .. "sweep(s) declined to enumerate (no building definition registered) | budgets %d/%d",
+            scanCost.sweeps, scanCost.ms / scanCost.sweeps,
+            scanCost.findMs / scanCost.sweeps, scanCost.loopMs / scanCost.sweeps, scanCost.peakMs,
             math.floor(scanCost.actors / scanCost.sweeps + 0.5), scanCost.bound,
-            scanCost.deferredBind, scanCost.deferredRender,
+            scanCost.deferredBind, scanCost.deferredRender, scanCost.idle,
             tonumber(M.SCAN_BIND_BUDGET) or 16, tonumber(M.SCAN_RENDER_BUDGET) or 4))
         scanCost.sweeps, scanCost.ms, scanCost.peakMs = 0, 0, 0
         scanCost.actors, scanCost.bound = 0, 0
         scanCost.deferredBind, scanCost.deferredRender = 0, 0
+        scanCost.findMs, scanCost.loopMs, scanCost.idle = 0, 0, 0
     end
     return changes
 end
