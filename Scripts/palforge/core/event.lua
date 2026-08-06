@@ -408,6 +408,58 @@ local MISS_THRESHOLD        = 6    -- consecutive scans an instance may be unsee
 local INTERACT_DEBOUNCE_SEC = 1.0
 local READY_POLLS           = 5    -- consecutive ~1s polls with a valid player pawn
 
+-- =====================================================================================
+-- SCAN COST — measured, not estimated, because the estimate was what got this wrong
+-- =====================================================================================
+--
+-- WHAT HAPPENED ON 2026-08-06. `building-actor-streaming` published 48 build ids into a base
+-- of 623 PalBuildObject actors. One sweep bound 227 instances; the next consumed every one of
+-- their `_meshPending` flags, so hundreds of LoadAsset + component creations landed in a single
+-- game-thread callback. Palworld closed seven seconds later. Nothing in this file had a budget
+-- — `grep budget` over 2200 lines returned nothing — so there was no mechanism that could have
+-- spread that work even in principle.
+--
+-- THE STEADY STATE IS THE BIGGER PROBLEM, and it is the one a player reaches without any hook.
+-- A Palworld base grows without bound. Per sweep, for N tracked actors, this scan pays:
+--
+--   FindAllOf("PalBuildObject")   1   walks EVERY UObject — this file already calls it the
+--                                     known periodic-hitch source, at PAL_SCAN_MS
+--   actor:IsValid()               N   native
+--   uo.key(actor) = GetFullName() N   native — the price of the A-1 fix, paid every sweep
+--   actorPos() = K2_GetActorLocation  N   native
+--   spatial.indexUpdate           N   Lua
+--
+-- At 623 actors and 2 Hz that is ~3,700 native calls a second for actors that are already bound
+-- and have not changed. At 5,000 it is ~30,000. The shape is wrong, not the constant.
+--
+-- SO: MEASURE FIRST. These counters are written by scanOnce and reported once every
+-- SCAN_REPORT_EVERY sweeps, at a cost of a few integer adds per sweep. Every number in the
+-- paragraphs above is COUNTED FROM THE CODE and none of it has been timed in a running game;
+-- the report line is what replaces the arithmetic with a measurement, and it is deliberately
+-- landing before the budget below rather than after, so the two can be compared.
+local SCAN_REPORT_EVERY = 120   -- sweeps between cost reports (~60 s at SCAN_MS = 500)
+local scanCost = RT.scanCost or { sweeps = 0, ms = 0, peakMs = 0, actors = 0, bound = 0,
+                                  rendered = 0, deferredBind = 0, deferredRender = 0 }
+RT.scanCost = scanCost
+
+-- =====================================================================================
+-- SCAN BUDGET — the fix for the burst half
+-- =====================================================================================
+--
+-- A sweep may CREATE at most this many new instances and RENDER at most this many deferred
+-- meshes. Anything over the budget is not dropped: it is simply not done this sweep, and the
+-- next sweep finds the same actor unbound and tries again. That is what makes the carry-over
+-- free — the scan is idempotent by construction, so "do less now" needs no queue.
+--
+-- WHY THESE NUMBERS. A bind is a table build plus a spatial insert plus a persistence mark;
+-- a render is a LoadAsset and a component creation, which is the expensive one and the one
+-- that was in the crash. 16 binds a sweep populates a 623-structure base in ~20 s of walking
+-- around it, which is invisible next to a world load; 4 renders a sweep is 8 meshes a second.
+-- Both are deliberately readable at runtime (`event.SCAN_BIND_BUDGET = 64`) so a session that
+-- wants the old all-at-once behaviour can ask for it and see what it costs.
+M.SCAN_BIND_BUDGET   = 16
+M.SCAN_RENDER_BUDGET = 4
+
 -- world.ready is DEFERRED: the ready-watch opens gate.ready and raises gate.pendingReady,
 -- and the first reconstruction scan that completes afterwards emits the channel. The scan
 -- is what creates the live instances, so emitting at gate-open time would dispatch
@@ -1114,10 +1166,20 @@ local function scanOnce()
         if not okP then log.warn("world records: the orphan pass failed: " .. tostring(eP)) end
     end
 
+    local t0 = os.clock()
     local okFind, actors = pcall(FindAllOf, "PalBuildObject")
     if not okFind or type(actors) ~= "table" then return 0 end
     local matched = {}
     local changes = 0
+
+    -- THIS SWEEP'S BUDGET. Read from the module fields rather than captured, so a session can
+    -- retune them between sweeps. Nothing that goes over is dropped: the scan is idempotent, so
+    -- an actor left unbound this sweep is simply found unbound on the next one and tried again.
+    -- That is the whole mechanism — no queue, no ordering, no state to get wrong — and it is
+    -- what turns 227 binds in one game-thread callback into 16 a sweep.
+    local bindBudget   = tonumber(M.SCAN_BIND_BUDGET)   or 16
+    local renderBudget = tonumber(M.SCAN_RENDER_BUDGET) or 4
+    local deferredBind, deferredRender = 0, 0
 
     for _, actor in ipairs(actors) do
         local ok = pcall(function()
@@ -1158,9 +1220,19 @@ local function scanOnce()
                     spatial.indexUpdate(bound)
                 end
                 -- deferred mesh: the actor survived >=1 scan, so it's initialized now.
+                -- BUDGETED. A render is a LoadAsset plus a component creation, and it is the
+                -- expensive half of the 2026-08-06 crash: hundreds of these landed in one
+                -- callback because every instance bound by the previous sweep had its flag set.
+                -- The flag is only CLEARED when the render is actually attempted, so an instance
+                -- deferred here keeps its place and renders on a later sweep.
                 if bound._meshPending then
-                    bound._meshPending = false
-                    pcall(function() bound:render() end)
+                    if renderBudget > 0 then
+                        renderBudget = renderBudget - 1
+                        bound._meshPending = false
+                        pcall(function() bound:render() end)
+                    else
+                        deferredRender = deferredRender + 1
+                    end
                 end
                 return
             end
@@ -1211,6 +1283,17 @@ local function scanOnce()
                 end
                 return
             end
+
+            -- BUDGETED. Everything below this line CREATES: a record read, a possible
+            -- unquarantine, an instance, a spatial insert, a persistence mark and two channel
+            -- emits. Deferring here rather than after `makeInstance` is what makes the deferral
+            -- free — nothing has been allocated or emitted yet, so the next sweep reaching this
+            -- same actor does exactly what this one would have done.
+            if bindBudget <= 0 then
+                deferredBind = deferredBind + 1
+                return
+            end
+            bindBudget = bindBudget - 1
 
             local w   = state.world()
             local rec = w.entities[key]
@@ -1301,6 +1384,29 @@ local function scanOnce()
                 changes = changes + 1
             end
         end
+    end
+
+    -- COST, counted rather than argued. os.clock is CPU time for this Lua state, which is the
+    -- right measure here: what matters is how long this callback holds the game thread.
+    local dt = os.clock() - t0
+    scanCost.sweeps  = scanCost.sweeps + 1
+    scanCost.ms      = scanCost.ms + dt * 1000
+    scanCost.actors  = scanCost.actors + #actors
+    scanCost.bound   = scanCost.bound + changes
+    scanCost.deferredBind   = scanCost.deferredBind + deferredBind
+    scanCost.deferredRender = scanCost.deferredRender + deferredRender
+    if dt * 1000 > scanCost.peakMs then scanCost.peakMs = dt * 1000 end
+    if scanCost.sweeps >= SCAN_REPORT_EVERY then
+        log.info(string.format(
+            "scan cost over %d sweeps: %.2f ms avg, %.2f ms peak | %d actor(s) enumerated per "
+            .. "sweep | %d bound, %d deferred bind(s), %d deferred render(s) | budgets %d/%d",
+            scanCost.sweeps, scanCost.ms / scanCost.sweeps, scanCost.peakMs,
+            math.floor(scanCost.actors / scanCost.sweeps + 0.5), scanCost.bound,
+            scanCost.deferredBind, scanCost.deferredRender,
+            tonumber(M.SCAN_BIND_BUDGET) or 16, tonumber(M.SCAN_RENDER_BUDGET) or 4))
+        scanCost.sweeps, scanCost.ms, scanCost.peakMs = 0, 0, 0
+        scanCost.actors, scanCost.bound = 0, 0
+        scanCost.deferredBind, scanCost.deferredRender = 0, 0
     end
     return changes
 end

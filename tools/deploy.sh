@@ -3,6 +3,7 @@
 #
 #   tools/deploy.sh                          # DEV deploy into the default install below
 #   tools/deploy.sh "/path/to/Palworld"      # dev deploy somewhere else
+#   tools/deploy.sh --writes-safe            # + the four hooks that only touch PalForge state
 #   tools/deploy.sh --release                # what a player gets: no dev overlay, no keys
 #   tools/deploy.sh --release "/path/to/Palworld"
 #   tools/deploy.sh --package                # build dist/PalForge.zip — no game required
@@ -46,12 +47,13 @@ for arg in "$@"; do
         --release) MODE="release" ;;
         --dev)     MODE="dev" ;;
         --writes)  WRITES=1 ;;
+        --writes-safe) WRITES=safe ;;
         --package) MODE="release"; PACKAGE=1 ;;
         -h|--help)
             sed -n '2,36p' "${BASH_SOURCE[0]}"
             exit 0 ;;
         -*)
-            echo "unknown option: $arg (expected --release, --dev, --package or a path)" >&2
+            echo "unknown option: $arg (expected --release, --dev, --writes, --writes-safe, --package or a path)" >&2
             exit 2 ;;
         *)
             GAME="$arg" ;;
@@ -193,6 +195,22 @@ fi
 # flag rather than the default precisely because three of the ten cannot be undone: a spawned pal
 # has no per-individual removal, an unlocked technology has no lock, and the waza write is the one
 # call in this tree that has ever correlated with the game closing.
+# --writes-safe: THE FOUR THAT CANNOT REACH PALWORLD'S SAVE. store-save-roundtrip,
+# store-crash-recovery, save-survives-pack-removal and building-actor-streaming create, corrupt
+# and rewrite files under <Mods>/PalForge/state/ and nothing else — deleting that directory undoes
+# every one of them. They are separated from --writes because the reason --writes is guarded does
+# not apply to them: nothing here is irreversible, so leaving them off has a cost (a queued hook
+# refuses by name and the session measures nothing) and no benefit.
+if [ "$MODE" = "dev" ] && [ "$WRITES" = "safe" ]; then
+    sed -i 's/^-- \(env\.debugHooks\["store-save-roundtrip"\]\)/\1/;
+            s/^-- \(env\.debugHooks\["store-crash-recovery"\]\)/\1/;
+            s/^-- \(env\.debugHooks\["save-survives-pack-removal"\]\)/\1/;
+            s/^-- \(env\.debugHooks\["building-actor-streaming"\]\)/\1/' "$STAGE/palforge_dev.lua"
+    echo "--writes-safe: the four state-only hook opt-ins are ON (store-save-roundtrip,"
+    echo "               store-crash-recovery, save-survives-pack-removal, building-actor-streaming)."
+    echo "               They touch <Mods>/PalForge/state/ only — never Palworld's save."
+fi
+
 if [ "$MODE" = "dev" ] && [ "$WRITES" = "1" ]; then
     sed -i 's/^-- env\.debugHooks/env.debugHooks/' "$STAGE/palforge_dev.lua"
     echo "⚠️  --writes: all ten env.debugHooks opt-ins are ON in this deploy. THROWAWAY SAVE ONLY."

@@ -247,9 +247,46 @@
 #
 # The watch runs ten minutes and prints one line a second. Quit whenever you like after the
 # suite line appears — everything after that is the streaming watch finishing its window.
-20 pf_hook_building_actor_streaming
-60 pf_hook_ui_update_event
-120 pf_tests
+# ---- QUEUED 2026-08-06. Nothing here can reach Palworld's save. ----
+#
+#   8 s   store-save-roundtrip     RUN 2, and it is the cheap one: run 1 deliberately left
+#                                  pf_probe.json + .bak on disk, so this run reads across a
+#                                  world teardown what a PREVIOUS session wrote. That is the
+#                                  trip a pack's onLoad makes, and nothing has ever measured it.
+#                                  Needs the SAME save run 1 used (w_1DF0E44B...).
+#  25 s   building-actor-streaming ⚠️ WALK OR FAST-TRAVEL PAST 287 m AND COME BACK while this
+#                                  samples. 287 m with all 7 structures still listed is the last
+#                                  reading; the answer wanted is the distance the count first
+#                                  DROPS. Standing still for two minutes is also a result — it is
+#                                  the control. Publishes the ids near you and retracts them.
+#  70 s   ui-update-event          open and close the inventory, open the build menu.
+# 130 s   pf_tests                 the suite, in a world.
+#
+# Both write hooks are opted in by `tools/deploy.sh --writes-safe`, which is what deployed this.
+# They write under <Mods>/PalForge/state/ and nowhere else — delete that directory and every
+# trace of them is gone. The irreversible three (spawn a pal, unlock a technology, teach a move)
+# are NOT on and are not here.
+# ---- 2026-08-06, AFTER THE CRASH. Measurement only; nothing here publishes anything. ----
+#
+# The last run closed the game: building-actor-streaming published 48 build ids into a base of
+# 623 actors, one sweep bound 227 instances and the next tried to render all of them. Two things
+# changed since — core/event budgets binds and renders per sweep, and the hook now publishes at
+# most 3 ids / 24 actors — but NEITHER HAS BEEN RUN IN A GAME, so this queue does not run the
+# hook. It runs the thing that tells us whether the budget works.
+#
+# WHAT TO DO: load the SAME big base and just play for a couple of minutes. The scan reports its
+# own cost every ~60 s:
+#
+#   [PalForge.event][info] scan cost over 120 sweeps: N ms avg, M ms peak | K actor(s)
+#                          enumerated per sweep | ... | budgets 16/4
+#
+# That line is the measurement. Every figure in plan/TODO.md about what this scan costs was
+# COUNTED FROM THE CODE and never timed; this replaces the arithmetic. Paste it back.
+#
+# Re-enable the streaming hook only once that number is known to be sane.
+# 25 pf_hook_building_actor_streaming
+8 pf_hook_store_save_roundtrip
+130 pf_tests
 
 # =====================================================================================
 # ★ THE GAME-REQUIRED TEST HOOKS (test/hooks/). Twenty-four measurements that CANNOT be taken

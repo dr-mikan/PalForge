@@ -259,10 +259,39 @@ hooks.declare{
             h:value("build ids standing here", #ids > 0 and table.concat(ids, ", ") or "none readable")
             for _, b in ipairs(ids) do h:value("  " .. b, counts[b] .. " actor(s)") end
 
+            -- ⚠️ CAPPED, AND THE CAP IS THE WHOLE OF THE 2026-08-06 LESSON. This block used to
+            -- publish EVERY id standing here. In a real base that is not three ids, it is 48 —
+            -- and the base behind them held 623 actors (Wood_Foundation 165, Wood_Wall_V2 85,
+            -- Wood_Roof 82). One sweep bound 227 instances, the next consumed all of their
+            -- _meshPending flags, and Palworld closed seven seconds later.
+            --
+            -- core/event now budgets binds and renders per sweep, so that burst cannot recur.
+            -- This cap is the SECOND line, and it is here because an instrument should ask for
+            -- the smallest thing that answers its question: R-1 needs SOME records to lose, not
+            -- every record in the base. The rarest ids are chosen deliberately — a build id with
+            -- three actors gives three records to watch, and one with 165 gives 165 for no extra
+            -- information. `h:value` names exactly what was left alone, so the run says what it
+            -- did not do rather than quietly doing less.
+            local MAX_IDS, MAX_ACTORS = 3, 24
+            table.sort(ids, function(a, b) return counts[a] < counts[b] end)
+            local chosen, budget = {}, MAX_ACTORS
+            for _, b in ipairs(ids) do
+                if #chosen >= MAX_IDS or counts[b] > budget then break end
+                chosen[#chosen + 1] = b
+                budget = budget - counts[b]
+            end
+            table.sort(chosen)
+            h:value("chosen to publish (rarest first)", #chosen > 0
+                and table.concat(chosen, ", ") or "none")
+            h:value("deliberately NOT published", string.format(
+                "%d of %d id(s) — an instrument asks for the smallest thing that answers it, and "
+                .. "publishing all of them is what closed the game on 2026-08-06",
+                #ids - #chosen, #ids))
+
             local nb = select(2, pcall(require, "palforge.native.buildings"))
             local published, failed = {}, {}
             if type(nb) == "table" and type(nb.publish) == "function" then
-                for _, b in ipairs(ids) do
+                for _, b in ipairs(chosen) do
                     local ok, res = pcall(nb.publish, b)
                     if ok and res then published[#published + 1] = b
                     else failed[#failed + 1] = b .. " (" .. tostring(res) .. ")" end
