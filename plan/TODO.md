@@ -14,7 +14,8 @@ Sections:
 
 - **Before publish** — empty. Nothing gates a public release any more; the paragraph there says
   what closed the last one and keeps the reason the item existed.
-- **Open (1)** — `audio-setvolume-audible`, and it is hedged on purpose.
+- **Open** — empty. The one item that was here is now GitHub issue #1; the section says why,
+  and where a new defect should go.
 - **Implemented, never exercised by a game (7)** — shipped code no Palworld session has ever run.
   Each names the ONE action that settles it and says whether a release should wait. This is the
   list to read when deciding what the next session does.
@@ -107,41 +108,23 @@ and nothing should pretend to.
 
 ---
 
-## Open (1)
+## Open — tracked on GitHub, not here
 
-### `audio-setvolume-audible` — nobody has confirmed that anything got quieter
+**Nothing is open in this file any more.** The one item that was —
+`audio-setvolume-audible`, where a bus volume of 0.00 was not silent — is
+**[issue #1](https://github.com/dr-mikan/PalForge/issues/1)**, filed 2026-08-07 with its
+measurement, its two possible outcomes and the exact run that settles it.
 
-- **Hook:** `pf_hook audio-setvolume-audible` — needs a loaded save. Deliberately NOT `writes`: it
-  makes noise, not a save edit.
-- **Where the measurement lives:** `api/audio.lua:426-435`, in `Handle:setVolume`'s own doc string.
+**Why it moved, and where things go from now on.** This file is for work whose shape is still
+being decided — a defect nobody has characterised, a design that is not settled. Once an item
+is *characterised and just needs doing*, a tracker is the better home: it can be assigned,
+closed by a commit, and read by someone who has not read this file. `audio-setvolume-audible`
+reached that state the moment its "one action that settles it" was written down.
 
-**What ran.** 2026-08-02 at 21:39: the same explosion four times, 8 s apart, at bus volume
-**1.0 / 0.25 / 0.00 / 1.0**, with `setVolume` and `play` both returning true on all four and unity
-restored at the end. Asked afterwards whether steps 2 and 3 were quieter, the operator answered —
-twice, and hedged both times — that they seemed to be.
-
-**⚠️ Volume 0.00 was not silent.** That is the fact, and it is the whole item.
-
-**What that does NOT establish, in either direction.** A bus volume of zero that is still audible
-has the same shape as `SpawnMonster` and `GetItem` once did — declared, issued, no effect — but
-nothing has separated *the parameter never reaches the mixer* from *something else interfered*:
-another emitter, the wrong actor's Wwise game object, or the explosion being posted somewhere other
-than the object whose output bus was scaled. One hedged human observation is more than this call had
-before (nobody had heard the parameter do anything at all) and it is not a verdict. **Do not upgrade
-this item on the strength of the direction matching.**
-
-**What it is not blocked on.** The native declaration is read and matched:
-`UAkGameplayStatics::SetOutputBusVolume(float BusVolume, AActor* Actor)`
-(`dumps/cxx/AkAudio.hpp:748`), actor-wide by construction, which is why *which* sound handle it was
-called on is ignored. The narrower RTPC route is closed with evidence — see *Do not re-measure*.
-`setVolume` returns true for **ISSUED** and its doc string says so in those words, so the shipped
-surface is already honest about this.
-
-**THE ONE ACTION THAT SETTLES IT.** Re-run the hook with the listener told **in advance** that the
-question is *silence at step 3*, not loudness anywhere — with the game's own sliders at a known
-position and nothing else audible. If 0.00 is silent, the item closes positive and the doc string
-loses its hedge. If 0.00 is audible, the item becomes a different and answerable question — which
-Wwise game object the sound was posted on — and that is a new hook, not this one.
+So: **a NEW defect or an unsettled design starts here; a characterised one goes to
+[Issues](https://github.com/dr-mikan/PalForge/issues).** The sections below are not
+open items — they are the record (*What the running game found*, *Do not re-measure*) and the
+work that is finished but unexercised.
 
 ---
 

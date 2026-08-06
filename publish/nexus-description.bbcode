@@ -1,0 +1,109 @@
+[size=5][b]PalForge — a content framework for Palworld[/b][/size]
+
+[b]This is a modder's tool, not a gameplay mod.[/b] On its own it changes nothing you can see: it adds no items, no pals and no buildings. What it does is let someone else add them in a short Lua file instead of a large one.
+
+If you are here to play, you want a mod [i]built on[/i] PalForge, not PalForge.
+
+[line]
+
+[size=4][b]What it does[/b][/size]
+
+You describe a piece of content — a building, an item, a pal, a skill, a status effect, a sound, a model, a menu — and PalForge registers it, wires it to the game's own events, and gives it somewhere to keep its state.
+
+[code]require("palforge.api")
+
+Building{
+    id = "CampFire",                        -- the game's own build id
+    events = {
+        onRightClick = function(self, ctx)  -- fires on the real campfire, in a real save
+            Item.get("Wood"):give(5)
+        end,
+    },
+}[/code]
+
+That is a complete, working mod. Right-clicking any campfire in your base gives you five wood.
+
+[line]
+
+[size=4][b]⚠️ SINGLE-PLAYER ONLY[/b][/size]
+
+[b]PalForge targets single-player Palworld. Dedicated servers and co-op guests are not supported and are not tested.[/b] There is no replication layer, and the item, spawn and event routes are all client-authoritative. A pack may appear to work for the host and do nothing for anyone else.
+
+This is a deliberate scope decision, not an oversight. Please do not report multiplayer behaviour as a bug — the answer is this paragraph.
+
+[line]
+
+[size=4][b]Requirements[/b][/size]
+
+[list]
+[*][b]Palworld[/b] — measured against [b]v1.0.2.101103[/b] (Steam, Win64). Other builds will probably work; that is the one every capability was tested on, and the startup line prints both the build it was measured on and the build you are running, so a mismatch is visible rather than mysterious.
+[*][b]UE4SS[/b] with the Lua mod loader. If you already run other Palworld Lua mods, you have it.
+[*][b]CheatManagerEnablerMod[/b] — [i]optional[/i]. PalForge builds a cheat manager itself for spawning; the enabler only helps the item helpers (give / take / unlock).
+[/list]
+
+[line]
+
+[size=4][b]Install[/b][/size]
+
+[list=1]
+[*]Download the zip.
+[*]Drop the [b]PalForge[/b] folder into [font=Courier New]Pal/Binaries/Win64/ue4ss/Mods/[/font].
+[*]Start the game. Check [font=Courier New]ue4ss/UE4SS.log[/font] for a line beginning [font=Courier New]PalForge v0.3.0 starting[/font].
+[/list]
+
+The zip contains one folder, named PalForge, and the shape of the zip is the install instruction. Nothing is written to your save by installing it.
+
+[line]
+
+[size=4][b]What actually works[/b][/size]
+
+Every capability below was confirmed in a real save, not inferred from a header:
+
+[list]
+[*][b]Buildings[/b] — placement, right-click, load, tick, removal, and per-structure state that survives a reload
+[*][b]Items[/b] — give, take, count, and the craft / obtain / use / discard events
+[*][b]Pals[/b] — spawn at a position, read and write skills, mesh and material overrides
+[*][b]Skills[/b] — activation and passive equip / unequip events
+[*][b]Status effects[/b] — the game's own 38 ailments, applied and removed
+[*][b]Audio[/b] — a 1957-entry catalog of the game's own sounds
+[*][b]UI[/b] — panels mounted into Palworld's own layout, with declared keys and mouse buttons
+[/list]
+
+And the honest other half, because a framework that oversells is worse than one that is small:
+
+[list]
+[*][b]A pack cannot ship its own mesh, texture, sound or material[/b] as a game asset. It can reference any of the game's own, and it can load geometry from an .obj on disk. Custom textures are wired but unproven.
+[*][b]Some things the engine simply does not expose[/b] — there is no "structure was destroyed" event and no "skill hit something" event on this build, and PalForge says so in the log rather than pretending.
+[/list]
+
+[line]
+
+[size=4][b]Does it touch my save?[/b][/size]
+
+[b]PalForge never writes to Palworld's save file.[/b] Its own state — which structures a pack is tracking, and whatever that pack chose to remember — lives in plain JSON under [font=Courier New]ue4ss/Mods/PalForge/state/[/font], one folder per save, one file per mod. Delete the mod folder and all of it is gone with no effect on your world.
+
+What a [i]pack built on PalForge[/i] does is a different question — an item it gives you goes into your inventory, which is in your save, and that item's row exists because that pack is installed. Ask its author.
+
+[line]
+
+[size=4][b]Performance[/b][/size]
+
+The building runtime does not poll. It watches Palworld's own events, and it only enumerates the world when something happened that could have changed it. Measured in a base with 623 structures: [b]2.2 ms per sweep, with 4 of 120 sweeps doing any work at all[/b]. A session with no building pack installed pays nothing — it declines to run entirely.
+
+[line]
+
+[size=4][b]For modders[/b][/size]
+
+[list]
+[*]Full documentation, in English, Japanese and Chinese: [url=https://dr-mikan.github.io/PalForge/]dr-mikan.github.io/PalForge[/url]
+[*]Source, issues and the complete engineering record: [url=https://github.com/dr-mikan/PalForge]github.com/dr-mikan/PalForge[/url]
+[*]MIT licensed. Build on it, fork it, ship it.
+[/list]
+
+Editor completion works out of the box — PalForge ships a generated [font=Courier New]types.lua[/font], so a Lua language server knows every field of every declaration and every method of every handle.
+
+[line]
+
+[size=4][b]Credits[/b][/size]
+
+Built on [url=https://github.com/UE4SS-RE/RE-UE4SS]UE4SS[/url]. Namespaced content ids follow the convention [url=https://github.com/Okaetsu/PalSchema]PalSchema[/url] writes into the game's data tables.

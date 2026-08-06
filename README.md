@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="PalForge — a content framework for Palworld" width="720">
+</p>
+
 # PalForge
 
 A content framework for **single-player Palworld**, written in Lua and running on
@@ -20,6 +24,11 @@ Building{
 
 Full documentation: **https://dr-mikan.github.io/PalForge/** ·
 Source: **https://github.com/dr-mikan/PalForge** · MIT · measured against Palworld **v1.0.2.101103**
+
+Found a defect, or want to know what is already known to be broken?
+**[Issues](https://github.com/dr-mikan/PalForge/issues)** is where characterised work lives;
+`plan/TODO.md` is the engineering record behind it, including what was measured and what was
+deliberately not built.
 
 ---
 
