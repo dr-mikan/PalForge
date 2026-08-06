@@ -1220,6 +1220,13 @@ local wrap  -- forward decl; the UI.Handle wrapper is defined in the BOTTOM sect
 ---@param opts UI.DefineOpts?
 ---@return UI.Handle
 local function define(spec, opts)
+    -- Options first, and through the shared parser rather than read inline. `opts and
+    -- opts.register == false` cannot distinguish a misspelled key from an absent one, so
+    -- `{ regsiter = false }` used to register quietly; schema.defineOpts raises on an unknown
+    -- key, on a non-table second argument, and on the wrong type for either option. Parsing
+    -- BEFORE Spec:validate also means a caller who got the second argument wrong hears about
+    -- that argument instead of about a spec that was fine.
+    local register, pack = schema.defineOpts(opts, "UI")
     spec = Spec:validate(spec, "UI")
     -- THE ID IS CHECKED FOR THE SHAPE `resolve` REQUIRES, HERE, AT DEFINE TIME. An id with a
     -- colon whose halves are not [%w_]+ ("my-pack:Panel") resolves to nothing at every engine
@@ -1423,8 +1430,8 @@ local function define(spec, opts)
     -- defect in it: an element that failed to register still mounts and still works, so it must
     -- not take the whole definition down, but nothing else in the session would ever say that
     -- UI.get(id) will not find it.
-    if not (opts and opts.register == false) then
-        local ok, err = pcall(om.register, "ui", spec.id, cls, { pack = opts and opts.pack })
+    if register then
+        local ok, err = pcall(om.register, "ui", spec.id, cls, { pack = pack })
         if not ok then
             log.err(string.format("UI %q was built but NOT registered: %s. The handle returned "
                 .. "here still mounts; what will not work is UI.get(%q), UI.get_all() and every "

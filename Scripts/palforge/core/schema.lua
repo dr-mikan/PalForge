@@ -384,7 +384,44 @@ function M.derive(name, base, overrides)
         assert(base._byName[fname],
             string.format("schema.derive(%s): %q is not a field of %s", name, fname, base.name))
     end
-    return M.define(name, fields, { handle = base.handle })
+    local derived = M.define(name, fields, { handle = base.handle })
+
+    -- CARRY THE BASE'S OWN `validate`, and this is a correctness fix rather than a convenience.
+    -- A spec may rawset `validate` on ITSELF to add cross-field passes that the field list cannot
+    -- express — Mesh.Spec does (api/mesh.lua:169), and it is where `resolvePackPath` runs on
+    -- `model`/`texture` and where an `SM_` model declared as `kind = "skeletal"` gets warned
+    -- about. `M.define` builds a FRESH spec object, so before this line the derivative inherited
+    -- only core/schema's shared method and both passes were silently absent from it. The visible
+    -- consequence: a named `Mesh{ model = "art/x.obj" }` resolved the relative path and an inline
+    -- `Building{ mesh = { model = "art/x.obj" } }` did not — same declaration, two behaviours,
+    -- no diagnostic. rawget so an inherited method is not mistaken for an override.
+    local own = rawget(base, "validate")
+    if own then rawset(derived, "validate", own) end
+    return derived
+end
+
+---Forget a declared spec. The inverse of `define`, and it exists for one caller shape: a TEST
+---that declares throwaway specs and has to leave the registry as it found it. `test/cases/schema`
+---registers eight namespaced specs on every F1 press (Inner, Spec, Dup, Derived, ReqDefault,
+---FnDefault, Untyped, Checked) and had no way to take them back, so a long dev session grew the
+---list `schema.all()` walks — inert, but the sweep in `test/support` could not reach it.
+---
+---Returns true when something was removed, false when the name was not declared. Never raises:
+---forgetting what is not there is the caller's normal case, not an error.
+---
+---⚠️ NOT a runtime facility. A spec is consumed by a live definition class; dropping one out from
+---under a definition does not un-validate anything already built, and re-declaring the same name
+---afterwards is what `define`'s duplicate check exists to catch. Use it in teardown, nowhere else.
+---@param name string
+---@return boolean removed
+function M.undefine(name)
+    if type(name) ~= "string" or registry[name] == nil then return false end
+    local self = registry[name]
+    registry[name] = nil
+    for i = #order, 1, -1 do
+        if order[i] == self then table.remove(order, i) end
+    end
+    return true
 end
 
 ---A declared spec by name ("Pal.Spec", "Pal.Spec.Events", ...), or nil.

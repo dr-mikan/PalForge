@@ -216,7 +216,11 @@ local wrap  -- forward decl; the Mesh.Handle wrapper is defined in the BOTTOM se
 ---@param opts table?
 ---@return Mesh.Handle
 local function define(spec, opts)
-    opts = (type(opts) == "table") and opts or {}
+    -- Validated at the call site by the shared parser, like the other seven domains. The old
+    -- `opts = (type(opts) == "table") and opts or {}` coerced a non-table to empty and then read
+    -- `opts.register` straight off it, so `Mesh(spec, "register")` and `{ regsiter = false }` were
+    -- both silently "register it" rather than errors. schema.defineOpts raises on either.
+    local register, pack = schema.defineOpts(opts, "Mesh")
     spec = Spec:validate(spec, "Mesh")
     if spec.id == nil then
         error("PalForge: Mesh: field \"id\" is required (an unnamed mesh cannot be "
@@ -241,9 +245,9 @@ local function define(spec, opts)
     -- `spec` is already a fresh, validated, defaults-filled copy that nothing else holds
     -- a reference to, so the definition can BE it rather than another transcription.
     local cls = setmetatable(spec, Class)
-    if opts.register ~= false then
+    if register then
         pcall(function()
-            om.register("mesh", spec.id, cls, opts.pack and { pack = opts.pack } or nil)
+            om.register("mesh", spec.id, cls, pack and { pack = pack } or nil)
         end)
     end
     return wrap(cls)

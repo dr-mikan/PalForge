@@ -325,6 +325,27 @@ function M.sweep()
             end
         end
     end
+
+    -- THE SPEC REGISTRY IS A SECOND POPULATION, and until schema grew an `undefine` this sweep
+    -- could not reach it: test/cases/schema declares eight namespaced specs per press (Inner,
+    -- Spec, Dup, Derived, ReqDefault, FnDefault, Untyped, Checked — measured across two
+    -- consecutive run()s rather than counted off the call sites) and every one of them stayed in
+    -- the list schema.all() walks, for the life of the session. Inert, unlike a stray definition,
+    -- because nothing dispatches per lookup over the spec list — but a `schema.all()` that grows
+    -- by eight every time someone presses F1 is a thing that reads as a leak to whoever finds it
+    -- next, and the docs print that list as "exactly what the game prints".
+    --
+    -- Namespaced the same way and swept the same way, so nothing real can be reached: a spec
+    -- named by support.id() carries the palforge_test: prefix and a declared spec cannot.
+    local schema = require("palforge.core.schema")
+    if type(schema.undefine) == "function" then
+        for _, spec in ipairs(schema.all()) do
+            local name = type(spec) == "table" and spec.name or spec
+            if M.isTestId(name) then
+                if schema.undefine(name) then removed = removed + 1 end
+            end
+        end
+    end
     return removed
 end
 

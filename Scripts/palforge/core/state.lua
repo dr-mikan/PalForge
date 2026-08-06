@@ -809,6 +809,16 @@ end
 -- the alternative is the whole pack's file failing on one bad record instead of one record
 -- being skipped by name. Nothing here validates the RECORD's own fields: those are written
 -- by this file and by core/event, not by a pack.
+--
+-- ⚠️ AND WHY IT IS STILL PAID, because the obvious fix is not one. `json.validate` now RETURNS
+-- the text it produced (utils/json.lua, fourth return value), so the measured bytes are there
+-- for the taking — but the second pass is not a second encode of `state` on its own. It is the
+-- encode of the WHOLE DOCUMENT, which contains `state` as a sub-table. Reusing the first pass
+-- would mean splicing a pre-encoded fragment into a document encode, and this store's tests
+-- assert that a machine-written document is BYTE-IDENTICAL through the strict path. Trading a
+-- guaranteed-identical serialiser for one saved pass over a handful of fields is the wrong way
+-- round. The return value is there for a caller who wants the text for its own sake; this one
+-- deliberately does not take it.
 local function partition(packId)
     local w = S.world
     local buildings, orphans = {}, {}

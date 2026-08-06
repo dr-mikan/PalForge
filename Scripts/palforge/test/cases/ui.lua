@@ -1449,9 +1449,20 @@ end)
 -- The routing rule is about WHO IS TOP, so a case that asserts it needs the stack to itself.
 -- In a headless run this is always true; in a live session with a panel already up it is not,
 -- and a skip is the honest answer rather than a failure about somebody else's element.
+-- ⚠️ THIS IS THE ONE GATING AXIS THE THREE-ENVIRONMENT MODEL DOES NOT DESCRIBE, and saying so is
+-- the point of this comment. headless / title-screen / loaded-save is a partition of SESSIONS; a
+-- non-empty UI stack is a partition of MOMENTS WITHIN one. No number of runs in different
+-- environments covers it, because the same session answers differently before and after anything
+-- mounts — and `pf_uiz` deliberately leaves three panels up for a minute and a half.
+--
+-- So it reports as SETUP, not as a bare skip and not as an environment: "a world is loaded but is
+-- not in the state the check needs" is exactly what this is, it is the direction core/unittests
+-- declares for it, and the summary counts it apart from the environments instead of inflating
+-- the count of runs a full measurement supposedly takes. The reason still says how to open it,
+-- because that is the whole difference between a skip and a silence.
 local function ownStack(t)
     if #UI.stack() > 0 then
-        t:skip("SKIPPED THE EMPTY-STACK DIRECTION — " .. #UI.stack() .. " UI element(s) are "
+        t:skipNeedsSetup("SKIPPED THE EMPTY-STACK DIRECTION — " .. #UI.stack() .. " UI element(s) are "
             .. "already mounted and this case asserts against a stack it owns. It is INVERSE-"
             .. "gated on state rather than on a world: headless the stack is always empty, and in "
             .. "a live session with a panel up (pf_uiz leaves three) it is not. Unmount them, or "
@@ -2037,7 +2048,17 @@ s:test("a key PalForge already holds is refused, and the refusal names the holde
     -- F1 runs the test suite. The old registry replaced a callback in place and said nothing,
     -- so a panel asking for F1 would have swallowed the runner — which is the one collision this
     -- tree can actually do something about, so it is checked BEFORE the game's.
-    if not reg.isBound("F1") then t:skip("F1 is not bound in this session") end
+    -- SESSION, not a bare skip. F1 is bound by test/init.lua when the keyboard layer could reach
+    -- UE4SS's RegisterKeyBind; headless there is no such function and the bind is refused with a
+    -- logged reason, so this check has nothing to collide WITH. That is a property of the
+    -- session's native surface, not of which environment it is running in — the same distinction
+    -- every other skip in this file now makes, and this was the last one in the tree still
+    -- landing in the summary's "did not say which" bucket.
+    if not reg.isBound("F1") then
+        t:skipUnanswerable("F1 is not bound in this session, so there is no holder to collide with — "
+            .. "the keyboard layer only binds when UE4SS's RegisterKeyBind is reachable, and it "
+            .. "logs the refusal when it is not")
+    end
     local st = reg.status("F1")
     t:eq(st.state, "palforge", "our own binding is the answer")
     t:truthy(st.why:find("REPLACE", 1, true), "and the reason says what registering again does")

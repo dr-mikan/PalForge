@@ -419,6 +419,15 @@ local wrap  -- forward decl; the Building.Handle wrapper is defined in the BOTTO
 ---@param opts table?  # { register = boolean, pack = string }
 ---@return Building.Handle
 local function define(spec, opts)
+    -- VALIDATE THE OPTIONS AT THE CALL SITE, the way the other seven domains do. This used to be
+    -- two inline `type(opts) == "table" and opts.register == false` reads, which is not the same
+    -- thing: an inline read cannot tell `{ register = false }` from `{ regsiter = false }`, so a
+    -- typo'd option was silently ignored — and for THIS domain that is not cosmetic. A Building
+    -- that registers when the caller asked it not to is picked up by core/event's next 500 ms
+    -- scan, and every matching actor in the world becomes a tracked, PERSISTED instance. That is
+    -- the exact failure `register = false` exists to prevent (F-8, a publish gate), reached by
+    -- one transposed letter. schema.defineOpts raises on an unknown key instead.
+    local register, pack = schema.defineOpts(opts, "Building")
     spec = Spec:validate(spec, "Building")
     -- The id SHAPE is checked here, at define time, and it is not the same check as the
     -- schema's nonEmpty. An id whose halves are not [%w_]+ ("my-pack:Bench") registers
@@ -456,9 +465,10 @@ local function define(spec, opts)
     -- is otherwise fine — the class is built and returned either way. `register = false` skips
     -- it entirely: the Handle works, core/event never sees the definition, and nothing is
     -- persisted for it.
-    if not (type(opts) == "table" and opts.register == false) then
-        local packOpts = (type(opts) == "table" and opts.pack) and { pack = opts.pack } or nil
-        pcall(function() om.register("building", spec.id, cls, packOpts) end)  -- core/event + get() find it
+    if register then
+        pcall(function()
+            om.register("building", spec.id, cls, pack and { pack = pack } or nil)
+        end)  -- core/event + get() find it
     end
     return wrap(cls)
 end

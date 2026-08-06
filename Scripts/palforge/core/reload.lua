@@ -79,6 +79,15 @@ local M = {}
 -- WHAT-EXISTS half of the kernel (core/registry.lua's own responsibility split) and it holds
 -- the only copy of every registered definition. Dropping it is what split a pack's content off
 -- from the framework at the first F9 — see the block above for the full account.
+--
+-- ⚠️ `core.state` IS DELIBERATELY ABSENT, AND IT SURVIVES F9 ANYWAY — for a reason that is not
+-- this table. Its whole runtime hangs off `_G.__PalForgeState` (core/state.lua:157,174), the same
+-- trick core/event uses for the bus and the building registry, so re-requiring the module rebinds
+-- to the state that is already there and no record is lost. That is a property of core/state, not
+-- a decision recorded here, which is exactly why it is written down here: if anyone ever moves
+-- that table off `_G` and into a module-local, **`palforge.core.state` must join this list in the
+-- same commit** or the first F9 will hand the runtime an empty store and it will persist empty
+-- records over a live base. The failure would be silent and it would be in the player's file.
 M.KEEP = {
     ["palforge.env"] = true,
     ["palforge.utils.log"] = true,

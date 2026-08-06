@@ -331,12 +331,18 @@ of headless / title screen / loaded save; an earlier run predicted `444 / 0 / 37
 and `466 / 0 / 15` in a save out of 481 and **both landed exactly**, which is the strongest form the
 claim could take. What a future run should compare is the **skip structure**, not the totals.
 
-- **The gap is still the wrong way round, and it is still unexplained.** Headless answers
-  `577 / 0 / 35`; the same suite with the in-game conditions simulated answers `558 / 0 / 54` — **19
-  more skips in the session that has more, not less, available to it.** The two totals do not say
-  WHICH checks differ; only the per-check skip reasons do, and nobody has read them side by side.
-  `ownStack` below is one known family that skips on something the environment model does not
-  describe, so part of the gap is already named.
+- ~~**The gap is still the wrong way round, and it is still unexplained.**~~ **READ SIDE BY SIDE,
+  2026-08-03, and there is nothing wrong with it.** The two runs were compared per check rather
+  than by total: headless skips **36**, the same suite with the engine simulated skips **48**, and
+  **every one of the 12 extra is a `no-engine` check** — the `[mesh]` texture-shape dispatch, six
+  `[ui]` cases that assert what happens with no controller and no owner, `[ui] keymap.refresh with
+  no game`, and four `[store_runtime]` cases. A check whose claim is *"with no engine under it, X"*
+  is UNMEASURABLE the moment an engine exists, so a richer session necessarily skips more, not
+  fewer. The direction was never a defect; it is what the third environment MEANS.
+  One check goes the other way and is equally correct: `[events] the ready gate is shut while
+  there is no player pawn` skips headlessly (no `LoopAsync`) and runs once the engine is stubbed.
+  Reproduce with `comm` over the two runs' `SKIP [suite] name (direction)` lines — the totals never
+  could have said this, and that was the real finding.
 - **The minimum full measurement is TWO runs, and neither is the pair the summary suggests.** A
   headless `lua5.4` run covers the no-engine and no-world checks (there is no world in a bare Lua
   process either); one F1 in a loaded save covers the 31 world-gated ones and the 3 the session

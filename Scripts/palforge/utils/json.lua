@@ -481,7 +481,16 @@ function M.validate(value)
         return false, "", string.format("is %.0f KiB encoded; the per-key limit is %d KiB.",
             #text / 1024, L.bytes / 1024)
     end
-    return true
+    -- HAND BACK THE TEXT WE ALREADY PRODUCED. The size limit can only be checked on the real
+    -- encoded bytes, so this function always encodes; returning the result turns a caller's
+    -- "validate, then encode" into "validate, then use what validate encoded". core/state's
+    -- partition() was the second pass — a record's `state` went through the encoder twice on
+    -- every flush, once to be measured and once to be written.
+    --
+    -- The extra return is the FOURTH value and every existing caller ignores it, so this changes
+    -- nothing for anyone who does not want it: the contract is still `ok` first, then `path` and
+    -- `reason` on failure. On failure `text` is nil, because there is nothing valid to hand on.
+    return true, nil, nil, text
 end
 
 return M
