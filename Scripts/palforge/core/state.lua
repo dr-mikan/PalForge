@@ -1365,6 +1365,28 @@ function M.ledgerAdd(packId, kind, id, n)
 end
 
 -- What a reclaim can and cannot undo, and WHY — read off the binary rather than assumed.
+---The installed reclaim drivers, by ledger kind. EMPTY HERE ON PURPOSE — see db.reclaim for why
+---this module cannot build them: undoing an item goes through api/item and undoing a passive
+---through core/character, and core/state requires nothing from api/, which is what keeps the
+---dependency graph acyclic. api/init installs what it can at load.
+---
+---A driver is `fn(id, n) -> done, why` where `done` is `true` / the count reclaimed / 0, and
+---`why` explains anything short of all of it. It may raise; db.reclaim pcalls it and reports the
+---failure against that row rather than losing the whole report.
+---@type table<string, fun(id: string, n: number): any, string?>
+M.RECLAIM_DRIVERS = {}
+
+---Install (or remove, with nil) the driver for one ledger kind. Returns false for a kind this
+---build does not ledger, so a typo is caught rather than silently doing nothing forever.
+---@param kind string
+---@param fn fun(id: string, n: number): any, string?
+---@return boolean installed
+function M.setReclaimDriver(kind, fn)
+    if not LEDGER_KIND[kind] then return false end
+    M.RECLAIM_DRIVERS[kind] = fn
+    return true
+end
+
 local RECLAIM = {
     item    = { can = true,  limit = "the local player's own bag only, and it needs a spawned "
                              .. "weapon actor; an item moved to a chest is out of reach" },
@@ -1556,12 +1578,43 @@ function M.storeFor(packId, packVer)
                 end
             end
         end
-        -- The DOING half is deliberately not built here: it needs api/item's take and
-        -- core/character's RemovePassiveSkill, and this module requires nothing from api/ —
-        -- that is what keeps the dependency graph acyclic. This delivers reclaim's INPUT.
+        -- THE DOING HALF IS INJECTED, NOT REQUIRED. Undoing an item needs api/item's take and
+        -- undoing a passive needs core/character's RemovePassiveSkill, and this module requires
+        -- nothing from api/ — that is what keeps the dependency graph acyclic. So the driver is
+        -- handed IN (M.setReclaimDriver, installed by api/init at load) and this stays the layer
+        -- that knows WHAT was recorded rather than the layer that knows how to take it back.
+        -- With no driver installed the report says exactly that, in those words, instead of
+        -- claiming an attempt it did not make.
         if rep.applied then
             for _, row in ipairs(rep.entries) do
-                if row.reclaimable then row.status = "not attempted (no reclaim driver on this build)" end
+                if not row.reclaimable then
+                    row.status = "impossible"
+                else
+                    local drv = M.RECLAIM_DRIVERS[row.kind]
+                    if not drv then
+                        row.status = "not attempted (no reclaim driver for " .. row.kind
+                            .. " on this build)"
+                    else
+                        -- Fail-soft by construction: a driver that raises must not take the
+                        -- whole report down, and a partial reclaim is a real outcome that the
+                        -- row has to be able to say. `done` is how many of `n` came back.
+                        local ok, doneOrErr, why = pcall(drv, row.id, row.n)
+                        if not ok then
+                            row.status = "FAILED: " .. tostring(doneOrErr)
+                        elseif doneOrErr == true or doneOrErr == row.n then
+                            row.done   = row.n
+                            row.status = "reclaimed"
+                        elseif type(doneOrErr) == "number" and doneOrErr > 0 then
+                            row.done   = doneOrErr
+                            row.status = string.format("partly reclaimed (%d of %d)%s",
+                                doneOrErr, row.n, why and (" — " .. tostring(why)) or "")
+                        else
+                            row.done   = 0
+                            row.status = "not reclaimed"
+                                .. (why and (" — " .. tostring(why)) or "")
+                        end
+                    end
+                end
             end
         end
         local parts = {}

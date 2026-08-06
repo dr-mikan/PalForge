@@ -229,6 +229,15 @@ local Spec = schema.define("Pal.Spec", {
     -- fallback is a string path too and :iconOf answers string|nil, always. Before this, the
     -- field carried no `type =` and the accessor could hand back a string path or whatever the
     -- author declared, which is a union every caller had to branch on.
+    -- THE TWO-SPELLINGS TRAP, as a field instead of as folklore. The same thing is spelled
+    -- one way as a blueprint / build id and another as a DataTable row on this build —
+    -- SheepBall / Sheepball, WorkBench / Workbench — and `icons.resolve` is case-SENSITIVE
+    -- (core/icons.lua:40-42), so the id dispatch keys on is not always the id the icon table
+    -- answers to. native/pals.lua carries M.ROW_ID for exactly this and its own M.iconOf works
+    -- around it, but that is catalog-level: a HANDLE still missed, because Class:iconOf had
+    -- only `id` to go on. Declaring the row id closes it at the level a pack actually holds.
+    { "iconId",      type = "string",
+                     doc = "the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`." },
     { "icon",        type = "string",
                      doc = "/Game/... texture path used when the icon DataTable has no row for this id" },
     { "events",      type = "table", of = Events, doc = "lifecycle handlers (grouped)" },
@@ -289,9 +298,23 @@ end
 -- id dispatch keys on, Sheepball is the DataTable row this lookup answers to — and the match
 -- here is case-SENSITIVE (core/icons.lua:40-42).
 function Class:iconOf()
-    local id = om.resolve(self.id) or self.id
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.pal, id) end)
-    if ok and tex ~= nil then return tex end
+    -- THE ROW ID FIRST, then the id, then the declared fallback. `iconId` exists because the id
+    -- this thing DISPATCHES on is not always the id the icon table answers to: the same creature
+    -- is SheepBall as a blueprint and Sheepball as a DataTable row, the same structure is
+    -- WorkBench and Workbench, and icons.resolve is case-SENSITIVE (core/icons.lua:40-42). The
+    -- catalogs have carried that as data since native/pals.lua's M.ROW_ID, but only their own
+    -- iconOf() consulted it, so a HANDLE — which is what a pack holds — still missed. Trying the
+    -- declared row id first and the id second means both spellings hit and neither has to be
+    -- known by the caller.
+    local tried = {}
+    if type(self.iconId) == "string" and #self.iconId > 0 then
+        tried[#tried + 1] = om.resolve(self.iconId) or self.iconId
+    end
+    tried[#tried + 1] = om.resolve(self.id) or self.id
+    for _, id in ipairs(tried) do
+        local ok, tex = pcall(function() return icons.resolve(icons.TABLES.pal, id) end)
+        if ok and tex ~= nil then return tex end
+    end
     return self.icon
 end
 
@@ -333,6 +356,7 @@ local function define(spec, opts)
         color        = spec.color,
         texture      = spec.texture,
         icon         = spec.icon,
+        iconId       = spec.iconId,
         data         = spec.data,
     }, Class)
     cls.__index = cls  -- so a spawned instance (if ever made) resolves the class methods
@@ -391,7 +415,17 @@ local function define(spec, opts)
     -- asked for a definition that is not content, so "it will receive no lifecycle events" is
     -- the requested outcome rather than the failure the log line describes.
     if register then
-        local called, okReg, regErr = pcall(om.register, "pal", spec.id, cls, { pack = pack })
+        -- THE IDS THIS DEFINITION MENTIONS, handed to the registry so cross-pack references
+        -- are checked instead of merely offered. object_manager cannot compute this list: it
+        -- holds no schema and cannot know that `skills` is an array of SKILL ids while
+        -- `texture` is a path. This layer does, so this is where `refs` is produced.
+        -- checkImport WARNS and never refuses, and only for a namespace the pack did not
+        -- declare a dependency on via api.pack(id, { depends = { ... } }); a literal game id
+        -- and the pack's own namespace both pass silently.
+        local refs = {}
+        for _, sid in ipairs(spec.skills or {}) do refs[#refs + 1] = sid end
+        local called, okReg, regErr = pcall(om.register, "pal", spec.id, cls,
+                                            { pack = pack, refs = refs })
         if not called then okReg, regErr = nil, okReg end   -- it raised: the message is arg 2
         if not okReg then
             log.err(string.format("Pal '%s' could NOT be registered (%s) — it will receive no "

@@ -30,6 +30,7 @@ local state   = require("palforge.core.state")
 local json    = require("palforge.utils.json")
 local om      = require("palforge.core.object_manager")
 local spatial = require("palforge.core.spatial")
+local support = require("palforge.test.support")
 
 local s = T.suite("store_state")
 
@@ -45,52 +46,9 @@ local SAVE = "pf_testsave"
 -- A file is TEXT here, not a decoded value, which is the whole point: "this file will not
 -- parse" and "these bytes were preserved verbatim" are both statements about text, and a
 -- fake that held decoded tables could express neither.
-local function fakeIO()
-    local files = {}          -- key -> { text = ... };  raw paths are stored under "raw:<rel>"
-    local io_ = { files = files, reads = {}, writes = {} }
-
-    function io_.get(key)
-        io_.reads[key] = (io_.reads[key] or 0) + 1
-        local f = files[key]
-        if not f then return nil, "absent" end
-        local v, err = json.decode(f.text)
-        if type(v) ~= "table" then return nil, err or "not a JSON object" end
-        return v
-    end
-
-    function io_.put(key, value)
-        if io_.failWrite then return false, io_.failWrite end
-        local text, err = json.encode(value)
-        if not text then return false, tostring(err) end
-        files[key] = { text = text }
-        io_.writes[key] = (io_.writes[key] or 0) + 1
-        return true
-    end
-
-    function io_.forget() end
-    function io_.bytes(key)  return files[key] and #files[key].text or nil end
-    function io_.exists(key) return files[key] ~= nil end
-    function io_.path(key)   return "<fake>/" .. key .. ".json" end
-
-    function io_.moveAside(key, destKey)
-        local f = files[key]
-        if not f then return false, "absent" end
-        files[destKey] = f                -- the SAME table: the bytes are not re-encoded
-        files[key] = nil
-        return true
-    end
-
-    function io_.writeRaw(rel, text) files["raw:" .. rel] = { text = text }; return true end
-    function io_.existsRaw(rel)      return files["raw:" .. rel] ~= nil end
-
-    function io_.remove(key)
-        if not files[key] then return false, "absent" end
-        files[key] = nil
-        return true
-    end
-
-    return io_
-end
+-- The store's I/O seam is faked once, in test/support: JSON round trip, read/write counters,
+-- a `failWrite` hook and a moveAside that carries the SAME bytes across. This suite used to
+-- carry its own copy of all four.
 
 -- Run fn(fake) with the store pointed at a fresh in-memory backend, and put the real one
 -- back whatever happens — including when an assertion raises, whose sentinel is a TABLE and
@@ -132,7 +90,7 @@ local function withSaveId(fn)
 end
 
 local function withStore(fn)
-    local fake = fakeIO()
+    local fake = support.storeIO{ json = true }
     local prevSaveId = spatial.saveId
     spatial.saveId = function() return SAVE end
     local prev = state.__io(fake)
@@ -360,9 +318,13 @@ function(t)
         state.world().entities["A@1,1,1"] = record("A", "alpha", 1, 1, 1)
         state.markDirty("alpha")
         state.flushDirty()
-        local readme = fake.files["raw:README.txt"]
-        t:type(readme, "table", "a player who opens state/ finds the answer next to the files")
-        t:truthy(readme.text:find("NOT part of Palworld's save", 1, true),
+        -- support.storeIO keeps writeRaw's output in its own `raw` table, as the STRING that was
+        -- written — this suite used to key it into `files` under a "raw:" prefix, which meant
+        -- reading a { text = ... } wrapper back out of the same table the JSON documents live in.
+        -- Same assertion, one fewer indirection.
+        local readme = fake.raw["README.txt"]
+        t:type(readme, "string", "a player who opens state/ finds the answer next to the files")
+        t:truthy(readme:find("NOT part of Palworld's save", 1, true),
             "and the first thing it says is the thing they are worried about")
         t:truthy(fake.files[SAVE .. "/_save"], "the manifest names the save's packs")
         local man = decodeFile(fake, SAVE .. "/_save")

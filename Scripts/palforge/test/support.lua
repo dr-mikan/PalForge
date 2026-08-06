@@ -375,6 +375,95 @@ function M.sweepAfter(s)
 end
 
 --=============================================================================
+-- the store's I/O seam, faked once
+--
+-- core/state talks to disk through eleven functions and nothing else, which is what makes it
+-- testable with no filesystem at all. Three suites needed that fake and each wrote its own:
+-- store_api's `fakeIO`, store_state's `fakeIO` and store_runtime's `memIO` were the same eleven
+-- names three times, differing in two things that turn out to be options rather than designs —
+-- whether a value is JSON round-tripped on the way through (which is what makes a codec defect
+-- visible) and whether writes are counted. So it is one factory with two options now, and a
+-- change to the seam is one edit instead of three.
+--
+-- The two DISK suites (store_disk, store_codec) deliberately keep their own harness: their whole
+-- subject is real files on a real filesystem — rotation, a partial .tmp, an unreadable byte
+-- sequence — and a fake that cannot lose a write cannot test any of it.
+--
+--   local io_, files, raw = support.storeIO()               -- values stored as-is
+--   local io_, files, raw = support.storeIO{ json = true }  -- values encoded/decoded per put/get
+--   io_.failWrite = "disk full"                             -- make every put fail, with that reason
+--   io_.writes[key] / io_.reads[key]                        -- call counts, per key
+--
+-- `files` is the backing store (key -> value, or key -> { text = ... } in json mode) and `raw`
+-- is where writeRaw / moveAside put things, both handed back so a check can look at what
+-- actually landed rather than only at what the store says it did.
+--=============================================================================
+
+---@param opts table?   # { json = boolean }
+---@return table io_, table files, table raw
+function M.storeIO(opts)
+    local json    = require("palforge.utils.json")
+    local asJson  = opts and opts.json == true
+    local files, raw = {}, {}
+    local io_ = { files = files, raw = raw, reads = {}, writes = {} }
+
+    function io_.get(key)
+        io_.reads[key] = (io_.reads[key] or 0) + 1
+        local f = files[key]
+        if f == nil then return nil, "absent" end
+        if not asJson then return f end
+        local v, err = json.decode(f.text)
+        if type(v) ~= "table" then return nil, err or "not a JSON object" end
+        return v
+    end
+
+    function io_.put(key, value)
+        if io_.failWrite then return false, io_.failWrite end
+        if asJson then
+            local text, err = json.encode(value)
+            if not text then return false, tostring(err) end
+            files[key] = { text = text }
+        else
+            files[key] = value
+        end
+        io_.writes[key] = (io_.writes[key] or 0) + 1
+        return true
+    end
+
+    function io_.forget() end
+    function io_.exists(key) return files[key] ~= nil end
+    function io_.path(key)   return "<fake>/" .. tostring(key) .. ".json" end
+
+    function io_.bytes(key)
+        local f = files[key]
+        if f == nil then return nil end
+        return asJson and #f.text or 1
+    end
+
+    -- The SAME value moves across, never re-encoded: quarantine must preserve bytes verbatim,
+    -- and a fake that re-serialises on the way would hide a codec that does not.
+    function io_.moveAside(key, destKey)
+        local f = files[key]
+        if f == nil then return false, "absent" end
+        raw[destKey] = f
+        files[destKey] = f
+        files[key] = nil
+        return true
+    end
+
+    function io_.writeRaw(rel, text) raw[rel] = text; return true end
+    function io_.existsRaw(rel)      return raw[rel] ~= nil end
+
+    function io_.remove(key)
+        if files[key] == nil then return false, "absent" end
+        files[key] = nil
+        return true
+    end
+
+    return io_, files, raw
+end
+
+--=============================================================================
 -- game ids the suites lean on
 --
 -- Real rows from the native catalogs, so a live check exercises content the game

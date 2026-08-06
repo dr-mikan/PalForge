@@ -43,10 +43,10 @@ Re-measured on 2026-08-03 while this file was rewritten, with `lua5.4`, `luac5.4
 - The same suite under **simulated in-game conditions** (the UI rebuild signal armed, three
   buildings published): **558 / 0 / 54** out of the same 612, recorded 2026-08-02 after the four
   in-game failures of 23:33 were fixed.
-- `luac5.4 -p` clean on all **160** `.lua` files under `Scripts/` and `tools/` — 31 of them under
+- `luac5.4 -p` clean on all **161** `.lua` files under `Scripts/` and `tools/` — 31 of them under
   `palforge/deprecated/`, which no deploy ships. `bash -n tools/deploy.sh` clean.
-- **25 declared hooks**, **10** of which declare `writes = true`. `test/init.lua` registers **18**
-  console actions with `env.debug` off and **43** with it on — the difference is one generated
+- **26 declared hooks**, **12** of which declare `writes = true`. `test/init.lua` registers **18**
+  console actions with `env.debug` off and **44** with it on — the difference is one generated
   `pf_hook_<id>` per hook (`test/init.lua:207` for the static table, `:1132` for the six probes,
   `:1154` for the hooks).
 - **No `-- TODO(<id>)` marker in `Scripts/` names an item this file carries.** The five that still
@@ -269,50 +269,71 @@ operator opened and closed two screens. What they were and what shipped is in *D
 
 ### 1. Small, and each one has a decision behind it
 
-- **Three constructors hand-roll their `opts` parsing.** `api/building.lua:459-460`,
+- ~~**Three constructors hand-roll their `opts` parsing.**~~ **DONE 2026-08-06.** All three call
+  `schema.defineOpts`; a misspelled option raises in every domain, verified for Building, Mesh and
+  UI. Original text: `api/building.lua:459-460`,
   `api/mesh.lua:244-246` and `api/ui.lua:1426-1427` read `register`/`pack` inline instead of calling
   `schema.defineOpts` the way the other five domains do (`api/audio.lua:275`, `effect.lua:342`,
   `item.lua:533`, `pal.lua:322`, `skill.lua:419`), so a misspelled option key — `{ regsiter = false }`
   — is silently ignored where the others raise. For Building that means a typo'd read starts
   persisting a save record for every matching actor, which is the exact failure the `register = false`
   gate exists to prevent. One line each; all three already require `schema`.
-- **`om.checkImport` has no producer.** `core/object_manager.lua:191` is consumed at `:371-373` via
+- ~~**`om.checkImport` has no producer.**~~ **DONE 2026-08-06.** `api/pal` produces refs from
+  `spec.skills`, `api/item` from a recipe's materials / product / station, and an undeclared
+  cross-pack reference now warns by name. Original text: `core/object_manager.lua:191` is consumed at `:371-373` via
   an optional `opts.refs`, and no `api/` module passes one, so cross-pack references are offered and
   unchecked. Object_manager cannot know which fields of a spec are id references; the api
   constructors are the only layer that does. `M.declareDeps` (`:162`) already gives the dependency
   set a memory, fed by `api.pack(id, { depends = ... })`, so no call site would have to carry a
   manifest.
-- **`core/schema` has no `undefine`.** `test/cases/schema.lua` leaves **8** namespaced specs behind
+- ~~**`core/schema` has no `undefine`.**~~ **DONE 2026-08-06.** `schema.undefine` exists and
+  `test/support`'s sweep uses it; the leak measured across two consecutive runs is 0, and
+  `schema.all()` stays at 31. Original text: `test/cases/schema.lua` leaves **8** namespaced specs behind
   on every F1 press — `Inner`, `Spec`, `Dup`, `Derived`, `ReqDefault`, `FnDefault`, `Untyped`,
   `Checked`, measured across two consecutive `run()`s rather than counted off the call sites
   (`test/cases/schema.lua:25-32`). Inert — nothing walks the spec list per lookup — but
   `test/support.lua`'s `sweep()` cannot reach it.
-- **The five store case files each build their own harness.** `store_api`, `store_codec`,
+- ~~**The five store case files each build their own harness.**~~ **DONE 2026-08-06.**
+  `support.storeIO{ json = ? }` is the one fake; the three in-memory suites use it. The two DISK
+  suites keep their own on purpose — their subject is real files. Original text: `store_api`, `store_codec`,
   `store_disk`, `store_runtime` and `store_state` separately write an in-memory or on-disk I/O table
   (`fakeIO` / `memIO` / `diskIO`), their own scratch-directory naming and teardown, and their own
   bracket. Four of the five want the same two things: a fake backend and a world snapshot restored
   afterwards. That belongs in `test/support.lua` beside `sweepAfter` (`:346`), and until it does, a
   change to the store's I/O seam is five edits.
-- **The value guard encodes every record's `state` twice per flush.** `utils/json`'s `validate` ends
+- ~~**The value guard encodes every record's `state` twice per flush.**~~ **DECIDED, NOT DONE,
+  2026-08-06.** `json.validate` now returns the text it produced, but core/state deliberately does
+  not take it: the second pass is the WHOLE-DOCUMENT encode, so reusing the first would mean
+  splicing a pre-encoded fragment into a serialiser whose byte-identical output the store's own
+  tests assert. The reasoning is written at the cost paragraph in core/state.lua. Original text: `utils/json`'s `validate` ends
   by encoding the value to measure it against the 64 KiB limit, and `partition` then encodes it again
   into the document — stated at `core/state.lua:804-810`, where the cost is argued acceptable (a
   handful of fields, at most every 10 s, only while dirty) against the alternative of a whole pack's
   file failing on one bad record. `validate` returning the text it already produced would remove the
   second pass without changing any behaviour.
-- **`schema.derive` does not carry a `validate` override, and two things depend on it.**
+- ~~**`schema.derive` does not carry a `validate` override**~~ **HALF DONE 2026-08-06.** `derive`
+  rawgets the base's own `validate` and carries it, so an inline `Building{ mesh = {...} }` now
+  gets `resolvePackPath` and the `SM_`-meets-`skeletal` warning. STILL OPEN: `validateDeclared`
+  walks `om.all("mesh")` only, and an inline mesh is unregistered by construction, so it remains
+  outside the world.ready pass. Original text:
   `core/schema.lua:372-382` copies field descriptors into a new spec object, so an inline
   `Building{ mesh = {...} }` gets neither `resolvePackPath` on `model` / `texture` (a named
   `Mesh{...}` handle does) nor the `SM_`-meets-`skeletal` warning. Separately,
   `core/mesh/init.lua`'s `validateDeclared` walks `om.all("mesh")` only, so the same inline meshes
   are outside the world.ready validation pass. Fix is one of: `derive` rawsets `validate`, or
   `api/building` delegates.
-- **`Handle:iconOf` still misses on the blueprint spelling.** The two-spellings-per-creature trap is
+- ~~**`Handle:iconOf` still misses on the blueprint spelling.**~~ **DONE 2026-08-06.** `iconId` is
+  a declared field on all four specs, `Class:iconOf` tries it before `id`, and the two curated
+  definitions plus the lazy catalog path carry it from `M.ROW_ID`. Original text: The two-spellings-per-creature trap is
   data now, not prose — `native/pals.lua:264` carries `M.ROW_ID = { SheepBall = "Sheepball" }` and
   `M.iconOf` (`:272`) consults it, with the same split on `WorkBench`/`Workbench` in
   `native/buildings.lua` — but that is catalog-level. `pals.SheepBall:iconOf()` (`api/pal.lua:291`,
   reached through `Handle:iconOf` at `:568`) still misses, because the icon table is keyed on the
   DataTable row spelling. Closing it on the handle needs a `Spec.iconId` field read by `Class:iconOf`.
-- **`db.reclaim()` reports but does not undo.** `core/state.lua:1554` marks every reclaimable id
+- ~~**`db.reclaim()` reports but does not undo.**~~ **DONE 2026-08-06.** `core/state` exposes
+  `setReclaimDriver` and `api/init` installs drivers for `item` and `passive`; `tech` and `pal`
+  stay driverless because they are impossible to undo on this build. Rows report reclaimed /
+  partly reclaimed / not reclaimed with the reason. Original text: `core/state.lua:1554` marks every reclaimable id
   `not attempted (no reclaim driver on this build)`. The doing half needs `api/item`'s take and
   `core/character`'s `RemovePassiveSkill`, and `core/state` may require nothing from `api/` — that is
   what keeps the dependency graph acyclic. The store delivers reclaim's *input*.
@@ -320,7 +341,10 @@ operator opened and closed two screens. What they were and what shipped is in *D
   `utils.log`, `core.reload`, `core.object_manager`). It survives F9 only because its state lives on
   `_G.__PalForgeState`. If anyone ever moves that off `_G`, `palforge.core.state` must go into KEEP
   or the runtime will re-persist empty records over a live base.
-- **`UI.Spec.input = "exclusive"` is the one declared surface in this file with no hook at all.**
+- ~~**`UI.Spec.input = "exclusive"` is the one declared surface with no hook at all.**~~
+  **DONE 2026-08-06.** `test/hooks/ui_input_exclusive.lua` declares it; 26 hooks now. It comes
+  down on the clock rather than on a keypress, because a modal that fails to retract is a session
+  where the player cannot move. Original text:
   Nothing under `test/hooks/` mounts it. Closing it means declaring a hook, not running one.
   (`host = "layer"` and `backHandler = true` both ran on 2026-08-02 — see *Do not re-measure*.)
 

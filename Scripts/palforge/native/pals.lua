@@ -237,7 +237,12 @@ M.UNNAMED = unnamed
 function M.get(id)
     if not id or not set[id] then return nil end
     if cache[id] then return cache[id] end
-    local h = Pal({ id = id }, { register = false, pack = catalog.PACK })
+    -- `iconId` carries the DataTable ROW spelling when it differs from the blueprint /
+    -- build id. M.ROW_ID has held that pair as data for a while, but only this module's
+    -- own M.iconOf consulted it, so the HANDLE a caller actually holds still missed —
+    -- `pals.SheepBall:iconOf()` is the case. Declaring it on the spec moves the
+    -- workaround to where the lookup happens, and Class:iconOf tries it before the id.
+    local h = Pal({ id = id, iconId = M.ROW_ID and M.ROW_ID[id] or nil }, { register = false, pack = catalog.PACK })
     cache[id] = h
     return h
 end
@@ -319,6 +324,9 @@ M.Chicken = Pal({
 -- under "SheepBall" — which is therefore NOT itself a CATALOG member (pre-seeded).
 M.SheepBall = Pal({
     id          = "SheepBall",
+    -- The DataTable row is spelled "Sheepball" and the blueprint "SheepBall"; Class:iconOf
+    -- tries this first, so the handle hits the icon table that the id alone misses.
+    iconId      = "Sheepball",
     name        = "Sheepball (demo)",
     mesh = {
         kind      = "skeletal",

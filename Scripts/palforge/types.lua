@@ -55,6 +55,7 @@
 ---@field material? Pal.Spec.Material # material override applied to that mesh
 ---@field color? table # base tint { r, g, b, a } (shorthand for material.color)
 ---@field texture? string # png path applied to the mesh (shorthand for material.texture)
+---@field iconId? string # the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`.
 ---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Pal.Spec.Events # lifecycle handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition
@@ -88,6 +89,7 @@
 ---@field description? string # one-line description, for UI and tooling
 ---@field category? Item.Spec.Category # what kind of inventory content this is (PalForge's own classification) (default material)
 ---@field maxStack? number # stack ceiling you declare; the GAME's ceiling is a DataTable column (default 1)
+---@field iconId? string # the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`.
 ---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field recipe? Item.Spec.Recipe # the recipe that produces THIS item (metadata; see Item.Spec.Recipe)
 ---@field restores? Item.Spec.Restores # what USING this item restores, ADDED to the game's own effect: { satiety = 20, hpRate = 0.25 } (LIVE - see Item.Spec.Restores)
@@ -140,6 +142,7 @@
 ---@field material? Building.Spec.Material # material override applied to that mesh
 ---@field color? table # base tint { r, g, b, a } (shorthand for material.color)
 ---@field texture? string # png path applied to the mesh (shorthand for material.texture)
+---@field iconId? string # the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`.
 ---@field icon? any # fallback icon used when the DataTable lookup misses
 ---@field state? table|fun(): table # default persisted state for a new instance (a table, or a factory returning one)
 ---@field events? Building.Spec.Events # lifecycle handlers (grouped)
@@ -164,6 +167,7 @@
 ---@field element? string # attribute / element (fire, water, ...). AUTHOR METADATA: stored and handed back, read by nothing
 ---@field cooldown? number # seconds between activations (enforced by :activate)
 ---@field power? number # base power / magnitude. AUTHOR METADATA: stored and handed back, read by nothing
+---@field iconId? string # the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`.
 ---@field icon? string # /Game/... texture path used when the icon DataTable has no row for this id
 ---@field events? Skill.Spec.Events # behaviour handlers (grouped)
 ---@field data? table # free-form payload of your own, carried onto the definition

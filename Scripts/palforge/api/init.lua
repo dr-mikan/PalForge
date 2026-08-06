@@ -397,4 +397,69 @@ function api.pack(packId, opts)
     return scoped
 end
 
+--=============================================================================
+-- reclaim drivers — the DOING half of db.reclaim, installed from this side
+--=============================================================================
+--
+-- core/state knows WHAT a pack made the game record; it cannot know HOW to take it back,
+-- because undoing an item goes through api/item and undoing a passive through core/character,
+-- and core/state requires nothing from api/ — that acyclic graph is deliberate. So the drivers
+-- are installed HERE, at the layer that already holds every domain, and core/state calls them
+-- through M.RECLAIM_DRIVERS. Until this ran, `db.reclaim{ apply = true }` reported
+-- "no reclaim driver on this build" for every reclaimable row and undid nothing.
+--
+-- ONLY THE TWO KINDS THAT CAN BE UNDONE ARE INSTALLED, and the other two stay absent rather
+-- than getting a driver that fails: a technology unlock is IMPOSSIBLE to reverse on this build
+-- (UPalCheatManager declares four unlock entries and no lock; LockTechnology /
+-- RemoveTechnology / ResetTechnology / ForgetTechnology are zero hits in Pal.hpp) and a spawned
+-- pal has no per-individual removal. core/state's RECLAIM table already says so in those words,
+-- and a row it marks `impossible` never reaches a driver.
+do
+    local ok, state = pcall(require, "palforge.core.state")
+    if ok and state and type(state.setReclaimDriver) == "function" then
+        -- ITEM — spend it back out of the local player's bag. Handle:take answers how many it
+        -- actually removed, which is exactly the partial result db.reclaim reports: an item the
+        -- player moved into a chest is out of reach and the row says so instead of claiming it.
+        state.setReclaimDriver("item", function(id, n)
+            local h = Item.get(id)
+            if not h then return 0, "no such item definition this session" end
+            local taken = h:take(n)
+            if taken == true then return n end
+            if type(taken) == "number" then
+                return taken, (taken < n) and "the rest is not in the local player's own bag" or nil
+            end
+            return 0, "take refused — no world, no player, or no weapon actor to spend through"
+        end)
+
+        -- PASSIVE — remove the skill from every actor this session can hold. core/character
+        -- resolves the id at the engine boundary and reads the character back afterwards, so a
+        -- true here means the pal really stopped carrying it rather than that the call ran.
+        state.setReclaimDriver("passive", function(id, n)
+            local character = require("palforge.core.character")
+            if type(character.removeSkill) ~= "function" then
+                return 0, "core/character exposes no removeSkill on this build"
+            end
+            local actors = {}
+            pcall(function()
+                for _, a in ipairs(FindAllOf("PalMonsterCharacter") or {}) do actors[#actors + 1] = a end
+                local p = FindFirstOf("PalPlayerCharacter")
+                if p then actors[#actors + 1] = p end
+            end)
+            if #actors == 0 then
+                return 0, "no world loaded, so there is no character to take it off"
+            end
+            local done = 0
+            for _, a in ipairs(actors) do
+                local okRm = select(1, pcall(character.removeSkill, a, id))
+                if okRm then done = done + 1 end
+                if done >= n then break end
+            end
+            if done == 0 then return 0, "no held character carried it" end
+            return math.min(done, n),
+                (done < n) and "only the actors this session can reach were checked — a pal in "
+                    .. "the box is not one of them" or nil
+        end)
+    end
+end
+
 return api

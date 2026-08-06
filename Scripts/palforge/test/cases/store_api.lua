@@ -61,37 +61,8 @@ end
 -- The in-memory backend. Same vocabulary core/state's real IO speaks, and files are TEXT for the
 -- same reason store_state.lua keeps them as text: what a store does with bytes it cannot parse is
 -- a claim about bytes.
-local function fakeIO()
-    local files = {}
-    local io_ = { files = files, writes = {} }
-    function io_.get(key)
-        local f = files[key]
-        if not f then return nil, "absent" end
-        local v, err = json.decode(f.text)
-        if type(v) ~= "table" then return nil, err or "not a JSON object" end
-        return v
-    end
-    function io_.put(key, value)
-        local text, err = json.encode(value)
-        if not text then return false, tostring(err) end
-        files[key] = { text = text }
-        io_.writes[key] = (io_.writes[key] or 0) + 1
-        return true
-    end
-    function io_.forget() end
-    function io_.bytes(key)  return files[key] and #files[key].text or nil end
-    function io_.exists(key) return files[key] ~= nil end
-    function io_.path(key)   return "<fake>/" .. key .. ".json" end
-    function io_.moveAside()  return false, "absent" end
-    function io_.writeRaw()   return true end
-    function io_.existsRaw()  return true end   -- README.txt already there: never write one
-    function io_.remove(key)
-        if not files[key] then return false, "absent" end
-        files[key] = nil
-        return true
-    end
-    return io_
-end
+-- The store's I/O seam is faked once, in test/support. This suite wants the JSON round trip,
+-- because what it checks is what a PACK sees come back out.
 
 -- Did this suite leave anything of its own in the store's caches? Asked before the loud cleanup
 -- below, and asked of all three places a check here can reach: the pack's key/value data, its
@@ -122,7 +93,11 @@ end
 -- records, and under the fake backend it deletes nothing real.
 local function withStore(t, fn)
     local st   = needStore(t)
-    local fake = fakeIO()
+    local fake = support.storeIO{ json = true }
+    -- The README.txt the store writes beside its files is already there as far as this suite
+    -- is concerned, so it is never asked to write one. The shared fake answers honestly from
+    -- `raw`; this one check wants the "already present" branch, so it says so here.
+    fake.existsRaw = function() return true end
     local prev = st.__io(fake)
     local ok, e = pcall(fn, api.pack(PACK).store, fake, st)
     -- uninstall is LOUD by design — it is the one destructive call in the store and it says so

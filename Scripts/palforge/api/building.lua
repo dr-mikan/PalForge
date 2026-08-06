@@ -176,6 +176,15 @@ local Spec = schema.define("Building.Spec", {
     { "material",     type = "table", of = Material, doc = "material override applied to that mesh" },
     { "color",        type = "table",  doc = "base tint { r, g, b, a } (shorthand for material.color)" },
     { "texture",      type = "string", doc = "png path applied to the mesh (shorthand for material.texture)" },
+    -- THE TWO-SPELLINGS TRAP, as a field instead of as folklore. The same thing is spelled
+    -- one way as a blueprint / build id and another as a DataTable row on this build —
+    -- SheepBall / Sheepball, WorkBench / Workbench — and `icons.resolve` is case-SENSITIVE
+    -- (core/icons.lua:40-42), so the id dispatch keys on is not always the id the icon table
+    -- answers to. native/pals.lua carries M.ROW_ID for exactly this and its own M.iconOf works
+    -- around it, but that is catalog-level: a HANDLE still missed, because Class:iconOf had
+    -- only `id` to go on. Declaring the row id closes it at the level a pack actually holds.
+    { "iconId",       type = "string",
+                      doc = "the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`." },
     { "icon",         doc = "fallback icon used when the DataTable lookup misses" },
     { "state",        type = "table|function", sig = "table|fun(): table",
                       doc = "default persisted state for a new instance (a table, or a factory returning one)" },
@@ -381,9 +390,23 @@ end
 -- LITERAL so a malformed id still asks the game the only question it can.
 -- Handle:unlock (below) has always spelled it this way; the two now agree.
 function Class:iconOf()
-    local id = om.resolve(self.id) or self.id
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.building, id) end)
-    if ok and tex ~= nil then return tex end
+    -- THE ROW ID FIRST, then the id, then the declared fallback. `iconId` exists because the id
+    -- this thing DISPATCHES on is not always the id the icon table answers to: the same creature
+    -- is SheepBall as a blueprint and Sheepball as a DataTable row, the same structure is
+    -- WorkBench and Workbench, and icons.resolve is case-SENSITIVE (core/icons.lua:40-42). The
+    -- catalogs have carried that as data since native/pals.lua's M.ROW_ID, but only their own
+    -- iconOf() consulted it, so a HANDLE — which is what a pack holds — still missed. Trying the
+    -- declared row id first and the id second means both spellings hit and neither has to be
+    -- known by the caller.
+    local tried = {}
+    if type(self.iconId) == "string" and #self.iconId > 0 then
+        tried[#tried + 1] = om.resolve(self.iconId) or self.iconId
+    end
+    tried[#tried + 1] = om.resolve(self.id) or self.id
+    for _, id in ipairs(tried) do
+        local ok, tex = pcall(function() return icons.resolve(icons.TABLES.building, id) end)
+        if ok and tex ~= nil then return tex end
+    end
     return self.icon
 end
 
@@ -452,6 +475,7 @@ local function define(spec, opts)
         color        = spec.color,
         texture      = spec.texture,
         icon         = spec.icon,
+        iconId       = spec.iconId,
         defaultState = spec.state,
         data         = spec.data,
     }, Class)

@@ -137,6 +137,12 @@ M.FILES = {
     "skill_hit_source",
     "ui_host_layer",
     "ui_backhandler",
+    -- ⚠️ THE MODAL ONE. `input = "exclusive"` is the game's own Menu config, and it was the one
+    -- declared surface in the whole tree with no instrument pointing at it. It writes nothing —
+    -- so it is not in the group below — but a modal that failed to come down is a session where
+    -- the player cannot move, so it comes down on the CLOCK rather than on a keypress, and its
+    -- own header says to run it on a throwaway session.
+    "ui_input_exclusive",
     -- building_runtime_reload is in THIS group and not the one above because the thing it wants
     -- the operator to do is press F9 BETWEEN two runs of it. It is the one hook whose
     -- measurement spans a reload, which is also why it arms no poller: a live poller refuses the

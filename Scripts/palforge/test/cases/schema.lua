@@ -415,7 +415,7 @@ s:test("an unknown field is a hard error with a did-you-mean suggestion", functi
     -- containment beats edit distance: a decorated name is the commonest typo
     t:errors(function() return api.Pal{ id = support.id("pal"), meshSpec = {} } end,
         "PalForge: Pal: unknown field \"meshSpec\" (did you mean \"mesh\"?). "
-        .. "Valid fields: id, name, description, skills, mesh, material, color, texture, icon, events, data")
+        .. "Valid fields: id, name, description, skills, mesh, material, color, texture, iconId, icon, events, data")
     -- and a genuine near-miss is caught by edit distance
     t:errors(function() return api.Pal{ id = support.id("pal"), nmae = "x" } end,
         "unknown field \"nmae\" (did you mean \"name\"?)")

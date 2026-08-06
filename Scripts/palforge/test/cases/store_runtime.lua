@@ -54,27 +54,8 @@ end
 -- ("w_…/logi") and save-relative paths — so this is a complete substitute rather than a
 -- partial one, and a check that accidentally writes lands here instead of in the player's
 -- state directory. `files` is returned so a check can assert what a flush actually produced.
-local function memIO()
-    local files, raw = {}, {}
-    return {
-        get = function(key)
-            if files[key] == nil then return nil, "absent" end
-            return files[key]
-        end,
-        put       = function(key, value) files[key] = value; return true end,
-        forget    = function() end,
-        bytes     = function(key) return files[key] ~= nil and 1 or nil end,
-        exists    = function(key) return files[key] ~= nil end,
-        moveAside = function(key, rel) raw[rel] = files[key]; files[key] = nil; return true end,
-        writeRaw  = function(rel, text) raw[rel] = text; return true end,
-        existsRaw = function(rel) return raw[rel] ~= nil end,
-        remove    = function(key)
-            if files[key] == nil then return false, "absent" end
-            files[key] = nil; return true
-        end,
-        path      = function(key) return "(memory)/" .. tostring(key) .. ".json" end,
-    }, files, raw
-end
+-- The store's I/O seam is faked once, in test/support: this suite wants values stored AS
+-- THEY ARE (no JSON round trip), which is support.storeIO's default.
 
 -- A fake PalBuildObject. Answers the four calls the scan makes of an actor and nothing else:
 -- IsValid, GetFullName (which IS the table key — core/event rule 1), GetClass():GetFullName()
@@ -107,7 +88,7 @@ local function harness()
         keys        = {},   -- record keys this check created
         insts       = {},   -- instance keys this check created
     }
-    h.io, h.files, h.raw = memIO()
+    h.io, h.files, h.raw = support.storeIO()
     h.prevIO = state.__io(h.io)
     state.__reset()
     -- The runtime's per-world "which documents did I ask for" memo. Cleared IN PLACE (the

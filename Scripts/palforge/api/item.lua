@@ -313,6 +313,15 @@ local Spec = schema.define("Item.Spec", {
     -- accessor that returns "a string path, or whatever you happened to declare" is one every
     -- caller has to branch on, and native/ui/tree.lua does exactly that today. So the
     -- declared fallback is a string path too, and :iconOf answers string|nil, always.
+    -- THE TWO-SPELLINGS TRAP, as a field instead of as folklore. The same thing is spelled
+    -- one way as a blueprint / build id and another as a DataTable row on this build —
+    -- SheepBall / Sheepball, WorkBench / Workbench — and `icons.resolve` is case-SENSITIVE
+    -- (core/icons.lua:40-42), so the id dispatch keys on is not always the id the icon table
+    -- answers to. native/pals.lua carries M.ROW_ID for exactly this and its own M.iconOf works
+    -- around it, but that is catalog-level: a HANDLE still missed, because Class:iconOf had
+    -- only `id` to go on. Declaring the row id closes it at the level a pack actually holds.
+    { "iconId",      type = "string",
+                     doc = "the DataTable ROW id to look the icon up under, when the game spells this thing differently in its icon table than in its blueprint / build id. Defaults to `id`." },
     { "icon",        type = "string",
                      doc = "/Game/... texture path used when the icon DataTable has no row for this id" },
     { "recipe",      type = "table", of = Recipe,
@@ -427,9 +436,23 @@ end
 -- looked like an item whose icon simply was not in the table. `or self.id` is the rule at every
 -- engine boundary: an id that fails to resolve falls back to the LITERAL, never to nothing.
 function Class:iconOf()
-    local id = om.resolve(self.id) or self.id
-    local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, id) end)
-    if ok and tex ~= nil then return tex end
+    -- THE ROW ID FIRST, then the id, then the declared fallback. `iconId` exists because the id
+    -- this thing DISPATCHES on is not always the id the icon table answers to: the same creature
+    -- is SheepBall as a blueprint and Sheepball as a DataTable row, the same structure is
+    -- WorkBench and Workbench, and icons.resolve is case-SENSITIVE (core/icons.lua:40-42). The
+    -- catalogs have carried that as data since native/pals.lua's M.ROW_ID, but only their own
+    -- iconOf() consulted it, so a HANDLE — which is what a pack holds — still missed. Trying the
+    -- declared row id first and the id second means both spellings hit and neither has to be
+    -- known by the caller.
+    local tried = {}
+    if type(self.iconId) == "string" and #self.iconId > 0 then
+        tried[#tried + 1] = om.resolve(self.iconId) or self.iconId
+    end
+    tried[#tried + 1] = om.resolve(self.id) or self.id
+    for _, id in ipairs(tried) do
+        local ok, tex = pcall(function() return icons.resolve(icons.TABLES.item, id) end)
+        if ok and tex ~= nil then return tex end
+    end
     return self.icon
 end
 
@@ -539,6 +562,7 @@ local function define(spec, opts)
         category    = spec.category,
         maxStack    = spec.maxStack,
         icon        = spec.icon,
+        iconId      = spec.iconId,
         recipe      = spec.recipe,
         restores    = spec.restores,
         data        = spec.data,
@@ -558,7 +582,17 @@ local function define(spec, opts)
     -- so core/event + get() find it — unless the caller asked for a definition that stays out
     -- of the registry (opts.register == false), which is a build, not a define.
     if register then
-        pcall(function() om.register("item", spec.id, cls, { pack = pack }) end)
+        -- The ids this definition MENTIONS — same reasoning as api/pal.lua. A recipe names
+        -- other ITEMS (its materials, its product) and a BUILDING (the station that crafts
+        -- it); all three are ids a pack can write in another pack's namespace.
+        local refs = {}
+        local rec = spec.recipe
+        if type(rec) == "table" then
+            for mat in pairs(rec.materials or {}) do refs[#refs + 1] = mat end
+            if type(rec.product) == "string" then refs[#refs + 1] = rec.product end
+            if type(rec.station) == "string" then refs[#refs + 1] = rec.station end
+        end
+        pcall(function() om.register("item", spec.id, cls, { pack = pack, refs = refs }) end)
     end
     return handle
 end
