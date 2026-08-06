@@ -303,7 +303,7 @@ sequenceDiagram
   participant IN as Live instance
   PL->>HK: picks the structure from the build menu
   HK->>SC: records a placement intent
-  SC->>SC: FindAllOf PalBuildObject every 500 ms
+  SC->>SC: FindAllOf PalBuildObject, only when woken
   SC->>IN: creates the instance and persists a record
   SC->>EV: emit building.place then building.load
   EV->>IN: onPlace ctx
@@ -433,7 +433,7 @@ end,
 
 重要的改动用 `save()`，高频循环里用 `setDirty()`；不然每个 tick 都 `save()`，就会每次心跳都写一遍文件。一次写只覆盖发生了改动的那个模组：不会因为你改了东西，就把别人的文件重写一遍。
 
-**没有记录会因为「不在」而被删掉。** 扫描连续六次没看到的建筑物 —— 按 500 ms 的节奏大约三秒 —— 会以 `reason = "missing"` 发出 `building.remove`，但它的记录不是被丢掉，而是被**隔离**：带着 `why = "missing"` 挪进 `orphans`，而下一次再看到那个 Actor 的扫描会把它连同 `state` 一起取回来。那次扫描只枚举内存里的对象，而出货二进制自己的声明表明 Palworld 是按距离生成和销毁地图对象的，所以「这一遍扫描里没有」不能读成「已经没了」。
+**没有记录会因为「不在」而被删掉。** 连续六次**进行了枚举的**扫描都没看到的建筑物，会以 `reason = "missing"` 发出 `building.remove`，但它的记录不是被丢掉，而是被**隔离**：带着 `why = "missing"` 挪进 `orphans`，而下一次再看到那个 Actor 的扫描会把它连同 `state` 一起取回来。那次扫描只枚举内存里的对象，而出货二进制自己的声明表明 Palworld 是按距离生成和销毁地图对象的，所以「这一遍扫描里没有」不能读成「已经没了」。
 
 **本次会话里没有任何定义认领**其 build id 的记录也按同样的方式隔离，理由是 `why = "unclaimed"`：原样搬进 `orphans`，带着条数和它们所属的内容包写进日志，一旦有定义重新认领那个 build id，就立刻搬回来。这一趟检查会在世界打开后等大约 30 秒才跑，好让那些在 `world.ready` 时、或者懒加载时才定义建筑物的内容包来得及。运行时里唯一会真的销毁记录的，是 4096 条的隔离上限，而且是**按模组文件**算的；超过之后从那个模组最旧的开始丢，并在日志里写明丢了多少条、属于哪个模组、为什么。
 

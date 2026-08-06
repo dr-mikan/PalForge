@@ -268,8 +268,35 @@ function M.validateDeclared(sink)
         if sink then pcall(sink, line) else log.info(line) end
     end
 
-    local ids = {}
-    for id in pairs(om.all("mesh")) do ids[#ids + 1] = id end
+    -- EVERY DECLARED MESH, INCLUDING THE ONES THAT ARE NOT IN THE MESH REGISTRY. A pack writes
+    -- a mesh two ways and only one of them registers:
+    --
+    --   Pal{ mesh = Mesh{ id = "x", model = ... } }   a NAMED mesh — om.all("mesh") has it
+    --   Pal{ mesh = { model = ... } }                 an INLINE mesh — nothing registers it
+    --
+    -- The inline form is the shorter one and therefore the common one, and until this loop it
+    -- was entirely outside this pass: the check that turns "my boss is invisible" into a log
+    -- line covered the declaration style a pack was less likely to use. The owning definition
+    -- IS registered, though, and it keeps the spec on `meshSpec` (api/pal.lua, api/building.lua),
+    -- so the inline ones are reachable through their owner and are reported under
+    -- "<owner> (inline)" so the log names something a pack author can find in their own file.
+    local specs, ids = {}, {}
+    local function add(id, spec)
+        if type(spec) == "table" and specs[id] == nil then
+            specs[id] = spec
+            ids[#ids + 1] = id
+        end
+    end
+    for id, cls in pairs(om.all("mesh")) do
+        add(id, (type(cls) == "table" and (cls.source and cls:source() or cls)) or nil)
+    end
+    for _, otype in ipairs({ "pal", "building" }) do
+        for id, cls in pairs(om.all(otype)) do
+            if type(cls) == "table" and type(cls.meshSpec) == "table" then
+                add(otype .. " " .. id .. " (inline)", cls.meshSpec)
+            end
+        end
+    end
     table.sort(ids)
 
     say(string.format("MESHVALIDATE %d declared mesh(es)", #ids))
@@ -279,8 +306,7 @@ function M.validateDeclared(sink)
     -- header has the class ladder). A procedural / obj model is a file on disk and is
     -- checked by opening it, because there is no asset to resolve.
     for _, id in ipairs(ids) do
-        local cls = om.get("mesh", id)
-        local spec = (type(cls) == "table" and (cls.source and cls:source() or cls)) or nil
+        local spec = specs[id]
         if type(spec) == "table" then
             local kind = spec.kind or "skeletal"
             local function record(field, path, ok, detail)

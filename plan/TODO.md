@@ -263,6 +263,60 @@ nothing ever tells them.** The correction is written where the claim was
 At 23:04, with the candidate set widened to **21 named out of the dumps**, three fired while the
 operator opened and closed two screens. What they were and what shipped is in *Do not re-measure*.
 
+### 4. The building scan cost 13% of wall-clock to do nothing, and the shape of the cost was a surprise
+
+**Measured 2026-08-07** after a hook published 48 build ids into a 623-structure base and closed the
+game. The crash was the burst — 227 instances bound in one sweep, every one of their meshes rendered
+in the next, all inside a single game-thread callback, with **no budget anywhere in
+`core/event.lua`**. But instrumenting it to find that turned up something worse underneath:
+
+```
+scan cost over 120 sweeps: 64.88 ms avg (44.97 find + 19.92 loop), 86 ms peak
+| 623 actor(s) per sweep | 0 bound
+```
+
+**Sixty-five milliseconds, twice a second, binding nothing** — that was the DEFAULT state, with no
+building definition registered at all. A player with no building pack paid the whole cost of the
+building runtime forever, for a feature they were not using.
+
+**THE SHAPE WAS NOT WHAT ANYONE WOULD ASSUME, and it is the reusable part.** `FindAllOf` is 69% of
+it, and it is **linear in the actor count** — 0.0723 ms per actor at 498 actors, 0.0722 at 623. A
+global `UObject` walk would be flat in the number of matches. It is not: the cost is
+**materialising one Lua wrapper per returned actor**, and this scan built 623 of them twice a second
+to use three. At 0.104 ms per actor per sweep, 5,000 structures is 520 ms against a 500 ms interval
+— the scan stops keeping up before a large base does anything unusual, and a Palworld base grows
+without bound.
+
+**What shipped, in three steps, each measured before the next was designed:**
+
+| | result |
+| --- | --- |
+| per-sweep bind and render budgets (`SCAN_BIND_BUDGET` / `SCAN_RENDER_BUDGET`) | the burst cannot recur; over-budget work is retried next sweep because the scan is idempotent |
+| decline to enumerate when no definition claims any build id | **64.88 ms → 0.00 ms** in the default state, verified in game |
+| discovery converges; tracking asks the handle it already holds | **64.88 ms → 2.20 ms** with three structures tracked, **4 of 120 sweeps enumerated** |
+
+The steady-state cost is now proportional to what a pack WATCHES, not to what the world contains.
+
+**Two design errors on the way, both caught by R-1 checks that already existed**, and both are the
+kind that would have been invisible in a game:
+
+1. **A live handle is not evidence of presence.** The first version marked an instance present when
+   its own handle answered `IsValid` — but a handle answers perfectly well for an object the
+   enumeration has legitimately stopped returning, which quietly made a missing structure immortal.
+   A live handle now marks nothing; a DEAD one wakes discovery, and the enumeration remains the only
+   thing that may declare an instance missing. The removal sweep runs only on a sweep that
+   enumerated: **not looking is safe precisely because not looking also means not judging.**
+2. **One clean enumeration is not convergence.** The sweep that removes a structure at
+   `MISS_THRESHOLD` is itself a change, so the sweep after it looks clean while the most interesting
+   thing that could happen — the structure coming back, which is what a stream-out and stream-in is
+   — has not had one enumeration to be seen in. Two consecutive clean runs are required.
+
+**And a fourth finding, from the instrument rather than the subject.** `M.every` wrapped every
+repeating callback in `pcall` and discarded what it caught. When the scan first went quiet there was
+no way to tell "the heartbeat stopped" from "the callback raises on every tick" — both are silence —
+and that cost a session. The `pcall` is right and stays; throwing the error away was the defect. It
+is now reported once per distinct message per subscriber.
+
 ---
 
 ## Owed work
@@ -311,11 +365,14 @@ operator opened and closed two screens. What they were and what shipped is in *D
   handful of fields, at most every 10 s, only while dirty) against the alternative of a whole pack's
   file failing on one bad record. `validate` returning the text it already produced would remove the
   second pass without changing any behaviour.
-- ~~**`schema.derive` does not carry a `validate` override**~~ **HALF DONE 2026-08-06.** `derive`
-  rawgets the base's own `validate` and carries it, so an inline `Building{ mesh = {...} }` now
-  gets `resolvePackPath` and the `SM_`-meets-`skeletal` warning. STILL OPEN: `validateDeclared`
-  walks `om.all("mesh")` only, and an inline mesh is unregistered by construction, so it remains
-  outside the world.ready pass. Original text:
+- ~~**`schema.derive` does not carry a `validate` override, and two things depend on it.**~~
+  **DONE 2026-08-07, both halves.** `derive` rawgets the base's own `validate` and carries it, so
+  an inline `Building{ mesh = {...} }` gets `resolvePackPath` and the `SM_`-meets-`skeletal`
+  warning. And `validateDeclared` no longer walks `om.all("mesh")` alone: it also pulls the
+  inline `meshSpec` off every registered pal and building class and reports it as
+  `<owner> (inline)`. That was the gap that mattered most, because the inline form is the
+  SHORTER one and therefore the common one — the check that turns "my boss is invisible" into a
+  log line was covering the declaration style a pack was less likely to write. Original text:
   `core/schema.lua:372-382` copies field descriptors into a new spec object, so an inline
   `Building{ mesh = {...} }` gets neither `resolvePackPath` on `model` / `texture` (a named
   `Mesh{...}` handle does) nor the `SM_`-meets-`skeletal` warning. Separately,
@@ -720,10 +777,18 @@ from a transient `ConcreteModel` (`FPalMapObjectSaveData`, `Pal.hpp:4639`);
 `OnAvailableConcreteModel` / `OnNotAvailableConcreteModel` delegate **pairs** on about ten classes
 (`Pal.hpp:14252-14699`); `TryGetConcreteModel` with a `Failed = 1` out-pin
 (`Pal_enums.hpp:2853-2857`); `UPalMapObjectConcreteModelBase:bDisposed`. `core/event.lua`'s miss
-sweep counts, per live instance, the consecutive scans in which `FindAllOf("PalBuildObject")` did not
-return that instance's actor, and past `MISS_THRESHOLD = 6` — three seconds at `SCAN_MS = 500` — it
-used to DELETE the record. **It now quarantines instead, and the scan's bind path restores on
-sight.** Whether that was a catastrophe averted or a latent bug closed is the unmeasured part.
+sweep counts, per live instance, the consecutive **enumerating** scans in which
+`FindAllOf("PalBuildObject")` did not return that instance's actor, and past
+`MISS_THRESHOLD = 6` it used to DELETE the record. **It now quarantines instead, and the scan's
+bind path restores on sight.** Whether that was a catastrophe averted or a latent bug closed is the
+unmeasured part.
+
+⚠️ **That is no longer six half-seconds.** Since 2026-08-07 the scan only enumerates when something
+woke it (see *What the running game found*, item 4), so six missed enumerations is however long six
+of those take — immediate while the world is settling, and up to `DISCOVER_IDLE_SWEEPS` apart once it
+has. A structure that streams out is therefore held longer before it is quarantined, which is the
+safe direction, and `building-actor-streaming` measures a different thing than it did when it was
+written.
 
 Everything readable off the binary says a save holding a pack-owned FName with no DataTable row
 behind it is a **missing lookup, not a broken file** — the save stores plain `FName`s, rows resolve

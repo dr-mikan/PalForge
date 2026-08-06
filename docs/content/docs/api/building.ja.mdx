@@ -388,7 +388,7 @@ sequenceDiagram
   participant IN as Live instance
   PL->>HK: picks the structure from the build menu
   HK->>SC: records a placement intent
-  SC->>SC: FindAllOf PalBuildObject every 500 ms
+  SC->>SC: FindAllOf PalBuildObject, only when woken
   SC->>IN: creates the instance and persists a record
   SC->>EV: emit building.place then building.load
   EV->>IN: onPlace ctx
@@ -560,8 +560,8 @@ end,
 `save()` はハートビートのたびにファイルを書きます。書き込みが及ぶのは変更があった mod だけで、
 あなたの側の変更で他の mod のファイルが書き直されることはありません。
 
-**「いない」ことを理由に削除されるレコードはありません。** スキャンが 6 回連続で見つけられなかった
-設置物、つまり 500 ms 間隔でおよそ 3 秒間見えなかった設置物は `reason = "missing"` で
+**「いない」ことを理由に削除されるレコードはありません。** **列挙を行ったスキャン**が 6 回連続で
+見つけられなかった設置物は `reason = "missing"` で
 `building.remove` を emit しますが、レコードは破棄されず **隔離** されます。`why = "missing"` として
 `orphans` へ移り、そのアクターを再び見つけた次のスキャンが `state` ごと取り出します。このスキャンは
 メモリ上のオブジェクトしか列挙せず、出荷バイナリ自身の宣言は Palworld がマップオブジェクトを距離に

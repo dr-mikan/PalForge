@@ -392,7 +392,7 @@ sequenceDiagram
   participant IN as Live instance
   PL->>HK: picks the structure from the build menu
   HK->>SC: records a placement intent
-  SC->>SC: FindAllOf PalBuildObject every 500 ms
+  SC->>SC: FindAllOf PalBuildObject, only when woken
   SC->>IN: creates the instance and persists a record
   SC->>EV: emit building.place then building.load
   EV->>IN: onPlace ctx
@@ -563,8 +563,8 @@ Call `save()` when the change matters and `setDirty()` in a hot loop, otherwise 
 every tick writes the file on every heartbeat. A write only ever covers the mod that changed:
 another mod's file is not rewritten because yours was.
 
-**No record is deleted for being absent.** A structure the scan fails to see for six scans in a
-row — about three seconds at the 500 ms cadence — emits `building.remove` with
+**No record is deleted for being absent.** A structure the scan fails to see for six ENUMERATING
+scans in a row emits `building.remove` with
 `reason = "missing"` and its record is **quarantined**, not dropped: it moves into `orphans` with
 `why = "missing"`, and the next scan that sees that actor again takes it back out with its
 `state` intact. That scan enumerates in-memory objects only, and the shipping binary's own
