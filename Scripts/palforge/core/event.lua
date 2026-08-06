@@ -318,12 +318,40 @@ end
 for _, n in ipairs(M.CHANNELS) do subject(n) end        -- pre-create so subscribe-before-emit works
 
 -- Run fn every `ms` (quantized to the heartbeat). Returns a disposer.
+-- ⚠️ THE pcall USED TO SWALLOW THE ERROR, AND THAT COST A WHOLE SESSION TO DIAGNOSE.
+--
+-- 2026-08-06: the building scan ran exactly once after world.ready and then never again. No
+-- cost report, no autorun entry firing, no building.load — while the log stayed busy with
+-- RegisterHook-driven channels, because those do not ride this driver. From outside, "the
+-- heartbeat stopped" and "the callback raises on every tick" are the SAME OBSERVATION: silence.
+-- There was no way to tell them apart without adding a line, which is the definition of a
+-- diagnostic gap in the one place every periodic behaviour in this file passes through.
+--
+-- The pcall itself is right and stays: one bad subscriber must not stop the heartbeat for
+-- everything else. What was wrong is discarding what it caught. The error is now reported —
+-- ONCE per distinct message per subscriber, because a driver that fires twice a second would
+-- otherwise turn one defect into a log flood, which is its own way of hiding it.
+local everyFails = {}   -- "<ms>:<message>" -> true, so each distinct failure is said once
 function M.every(ms, fn)
     assert(type(ms) == "number" and ms > 0 and type(fn) == "function", "event.every(ms>0, fn)")
     local acc = 0
     return M.on("tick", function()
         acc = acc + M.TICK_MS
-        if acc >= ms then acc = 0; pcall(fn) end
+        if acc >= ms then
+            acc = 0
+            local ok, err = pcall(fn)
+            if not ok then
+                local key = tostring(ms) .. ":" .. tostring(err)
+                if not everyFails[key] then
+                    everyFails[key] = true
+                    log.err(string.format(
+                        "a %d ms repeating callback RAISED and has been failing silently: %s. "
+                        .. "The heartbeat is unaffected and every other subscriber still runs; "
+                        .. "this one has done nothing since. Said once per distinct error.",
+                        ms, tostring(err)))
+                end
+            end
+        end
     end)
 end
 
@@ -437,7 +465,13 @@ local READY_POLLS           = 5    -- consecutive ~1s polls with a valid player 
 -- paragraphs above is COUNTED FROM THE CODE and none of it has been timed in a running game;
 -- the report line is what replaces the arithmetic with a measurement, and it is deliberately
 -- landing before the budget below rather than after, so the two can be compared.
-local SCAN_REPORT_EVERY = 120   -- sweeps between cost reports (~60 s at SCAN_MS = 500)
+-- THE FIRST REPORT COMES EARLY, AND THAT IS A LIVENESS SIGNAL RATHER THAN A COST ONE. On
+-- 2026-08-06 the scan ran once after world.ready and then went quiet, and with a 60 s reporting
+-- cadence there was no way to tell "the sweep is cheap and reporting later" from "the sweep is
+-- dead" for a whole minute. 20 sweeps is ~10 s: long enough to average, short enough that its
+-- ABSENCE is information while the operator is still looking at the screen.
+local SCAN_REPORT_FIRST = 20    -- sweeps before the first report (~10 s at SCAN_MS = 500)
+local SCAN_REPORT_EVERY = 120   -- sweeps between cost reports thereafter (~60 s)
 local scanCost = RT.scanCost or { sweeps = 0, ms = 0, peakMs = 0, actors = 0, bound = 0,
                                   rendered = 0, deferredBind = 0, deferredRender = 0 }
 RT.scanCost = scanCost
@@ -1396,7 +1430,10 @@ local function scanOnce()
     scanCost.deferredBind   = scanCost.deferredBind + deferredBind
     scanCost.deferredRender = scanCost.deferredRender + deferredRender
     if dt * 1000 > scanCost.peakMs then scanCost.peakMs = dt * 1000 end
-    if scanCost.sweeps >= SCAN_REPORT_EVERY then
+    scanCost.reports = scanCost.reports or 0
+    local due = (scanCost.reports == 0) and SCAN_REPORT_FIRST or SCAN_REPORT_EVERY
+    if scanCost.sweeps >= due then
+        scanCost.reports = scanCost.reports + 1
         log.info(string.format(
             "scan cost over %d sweeps: %.2f ms avg, %.2f ms peak | %d actor(s) enumerated per "
             .. "sweep | %d bound, %d deferred bind(s), %d deferred render(s) | budgets %d/%d",
