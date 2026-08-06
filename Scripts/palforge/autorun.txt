@@ -283,8 +283,29 @@
 # That line is the measurement. Every figure in plan/TODO.md about what this scan costs was
 # COUNTED FROM THE CODE and never timed; this replaces the arithmetic. Paste it back.
 #
-# Re-enable the streaming hook only once that number is known to be sane.
-# 25 pf_hook_building_actor_streaming
+# STAGE 1 IS DONE, 2026-08-06 23:11:15 — and the early-out works:
+#
+#   scan cost over 20 sweeps: 0.00 ms avg (0.00 find + 0.00 loop), 0.00 ms peak
+#   | 0 actor(s) per sweep | 20 sweep(s) declined to enumerate
+#
+# 69.25 ms -> 0.00 ms. A session with no building pack now pays nothing at all.
+#
+# STAGE 2 is the one that decides the refactor, and 0.00 ms cannot decide it: the scan is
+# cheap here because it is doing NOTHING. The question is what it costs when a pack HAS
+# registered buildings in a base this size, split into its two halves —
+#
+#   (A find + B loop)
+#     A large -> FindAllOf, which walks every UObject, is the cost. Enumerate less OFTEN.
+#     B large -> the three native calls per actor are the cost. Touch each actor LESS.
+#
+# building-actor-streaming publishes at most 3 build ids / 24 actors (it published 48 ids
+# into 623 actors on 2026-08-06 and closed the game; both the hook cap and core/event's
+# per-sweep bind and render budgets landed after that). Once it publishes, the scan has
+# something to match and the next report carries the split.
+#
+# ⚠️ It samples for 600 s and refuses F9 while it does. Two or three report lines is all
+# this needs — closing the game once they are in the log is fine.
+20 pf_hook_building_actor_streaming
 8 pf_hook_store_save_roundtrip
 130 pf_tests
 

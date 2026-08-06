@@ -474,12 +474,34 @@ local SCAN_REPORT_FIRST = 20    -- sweeps before the first report (~10 s at SCAN
 local SCAN_REPORT_EVERY = 120   -- sweeps between cost reports thereafter (~60 s)
 local scanCost = RT.scanCost or { sweeps = 0, ms = 0, peakMs = 0, actors = 0, bound = 0,
                                   rendered = 0, deferredBind = 0, deferredRender = 0,
-                                  findMs = 0, loopMs = 0, idle = 0 }
+                                  findMs = 0, loopMs = 0, idle = 0, discovered = 0 }
 RT.scanCost = scanCost
 
 -- Handed to the actor loop when the scan declines to enumerate, so the loop needs no second
 -- shape. One table for the life of the module; nothing ever writes to it.
 local EMPTY_ACTORS = {}
+
+-- How many sweeps a converged scan waits before enumerating once as a safety net. 60 at
+-- SCAN_MS = 500 is 30 s. It exists because a structure can appear with no hook of its own —
+-- streamed in, spawned by something PalForge does not see — and without it such a structure
+-- would wait for the next placement anywhere in the world. At one sweep in sixty it costs
+-- 1/60th of what the unconditional enumeration cost, which at the 2026-08-07 measurement is
+-- 65 ms every 30 s instead of 65 ms twice a second.
+local DISCOVER_IDLE_SWEEPS = 60
+
+-- Consecutive enumerations that must find nothing and leave nothing unaccounted for before the
+-- scan goes idle. See the convergence block in scanOnce for why one is not enough.
+local DISCOVER_SETTLE = 2
+
+-- Ask the next sweep to enumerate. Every caller is an EVENT — a placement intent, a definition
+-- arriving or leaving, a world load, a tracked handle going invalid — which is the whole point:
+-- discovery is driven by things happening, and the idle re-check above is a net under it rather
+-- than the mechanism. Public so a pack that spawns a structure by some route PalForge cannot
+-- see has a supported way to say so.
+function M.discoverSoon()
+    local g = RT.world
+    g.discoverDue = true
+end
 
 -- =====================================================================================
 -- SCAN BUDGET — the fix for the burst half
@@ -786,6 +808,19 @@ local function refreshDefs()
     -- Retire: replace the index wholesale (a stale build id must stop resolving) and drop
     -- defs for ids the registry no longer holds. Existing INSTANCES keep the def object they
     -- were created with, which is what makes inst.def identity stable across a redefinition.
+    -- A CHANGED CLAIM SET IS A REASON TO ENUMERATE. A definition arriving mid-session claims
+    -- build ids that standing actors may already match, and a converged scan would otherwise
+    -- never look at them again. Compared by the claimed ids rather than by the def objects,
+    -- because a redefinition that claims the same ids changes nothing the scan can find.
+    local sig = {}
+    for r in pairs(byBuildId) do sig[#sig + 1] = r end
+    table.sort(sig)
+    sig = table.concat(sig, "\0")
+    if sig ~= Registry.buildIdSig then
+        Registry.buildIdSig = sig
+        RT.world.discoverDue = true
+    end
+
     Registry.byBuildId = byBuildId
     for id in pairs(Registry.defs) do
         if live[id] == nil then Registry.defs[id] = nil end
@@ -967,6 +1002,9 @@ end
 local function onPlaceRequest(resolvedBuildId, pos, player)
     refreshDefs()  -- a building defined post-start must be known before we match its id
     if not Registry.byBuildId[resolvedBuildId] then return end
+    -- A placement is the clearest possible reason to enumerate: an actor is about to exist
+    -- that nothing is tracking. This is what makes the converged scan wake up.
+    RT.world.discoverDue = true
     table.insert(Registry.pending, { buildId = resolvedBuildId, pos = pos, player = player })
     while #Registry.pending > 16 do table.remove(Registry.pending, 1) end
 end
@@ -1225,15 +1263,74 @@ local function scanOnce()
     -- The removal sweep below is NOT skipped: instances can outlive the definition that made
     -- them (a pack unregistering, an F9 reload), and those still have to be able to go away.
     local anyDef = next(Registry.byBuildId) ~= nil
+
+    -- =================================================================================
+    -- TRACKING — what is already known, checked without enumerating anything
+    -- =================================================================================
+    --
+    -- MEASURED 2026-08-07, 623 structures: 64.88 ms a sweep, 44.97 of it in FindAllOf and
+    -- 19.92 in the per-actor loop, and it is LINEAR in the actor count — 0.0723 ms per actor
+    -- in find at 498 actors and 0.0722 at 623. That linearity is the finding: FindAllOf's cost
+    -- here is not the global UObject walk, it is MATERIALISING ONE LUA WRAPPER PER ACTOR, and
+    -- this scan threw all 623 away twice a second to use three of them. Projected forward at
+    -- 0.104 ms per actor per sweep, 5,000 structures is 520 ms a sweep against a 500 ms
+    -- interval: the scan stops keeping up before a large base does anything unusual.
+    --
+    -- An instance already holds its own actor handle (bindActor stores it). Asking THAT handle
+    -- whether it is still live is one native call, and the count is the number of TRACKED
+    -- structures rather than the number that exist. A pack watching five workbenches pays five
+    -- calls a sweep in a base of any size.
+    --
+    -- A handle going invalid is also the wake signal for discovery: something was destroyed or
+    -- streamed out, and only an enumeration can tell which.
+    -- ⚠️ THIS PASS DOES NOT DECIDE PRESENCE, ONLY ABSENCE — and getting that backwards broke
+    -- two R-1 checks the first time this was written. A live handle is NOT evidence that the
+    -- structure is still in the world's actor list: a stub, or a real object the enumeration
+    -- legitimately stopped returning, answers IsValid perfectly well. So a live handle marks
+    -- nothing as matched; it simply costs one native call and tells us there is no news.
+    --
+    -- A DEAD handle is the strong signal, and it is the one worth paying for: it means
+    -- something was destroyed or unloaded, and only an enumeration can say which instances are
+    -- affected. So it wakes discovery, and the ENUMERATION — exactly as before this change —
+    -- remains the only thing that may declare an instance missing.
+    local matched = {}
+    local anyDead = false
+    local trackedCount = 0
+    for _, inst in pairs(Registry.instances) do
+        trackedCount = trackedCount + 1
+        if not (inst.actor ~= nil and uo.live(inst.actor)) then anyDead = true end
+    end
+
+    -- =================================================================================
+    -- DISCOVERY — the only thing that needs FindAllOf, and it converges
+    -- =================================================================================
+    --
+    -- Discovery answers exactly one question: is there an actor here that nothing is tracking
+    -- yet? That is true at a world load, when a structure is placed, and when one comes back
+    -- after being lost — and it is FALSE the rest of the time, which is the whole of the saving.
+    --
+    -- `gate.discoverDue` is set by those events (see setDiscoverDue) and cleared by a sweep that
+    -- enumerated and bound NOTHING NEW: zero new binds is convergence, because the world was
+    -- enumerated in full and had nothing to give. The idle re-check is a safety net rather than
+    -- a mechanism — a structure that streams in with no hook of its own would otherwise wait for
+    -- the next placement — and at one sweep in DISCOVER_IDLE_SWEEPS it costs 1/60th of what the
+    -- unconditional enumeration did.
+    if anyDead then gate.discoverDue = true end
+    gate.sinceDiscover = (gate.sinceDiscover or 0) + 1
+    local discover = anyDef and (gate.discoverDue or gate.sinceDiscover >= DISCOVER_IDLE_SWEEPS)
+
     local actors = EMPTY_ACTORS
-    local tFind = t0
-    if anyDef then
+    local tFind = os.clock()
+    if discover then
+        gate.sinceDiscover = 0
         local okFind, found = pcall(FindAllOf, "PalBuildObject")
         if not okFind or type(found) ~= "table" then return 0 end
         actors = found
+        tFind = os.clock()
     end
-    tFind = os.clock()
-    local matched = {}
+    -- `matched` is built by the TRACKING pass above, not here: an instance whose own handle is
+    -- still live is present whether or not this sweep enumerated anything. The loop below only
+    -- ADDS to it, for actors discovery found.
     local changes = 0
 
     -- THIS SWEEP'S BUDGET. Read from the module fields rather than captured, so a session can
@@ -1437,10 +1534,22 @@ local function scanOnce()
         if not ok then log.warn("scan: actor pass failed") end
     end
 
-    -- removal sweep
-    for key, inst in pairs(Registry.instances) do
+    -- CONVERGENCE. A discovery that enumerated the world in full and bound nothing new has
+    -- nothing left to find, so the next sweep does not enumerate. Anything that could make that
+    -- untrue — a placement, a definition arriving, a handle going invalid, a world change —
+    -- sets the flag again through setDiscoverDue.
+
+    -- removal sweep — ONLY AFTER A SWEEP THAT ENUMERATED. `matched` is built by the actor loop
+    -- above and means "the enumeration listed this instance's actor", which is what it has
+    -- always meant. A sweep that declined to enumerate has looked at nothing and therefore may
+    -- not conclude that anything is absent; it just does not run this. That is the whole
+    -- correctness argument for the convergence: not looking is safe precisely because not
+    -- looking also means not judging.
+    local anyPending = false
+    for key, inst in pairs(discover and Registry.instances or EMPTY_ACTORS) do
         if not matched[key] then
             inst.missingStreak = (inst.missingStreak or 0) + 1
+            anyPending = true
             if inst.missingStreak >= MISS_THRESHOLD then
                 -- emit BEFORE dropping so DISPATCH's resolve() still finds the instance.
                 srcEmit("building.remove", { key = key, buildId = inst.buildId, actor = inst.actor, reason = "missing" })
@@ -1448,6 +1557,31 @@ local function scanOnce()
                 changes = changes + 1
             end
         end
+    end
+
+    -- CONVERGENCE, and the second condition is the one the first attempt got wrong. Binding
+    -- nothing new is not enough: an instance the enumeration did NOT list has unfinished
+    -- business — it is somewhere between one miss and MISS_THRESHOLD, and only more
+    -- enumerations can settle whether it comes back or goes. Converging while a miss was
+    -- outstanding froze missingStreak at 1 forever and the structure was never removed, which
+    -- is exactly what two R-1 checks caught.
+    --
+    -- So the scan stops enumerating only when it bound nothing AND nothing is unaccounted for.
+    -- Anything that could make that untrue — a placement, a definition arriving, a handle going
+    -- invalid, a world change — sets the flag again through M.discoverSoon.
+    if discover then
+        if changes == 0 and not anyPending then
+            gate.cleanRuns = (gate.cleanRuns or 0) + 1
+        else
+            gate.cleanRuns = 0
+        end
+        -- TWO CLEAN ENUMERATIONS, not one. One is weak evidence that the world has settled: the
+        -- sweep that REMOVES a structure at MISS_THRESHOLD is itself a change, so the sweep
+        -- straight after it looks clean while the most interesting thing that could happen —
+        -- the structure coming back, which is what a stream-out and stream-in looks like — has
+        -- not had a single enumeration to be seen in. Requiring two costs one extra FindAllOf
+        -- per settling and is what makes "walk away, walk back" work inside one session.
+        if gate.cleanRuns >= DISCOVER_SETTLE then gate.discoverDue = false end
     end
 
     -- COST, counted rather than argued. os.clock is CPU time for this Lua state, which is the
@@ -1462,6 +1596,7 @@ local function scanOnce()
     scanCost.findMs  = scanCost.findMs + (tFind - t0) * 1000
     scanCost.loopMs  = scanCost.loopMs + (tEnd - tFind) * 1000
     if not anyDef then scanCost.idle = scanCost.idle + 1 end
+    if discover then scanCost.discovered = scanCost.discovered + 1 end
     scanCost.actors  = scanCost.actors + #actors
     scanCost.bound   = scanCost.bound + changes
     scanCost.deferredBind   = scanCost.deferredBind + deferredBind
@@ -1473,17 +1608,20 @@ local function scanOnce()
         scanCost.reports = scanCost.reports + 1
         log.info(string.format(
             "scan cost over %d sweeps: %.2f ms avg (%.2f find + %.2f loop), %.2f ms peak | %d "
-            .. "actor(s) per sweep | %d bound, %d deferred bind(s), %d deferred render(s) | %d "
-            .. "sweep(s) declined to enumerate (no building definition registered) | budgets %d/%d",
+            .. "actor(s) per sweep | %d bound, %d deferred bind(s), %d deferred render(s) | "
+            .. "%d/%d sweep(s) ENUMERATED (%d had no definition to match) | %d tracked | "
+            .. "budgets %d/%d",
             scanCost.sweeps, scanCost.ms / scanCost.sweeps,
             scanCost.findMs / scanCost.sweeps, scanCost.loopMs / scanCost.sweeps, scanCost.peakMs,
             math.floor(scanCost.actors / scanCost.sweeps + 0.5), scanCost.bound,
-            scanCost.deferredBind, scanCost.deferredRender, scanCost.idle,
+            scanCost.deferredBind, scanCost.deferredRender,
+            scanCost.discovered, scanCost.sweeps, scanCost.idle, trackedCount,
             tonumber(M.SCAN_BIND_BUDGET) or 16, tonumber(M.SCAN_RENDER_BUDGET) or 4))
         scanCost.sweeps, scanCost.ms, scanCost.peakMs = 0, 0, 0
         scanCost.actors, scanCost.bound = 0, 0
         scanCost.deferredBind, scanCost.deferredRender = 0, 0
         scanCost.findMs, scanCost.loopMs, scanCost.idle = 0, 0, 0
+        scanCost.discovered = 0
     end
     return changes
 end
@@ -1675,6 +1813,8 @@ function M.__worldPoll()
             -- The CHANNEL is armed instead of emitted — the next scan owns it.
             gate.ready = true
             gate.pendingReady = true
+            gate.discoverDue = true   -- a fresh world: nothing is tracked yet
+            gate.sinceDiscover = 0
             log.info("world ready - building dispatch enabled")
             migrateOnce()
         end
@@ -1704,6 +1844,8 @@ local function installWorldSource()
         --  when LoopAsync is gone there is no scan either, and nothing emits.)
         gate.ready = true
         gate.pendingReady = true
+        gate.discoverDue = true   -- a fresh world: nothing is tracked yet
+        gate.sinceDiscover = 0
         log.warn("ready-watch unavailable (" .. tostring(e) .. ") - dispatch always on")
         migrateOnce()   -- the gate opened, so this is still "before the first bind"
     end
