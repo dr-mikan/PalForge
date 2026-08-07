@@ -66,7 +66,7 @@ than no statement.
 | thumbnail | `palforge-thumb.png` | 512×512 — the square mark (concept A, the anvil), because the thumbnail renders small and the banner's text will not survive it |
 | gallery | `assets/gallery/*.png` | 1280×720, **three of them** |
 
-Build them with the commands in `assets/README.md` and `assets/cards/README.md`.
+Build them with the commands in `assets/README.md` and `assets/gallery/README.md`.
 
 **Three, in this order, and the order is the argument:**
 
@@ -74,10 +74,10 @@ Build them with the commands in `assets/README.md` and `assets/cards/README.md`.
 2. `G2-what-you-can-add` — *how many kinds of thing*, at a glance
 3. `G3-events` — *and it already reacts to the game*
 
-`assets/cards/` holds nine more, one per domain. Those are documentation figures, not gallery
-images. **Not one of the five frameworks read before this used a single diagram** — nine on a mod
-page reads as effort spent on the page rather than on the code. Three is the smallest number that
-answers the three questions a stranger actually has.
+**Not one of the five frameworks read before this used a single diagram** (SMAPI, UE4SS, Fabric,
+Harmony, BepInEx). Nine on a mod page would read as effort spent on the page rather than on the
+code. Three is the smallest number that answers the three questions a stranger actually has —
+`assets/gallery/README.md` has the reasoning.
 
 ## ⚠️ The claim that must not drift
 
