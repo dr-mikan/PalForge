@@ -4,8 +4,8 @@ Everything a release needs that is not the code. Nothing here is read at runtime
 
 | file | for |
 | --- | --- |
-| `nexus-full-description.md` | **the Full description field.** Markdown, no images, every link verified live. Paste this one. |
-| `nexus-full-description.bbcode` | the same text in BBCode, generated from the Markdown, for when Nexus's editor will not take Markdown |
+| `nexus-full-description.bbcode` | **the Full description field. Paste this one.** BBCode, no images, every link verified live. |
+| `nexus-full-description.md` | the SOURCE it is generated from. Edit here, never the .bbcode. |
 | `nexus-short-description.md` | the 350-character description, with the reasoning per sentence and two alternatives |
 | `nexus-fields.md` | the short fields on the upload form — name, summary, category, tags, permissions |
 | `../assets/*.svg` | the mark, the banner, and four gallery cards (see `assets/README.md`) |
@@ -26,7 +26,7 @@ puts a diagram in its prose.
 2. **Check the zip.** Download it from the Release and open it. One folder, named `PalForge`. That
    shape IS the install instruction, so if it is wrong the instruction is wrong.
 3. **Rasterise the images** — `assets/README.md` has the commands.
-4. **Nexus.** Upload the zip, paste `nexus-full-description.md` into Full description,
+4. **Nexus.** Upload the zip, paste `nexus-full-description.bbcode` into Full description,
    `nexus-short-description.md`'s chosen line into the short one, and fill the rest from
    `nexus-fields.md`. Optionally add the four gallery PNGs on the Images tab — the description
    does not reference them, so their order and presence are free.
@@ -37,6 +37,26 @@ Their acceptable-use policy makes the public API read-only, so step 4 is a human
 from the GitHub Release into the Nexus form. Nothing automates it and nothing here should pretend
 to. Upload the **GitHub Release artifact**, not a locally built zip: the one that passed the gate
 is the one people should get.
+
+## Editing the description
+
+`nexus-full-description.md` is the source; the `.bbcode` is build output. Edit the Markdown, then:
+
+```sh
+python3 tools/md2bbcode.py publish/nexus-full-description.md
+```
+
+It regenerates the BBCode and **checks it**, exiting non-zero on anything that would render wrong:
+an unbalanced tag, Markdown that survived the conversion, a BBCode tag inside a `[code]` block
+(Nexus renders those literally), or a `[*]` outside any `[list]`.
+
+Two hand-kept copies of this text is how one of them starts lying — and this text carries version
+numbers, a measurement, and the sentence about what PalForge cannot do. One source.
+
+⚠️ **The converter is not a general Markdown converter and must not become one.** It handles
+exactly what this description uses and fails loudly on the rest, which is what caught the one real
+defect it has had: an indented code block containing a blank line came out as *two* `[code]` boxes,
+splitting the Lua example in half.
 
 ## The links in the description are checked, and the trailing slash matters
 

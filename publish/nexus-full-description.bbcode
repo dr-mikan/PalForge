@@ -21,9 +21,9 @@ wanted, and keeping whatever you remembered alive across a save and reload.
 You declare a thing and its behaviour in one block. PalForge registers it, connects it to the
 events Palworld already emits, and gives it somewhere to keep its state that survives a reload.
 
-[code]require("palforge.api")[/code]
+[code]require("palforge.api")
 
-[code]Building{
+Building{
     id = "CampFire",                        -- the game's own campfire
     events = {
         onRightClick = function(self, ctx)  -- fires in a real save

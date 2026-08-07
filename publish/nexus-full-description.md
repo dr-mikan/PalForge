@@ -1,11 +1,15 @@
 # Nexus — Full description
 
-Paste the block below into Nexus's **Full description** field. It is Markdown, no images, and
-every link was checked with `curl` before it was written down.
+**This file is the SOURCE. What gets pasted into Nexus is `nexus-full-description.bbcode`**, which
+is generated from the block below — Nexus's editor is BBCode, so that is the one to copy.
 
-**Nexus's editor is BBCode.** If it does not accept Markdown, use
-`nexus-full-description.bbcode` instead — same text, same links, BBCode tags. The `[img]` tags in
-that file can simply be deleted; every section reads without them.
+Edit here, then regenerate:
+
+```sh
+python3 tools/md2bbcode.py publish/nexus-full-description.md
+```
+
+No images, and every link was checked with `curl` before it was written down.
 
 ## ⚠️ Two things that must not drift
 
