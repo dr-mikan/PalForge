@@ -417,3 +417,116 @@ io.open(os.path.join(OUT, "_sheet.svg"), "w", encoding="utf-8").write(
     f'nine cards, one design language \u00b7 dashed cold steel = declared, with no native source</text>\n'
     + "".join(parts) + '</svg>\n')
 print("  wrote _sheet.svg")
+
+
+# =====================================================================================
+# THE NEXUS GALLERY — three cards, and a different question than the nine above
+# =====================================================================================
+#
+# The nine cards answer "what can I extend", domain by domain, which is a documentation
+# question. A stranger on a mod page is asking something shorter and blunter: WHAT CAN I ADD.
+#
+# Five comparable frameworks were read before these were drawn — SMAPI, UE4SS, Fabric, Harmony,
+# BepInEx — and NOT ONE of them uses a diagram. Every one leads with a logo, one sentence of the
+# form "<category> for <game>", and a download. Harmony, which has exactly this project's problem
+# (a library with no visible output), says so explicitly: it does not try to visualise itself.
+#
+# So three, not nine. Those five can afford zero because they are already known; PalForge is not,
+# and "content framework" is not a category anyone recognises. Three is the smallest number that
+# answers "what can I add", "what can I add it to", and "how does it fire".
+#
+# ⚠️ THE ONE CLAIM THAT MUST NOT DRIFT. PalForge alone cannot add a new row to the game's data
+# tables — Lua cannot write one. A genuinely new item, creature or build object needs PalSchema
+# for the row, and PalForge's namespaced ids are built to be exactly what PalSchema writes
+# (`mypack:Potion` -> `mypack_Potion`). Card G1 says that in the picture rather than in a
+# footnote, because it is the difference between a framework that works and a page that lies.
+
+GALLERY = "assets/gallery"
+
+
+def gallery_card(fname, eyebrow, title, blurb, code, diagram, footnote):
+    global OUT
+    keep, OUT = OUT, GALLERY
+    try:
+        return card(fname, eyebrow, title, blurb, code, diagram, footnote)
+    finally:
+        OUT = keep
+
+
+# ---- G1: add a new entity -------------------------------------------------------------
+d = "\n".join([
+    node(700, 250, 234, 96, "PalSchema", "writes the row"),
+    arrow(934, 298, 1000, 298),
+    node(1000, 250, 208, 96, "the game", "knows it exists"),
+    arrow(1104, 346, 1104, 404),
+    node(700, 404, 508, 96, "PalForge", "gives it behaviour and events"),
+    spark(934, 298, 7),
+    f'  <text x="700" y="556" font-family="{SANS}" font-size="19" fill="{STEEL_M}">'
+    f'One id, spelled the same on both sides: mypack:Potion → mypack_Potion</text>',
+])
+gallery_card("G1-new-entity.svg", "ADD SOMETHING NEW", "New pals, items and buildings",
+    "PalSchema writes the data row. PalForge gives it behaviour, events and saved state.",
+    [('Item{', "code"),
+     ('    id       = "mypack:Potion",', "hot"),
+     ('    name     = "Healing Potion",', "code"),
+     ('    restores = { hpRate = 0.25 },', "code"),
+     ('    events   = {', "code"),
+     ('        onUse = function(self, ctx)', "code"),
+     ('            Audio.get("AKE_Heal"):play()', "code"),
+     ('        end,', "code"),
+     ('    },', "code"),
+     ('}', "code")],
+    d,
+    "Lua cannot add a row to the game's tables, so a brand-new entity needs PalSchema for the row. PalForge does everything after that.")
+
+# ---- G2: everything you can declare ---------------------------------------------------
+cells = [("Pal", "creatures"), ("Item", "things"), ("Building", "structures"),
+         ("Skill", "moves & passives"), ("Effect", "status ailments"), ("Audio", "1957 sounds"),
+         ("Mesh", "models & materials"), ("UI", "panels")]
+g = []
+for i, (nm, sub) in enumerate(cells):
+    cx = 700 + (i % 2) * 262
+    cy = 250 + (i // 2) * 82
+    g.append(node(cx, cy, 246, 68, nm, sub))
+d = "\n".join(g + [
+    f'  <text x="700" y="596" font-family="{SANS}" font-size="19" fill="{STEEL_M}">'
+    f'Every one is the same shape: call it to define, get a handle back.</text>'])
+gallery_card("G2-what-you-can-add.svg", "WHAT YOU CAN DECLARE", "Eight kinds of thing, one shape",
+    "A pal, an item, a building, a skill, an effect, a sound, a model, a panel.",
+    [('Pal{      id = "mypack:Boss",  ... }', "code"),
+     ('Item{     id = "mypack:Potion", ... }', "code"),
+     ('Building{ id = "mypack:Bench", ... }', "code"),
+     ('Skill{    id = "mypack:Ember", ... }', "code"),
+     ('Effect{   id = "mypack:Regen", ... }', "code"),
+     ('Audio{    id = "AKE_BGM_Title" }', "code"),
+     ('Mesh{     id = "mypack:Body",  ... }', "code"),
+     ('UI{       id = "mypack:Panel", ... }', "code"), ("", "dim"),
+     ('Item.get("Wood"):give(10)   -- and act on it', "dim")],
+    d,
+    "Every field is checked where you typed it — an undeclared field is an error with a did-you-mean, never a silent no-op.")
+
+# ---- G3: the events ------------------------------------------------------------------
+d = "\n".join([
+    node(700, 250, 214, 82, "the game", "does a thing"),
+    arrow(914, 291, 978, 291),
+    node(978, 250, 230, 82, "your handler", "runs"),
+    node(700, 356, 508, 74, "onPlace · onRightClick · onTick · onRemove", None),
+    node(700, 444, 508, 74, "onUse · onCraft · onObtain · onDiscard", None),
+    node(700, 532, 508, 66, "onSpawned · onDamaged · onDeath · onCaptured", None),
+    spark(914, 291, 7),
+])
+gallery_card("G3-events.svg", "AND THE EVENTS ARE ALREADY WIRED", "React to what the game does",
+    "Twenty-one channels, fed by twenty-two native hooks. You declare a handler; it fires.",
+    [('Building{', "code"),
+     ('    id = "CampFire",     -- the vanilla campfire', "dim"),
+     ('    events = {', "code"),
+     ('        onRightClick = function(self, ctx)', "hot"),
+     ('            self.state.uses = self.state.uses + 1', "code"),
+     ('            self:save()      -- survives a reload', "code"),
+     ('        end,', "code"),
+     ('    },', "code"),
+     ('}', "code")],
+    d,
+    "No polling loop to write, no hook to register. A channel with no native source behind it says so instead of staying quiet.")
+
+print("  gallery: G1-new-entity.svg, G2-what-you-can-add.svg, G3-events.svg")

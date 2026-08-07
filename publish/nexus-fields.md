@@ -5,21 +5,28 @@ The description is `nexus-description.bbcode`. These are everything else on the 
 ## Name
 
 ```
-PalForge — content framework for Palworld (UE4SS/Lua)
+PalForge — add new pals, items and buildings (UE4SS/Lua framework)
 ```
 
-The parenthetical is doing work: it tells a player scanning the list that this is not a mod for
-them, before they download it and find nothing changed.
+**This changed on 2026-08-07 and the reason is worth keeping.** It used to read *content framework
+for Palworld*, which is what the thing IS — but nobody searches for a category they have never
+heard of. Five comparable frameworks were read before rewriting it (SMAPI, UE4SS, Fabric, Harmony,
+BepInEx) and every one leads with the same shape: **`<what it does> for <the game>`**, then the
+category in second position. So the outcome leads and *framework* follows, where it stops the
+wrong download instead of preventing the right one.
 
 ## Summary (the one line under the title)
 
 ```
-A modder's framework: declare a building, item, pal, skill, effect, sound or UI panel in a few
-lines of Lua and PalForge wires it to the game's own events. Single-player only.
+Add new pals, items and buildings to Palworld in a few lines of Lua — and react to what the
+game does. Single-player only.
 ```
 
-Both halves are load-bearing. *A modder's framework* stops the wrong download; *single-player
-only* stops the first bug report.
+One sentence, not two: Fabric gets by on *"a modular, lightweight mod loader for Minecraft"* and
+the density is the point. *Add* is the promise, *react to what the game does* is the second half
+of it, and *single-player only* stops the first bug report.
+
+⚠️ **Do not shorten it to "add new content" and stop there.** See the warning under Images.
 
 ## Category
 
@@ -41,7 +48,8 @@ with `package.json`, so if the workflow passed, these agree.
 
 | mod | why |
 | --- | --- |
-| UE4SS (RE-UE4SS) | the Lua loader PalForge runs on. Not optional. |
+| UE4SS (RE-UE4SS) | the Lua loader PalForge runs on. **Not optional.** |
+| PalSchema | **required to add NEW content**, optional to extend what the game already has. Lua cannot write a row into the game's data tables; PalSchema can, and PalForge's ids are spelled to match what it writes. |
 | CheatManagerEnablerMod | **optional.** Only improves the item helpers; spawning does not need it. |
 
 ## Permissions
@@ -56,14 +64,34 @@ than no statement.
 | --- | --- | --- |
 | main image | `palforge-banner.png` | 1280×640 |
 | thumbnail | `palforge-thumb.png` | 512×512 — the square mark (concept A, the anvil), because the thumbnail renders small and the banner's text will not survive it |
-| gallery | `assets/cards/*.png` | 1280×720, nine of them |
+| gallery | `assets/gallery/*.png` | 1280×720, **three of them** |
 
 Build them with the commands in `assets/README.md` and `assets/cards/README.md`.
 
-**Gallery order matters more than the images do.** `01-buildings` first: it is the shortest
-complete example and the one that answers *what would I even use this for*. Then `08-events`,
-which explains why the rest works. Then the domain cards. Then `07-state` and `09-packs` last —
-those answer questions a reader only has once they are already convinced.
+**Three, in this order, and the order is the argument:**
+
+1. `G1-new-entity` — *what can I add*, and the honest pairing that makes it possible
+2. `G2-what-you-can-add` — *how many kinds of thing*, at a glance
+3. `G3-events` — *and it already reacts to the game*
+
+`assets/cards/` holds nine more, one per domain. Those are documentation figures, not gallery
+images. **Not one of the five frameworks read before this used a single diagram** — nine on a mod
+page reads as effort spent on the page rather than on the code. Three is the smallest number that
+answers the three questions a stranger actually has.
+
+## ⚠️ The claim that must not drift
+
+**PalForge alone cannot add a row to the game's data tables.** Lua cannot write one. A genuinely
+new item, creature or build object needs **PalSchema** for the row; PalForge's namespaced ids are
+built to be exactly what PalSchema writes (`mypack:Potion` → `mypack_Potion`).
+
+So *"add new pals, items and buildings"* is true of the two together, and the page has to say so
+where a reader will actually meet it — which is why card G1 draws the pairing instead of putting
+it in a footnote, and why PalSchema is listed under Requirements as **required for new content,
+optional for extending what the game already has**.
+
+Nothing on the page may say PalForge adds content on its own. That is the one sentence that would
+turn this into a page that lies.
 
 ## Two things NOT to put on the page
 

@@ -1,7 +1,24 @@
 # Capability cards
 
-Nine 1280×720 images, one per thing a pack can extend. They are the Nexus gallery, and they double
-as the hero images in the docs.
+Nine 1280×720 images, one per thing a pack can extend. **They are documentation figures.** The
+Nexus gallery is the three in `../gallery/`, and the split is the whole point of this paragraph.
+
+## Why three on the mod page and nine here
+
+Five comparable frameworks were read before deciding — **SMAPI**, **UE4SS**, **Fabric**,
+**Harmony**, **BepInEx** — and **not one of them uses a single diagram**. Every one leads with a
+logo, one sentence of the form *`<what it is>` for `<the game>`*, and a download. Harmony, which
+has exactly this project's problem (a library with no visible output), is explicit about it: it
+does not try to visualise itself, it explains in words and sends you to the docs.
+
+They can afford zero because they are already known. PalForge is not, and *content framework* is
+not a category anyone recognises — so it needs more than zero. But nine on a mod page reads as
+effort spent on the page rather than on the code, which is the opposite of what this project
+wants to be believed about it. **Three is the smallest number that answers the three questions a
+stranger actually has**: what can I add, how many kinds of thing, and does it react to the game.
+
+The nine below answer a documentation question — *what can I extend, domain by domain* — and that
+is a question somebody asks after they are already interested.
 
 **They are generated.** `tools/gen-cards.py` holds the template and all nine card definitions;
 editing an SVG here is editing build output. Run:

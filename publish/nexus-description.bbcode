@@ -1,29 +1,58 @@
-[size=5][b]PalForge — a content framework for Palworld[/b][/size]
+[size=5][b]PalForge — add new pals, items and buildings to Palworld[/b][/size]
 
-[b]This is a modder's tool, not a gameplay mod.[/b] On its own it changes nothing you can see: it adds no items, no pals and no buildings. What it does is let someone else add them in a short Lua file instead of a large one.
+[b]This is a modder's tool, not a gameplay mod.[/b] On its own it changes nothing you can see. What it does is let someone else add a pal, an item, a building, a skill, a status effect, a sound, a model or a UI panel in a short Lua file instead of a large one — and react to what the game does, without writing any plumbing.
 
 If you are here to play, you want a mod [i]built on[/i] PalForge, not PalForge.
 
 [line]
 
-[size=4][b]What it does[/b][/size]
+[size=4][b]What you can add[/b][/size]
 
-You describe a piece of content — a building, an item, a pal, a skill, a status effect, a sound, a model, a menu — and PalForge registers it, wires it to the game's own events, and gives it somewhere to keep its state.
+Eight kinds of thing, and every one is the same shape — call it to declare, get a handle back:
 
-[code]require("palforge.api")
+[list]
+[*][b]Pal[/b] — creatures, with a mesh, a material, skills and a lifecycle
+[*][b]Item[/b] — things, with what they restore and what happens when they are used
+[*][b]Building[/b] — structures, with per-structure state that survives a reload
+[*][b]Skill[/b] — active moves and passives
+[*][b]Effect[/b] — status ailments, including the game's own 38
+[*][b]Audio[/b] — from a 1957-entry catalog of the game's own sounds
+[*][b]Mesh[/b] — models and materials
+[*][b]UI[/b] — panels mounted inside Palworld's own interface
+[/list]
 
-Building{
-    id = "CampFire",                        -- the game's own build id
-    events = {
-        onRightClick = function(self, ctx)  -- fires on the real campfire, in a real save
-            Item.get("Wood"):give(5)
+[code]Item{
+    id       = "mypack:Potion",
+    name     = "Healing Potion",
+    restores = { hpRate = 0.25 },
+    events   = {
+        onUse = function(self, ctx)
+            Audio.get("AKE_Heal"):play()
         end,
     },
 }[/code]
 
-That is a complete, working mod. Right-clicking any campfire in your base gives you five wood.
+[b]⚠️ How a genuinely NEW entity works, stated plainly.[/b] Lua cannot write a row into Palworld's data tables, so a brand-new item, creature or build object needs [b]PalSchema[/b] to create the row (search Nexus for it, or see its GitHub linked at the bottom). PalForge does everything after that — behaviour, events, saved state — and its ids are spelled to be exactly what PalSchema writes ([font=Courier New]mypack:Potion[/font] becomes the row [font=Courier New]mypack_Potion[/font]).
+
+To give something the game [i]already has[/i] new behaviour, PalForge alone is enough.
 
 [line]
+
+[size=4][b]And the events are already wired[/b][/size]
+
+Twenty-one channels, fed by twenty-two hooks into the game itself. You declare a handler; it fires. There is no polling loop to write and no hook to register.
+
+[code]Building{
+    id = "CampFire",                        -- the game's own campfire
+    events = {
+        onRightClick = function(self, ctx)  -- fires in a real save
+            self.state.uses = self.state.uses + 1
+            self:save()                     -- survives a reload
+        end,
+    },
+}[/code]
+
+Placement, right-click, load, tick, removal · craft, obtain, use, discard · spawned, damaged, death, captured · skill activation and passives. Each one was found by hooking the game and watching it fire, not by guessing at a name — and a channel that has no source behind it on this build [i]says so[/i] rather than staying quiet.
 
 [size=4][b]⚠️ SINGLE-PLAYER ONLY[/b][/size]
 
@@ -38,6 +67,7 @@ This is a deliberate scope decision, not an oversight. Please do not report mult
 [list]
 [*][b]Palworld[/b] — measured against [b]v1.0.2.101103[/b] (Steam, Win64). Other builds will probably work; that is the one every capability was tested on, and the startup line prints both the build it was measured on and the build you are running, so a mismatch is visible rather than mysterious.
 [*][b]UE4SS[/b] with the Lua mod loader. If you already run other Palworld Lua mods, you have it.
+[*][b]PalSchema[/b] — [i]required to add NEW content[/i], optional to extend what the game already has. See the note above.
 [*][b]CheatManagerEnablerMod[/b] — [i]optional[/i]. PalForge builds a cheat manager itself for spawning; the enabler only helps the item helpers (give / take / unlock).
 [/list]
 
