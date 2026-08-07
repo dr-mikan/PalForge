@@ -240,13 +240,16 @@ echo "deployed $files file(s) in $MODE mode"
 
 # THE ZIP. One folder named PalForge at the root, which is what a player drags into
 # ue4ss/Mods — so the archive's shape IS the install instruction and there is nothing to
-# explain. LICENSE and README ride along at the root beside it, not inside the mod folder,
+# explain. LICENSE, THIRD-PARTY-NOTICES and README ride along at the root beside it, not inside
+# the mod folder. THIRD-PARTY-NOTICES is not optional politeness: this archive REDISTRIBUTES
+# RxLua, whose MIT licence requires its copyright and permission notice to travel with every
+# copy. An archive without it is a licence violation, not an untidy one.
 # where UE4SS would try to make sense of them.
 #
 # -X drops the extended attributes; without it, the archive built on one runner differs from
 # the same tree zipped on another and "is this the build I tested" stops being answerable.
 if [ "$PACKAGE" = "1" ]; then
-    for extra in LICENSE README.md; do
+    for extra in LICENSE THIRD-PARTY-NOTICES.md README.md; do
         [ -f "$SRC/$extra" ] && cp "$SRC/$extra" "$OUT/$extra"
     done
     # No zip binary is not an error worth failing the staged tree over — the tree in $OUT is
@@ -258,7 +261,7 @@ if [ "$PACKAGE" = "1" ]; then
     fi
     ZIP="$OUT/PalForge.zip"
     rm -f "$ZIP"
-    (cd "$OUT" && zip -qrX "PalForge.zip" PalForge $(cd "$OUT" && ls LICENSE README.md 2>/dev/null))
+    (cd "$OUT" && zip -qrX "PalForge.zip" PalForge $(cd "$OUT" && ls LICENSE THIRD-PARTY-NOTICES.md README.md 2>/dev/null))
     echo "packaged $ZIP ($(du -h "$ZIP" | cut -f1))"
     exit 0
 fi

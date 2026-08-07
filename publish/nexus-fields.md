@@ -70,8 +70,36 @@ is under. The version it was measured against belongs in the description, where 
 ## Permissions
 
 MIT, so set every permission to allowed: upload to other sites, convert, use assets, modify. The
-licence already says so and a Nexus permission that contradicts the shipped LICENSE file is worse
+licence already says so, and a Nexus permission that contradicts the shipped LICENSE file is worse
 than no statement.
+
+## Credits
+
+Nexus says, correctly and in bold: *crediting other people's work does not entitle you to use
+their work.* So this field is two different things and they should not be muddled.
+
+**What is actually redistributed, and therefore needs its licence honoured — not just a mention:**
+
+| | |
+| --- | --- |
+| **RxLua** by Bjorn Swenson — MIT, © 2015 | Vendored at `Scripts/palforge/core/vendor/rx.lua` and **inside the zip**. MIT permits that and requires the copyright and permission notice to travel with every copy, which is why the archive carries `THIRD-PARTY-NOTICES.md` and the file itself now carries the full notice. |
+
+**What is depended on but NOT redistributed** — no obligation, listed because they earned it:
+
+| | |
+| --- | --- |
+| **UE4SS (RE-UE4SS)** | The Lua loader. Nothing of it is in the archive; the user installs it. |
+| **PalSchema** by Okaetsu | Writes the data rows new content needs. Nothing of it is in the archive. |
+| **Pocketpair** | For the game. |
+
+⚠️ **No Palworld asset is in the archive** — no model, sound, string table, texture or code.
+PalForge references the game's own content **by id**; `Scripts/palforge/native/` is a list of names
+the game already uses, not a copy of anything it ships. Worth being able to say plainly if anyone
+asks.
+
+Keep this field in step with `THIRD-PARTY-NOTICES.md`. That file has the rule for adding one:
+*does the archive contain it?* If yes, its notice requirements apply to us and a link is not a
+substitute.
 
 ## The images
 

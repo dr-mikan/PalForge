@@ -22,6 +22,8 @@ Building{
 }
 ```
 
+Licence: MIT (`LICENSE`). One piece of third-party code ships inside it — RxLua, MIT, © 2015 Bjorn Swenson — and its notice is in `THIRD-PARTY-NOTICES.md`.
+
 Full documentation: **https://dr-mikan.github.io/PalForge/** ·
 Source: **https://github.com/dr-mikan/PalForge** · MIT · measured against Palworld **v1.0.2.101103**
 

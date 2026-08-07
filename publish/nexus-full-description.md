@@ -251,5 +251,13 @@ appreciated. If you build something with it, I would genuinely like to see it.
 * **Okaetsu, for [PalSchema](https://github.com/Okaetsu/PalSchema)** — the other half of adding
   content to this game. PalForge's id convention follows what PalSchema writes, deliberately, so
   the two compose instead of competing.
+* **Bjorn Swenson, for [RxLua](https://github.com/bjornbytes/RxLua)** — MIT, and the one piece of
+  someone else's code that actually ships inside this zip. It is the observable bus underneath the
+  event channels. Its copyright and permission notice travel with it, in the file and in
+  `THIRD-PARTY-NOTICES.md` at the archive root, because that is what its licence asks for and
+  crediting is not the same as complying.
 * **Pocketpair**, for a game worth spending this long inside.
+
+No Palworld asset is in this archive — no model, sound, string table, texture or code. PalForge
+references the game's own content by id.
 ```
