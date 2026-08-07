@@ -6,6 +6,7 @@ Everything a release needs that is not the code. Nothing here is read at runtime
 | --- | --- |
 | `nexus-description.bbcode` | the Nexus Mods description field, in their BBCode |
 | `nexus-fields.md` | the short fields on the Nexus upload form — name, summary, category, tags |
+| `nexus-short-description.md` | the 350-character description, with the reasoning per sentence and two alternatives |
 | `../assets/*.svg` | the images, plus the commands that rasterise them (see `assets/README.md`) |
 
 ## The order that works
