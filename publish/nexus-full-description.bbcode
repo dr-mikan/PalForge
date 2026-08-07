@@ -127,11 +127,9 @@ behaviour as a bug — the answer is this paragraph.
 [list]
 [*][b]Palworld[/b] — measured against [b]v1.0.2.101103[/b] (Steam, Win64). Other builds will very likely work. The startup line prints both the build PalForge was tested against and the build you are running, so a mismatch is something you can see rather than something you deduce from a mod that stopped working.
 [*][b]UE4SS[/b], with the Lua mod loader. If you already run other Palworld Lua mods you have it. [i]Not optional.[/i]
+[*][b]PalSchema[/b] — [i]required to add NEW content[/i]; not needed to give existing content new behaviour. See "How a genuinely new entity works" above.
+[*][b]CheatManagerEnablerMod[/b] — [b]not a separate download.[/b] It ships with UE4SS and is listed in its [font=Courier New]mods.txt[/font], so if you have UE4SS you have it. PalForge builds a cheat manager itself for spawning and does not need it; it only helps the item helpers ([font=Courier New]give[/font] / [font=Courier New]take[/font] / [font=Courier New]unlockTech[/font]), which find a cheat manager but do not construct one.
 [/list]
-[i] [b]PalSchema[/b] — [/i]required to add NEW content*; not needed to give existing content new
-  behaviour. See "How a genuinely new entity works" above.
-[i] [b]CheatManagerEnablerMod[/b] — [/i]optional.* PalForge builds a cheat manager itself for spawning, so
-  it is not needed for that; it only improves the item helpers ([font=Courier New]give[/font] / [font=Courier New]take[/font] / [font=Courier New]unlockTech[/font]).
 
 [line]
 

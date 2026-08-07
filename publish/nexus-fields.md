@@ -46,11 +46,26 @@ with `package.json`, so if the workflow passed, these agree.
 
 ## Requirements (the "Requirements" tab)
 
-| mod | why |
-| --- | --- |
-| UE4SS (RE-UE4SS) | the Lua loader PalForge runs on. **Not optional.** |
-| PalSchema | **required to add NEW content**, optional to extend what the game already has. Lua cannot write a row into the game's data tables; PalSchema can, and PalForge's ids are spelled to match what it writes. |
-| CheatManagerEnablerMod | **optional.** Only improves the item helpers; spawning does not need it. |
+Nexus splits this into **Nexus requirements** (linked to a mod page) and **off-site requirements**
+(a name and a URL). Only two things belong there at all:
+
+| where | what | why |
+| --- | --- | --- |
+| off-site | **UE4SS (RE-UE4SS)** — https://github.com/UE4SS-RE/RE-UE4SS | the Lua loader PalForge runs on. **Not optional.** Primarily distributed on GitHub, so it is an off-site entry unless a current Nexus mirror is found. |
+| Nexus, if it has a page — otherwise off-site | **PalSchema** — https://github.com/Okaetsu/PalSchema | **required to add NEW content**, not needed to extend what the game already has. Lua cannot write a row into the game's data tables; PalSchema can, and PalForge's ids are spelled to match what it writes. |
+
+⚠️ **CheatManagerEnablerMod is NOT a requirement and must not be listed as one.** It **ships with
+UE4SS** — it sits in UE4SS's own `Mods/` folder alongside ConsoleEnablerMod and BPModLoaderMod, and
+is listed in the `mods.txt` UE4SS installs. Anyone with UE4SS already has it. Listing it would send
+readers looking for a download that does not exist.
+
+It is still worth a sentence in the description, because what it *does* is real: PalForge builds a
+cheat manager itself for spawning and does not need it, but the item helpers (`give` / `take` /
+`unlockTech`) find a cheat manager rather than constructing one, so without it those log
+`no PalCheatManager` and return false.
+
+**Palworld itself is not a Requirements entry** either — Nexus already knows which game the page
+is under. The version it was measured against belongs in the description, where it is.
 
 ## Permissions
 

@@ -31,11 +31,22 @@ def convert(md: str) -> str:
     s = re.sub(r'^### (.+)$', r'[size=4][b]\1[/b][/size]', s, flags=re.M)
     s = re.sub(r'^---$', '[line]', s, flags=re.M)
 
+    # ---- PROTECT THE LIST MARKERS FIRST, and this is not fussiness ------------------
+    # `* **PalSchema** — *required...*` is a bullet whose content starts bold and contains an
+    # italic. The italic rule matched the BULLET's asterisk and the italic's closing one, so the
+    # line came out as `[i] [b]PalSchema[/b] — [/i]required...*` — balanced tags, in the wrong
+    # places, saying the wrong thing. The check passed it because counting tags cannot see that.
+    # Two real requirement lines shipped like that before a human read the rendered output.
+    MARK = "\x00BULLET\x00"
+    s = re.sub(r'^\* ', MARK, s, flags=re.M)
+
     # ---- inline. Links FIRST: a URL can contain characters the others match --------
     s = re.sub(r'\[([^\]]+)\]\((https?://[^)]+)\)', r'[url=\2]\1[/url]', s)
     s = re.sub(r'\*\*(.+?)\*\*', r'[b]\1[/b]', s, flags=re.S)
     s = re.sub(r'(?<![*\w])\*([^*\n]+)\*(?!\*)', r'[i]\1[/i]', s)
     s = re.sub(r'`([^`\n]+)`', r'[font=Courier New]\1[/font]', s)
+
+    s = s.replace(MARK, "* ")
 
     # ---- indented code blocks -------------------------------------------------------
     # A blank line does NOT end a block: it is part of the snippet. Only a non-blank,
@@ -113,6 +124,17 @@ def check(s: str) -> list:
         found = set(re.findall(r'\[/?(?:b|i|url|font|size)[\]=]', m.group(1)))
         if found:
             bad.append(f"BBCode tags inside a [code] block: {sorted(found)}")
+
+    # Emphasis that opened at a list marker: the tags balance, so nothing above catches it.
+    # The signature is an [i] or [b] that opens a list item and closes mid-sentence, leaving a
+    # bare `*` behind — which is the asterisk that was supposed to close it.
+    for line in s.split('\n'):
+        if line.startswith('[*]'):
+            continue
+        if re.match(r'^\[(i|b)\]\s*\[', line) and '*' in line:
+            bad.append(f"emphasis swallowed a list marker: {line[:64]}")
+    if re.search(r'\[/i\][a-zA-Z]', s):
+        bad.append("[/i] immediately followed by a word — an italic closed in the wrong place")
 
     # An orphan [*] renders as literal text on most BBCode engines.
     depth = 0

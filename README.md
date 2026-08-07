@@ -69,7 +69,7 @@ the game cannot answer, the line reads `unknown` rather than a guess.
 | --- | --- |
 | Palworld | measured against v1.0.2.101103 (Steam, Win64) |
 | UE4SS | with the Lua mod loader — if you already run other Palworld Lua mods, you have it |
-| `CheatManagerEnablerMod` | **optional.** `core/spawn.lua` builds a cheat manager itself off the local player controller (`StaticConstructObject(pc.CheatClass, pc)`), so `Pal.Handle:spawn` does not need the mod — what it needs is a player controller, i.e. a loaded save. The enabler still helps `utils.items` (`give` / `take` / `unlockTech`), which finds a cheat manager but does not construct one; without one those log `no PalCheatManager` and return false |
+| `CheatManagerEnablerMod` | **ships with UE4SS** — it is one of the mods in UE4SS's own `Mods/` folder and is listed in the `mods.txt` UE4SS installs, so having UE4SS means having it. It is not a separate download. `core/spawn.lua` builds a cheat manager itself off the local player controller (`StaticConstructObject(pc.CheatClass, pc)`), so `Pal.Handle:spawn` does not need it — what that needs is a player controller, i.e. a loaded save. The enabler still helps `utils/items` (`give` / `take` / `unlockTech`), which finds a cheat manager but does not construct one; without one those log `no PalCheatManager` and return false |
 
 ## Install
 

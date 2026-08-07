@@ -162,8 +162,10 @@ behaviour as a bug — the answer is this paragraph.
   *Not optional.*
 * **PalSchema** — *required to add NEW content*; not needed to give existing content new
   behaviour. See "How a genuinely new entity works" above.
-* **CheatManagerEnablerMod** — *optional.* PalForge builds a cheat manager itself for spawning, so
-  it is not needed for that; it only improves the item helpers (`give` / `take` / `unlockTech`).
+* **CheatManagerEnablerMod** — **not a separate download.** It ships with UE4SS and is listed in
+  its `mods.txt`, so if you have UE4SS you have it. PalForge builds a cheat manager itself for
+  spawning and does not need it; it only helps the item helpers (`give` / `take` / `unlockTech`),
+  which find a cheat manager but do not construct one.
 
 ---
 
