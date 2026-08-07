@@ -255,4 +255,38 @@ gallery_card("G3-events.svg", "AND THE EVENTS ARE ALREADY WIRED", "React to what
     d,
     "No polling loop to write, no hook to register. A channel with no native source behind it says so instead of staying quiet.")
 
-print("  gallery: G1-new-entity.svg, G2-what-you-can-add.svg, G3-events.svg")
+
+# ---- G4: where your state lives -------------------------------------------------------
+# The one image the "does it touch my save?" section needs. That question is asked on every
+# framework page and answering it in prose alone leaves a doubt a picture removes: two boxes
+# that never touch, and one of them is the one the player is worried about.
+d = "\n".join([
+    f'  <text x="700" y="272" font-family="{MONO}" font-size="17" fill="{STEEL_D}">'
+    f'ue4ss/Mods/PalForge/state/</text>',
+    node(700, 286, 508, 66, "one folder per save", "w_1DF0E44B…"),
+    node(724, 368, 226, 66, "yourmod.json", "yours alone"),
+    node(982, 368, 226, 66, "othermod.json", "never touched"),
+    f'  <rect x="700" y="466" width="508" height="86" rx="12" fill="{PANEL}" '
+    f'stroke="{STEEL_D}" stroke-width="3" stroke-dasharray="7 6"/>',
+    f'  <text x="954" y="500" text-anchor="middle" font-family="{SANS}" font-size="20" '
+    f'font-weight="600" fill="{STEEL_L}">Palworld\u2019s own save</text>',
+    f'  <text x="954" y="528" text-anchor="middle" font-family="{MONO}" font-size="16" '
+    f'fill="{STEEL_D}">PalForge never writes here</text>',
+    f'  <text x="700" y="596" font-family="{SANS}" font-size="19" fill="{STEEL_M}">'
+    f'Delete the mod folder and every trace of it goes with it.</text>',
+])
+gallery_card("G4-saved-state.svg", "WHERE YOUR STATE LIVES", "Beside the mod, not inside the save",
+    "One folder per save, one file per mod. Plain JSON you can open.",
+    [('local db = PalForge.pack("mypack").store', "hot"), ("", "dim"),
+     ('db.set("oreBurned", 12)', "code"),
+     ('db.get("oreBurned")        --> 12', "dim"),
+     ('db.save()', "code"), ("", "dim"),
+     ('-- and per placed structure:', "dim"),
+     ('function Bench:onRightClick(ctx)', "code"),
+     ('    self.state.uses = self.state.uses + 1', "code"),
+     ('    self:save()', "code"),
+     ('end', "code")],
+    d,
+    "A crash mid-write leaves the previous version readable, and a file that will not parse is quarantined verbatim rather than overwritten.")
+
+print("  gallery: G1-new-entity, G2-what-you-can-add, G3-events, G4-saved-state")

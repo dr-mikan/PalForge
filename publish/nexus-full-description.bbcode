@@ -1,0 +1,170 @@
+[b]⚠️ BEFORE PASTING:[/b] the four image tags below have placeholder URLs (IMG_URL_1 to IMG_URL_4). Upload the PNGs to the mod's Images tab FIRST, then replace each placeholder with the direct link Nexus gives you — publish/README.md has the mapping. Then delete this line.
+
+[size=5][b]PalForge — add new pals, items and buildings to Palworld[/b][/size]
+
+[b]This is a modder's tool. It adds no content on its own[/b] — install it by itself and nothing in your game changes. What it does is let someone [i]write[/i] content in a few lines of Lua instead of a few hundred.
+
+If you came here to play, you want a mod [i]built on[/i] PalForge, not PalForge.
+
+[line]
+
+[size=4][b]Description[/b][/size]
+
+Modding Palworld means two separate problems. The first is getting a new thing into the game's data — a row for an item, a creature, a build object. The second, and the one that eats the weekend, is making it [i]do[/i] something: finding which internal function fires when a structure is placed, hooking it without crashing, working out which of the fifty arguments is the id you wanted, and keeping whatever you remembered alive across a save and reload.
+
+PalForge is the second half, done.
+
+You declare a thing and its behaviour in one block. PalForge registers it, connects it to the events Palworld already emits, and gives it somewhere to keep its state that survives a reload.
+
+[code]require("palforge.api")
+
+Building{
+    id = "CampFire",                        -- the game's own campfire
+    events = {
+        onRightClick = function(self, ctx)  -- fires in a real save
+            Item.get("Wood"):give(5)
+        end,
+    },
+}[/code]
+
+That is a complete, working mod. Right-click any campfire in your base, get five wood.
+
+[b]Every event PalForge exposes was found by hooking the running game and watching it fire[/b] — not by guessing at a plausible function name. Where a channel has no source behind it on this build, PalForge says so in the log instead of staying quiet, and the documentation names it. That distinction is the reason to trust the rest.
+
+[line]
+
+[size=4][b]Main features[/b][/size]
+
+[size=3][b]Eight kinds of content, one shape[/b][/size]
+
+[img]IMG_URL_2[/img]
+
+Every domain is called the same way — call it to declare, get a handle back, act on the handle:
+
+[list]
+[*][b]Pal[/b] — creatures, with a mesh, a material, skills and a lifecycle
+[*][b]Item[/b] — things, with what they restore and what happens when they are used
+[*][b]Building[/b] — structures, with per-structure state
+[*][b]Skill[/b] — active moves and passives
+[*][b]Effect[/b] — status ailments, including the game's own 38
+[*][b]Audio[/b] — from a 1957-entry catalog of the game's own sounds
+[*][b]Mesh[/b] — models and materials
+[*][b]UI[/b] — panels mounted inside Palworld's own interface
+[/list]
+
+Every field is checked where you typed it. An undeclared field is an error with a did-you-mean, never a silent no-op — and an id that could never reach a row in the game's data is refused at the line you wrote it, not three hours later when nothing appears.
+
+[size=3][b]How a genuinely new entity works[/b][/size]
+
+[img]IMG_URL_1[/img]
+
+[b]Read this before you plan a mod around PalForge.[/b] Lua cannot write a row into Palworld's data tables. A brand-new item, creature or build object therefore needs [b]PalSchema[/b] to create the row — and PalForge's namespaced ids are spelled to be exactly what PalSchema writes: [font=Courier New]mypack:Potion[/font] becomes the data row [font=Courier New]mypack_Potion[/font], automatically, at every point where the id crosses into the game.
+
+So the two work as a pair. PalSchema makes the game aware the thing exists; PalForge gives it behaviour, events and saved state.
+
+[b]Giving something the game already has new behaviour needs PalForge alone[/b] — the campfire example above uses no other mod.
+
+[size=3][b]The events are already wired[/b][/size]
+
+[img]IMG_URL_3[/img]
+
+Twenty-one channels, fed by twenty-two hooks into the game itself. You declare a handler; it fires. There is no polling loop to write and no hook to register.
+
+[list]
+[*][b]Buildings[/b] — placed, right-clicked, loaded, ticked, removed, built, world-ready
+[*][b]Items[/b] — crafted, obtained, used, discarded
+[*][b]Pals[/b] — spawned, damaged, killed, captured
+[*][b]Skills[/b] — activated, passive equipped and unequipped
+[*][b]World[/b] — ready, left, and a shared heartbeat
+[/list]
+
+The building runtime does not poll for structures either. It watches the game's own placement events and only enumerates the world when something happened that could have changed it. In a base of 623 structures that is [b]2.2 ms per sweep with 4 of 120 sweeps doing any work at all[/b] — and a session with no building mod installed pays nothing, because the scan declines to run.
+
+[size=3][b]State that survives a reload[/b][/size]
+
+[img]IMG_URL_4[/img]
+
+Each placed structure gets its own state table, and your mod gets a store with its id baked into the handle — there is no way to reach another mod's data through it.
+
+[b]PalForge never writes to Palworld's save file.[/b] Its own state is plain JSON under [font=Courier New]ue4ss/Mods/PalForge/state/[/font], one folder per save and one file per mod. Delete the mod folder and every trace of it goes with it, with no effect on your world.
+
+A crash mid-write leaves the previous version readable. A file that will not parse is quarantined verbatim rather than overwritten. A mod that is not loaded this session keeps every byte and gets it all back next time.
+
+[size=3][b]Editor completion, out of the box[/b][/size]
+
+PalForge ships a generated [font=Courier New]types.lua[/font], so a Lua language server knows every field of every declaration and every method of every handle — including which events are live and which are declared-but-unsourced. Nothing to configure.
+
+[line]
+
+[size=4][b]⚠️ Single-player only[/b][/size]
+
+[b]PalForge targets single-player Palworld. Dedicated servers and co-op guests are not supported and are not tested.[/b] There is no replication layer, and the item, spawn and event routes are all client-authoritative. A mod may appear to work for the host and do nothing for anyone else.
+
+This is a deliberate scope decision, not an oversight or a to-do. Please do not report multiplayer behaviour as a bug — the answer is this paragraph.
+
+[line]
+
+[size=4][b]Requirements[/b][/size]
+
+[list]
+[*][b]Palworld[/b] — measured against [b]v1.0.2.101103[/b] (Steam, Win64). Other builds will very likely work. The startup line prints both the build PalForge was tested against and the build you are running, so a mismatch is something you can see rather than something you have to deduce from a mod that stopped working.
+[*][b]UE4SS[/b], with the Lua mod loader. If you already run other Palworld Lua mods you have it. [i]Not optional.[/i]
+[*][b]PalSchema[/b] — [i]required to add NEW content[/i]; not needed to give existing content new behaviour. See "How a genuinely new entity works" above.
+[*][b]CheatManagerEnablerMod[/b] — [i]optional[/i]. PalForge builds a cheat manager itself for spawning, so it is not needed for that; it only improves the item helpers ([font=Courier New]give[/font] / [font=Courier New]take[/font] / [font=Courier New]unlockTech[/font]).
+[/list]
+
+[line]
+
+[size=4][b]Installation instructions[/b][/size]
+
+[list=1]
+[*]Install [b]UE4SS[/b] if you have not already.
+[*]Download the zip from the Files tab.
+[*]Open it. Inside is a folder named [b]PalForge[/b], plus the licence and readme.
+[*]Drop that folder into [font=Courier New]Palworld/Pal/Binaries/Win64/ue4ss/Mods/[/font].
+[*]Start the game.
+[/list]
+
+The [b]PalForge[/b] folder goes in as-is — its shape [i]is[/i] the install instruction. There is nothing to configure and nothing to enable.
+
+[b]To check it worked[/b], open [font=Courier New]ue4ss/UE4SS.log[/font] and look for:
+
+[code]PalForge v0.3.0 starting | game build: declared v1.0.2.101103, ... | dev=false debug=false[/code]
+
+That is all you will see, and it is all you should see. PalForge ships with its developer tooling off — no keybinds, no test suite, nothing running in the background. A player installing a mod built on PalForge should never know it is there.
+
+[b]To uninstall[/b], delete the [font=Courier New]PalForge[/font] folder. That removes its saved state with it. Your Palworld save is untouched either way.
+
+[line]
+
+[size=4][b]What is not here, said plainly[/b][/size]
+
+A framework that oversells is worse than one that is small, so:
+
+[list]
+[*][b]A mod cannot ship its own mesh, texture, sound or material[/b] as a game asset. It can reference any of the thousands the game already has, and it can load geometry from an [font=Courier New].obj[/font] file on disk. Custom textures are wired with the right signature but have never been confirmed working.
+[*][b]Some things the engine does not expose at all.[/b] There is no "structure was destroyed" event and no "skill hit something" event on this build — both were searched for by reading every function of every class that could plausibly own one. PalForge reports their absence rather than pretending, and a structure disappearing still surfaces as a removal with the reason "missing".
+[*][b]One capability is shipped but unconfirmed:[/b] setting a sound's volume reaches the engine and reports success, but nobody has confirmed by ear that anything got quieter. It is tracked as an open issue rather than described as working.
+[/list]
+
+[line]
+
+[size=4][b]For modders[/b][/size]
+
+[list]
+[*][b]Full documentation[/b], in English, Japanese and Chinese — every domain, every event, every honest limit: [url=https://dr-mikan.github.io/PalForge/]dr-mikan.github.io/PalForge[/url]
+[*][b]Source, issues and the complete engineering record[/b] — including what was measured, what was tried and failed, and what was deliberately not built: [url=https://github.com/dr-mikan/PalForge]github.com/dr-mikan/PalForge[/url]
+[*][b]MIT licensed.[/b] Build on it, fork it, ship it, sell it. No attribution required, though it is appreciated.
+[/list]
+
+If you build something with it, I would genuinely like to see it.
+
+[line]
+
+[size=4][b]Shout outs[/b][/size]
+
+[list]
+[*][b]The UE4SS team[/b] — [url=https://github.com/UE4SS-RE/RE-UE4SS]RE-UE4SS[/url]. None of this exists without it. Its header dumper answered questions that would otherwise have cost weeks of guessing, and its Lua layer is what PalForge is built on.
+[*][b]Okaetsu, for [url=https://github.com/Okaetsu/PalSchema]PalSchema[/url][/b] — the other half of adding content to this game. PalForge's id convention follows what PalSchema writes, deliberately, so the two compose instead of competing.
+[*][b]Pocketpair[/b], for a game worth spending this long inside.
+[/list]
