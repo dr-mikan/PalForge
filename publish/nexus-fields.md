@@ -60,39 +60,30 @@ than no statement.
 
 ## The images
 
-| slot | file | size |
+Run `npm run art` — it regenerates every SVG and renders every PNG at exactly the size Nexus
+wants, into `publish/images/`. The sizes are not decoration: Nexus crops a header that is not
+1300×372 and downscales a gallery image that is not 1920×1080, and these images are mostly TEXT,
+so a downscale is a blurry code panel.
+
+| Nexus field | file | size |
 | --- | --- | --- |
-| main image | `palforge-banner.png` | 1280×640 |
-| thumbnail | `palforge-thumb.png` | 512×512 — the square mark (concept A, the anvil), because the thumbnail renders small and the banner's text will not survive it |
-| gallery | `assets/gallery/*.png` | 1280×720, four of them — **optional now.** The description no longer embeds images, so these live on the Images tab as a gallery in their own right. |
+| **Header** — the banner across the top | `header.png` | 1300×372 |
+| **Images** — the gallery | `G1` `G2` `G3` `G4`.png | 1920×1080 each |
+| thumbnail, wherever one is asked for | `thumbnail.png` | 512×512 |
+| GitHub social preview (not Nexus) | `banner.png` | 1280×640 |
 
-Build them with the commands in `assets/README.md` and `assets/gallery/README.md`.
-
-**Four, in this order, and the order is the argument:**
+**Gallery order is the argument, so upload them in it:**
 
 1. `G1-new-entity` — *what can I add*, and the honest pairing that makes it possible
 2. `G2-what-you-can-add` — *how many kinds of thing*, at a glance
 3. `G3-events` — *and it already reacts to the game*
 4. `G4-saved-state` — *does it touch my save* (no)
 
-**Not one of the five frameworks read before this used a single diagram** (SMAPI, UE4SS, Fabric,
-Harmony, BepInEx). Nine on a mod page would read as effort spent on the page rather than on the
-code. Three is the smallest number that answers the three questions a stranger actually has —
-`assets/gallery/README.md` has the reasoning.
+Give each a caption. The caption is what a screen reader and a slow connection get, and these
+images carry real information — a caption of "screenshot" wastes it.
 
-## ⚠️ The claim that must not drift
-
-**PalForge alone cannot add a row to the game's data tables.** Lua cannot write one. A genuinely
-new item, creature or build object needs **PalSchema** for the row; PalForge's namespaced ids are
-built to be exactly what PalSchema writes (`mypack:Potion` → `mypack_Potion`).
-
-So *"add new pals, items and buildings"* is true of the two together, and the page has to say so
-where a reader will actually meet it — which is why card G1 draws the pairing instead of putting
-it in a footnote, and why PalSchema is listed under Requirements as **required for new content,
-optional for extending what the game already has**.
-
-Nothing on the page may say PalForge adds content on its own. That is the one sentence that would
-turn this into a page that lies.
+⚠️ **The description does not embed any of them.** They live on the Images tab as a gallery in
+their own right, so their presence and order cost nothing to change.
 
 ## Two things NOT to put on the page
 

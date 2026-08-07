@@ -16,7 +16,9 @@
     "types:check": "t=$(mktemp -d) && cp -r Scripts \"$t/Scripts\" && lua5.4 tools/gen-types.lua \"$t/\" && diff -u Scripts/palforge/types.lua \"$t/Scripts/palforge/types.lua\" && rm -rf \"$t\" || { echo 'types.lua is stale — run: npm run types:gen'; exit 1; }",
     "check": "npm run lint:lua && npm run lint:sh && npm test && npm run types:check && npm run lint:docs",
     "package": "tools/deploy.sh --package",
-    "lint:sh": "bash -n tools/deploy.sh"
+    "lint:sh": "bash -n tools/deploy.sh",
+    "images": "node tools/rasterise.mjs",
+    "art": "python3 tools/gen-cards.py && node tools/rasterise.mjs"
   },
   "repository": {
     "type": "git",
@@ -37,6 +39,7 @@
   "homepage": "https://github.com/dr-mikan/PalForge#readme",
   "devDependencies": {
     "@playwright/test": "^1.62.0",
-    "@types/node": "^26.1.1"
+    "@types/node": "^26.1.1",
+    "@resvg/resvg-js": "^2.6.2"
   }
 }

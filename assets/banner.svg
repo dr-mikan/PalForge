@@ -1,48 +1,36 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="PalForge — a content framework for Palworld">
-  <title>PalForge — a content framework for Palworld</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="PalForge — add new pals, items and buildings to Palworld">
+  <title>PalForge</title>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0"   stop-color="#0d1218"/>
-      <stop offset="0.55" stop-color="#161d27"/>
-      <stop offset="1"   stop-color="#0d1218"/>
+    <linearGradient id="heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7a2a12"/><stop offset="0.45" stop-color="#e2621d"/>
+      <stop offset="0.8" stop-color="#f5a524"/><stop offset="1" stop-color="#ffd978"/>
     </linearGradient>
-    <linearGradient id="heat2" x1="0" y1="1" x2="0" y2="0">
-      <stop offset="0"   stop-color="#7a2a12"/>
-      <stop offset="0.5" stop-color="#e2621d"/>
-      <stop offset="1"   stop-color="#ffd978"/>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9eef5"/><stop offset="0.5" stop-color="#9fb0c4"/>
+      <stop offset="1" stop-color="#5d6f85"/>
     </linearGradient>
-    <linearGradient id="steel2" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0"   stop-color="#e9eef5"/>
-      <stop offset="0.5" stop-color="#9fb0c4"/>
-      <stop offset="1"   stop-color="#5d6f85"/>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffd978"/><stop offset="1" stop-color="#e2621d"/>
     </linearGradient>
-    <radialGradient id="glow2" cx="0.5" cy="0.6" r="0.6">
-      <stop offset="0" stop-color="#ffb545" stop-opacity="0.5"/>
+    <radialGradient id="glow" cx="0.5" cy="0.6" r="0.55">
+      <stop offset="0" stop-color="#ffb545" stop-opacity="0.55"/>
       <stop offset="1" stop-color="#ffb545" stop-opacity="0"/>
     </radialGradient>
   </defs>
-
-  <rect width="1280" height="640" fill="url(#bg)"/>
-  <circle cx="250" cy="330" r="300" fill="url(#glow2)"/>
-
-  <g transform="translate(110,180) scale(0.62)">
-    <path d="M126 300 h260 l-26 34 h-49 l-6 26 h48 l22 40 H147 l22-40 h48 l-6-26 h-49 z"
-          fill="url(#steel2)"/>
-    <rect x="196" y="404" width="120" height="26" rx="8" fill="#43536a"/>
-    <circle cx="256" cy="196" r="26" fill="url(#heat2)"/>
-    <circle cx="196" cy="150" r="13" fill="#f5a524" opacity="0.9"/>
-    <circle cx="318" cy="140" r="10" fill="#ffd978" opacity="0.85"/>
-    <circle cx="256" cy="196" r="52" fill="none" stroke="#f5a524" stroke-width="7" opacity="0.55"/>
+  <rect width="1280" height="640" fill="#0d1218"/>
+  <circle cx="290" cy="330" r="290" fill="url(#glow)"/>
+  <rect x="0" y="635" width="1280" height="5" fill="url(#wire)"/>
+  <g transform="translate(60,92) scale(0.86)" opacity="1.0">
+    <path d="M96 302 L152 282 L396 282 L396 320 L336 334 L312 358 L312 384 L360 384 L360 418 L152 418 L152 384 L200 384 L200 358 L176 334 L116 320 Z" fill="url(#steel)"/>
+    <rect x="150" y="418" width="212" height="18" rx="6" fill="#43536a"/>
+    <circle cx="256" cy="186" r="26" fill="url(#heat)"/>
+    <circle cx="196" cy="140" r="13" fill="#f5a524" opacity="0.9"/>
+    <circle cx="318" cy="130" r="10" fill="#ffd978" opacity="0.85"/>
+    <circle cx="256" cy="186" r="52" fill="none" stroke="#f5a524" stroke-width="7" opacity="0.55"/>
   </g>
-
-  <text x="470" y="286" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
-        font-size="104" font-weight="700" fill="#f2f5f9" letter-spacing="-2">PalForge</text>
-  <text x="474" y="344" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
-        font-size="34" fill="#f5a524">A content framework for Palworld</text>
-  <text x="474" y="404" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
-        font-size="27" fill="#8fa1b6">Declare a pal, an item, a building or a UI panel —</text>
-  <text x="474" y="442" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
-        font-size="27" fill="#8fa1b6">PalForge wires it to the game's own events.</text>
-  <text x="474" y="510" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif"
-        font-size="23" fill="#5d6f85">UE4SS Lua · single-player · measured against Palworld v1.0.2.101103</text>
+  <text x="560" y="268" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="94" font-weight="700" fill="#f2f5f9" letter-spacing="-2">PalForge</text>
+  <text x="564" y="326" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="31" fill="#f5a524">Add new pals, items and buildings to Palworld</text>
+  <text x="564" y="380" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="24" fill="#9fb0c4">Declare it in a few lines of Lua — the game’s own</text>
+  <text x="564" y="414" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="24" fill="#9fb0c4">events are already wired</text>
+  <text x="564" y="470" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" fill="#5d6f85">UE4SS · single-player · MIT · Palworld v1.0.2.101103</text>
 </svg>

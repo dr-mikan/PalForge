@@ -22,7 +22,7 @@ palette here and every card moves with it.
 Every code snippet on a card is real, callable API — not pseudocode. If an API changes, the card
 that teaches it is wrong, and the fix belongs here.
 """
-import io, os, html
+import io, os, html, textwrap
 
 
 # ---- the palette, and it is the same three colours as the marks ----------------------
@@ -47,15 +47,25 @@ def esc(s):
     return html.escape(s, quote=False)
 
 
+# THE ANVIL, and it had to be redrawn. The first path was a flat slab over an hourglass waist,
+# which rasterised into something closer to a bowtie than a tool — the shape was only ever looked
+# at as vector source, never as the 1300x372 PNG a visitor actually sees. An anvil is recognised
+# by its HORN: the tapering point off one side is the whole silhouette. Everything else — the
+# flat face, the undercut, the waist, the wider foot — is what makes the horn read as an anvil
+# rather than as a wedge.
+ANVIL_PATH = ("M96 302 L152 282 L396 282 L396 320 L336 334 L312 358 L312 384 "
+              "L360 384 L360 418 L152 418 L152 384 L200 384 L200 358 L176 334 L116 320 Z")
+
+
 def anvil(x, y, scale, opacity=1.0):
-    """The chosen mark, A, at any size. One definition; every card uses it."""
+    """The chosen mark, A, at any size. One definition; every image uses it."""
     return f'''  <g transform="translate({x},{y}) scale({scale})" opacity="{opacity}">
-    <path d="M126 300 h260 l-26 34 h-49 l-6 26 h48 l22 40 H147 l22-40 h48 l-6-26 h-49 z" fill="url(#steel)"/>
-    <rect x="196" y="404" width="120" height="26" rx="8" fill="#43536a"/>
-    <circle cx="256" cy="196" r="26" fill="url(#heat)"/>
-    <circle cx="196" cy="150" r="13" fill="{HEAT}" opacity="0.9"/>
-    <circle cx="318" cy="140" r="10" fill="{HEAT_L}" opacity="0.85"/>
-    <circle cx="256" cy="196" r="52" fill="none" stroke="{HEAT}" stroke-width="7" opacity="0.55"/>
+    <path d="{ANVIL_PATH}" fill="url(#steel)"/>
+    <rect x="150" y="418" width="212" height="18" rx="6" fill="#43536a"/>
+    <circle cx="256" cy="186" r="26" fill="url(#heat)"/>
+    <circle cx="196" cy="140" r="13" fill="{HEAT}" opacity="0.9"/>
+    <circle cx="318" cy="130" r="10" fill="{HEAT_L}" opacity="0.85"/>
+    <circle cx="256" cy="186" r="52" fill="none" stroke="{HEAT}" stroke-width="7" opacity="0.55"/>
   </g>'''
 
 
@@ -71,6 +81,28 @@ def code_block(x, y, w, lines, title=None):
         out.append(f'  <text x="{x+22}" y="{ty}" font-family="{MONO}" font-size="19" fill="{fill}" xml:space="preserve">{esc(text)}</text>')
         ty += lh
     return "\n".join(out), body_h
+
+
+
+# THE FOOTNOTE WRAPS, and it wraps because the raster said so. Every card was written, validated
+# as XML and looked at only as vector source; the first 1920x1080 PNG showed the footnote running
+# under the brand label on the right and the diagram caption running off the right EDGE. SVG does
+# not wrap text — there is no such thing as overflow in a <text> element, it simply keeps going —
+# so nothing about the file was wrong and nothing could have caught it except rendering it.
+#
+# 118 characters is measured from that render, not guessed: at font-size 19 in this sans, the
+# 1136 px between the margins holds about that many.
+def wrapped(text, x=72, y=None, size=19, fill=None, per_line=118, lh=26):
+    y = (H - 74) if y is None else y
+    fill = fill or STEEL_D
+    lines = textwrap.wrap(text, per_line) or [""]
+    if len(lines) > 2:                      # a third line would collide with the diagram
+        raise SystemExit(f"footnote too long ({len(text)} chars): {text[:60]}...")
+    out = []
+    for i, line in enumerate(lines):
+        out.append(f'  <text x="{x}" y="{y + i * lh}" font-family="{SANS}" font-size="{size}" '
+                   f'fill="{fill}">{esc(line)}</text>')
+    return "\n".join(out)
 
 
 def card(fname, eyebrow, title, blurb, code, diagram, footnote):
@@ -99,7 +131,8 @@ def card(fname, eyebrow, title, blurb, code, diagram, footnote):
   <rect width="{W}" height="{H}" fill="{BG}"/>
   <rect x="0" y="0" width="{W}" height="6" fill="url(#wire)"/>
 
-{anvil(1120, 24, 0.19, 0.9)}
+{anvil(1116, 10, 0.17, 0.9)}
+  <text x="{W-72}" y="118" text-anchor="end" font-family="{SANS}" font-size="16" fill="{STEEL_D}">PalForge · single-player</text>
 
   <text x="72" y="112" font-family="{SANS}" font-size="21" font-weight="600" fill="{HEAT}" letter-spacing="3">{esc(eyebrow)}</text>
   <text x="72" y="176" font-family="{SANS}" font-size="52" font-weight="700" fill="{STEEL_L}">{esc(title)}</text>
@@ -109,8 +142,7 @@ def card(fname, eyebrow, title, blurb, code, diagram, footnote):
 
 {diagram}
 
-  <text x="72" y="{H-46}" font-family="{SANS}" font-size="19" fill="{STEEL_D}">{esc(footnote)}</text>
-  <text x="{W-72}" y="{H-46}" text-anchor="end" font-family="{SANS}" font-size="18" fill="{STEEL_D}">PalForge · UE4SS Lua · single-player</text>
+{wrapped(footnote)}
 </svg>
 '''
     os.makedirs(OUT, exist_ok=True)
@@ -188,7 +220,7 @@ d = "\n".join([
     node(700, 404, 508, 96, "PalForge", "gives it behaviour and events"),
     spark(934, 298, 7),
     f'  <text x="700" y="556" font-family="{SANS}" font-size="19" fill="{STEEL_M}">'
-    f'One id, spelled the same on both sides: mypack:Potion → mypack_Potion</text>',
+    f'One id, both sides: mypack:Potion → mypack_Potion</text>',
 ])
 gallery_card("G1-new-entity.svg", "ADD SOMETHING NEW", "New pals, items and buildings",
     "PalSchema writes the data row. PalForge gives it behaviour, events and saved state.",
@@ -216,7 +248,7 @@ for i, (nm, sub) in enumerate(cells):
     g.append(node(cx, cy, 246, 68, nm, sub))
 d = "\n".join(g + [
     f'  <text x="700" y="596" font-family="{SANS}" font-size="19" fill="{STEEL_M}">'
-    f'Every one is the same shape: call it to define, get a handle back.</text>'])
+    f'All the same shape: call it, get a handle back.</text>'])
 gallery_card("G2-what-you-can-add.svg", "WHAT YOU CAN DECLARE", "Eight kinds of thing, one shape",
     "A pal, an item, a building, a skill, an effect, a sound, a model, a panel.",
     [('Pal{      id = "mypack:Boss",  ... }', "code"),
@@ -273,7 +305,7 @@ d = "\n".join([
     f'  <text x="954" y="528" text-anchor="middle" font-family="{MONO}" font-size="16" '
     f'fill="{STEEL_D}">PalForge never writes here</text>',
     f'  <text x="700" y="596" font-family="{SANS}" font-size="19" fill="{STEEL_M}">'
-    f'Delete the mod folder and every trace of it goes with it.</text>',
+    f'Delete the mod folder and it is all gone.</text>',
 ])
 gallery_card("G4-saved-state.svg", "WHERE YOUR STATE LIVES", "Beside the mod, not inside the save",
     "One folder per save, one file per mod. Plain JSON you can open.",
@@ -290,3 +322,110 @@ gallery_card("G4-saved-state.svg", "WHERE YOUR STATE LIVES", "Beside the mod, no
     "A crash mid-write leaves the previous version readable, and a file that will not parse is quarantined verbatim rather than overwritten.")
 
 print("  gallery: G1-new-entity, G2-what-you-can-add, G3-events, G4-saved-state")
+
+
+# =====================================================================================
+# THE HEADER — 1300x372, the banner across the top of the mod page
+# =====================================================================================
+#
+# A different shape and therefore a different design, not the banner squashed. At 3.5:1 there is
+# room for the mark, the name and one line — and nothing else fits, which is the constraint that
+# makes it work: a header that tries to explain gets skimmed past, a header that says WHAT and
+# FOR WHAT gets read. The measured build goes on it because it is the one fact a visitor most
+# needs before deciding this is for their install.
+HW, HH = 1300, 372
+
+header = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {HW} {HH}" width="{HW}" height="{HH}" role="img" aria-label="PalForge — add new pals, items and buildings to Palworld">
+  <title>PalForge</title>
+  <desc>A content framework for single-player Palworld, running on UE4SS.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1016"/><stop offset="0.5" stop-color="#161d27"/>
+      <stop offset="1" stop-color="#0b1016"/>
+    </linearGradient>
+    <linearGradient id="heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7a2a12"/><stop offset="0.45" stop-color="{HEAT_M}"/>
+      <stop offset="0.8" stop-color="{HEAT}"/><stop offset="1" stop-color="{HEAT_L}"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="{STEEL_L}"/><stop offset="0.5" stop-color="{STEEL_M}"/>
+      <stop offset="1" stop-color="{STEEL_D}"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="{HEAT_L}"/><stop offset="1" stop-color="{HEAT_M}"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.55" r="0.55">
+      <stop offset="0" stop-color="#ffb545" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#ffb545" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="{HW}" height="{HH}" fill="url(#bg)"/>
+  <circle cx="196" cy="196" r="228" fill="url(#glow)"/>
+  <rect x="0" y="{HH-5}" width="{HW}" height="5" fill="url(#wire)"/>
+
+{anvil(52, 26, 0.62)}
+
+  <text x="410" y="168" font-family="{SANS}" font-size="86" font-weight="700"
+        fill="#f2f5f9" letter-spacing="-2">PalForge</text>
+  <text x="414" y="222" font-family="{SANS}" font-size="30" fill="{HEAT}">Add new pals, items and buildings to Palworld</text>
+  <text x="414" y="270" font-family="{SANS}" font-size="23" fill="{STEEL_M}">Declare it in a few lines of Lua — the game’s own events are already wired</text>
+  <text x="414" y="316" font-family="{SANS}" font-size="20" fill="{STEEL_D}">UE4SS · single-player · MIT · measured against Palworld v1.0.2.101103</text>
+</svg>
+'''
+io.open(os.path.join("assets", "header.svg"), "w", encoding="utf-8").write(header)
+print("  header: assets/header.svg (1300x372)")
+
+
+# =====================================================================================
+# THE MARK AND THE WIDE BANNER — generated too, so the anvil has ONE definition
+# =====================================================================================
+#
+# These were hand-written before this generator existed, and they kept a COPY of the anvil path.
+# When the anvil was redrawn — the first one rasterised into something closer to a bowtie than a
+# tool — the two hand-written files silently kept the old shape, and the thumbnail and the GitHub
+# social preview would have shipped a different logo from every other image. Two copies of a
+# drawing is the same defect as two copies of a sentence.
+DEFS = f'''  <defs>
+    <linearGradient id="heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7a2a12"/><stop offset="0.45" stop-color="{HEAT_M}"/>
+      <stop offset="0.8" stop-color="{HEAT}"/><stop offset="1" stop-color="{HEAT_L}"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="{STEEL_L}"/><stop offset="0.5" stop-color="{STEEL_M}"/>
+      <stop offset="1" stop-color="{STEEL_D}"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="{HEAT_L}"/><stop offset="1" stop-color="{HEAT_M}"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.6" r="0.55">
+      <stop offset="0" stop-color="#ffb545" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffb545" stop-opacity="0"/>
+    </radialGradient>
+  </defs>'''
+
+io.open("assets/logo.svg", "w", encoding="utf-8").write(f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="PalForge">
+  <title>PalForge</title>
+{DEFS}
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <circle cx="256" cy="300" r="180" fill="url(#glow)"/>
+{anvil(0, 0, 1.0)}
+</svg>
+''')
+print("  mark:   assets/logo.svg (512x512)")
+
+io.open("assets/banner.svg", "w", encoding="utf-8").write(f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="PalForge — add new pals, items and buildings to Palworld">
+  <title>PalForge</title>
+{DEFS}
+  <rect width="1280" height="640" fill="#0d1218"/>
+  <circle cx="290" cy="330" r="290" fill="url(#glow)"/>
+  <rect x="0" y="635" width="1280" height="5" fill="url(#wire)"/>
+{anvil(60, 92, 0.86)}
+  <text x="560" y="268" font-family="{SANS}" font-size="94" font-weight="700" fill="#f2f5f9" letter-spacing="-2">PalForge</text>
+  <text x="564" y="326" font-family="{SANS}" font-size="31" fill="{HEAT}">Add new pals, items and buildings to Palworld</text>
+  <text x="564" y="380" font-family="{SANS}" font-size="24" fill="{STEEL_M}">Declare it in a few lines of Lua — the game’s own</text>
+  <text x="564" y="414" font-family="{SANS}" font-size="24" fill="{STEEL_M}">events are already wired</text>
+  <text x="564" y="470" font-family="{SANS}" font-size="20" fill="{STEEL_D}">UE4SS · single-player · MIT · Palworld v1.0.2.101103</text>
+</svg>
+''')
+print("  banner: assets/banner.svg (1280x640)")

@@ -22,14 +22,15 @@
   <rect width="1280" height="720" fill="#0d1218"/>
   <rect x="0" y="0" width="1280" height="6" fill="url(#wire)"/>
 
-  <g transform="translate(1120,24) scale(0.19)" opacity="0.9">
-    <path d="M126 300 h260 l-26 34 h-49 l-6 26 h48 l22 40 H147 l22-40 h48 l-6-26 h-49 z" fill="url(#steel)"/>
-    <rect x="196" y="404" width="120" height="26" rx="8" fill="#43536a"/>
-    <circle cx="256" cy="196" r="26" fill="url(#heat)"/>
-    <circle cx="196" cy="150" r="13" fill="#f5a524" opacity="0.9"/>
-    <circle cx="318" cy="140" r="10" fill="#ffd978" opacity="0.85"/>
-    <circle cx="256" cy="196" r="52" fill="none" stroke="#f5a524" stroke-width="7" opacity="0.55"/>
+  <g transform="translate(1116,10) scale(0.17)" opacity="0.9">
+    <path d="M96 302 L152 282 L396 282 L396 320 L336 334 L312 358 L312 384 L360 384 L360 418 L152 418 L152 384 L200 384 L200 358 L176 334 L116 320 Z" fill="url(#steel)"/>
+    <rect x="150" y="418" width="212" height="18" rx="6" fill="#43536a"/>
+    <circle cx="256" cy="186" r="26" fill="url(#heat)"/>
+    <circle cx="196" cy="140" r="13" fill="#f5a524" opacity="0.9"/>
+    <circle cx="318" cy="130" r="10" fill="#ffd978" opacity="0.85"/>
+    <circle cx="256" cy="186" r="52" fill="none" stroke="#f5a524" stroke-width="7" opacity="0.55"/>
   </g>
+  <text x="1208" y="118" text-anchor="end" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="16" fill="#5d6f85">PalForge · single-player</text>
 
   <text x="72" y="112" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#f5a524" letter-spacing="3">WHAT YOU CAN DECLARE</text>
   <text x="72" y="176" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="52" font-weight="700" fill="#e9eef5">Eight kinds of thing, one shape</text>
@@ -71,8 +72,7 @@
   <rect x="962" y="496" width="246" height="68" rx="12" fill="#141b25" stroke="#f5a524" stroke-width="3"/>
   <text x="1085" y="526" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#e9eef5">UI</text>
   <text x="1085" y="554" text-anchor="middle" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="16" fill="#5d6f85">panels</text>
-  <text x="700" y="596" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#9fb0c4">Every one is the same shape: call it to define, get a handle back.</text>
+  <text x="700" y="596" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#9fb0c4">All the same shape: call it, get a handle back.</text>
 
-  <text x="72" y="674" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#5d6f85">Every field is checked where you typed it — an undeclared field is an error with a did-you-mean, never a silent no-op.</text>
-  <text x="1208" y="674" text-anchor="end" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#5d6f85">PalForge · UE4SS Lua · single-player</text>
+  <text x="72" y="646" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#5d6f85">Every field is checked where you typed it — an undeclared field is an error with a did-you-mean, never a silent no-op.</text>
 </svg>

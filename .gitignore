@@ -76,3 +76,9 @@ Scripts/palforge_dev.lua
 # zip here; the release workflow builds it fresh on every run and uploads it, so a copy checked
 # in would only ever be an out-of-date one claiming to be the download.
 /dist/
+
+# Rendered artwork. `npm run art` regenerates every PNG from the SVGs in assets/, which are the
+# source. Committing them would let a stale PNG sit on a mod page after the design changed —
+# and the design HAS changed once already, when the anvil turned out to rasterise into something
+# closer to a bowtie than a tool.
+publish/images/
