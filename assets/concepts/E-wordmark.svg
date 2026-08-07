@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="PalForge concept E — the wordmark">
+  <title>Concept E — the wordmark: legible at 64 px</title>
+  <defs>
+    <linearGradient id="e-heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#c2490f"/><stop offset="0.6" stop-color="#f5a524"/>
+      <stop offset="1" stop-color="#ffd978"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <rect x="64" y="64" width="384" height="384" rx="64" fill="none" stroke="#243040" stroke-width="6"/>
+
+  <!-- P and F sharing a stem: the pack and the framework are one object -->
+  <g fill="none" stroke-width="34" stroke-linecap="square">
+    <path d="M168 140 V372" stroke="#9fb0c4"/>
+    <path d="M168 156 h84 a52 52 0 0 1 0 104 h-84" stroke="#9fb0c4"/>
+    <path d="M330 372 V140 h72" stroke="url(#e-heat)"/>
+    <path d="M330 252 h58" stroke="url(#e-heat)"/>
+  </g>
+  <!-- the spark on the F's shoulder -->
+  <circle cx="402" cy="140" r="17" fill="#ffd978"/>
+  <circle cx="402" cy="140" r="30" fill="none" stroke="#f5a524" stroke-width="4" opacity="0.45"/>
+</svg>

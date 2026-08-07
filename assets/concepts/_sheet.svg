@@ -1,0 +1,200 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1152 1010" width="1152" height="1010" role="img" aria-label="PalForge concept sheet — six marks">
+  <title>PalForge concept sheet</title>
+  <defs>
+    <linearGradient id="a-heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7a2a12"/><stop offset="0.45" stop-color="#e2621d"/>
+      <stop offset="0.8" stop-color="#f5a524"/><stop offset="1" stop-color="#ffd978"/>
+    </linearGradient>
+    <linearGradient id="a-steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9eef5"/><stop offset="0.5" stop-color="#9fb0c4"/>
+      <stop offset="1" stop-color="#5d6f85"/>
+    </linearGradient>
+    <radialGradient id="a-glow" cx="0.5" cy="0.72" r="0.55">
+      <stop offset="0" stop-color="#ffb545" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#ffb545" stop-opacity="0"/>
+    </radialGradient>
+  
+    <linearGradient id="b-heat" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#e2621d"/><stop offset="1" stop-color="#ffd978"/>
+    </linearGradient>
+    <radialGradient id="b-core" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffe9b0"/><stop offset="0.55" stop-color="#f5a524"/>
+      <stop offset="1" stop-color="#c2490f"/>
+    </radialGradient>
+  
+    <linearGradient id="c-heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#c2490f"/><stop offset="1" stop-color="#ffd978"/>
+    </linearGradient>
+    <linearGradient id="c-fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5d6f85" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#5d6f85" stop-opacity="0.15"/>
+    </linearGradient>
+  
+    <linearGradient id="d-heat" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffd978"/><stop offset="1" stop-color="#e2621d"/>
+    </linearGradient>
+    <radialGradient id="d-src" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffe9b0"/><stop offset="1" stop-color="#e2621d"/>
+    </radialGradient>
+  
+    <linearGradient id="e-heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#c2490f"/><stop offset="0.6" stop-color="#f5a524"/>
+      <stop offset="1" stop-color="#ffd978"/>
+    </linearGradient>
+  
+    <linearGradient id="f-heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7a2a12"/><stop offset="0.4" stop-color="#e2621d"/>
+      <stop offset="0.85" stop-color="#ffd978"/><stop offset="1" stop-color="#fff2cf"/>
+    </linearGradient>
+    <radialGradient id="f-glow" cx="0.5" cy="0.62" r="0.5">
+      <stop offset="0" stop-color="#ffb545" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#ffb545" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1152" height="1010" fill="#0d1218"/>
+  <text x="56" y="74" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="30" font-weight="700" fill="#f2f5f9">PalForge — concept marks</text>
+  <text x="56" y="104" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#f5a524">six directions, one palette · pick one, or say what to cross</text>
+  <g transform="translate(56,126) scale(0.62500)">
+  
+  
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <circle cx="256" cy="330" r="150" fill="url(#a-glow)"/>
+  <path d="M126 300 h260 l-26 34 h-49 l-6 26 h48 l22 40 H147 l22-40 h48 l-6-26 h-49 z" fill="url(#a-steel)"/>
+  <rect x="196" y="404" width="120" height="26" rx="8" fill="#43536a"/>
+  <circle cx="256" cy="196" r="26" fill="url(#a-heat)"/>
+  <circle cx="196" cy="150" r="13" fill="#f5a524" opacity="0.9"/>
+  <circle cx="318" cy="140" r="10" fill="#ffd978" opacity="0.85"/>
+  <circle cx="256" cy="196" r="52" fill="none" stroke="#f5a524" stroke-width="7" opacity="0.55"/>
+  <circle cx="256" cy="196" r="76" fill="none" stroke="#f5a524" stroke-width="4" opacity="0.25"/>
+</g>
+  <text x="56" y="476" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#e9eef5">A · The anvil</text>
+  <text x="56" y="500" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="17" fill="#8fa1b6">the forge, plainly</text>
+  <g transform="translate(416,126) scale(0.62500)">
+  
+  
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <!-- the game: a closed ring, complete without you -->
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#3a4657" stroke-width="26"/>
+  <!-- four sockets cut into it -->
+  <g fill="#12171f">
+    <rect x="243" y="93"  width="26" height="46" rx="4"/>
+    <rect x="243" y="373" width="26" height="46" rx="4"/>
+    <rect x="93"  y="243" width="46" height="26" rx="4"/>
+    <rect x="373" y="243" width="46" height="26" rx="4"/>
+  </g>
+  <!-- three filled by a pack, one left open: the framework does not require all of them -->
+  <g fill="url(#b-heat)">
+    <rect x="243" y="93"  width="26" height="46" rx="4"/>
+    <rect x="93"  y="243" width="46" height="26" rx="4"/>
+    <rect x="373" y="243" width="46" height="26" rx="4"/>
+  </g>
+  <rect x="243" y="373" width="26" height="46" rx="4" fill="none" stroke="#5d6f85" stroke-width="3" stroke-dasharray="5 5"/>
+  <!-- what the sockets carry -->
+  <circle cx="256" cy="256" r="62" fill="url(#b-core)"/>
+  <circle cx="256" cy="256" r="62" fill="none" stroke="#ffd978" stroke-width="3" opacity="0.6"/>
+  <g stroke="url(#b-heat)" stroke-width="8" stroke-linecap="round" opacity="0.85">
+    <path d="M256 139 v55"/><path d="M139 256 h55"/><path d="M373 256 h-55"/>
+  </g>
+</g>
+  <text x="416" y="476" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#e9eef5">B · The socket</text>
+  <text x="416" y="500" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="17" fill="#8fa1b6">a pack plugging into the game</text>
+  <g transform="translate(776,126) scale(0.62500)">
+  
+  
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <!-- blueprint grid, left half only: the declared side -->
+  <g stroke="#243040" stroke-width="1.5">
+    <path d="M64 96 V416 M120 96 V416 M176 96 V416 M232 96 V416"/>
+    <path d="M64 96 H256 M64 152 H256 M64 208 H256 M64 264 H256 M64 320 H256 M64 376 H256 M64 416 H256"/>
+  </g>
+  <!-- the declaration: a wireframe outline -->
+  <path d="M104 320 h112 v-72 l-56 -44 -56 44 z" fill="none" stroke="url(#c-fade)" stroke-width="4" stroke-dasharray="8 6"/>
+  <!-- the same shape, built, on the right -->
+  <path d="M296 320 h112 v-72 l-56 -44 -56 44 z" fill="#2b3648"/>
+  <path d="M296 248 l56 -44 56 44 -56 30 z" fill="#3d4c63"/>
+  <rect x="336" y="272" width="32" height="48" rx="4" fill="url(#c-heat)"/>
+  <!-- the transition -->
+  <path d="M236 268 h44" stroke="#f5a524" stroke-width="7" stroke-linecap="round"/>
+  <path d="M268 254 l18 14 -18 14 z" fill="#f5a524"/>
+  <circle cx="352" cy="176" r="9"  fill="#f5a524" opacity="0.9"/>
+  <circle cx="326" cy="150" r="6"  fill="#ffd978" opacity="0.75"/>
+  <circle cx="378" cy="146" r="5"  fill="#ffd978" opacity="0.6"/>
+</g>
+  <text x="776" y="476" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#e9eef5">C · The blueprint</text>
+  <text x="776" y="500" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="17" fill="#8fa1b6">declared, then real</text>
+  <g transform="translate(56,560) scale(0.62500)">
+  
+  
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+
+  <!-- the game emits, once, on the left -->
+  <circle cx="112" cy="256" r="34" fill="url(#d-src)"/>
+  <circle cx="112" cy="256" r="52" fill="none" stroke="#f5a524" stroke-width="3" opacity="0.35"/>
+  <circle cx="112" cy="256" r="72" fill="none" stroke="#f5a524" stroke-width="2" opacity="0.16"/>
+
+  <!-- fanning out to four subscribers -->
+  <g fill="none" stroke="url(#d-heat)" stroke-width="6" stroke-linecap="round">
+    <path d="M156 232 C 240 150, 280 130, 356 122"/>
+    <path d="M158 246 C 250 220, 290 208, 356 202"/>
+    <path d="M158 266 C 250 292, 290 304, 356 310"/>
+    <path d="M156 280 C 240 362, 280 382, 356 390"/>
+  </g>
+
+  <!-- the listeners: three live, one declared and never fired -->
+  <g>
+    <rect x="356" y="98"  width="76" height="48" rx="10" fill="#2b3648" stroke="#f5a524" stroke-width="3"/>
+    <rect x="356" y="178" width="76" height="48" rx="10" fill="#2b3648" stroke="#f5a524" stroke-width="3"/>
+    <rect x="356" y="286" width="76" height="48" rx="10" fill="#2b3648" stroke="#f5a524" stroke-width="3"/>
+    <rect x="356" y="366" width="76" height="48" rx="10" fill="#1a2230" stroke="#5d6f85" stroke-width="3" stroke-dasharray="6 5"/>
+  </g>
+  <g fill="#f5a524">
+    <circle cx="394" cy="122" r="7"/><circle cx="394" cy="202" r="7"/><circle cx="394" cy="310" r="7"/>
+  </g>
+  <circle cx="394" cy="390" r="7" fill="none" stroke="#5d6f85" stroke-width="2.5"/>
+</g>
+  <text x="56" y="910" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#e9eef5">D · The channels</text>
+  <text x="56" y="934" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="17" fill="#8fa1b6">one event, many listeners</text>
+  <g transform="translate(416,560) scale(0.62500)">
+  
+  
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <rect x="64" y="64" width="384" height="384" rx="64" fill="none" stroke="#243040" stroke-width="6"/>
+
+  <!-- P and F sharing a stem: the pack and the framework are one object -->
+  <g fill="none" stroke-width="34" stroke-linecap="square">
+    <path d="M168 140 V372" stroke="#9fb0c4"/>
+    <path d="M168 156 h84 a52 52 0 0 1 0 104 h-84" stroke="#9fb0c4"/>
+    <path d="M330 372 V140 h72" stroke="url(#e-heat)"/>
+    <path d="M330 252 h58" stroke="url(#e-heat)"/>
+  </g>
+  <!-- the spark on the F's shoulder -->
+  <circle cx="402" cy="140" r="17" fill="#ffd978"/>
+  <circle cx="402" cy="140" r="30" fill="none" stroke="#f5a524" stroke-width="4" opacity="0.45"/>
+</g>
+  <text x="416" y="910" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#e9eef5">E · The wordmark</text>
+  <text x="416" y="934" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="17" fill="#8fa1b6">legible at 64 px</text>
+  <g transform="translate(776,560) scale(0.62500)">
+  
+  
+  <rect width="512" height="512" rx="96" fill="#12171f"/>
+  <circle cx="256" cy="300" r="170" fill="url(#f-glow)"/>
+
+  <!-- a hex: the game's own world, tiled and finite -->
+  <path d="M256 96 L404 182 V354 L256 440 L108 354 V182 Z"
+        fill="#1a2230" stroke="#3a4657" stroke-width="10" stroke-linejoin="round"/>
+  <!-- the tiling, faint -->
+  <g stroke="#243040" stroke-width="3" fill="none">
+    <path d="M256 96 V440"/><path d="M108 182 L404 354"/><path d="M404 182 L108 354"/>
+  </g>
+  <!-- the flame inside it -->
+  <path d="M256 372 c-46 0 -78 -30 -78 -70 0 -46 40 -66 52 -112 4 -16 2 -28 -4 -40
+           34 12 58 44 58 78 0 20 -10 32 -10 46 0 12 8 20 18 20 14 0 22 -14 22 -34
+           0 -14 -4 -26 -10 -36 34 20 50 50 50 78 0 40 -34 70 -98 70 z"
+        fill="url(#f-heat)"/>
+  <circle cx="256" cy="146" r="8" fill="#ffd978" opacity="0.8"/>
+  <circle cx="212" cy="168" r="5" fill="#f5a524" opacity="0.6"/>
+  <circle cx="302" cy="164" r="5" fill="#f5a524" opacity="0.6"/>
+</g>
+  <text x="776" y="910" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#e9eef5">F · The hearth</text>
+  <text x="776" y="934" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="17" fill="#8fa1b6">the world, warmed from inside</text>
+</svg>

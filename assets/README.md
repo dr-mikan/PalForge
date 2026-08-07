@@ -5,8 +5,9 @@ source; the PNGs are build output and are not committed.
 
 | file | what it is |
 | --- | --- |
-| `logo.svg` | 512×512 square mark — an anvil under a rising spark, ringed like a socket. The forge is the anvil; the ring is a pack plugging into it. |
+| `logo.svg` | 512×512 square mark — an anvil under a rising spark, ringed like a socket. The forge is the anvil; the ring is a pack plugging into it. Concept **A**. |
 | `banner.svg` | 1280×640 wide mark with the name, the one-line description and the measured game build. |
+| `concepts/` | **six alternative marks and a contact sheet.** `concepts/_sheet.svg` shows all six at once and is self-contained. `concepts/README.md` says what each one is trying to say and which survive at 32 px. The shipped mark is A until someone picks another. |
 
 The palette is three colours and they mean something rather than decorating: heated steel
 (`#e2621d` → `#ffd978`) for anything that fires, cold steel (`#9fb0c4`) for the framework itself,
