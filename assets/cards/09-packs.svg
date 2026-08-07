@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720" role="img" aria-label="PalForge — Two mods, one game, no collisions">
+  <title>PalForge — Two mods, one game, no collisions</title>
+  <desc>Ids are namespaced per domain, and every definition records who made it.</desc>
+  <defs>
+    <linearGradient id="heat" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#7a2a12"/><stop offset="0.45" stop-color="#e2621d"/>
+      <stop offset="0.8" stop-color="#f5a524"/><stop offset="1" stop-color="#ffd978"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9eef5"/><stop offset="0.5" stop-color="#9fb0c4"/>
+      <stop offset="1" stop-color="#5d6f85"/>
+    </linearGradient>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffd978"/><stop offset="1" stop-color="#e2621d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffb545" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffb545" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1280" height="720" fill="#0d1218"/>
+  <rect x="0" y="0" width="1280" height="6" fill="url(#wire)"/>
+
+  <g transform="translate(1120,24) scale(0.19)" opacity="0.9">
+    <path d="M126 300 h260 l-26 34 h-49 l-6 26 h48 l22 40 H147 l22-40 h48 l-6-26 h-49 z" fill="url(#steel)"/>
+    <rect x="196" y="404" width="120" height="26" rx="8" fill="#43536a"/>
+    <circle cx="256" cy="196" r="26" fill="url(#heat)"/>
+    <circle cx="196" cy="150" r="13" fill="#f5a524" opacity="0.9"/>
+    <circle cx="318" cy="140" r="10" fill="#ffd978" opacity="0.85"/>
+    <circle cx="256" cy="196" r="52" fill="none" stroke="#f5a524" stroke-width="7" opacity="0.55"/>
+  </g>
+
+  <text x="72" y="112" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="21" font-weight="600" fill="#f5a524" letter-spacing="3">SHIP A PACK</text>
+  <text x="72" y="176" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="52" font-weight="700" fill="#e9eef5">Two mods, one game, no collisions</text>
+  <text x="72" y="216" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="24" fill="#9fb0c4">Ids are namespaced per domain, and every definition records who made it.</text>
+
+  <rect x="72" y="250" width="560" height="304" rx="12" fill="#141b25" stroke="#243040" stroke-width="2"/>
+  <text x="94" y="284" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#f5a524" xml:space="preserve">local api = PalForge.pack("mypack", {</text>
+  <text x="94" y="311" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#e9eef5" xml:space="preserve">    version = "1.0.0",</text>
+  <text x="94" y="338" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#e9eef5" xml:space="preserve">    depends = { "otherpack" },</text>
+  <text x="94" y="365" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#f5a524" xml:space="preserve">})</text>
+  <text x="94" y="392" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#5d6f85" xml:space="preserve"></text>
+  <text x="94" y="419" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#e9eef5" xml:space="preserve">api.Item{ id = "mypack:Potion" }</text>
+  <text x="94" y="446" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#5d6f85" xml:space="preserve">--   the game data row is  mypack_Potion</text>
+  <text x="94" y="473" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#5d6f85" xml:space="preserve"></text>
+  <text x="94" y="500" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#5d6f85" xml:space="preserve">-- referencing another pack without declaring</text>
+  <text x="94" y="527" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="19" fill="#5d6f85" xml:space="preserve">-- a dependency warns, by name.</text>
+
+  <rect x="700" y="250" width="240" height="88" rx="12" fill="#141b25" stroke="#f5a524" stroke-width="3"/>
+  <text x="820" y="290" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#e9eef5">mypack</text>
+  <text x="820" y="318" text-anchor="middle" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="16" fill="#5d6f85">owns its ids</text>
+  <rect x="968" y="250" width="240" height="88" rx="12" fill="#141b25" stroke="#f5a524" stroke-width="3"/>
+  <text x="1088" y="290" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#e9eef5">otherpack</text>
+  <text x="1088" y="318" text-anchor="middle" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="16" fill="#5d6f85">owns its own</text>
+  <path d="M940 294 L968 294" stroke="#5d6f85" stroke-width="4" stroke-linecap="round" stroke-dasharray="7 6"/>
+  <path d="M955 285 L968 294 L955 303 Z" fill="#5d6f85"/>
+  <rect x="700" y="356" width="508" height="82" rx="12" fill="#141b25" stroke="#f5a524" stroke-width="3"/>
+  <text x="954" y="393" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#e9eef5">a collision is named, not silent</text>
+  <text x="954" y="421" text-anchor="middle" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="16" fill="#5d6f85">last wins, and says so</text>
+  <rect x="700" y="458" width="508" height="82" rx="12" fill="#141b25" stroke="#f5a524" stroke-width="3"/>
+  <text x="954" y="495" text-anchor="middle" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="20" font-weight="600" fill="#e9eef5">PalForge.pack(id).store</text>
+  <text x="954" y="523" text-anchor="middle" font-family="Cascadia Mono, Consolas, DejaVu Sans Mono, monospace" font-size="16" fill="#5d6f85">isolation is the surface</text>
+  <circle cx="700" cy="294" r="18" fill="url(#glow)"/>
+  <circle cx="700" cy="294" r="6" fill="#ffd978"/>
+
+  <text x="72" y="674" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="19" fill="#5d6f85">Registering an id another pack holds is last-wins — but it is logged with both owners, which is the part that was missing.</text>
+  <text x="1208" y="674" text-anchor="end" font-family="Segoe UI, Inter, Helvetica, Arial, sans-serif" font-size="18" fill="#5d6f85">PalForge · UE4SS Lua · single-player</text>
+</svg>

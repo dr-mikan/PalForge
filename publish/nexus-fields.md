@@ -55,9 +55,15 @@ than no statement.
 | slot | file | size |
 | --- | --- | --- |
 | main image | `palforge-banner.png` | 1280×640 |
-| thumbnail | `palforge-thumb.png` | 512×512 — the square mark, because the thumbnail renders small and the banner's text will not survive it |
+| thumbnail | `palforge-thumb.png` | 512×512 — the square mark (concept A, the anvil), because the thumbnail renders small and the banner's text will not survive it |
+| gallery | `assets/cards/*.png` | 1280×720, nine of them |
 
-Build both with the commands in `assets/README.md`.
+Build them with the commands in `assets/README.md` and `assets/cards/README.md`.
+
+**Gallery order matters more than the images do.** `01-buildings` first: it is the shortest
+complete example and the one that answers *what would I even use this for*. Then `08-events`,
+which explains why the rest works. Then the domain cards. Then `07-state` and `09-packs` last —
+those answer questions a reader only has once they are already convinced.
 
 ## Two things NOT to put on the page
 
