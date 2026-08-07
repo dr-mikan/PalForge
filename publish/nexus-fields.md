@@ -64,15 +64,16 @@ than no statement.
 | --- | --- | --- |
 | main image | `palforge-banner.png` | 1280×640 |
 | thumbnail | `palforge-thumb.png` | 512×512 — the square mark (concept A, the anvil), because the thumbnail renders small and the banner's text will not survive it |
-| gallery | `assets/gallery/*.png` | 1280×720, **three of them** |
+| gallery | `assets/gallery/*.png` | 1280×720, four of them — **optional now.** The description no longer embeds images, so these live on the Images tab as a gallery in their own right. |
 
 Build them with the commands in `assets/README.md` and `assets/gallery/README.md`.
 
-**Three, in this order, and the order is the argument:**
+**Four, in this order, and the order is the argument:**
 
 1. `G1-new-entity` — *what can I add*, and the honest pairing that makes it possible
 2. `G2-what-you-can-add` — *how many kinds of thing*, at a glance
 3. `G3-events` — *and it already reacts to the game*
+4. `G4-saved-state` — *does it touch my save* (no)
 
 **Not one of the five frameworks read before this used a single diagram** (SMAPI, UE4SS, Fabric,
 Harmony, BepInEx). Nine on a mod page would read as effort spent on the page rather than on the
